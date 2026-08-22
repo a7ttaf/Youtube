@@ -1,3 +1,23 @@
+# ============================================================================
+# Purpose: Domain-side apply execution tests — the write-boundary audit
+#   diffs computed from what the registry write ACTUALLY replaced, the
+#   archived-group race guards (PR #159 rounds), and the transaction()
+#   boundary's all-or-nothing behavior over the in-memory stores (review
+#   #184, C2).
+# Database/ORM: None (in-memory ChannelRegistry/ChannelGroupRegistry and
+#   InMemoryAuditSink); the SQL boundary's direct-caller pins live in
+#   tests/org/test_sql_channel_registry.py.
+# Standards: Every test builds its own stores and seeds explicitly; no
+#   shared fixtures, no cross-test state.
+# Blast Radius: Test-only.
+# Connections: the apply under test and its sibling tiers.
+#   - File: backend/ums_smart_revenue/org/channel_import_apply.py -> the
+#     apply orchestration under test.
+#   - File: tests/org/test_store_transaction_boundary.py -> the boundary's
+#     own contract pins, independent of the import.
+#   - File: tests/org/test_sql_channel_registry.py -> the SQL adapters'
+#     SAVEPOINT pins.
+# ============================================================================
 """Domain-side apply execution: write-boundary diffs and archived-group races.
 
 Covers the two plan-to-apply race guards from PR #159 review rounds

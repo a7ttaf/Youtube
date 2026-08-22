@@ -1,3 +1,21 @@
+# ============================================================================
+# Purpose: API-tier tests for POST /channels/import — SQLite lane, form
+#   contract, permission gates, binding tokens (fingerprint + display
+#   digest), blocked-apply payloads, and the audit records the route emits.
+# Database/ORM: In-memory SQLite via create_app's test bootstrap; the
+#   PostgreSQL-only behaviors (RLS isolation, all-or-nothing including
+#   audit) are pinned in tests/api/test_channels_import_postgres.py.
+# Standards: Every test builds its own app/principal and seeds explicitly;
+#   no shared fixtures, no cross-test state.
+# Blast Radius: Test-only.
+# Connections: the route under test and its sibling tiers.
+#   - File: backend/ums_smart_revenue/api/channels.py -> the route under
+#     test.
+#   - File: tests/api/test_channels_import_postgres.py -> the Postgres-tier
+#     proofs this SQLite tier cannot settle.
+#   - File: tests/org/test_channel_import_apply.py -> the domain-side apply
+#     execution these route tests sit above.
+# ============================================================================
 """API tests for the bulk channel inventory import (POST /channels/import)."""
 
 import dataclasses

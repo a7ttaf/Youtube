@@ -1,3 +1,23 @@
+# ============================================================================
+# Purpose: Postgres-tier proof for POST /channels/import — tenant isolation
+#   via FORCE ROW LEVEL SECURITY on youtube_channels and all-or-nothing
+#   atomicity including the audit rows written through the same tenant
+#   session (review #184, C2).
+# Database/ORM: PostgreSQL only (RLS + one session transaction for channel
+#   and audit rows); requires UMS_TEST_DATABASE_URL — require_postgres_url()
+#   raises, never skips, preserving the no-skip policy.
+# Standards: The bare SELECT here has no WHERE tenant_id on purpose — RLS
+#   is the only filter under test, mirroring tests/tenancy/test_isolation.py.
+# Blast Radius: Test-only, but failing here means a tenant can see another
+#   tenant's import or a failed import can leave committed audit rows.
+# Connections: the route under test and the sibling tiers.
+#   - File: backend/ums_smart_revenue/api/channels.py -> the route under
+#     test.
+#   - File: tests/api/test_channels_import_api.py -> the SQLite tier whose
+#     open questions this file settles.
+#   - File: backend/ums_smart_revenue/auth/sql_audit_sink.py -> the sink
+#     whose same-session atomicity is under proof.
+# ============================================================================
 """Postgres-tier proof for POST /channels/import: RLS isolation + atomicity.
 
 The SQLite tier (``tests/api/test_channels_import_api.py``) cannot settle two

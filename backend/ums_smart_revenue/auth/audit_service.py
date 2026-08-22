@@ -1,3 +1,29 @@
+# ============================================================================
+# Purpose: Audit event recording service — builds AuditRecord instances from
+#   the audit event definitions, resolves permission/sensitivity stamps, and
+#   defines the AuditSink protocol (append + the transaction() batch
+#   atomicity boundary + the sql_unit_of_work declaration the import's
+#   wiring validation reads) together with its thread-safe in-memory
+#   implementation.
+# Database/ORM: None directly — the SQL implementations of the sink protocol
+#   live in sql_audit_sink.py (audit_logs INSERT + Session.begin_nested
+#   SAVEPOINT); this module defines the contract they satisfy.
+# Standards: Fail-closed audit — a raise inside a transaction() boundary
+#   must leave NO accepted prefix behind; the in-memory sink serializes
+#   appends and boundaries on one re-entrant lock because the no-database
+#   tier shares it across threads (PR #196).
+# Blast Radius: Audit-trail integrity on every tier — a partial audit batch
+#   would claim an operation that then failed; the import's audit flush
+#   (channel_import_apply.py) runs inside this boundary.
+# Connections: the protocol's SQL implementations and the import that
+#   depends on it.
+#   - File: backend/ums_smart_revenue/auth/sql_audit_sink.py -> SQL sinks
+#     implementing append/transaction with SAVEPOINTs.
+#   - File: backend/ums_smart_revenue/org/channel_import_apply.py -> the
+#     buffered audit flush wrapped in transaction().
+#   - File: backend/ums_smart_revenue/api/channels.py -> record_audit_event
+#     callers on the channel routes.
+# ============================================================================
 import threading
 from collections.abc import Iterator, Mapping
 from contextlib import AbstractContextManager, contextmanager

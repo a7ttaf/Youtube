@@ -12,7 +12,7 @@
 # Standards: Every test builds its own session and seeds explicitly; no
 #   shared fixtures, no cross-test state.
 # Blast Radius: Test-only.
-# Connections:
+# Connections: the adapter under test and the sibling tier pins.
 #   - File: backend/ums_smart_revenue/org/sql_channel_registry.py -> the
 #     adapter under test.
 #   - File: tests/org/test_store_transaction_boundary.py -> the in-memory

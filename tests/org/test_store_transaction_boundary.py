@@ -1,3 +1,22 @@
+# ============================================================================
+# Purpose: Store-level pins for the transaction() boundary itself (review
+#   #184, C2) — own writes undone on raise, a FOREIGN write interleaved
+#   mid-boundary survives, success keeps everything, and the boundary
+#   refuses to nest; independent of the import that wraps it.
+# Database/ORM: None (in-memory adapters); the SQL adapters' SAVEPOINT pins
+#   live in tests/org/test_sql_channel_registry.py and the end-to-end
+#   request-path proof in tests/api/test_channels_import_postgres.py.
+# Standards: Every test builds its own stores and seeds explicitly; no
+#   shared fixtures, no cross-test state.
+# Blast Radius: Test-only.
+# Connections: the adapters whose boundary is pinned and the sibling tiers.
+#   - File: backend/ums_smart_revenue/org/channel_registry.py -> the
+#     in-memory registry whose transaction() is under test.
+#   - File: backend/ums_smart_revenue/org/channel_groups.py -> the groups
+#     counterpart of the same boundary.
+#   - File: tests/org/test_sql_channel_registry.py -> the SQL adapters'
+#     SAVEPOINT pins these in-memory pins mirror.
+# ============================================================================
 """Store-level pins for the transaction boundary (review #184, C2).
 
 The bulk import wraps its two passes in ``registry.transaction()`` +
