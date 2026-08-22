@@ -10,7 +10,7 @@ dependencies = [
     "sqlalchemy==2.0.52",
     "alembic==1.19.1",
     "psycopg[binary]==3.3.4",
-    "httpx==0.28.1",
+    "httpx2==2.12.0",
     "celery==5.6.3",
     "redis==8.1.0",
     "openpyxl==3.1.5",
@@ -24,7 +24,7 @@ dependencies = [
 [project.optional-dependencies]
 test = [
     "pytest==9.1.1",
-    "httpx==0.28.1",
+    "httpx2==2.12.0",
     "pypdf==6.16.1",
 ]
 lint = [
@@ -32,7 +32,7 @@ lint = [
     "ruff==0.16.3",
 ]
 dev = [
-    "httpx==0.28.1",
+    "httpx2==2.12.0",
     "mypy==2.3.0",
     "pypdf==6.16.1",
     "pytest==9.1.1",

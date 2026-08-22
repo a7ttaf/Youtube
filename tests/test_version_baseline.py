@@ -1,8 +1,12 @@
-# skipcq: PYL-R0401 -- DeepSource attributes pre-existing backend import cycles
-# (api.allocation/channels/revenue; finance.month_close/month_close_readiness/
-# reconciliation/revenue_facts) to this top-level module via whole-package import
-# analysis. The cycles are not introduced here and resolve at runtime; they are
-# tracked for a dedicated backend decoupling refactor (see PR #104 report).
+# ============================================================================
+# Purpose: Assert pyproject/uv.lock pins match the checked version baseline.
+# Database/ORM: None.
+# Standards: Reads pyproject.toml and STACK_VERSION_BASELINE via imports.
+# Blast Radius: Version drift detection tests only.
+# Connections: expected pins and the documented baseline.
+#   - File: backend/ums_smart_revenue/config/version_baseline.py -> Expected pins.
+#   - File: Docs/implementation/TECH_VERSION_BASELINE.md -> Documented baseline.
+# ============================================================================
 import tomllib
 from pathlib import Path
 
@@ -22,7 +26,9 @@ def test_backend_dependencies_are_pinned_to_checked_latest_stable_versions():
         "sqlalchemy==2.0.52",
         "alembic==1.19.1",
         "psycopg[binary]==3.3.4",
-        "httpx==0.28.1",
+        # httpx2 is the successor of httpx (starlette 1.3+ deprecates the old
+        # package for its testclient); migrated 2026-08-21 (backlog item 2/3).
+        "httpx2==2.12.0",
         "celery==5.6.3",
         "redis==8.1.0",
         "openpyxl==3.1.5",
@@ -37,7 +43,7 @@ def test_backend_dependencies_are_pinned_to_checked_latest_stable_versions():
     }
     expected_test_dependencies = {
         "pytest==9.1.1",
-        "httpx==0.28.1",
+        "httpx2==2.12.0",
         "pypdf==6.16.1",
     }
 

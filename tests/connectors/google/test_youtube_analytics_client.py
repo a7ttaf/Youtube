@@ -1,3 +1,12 @@
+# ============================================================================
+# Purpose: YouTube Analytics targeted channel ingestion tests (spec §5.5).
+# Database/ORM: SQLite fixtures for ingestion paths under test.
+# Standards: httpx2 imported as httpx for HTTP doubles.
+# Blast Radius: Test coverage for YouTube Analytics client only.
+# Connections:
+#   - File: backend/ums_smart_revenue/connectors/google/youtube_analytics_client.py
+#     -> SUT.
+# ============================================================================
 """YouTube Analytics targeted channel ingestion tests (spec §5.5)."""
 
 from __future__ import annotations
@@ -5,7 +14,7 @@ from __future__ import annotations
 import json
 from uuid import UUID, uuid4
 
-import httpx
+import httpx2 as httpx
 import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
