@@ -89,8 +89,11 @@ class SqlAlchemyChannelGroupRegistry:
     #   change. The import enters the registry's boundary first, so this one
     #   nests as an inner savepoint on the same session — SAVEPOINT stacks
     #   are exactly what the mechanism is for.
-    # Standards: Never commits; exceptions propagate; group row locks are
-    #   transaction-scoped and survive a savepoint rollback.
+    # Standards: Never commits; exceptions propagate. Group row locks taken
+    #   BEFORE the savepoint survive its rollback; locks first acquired
+    #   INSIDE the boundary (the import's group row locks) are released by
+    #   the rollback-to, per PostgreSQL's savepoint rules — see the registry
+    #   block for the full lock-release story (PR #196 round 7, codex).
     # Blast Radius: Which group writes survive a caught apply failure for
     #   direct callers. Request-path end state unchanged.
     # Connections:

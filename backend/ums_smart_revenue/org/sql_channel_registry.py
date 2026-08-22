@@ -81,13 +81,19 @@ class SqlAlchemyChannelRegistry:
     # Database/ORM: SAVEPOINT via Session.begin_nested() — no table, column,
     #   or query-shape change; begin/release/rollback-to only. Commit of the
     #   OUTER transaction stays with the request dependency, never here.
-    # Standards: Locks are unaffected by design: row locks and the advisory
-    #   close guard (pg_advisory_xact_lock) are TRANSACTION-scoped, so a
-    #   savepoint rollback releases neither — the _guard_held memo stays
-    #   valid, and the guard-before-row-lock total order is untouched. The
-    #   platform-lane audit elevation is orthogonal: elevation changes the
-    #   ROLE a statement runs under, never which transaction (or savepoint)
-    #   it belongs to. Exceptions always propagate. SQLite emits the same
+    # Standards: Lock release follows PostgreSQL's savepoint rules, and the
+    #   code accounts for BOTH sides of them: locks taken BEFORE the
+    #   savepoint belong to the outer transaction and survive its rollback,
+    #   while row locks and the advisory close guard
+    #   (pg_advisory_xact_lock) first acquired INSIDE the boundary are
+    #   RELEASED by the rollback-to — a catching direct caller must not
+    #   rely on post-savepoint locks remaining held, which is exactly why
+    #   the exception path below resets the _guard_held memo instead of
+    #   trusting it (PR #196 rounds 3 and 7, codex). The
+    #   guard-before-row-lock total order is untouched. The platform-lane
+    #   audit elevation is orthogonal: elevation changes the ROLE a
+    #   statement runs under, never which transaction (or savepoint) it
+    #   belongs to. Exceptions always propagate. SQLite emits the same
     #   SAVEPOINT statements, so both SQL tiers behave identically.
     # Blast Radius: Which writes survive a caught apply failure for direct
     #   service/bootstrap callers — previously the accepted prefix could be
@@ -99,7 +105,7 @@ class SqlAlchemyChannelRegistry:
     #   - File: backend/ums_smart_revenue/api/dependencies.py ->
     #     authenticated_session_dependency, the outer transaction's owner.
     #   - File: backend/ums_smart_revenue/finance/month_close_locks.py ->
-    #     the transaction-scoped advisory guard a savepoint rollback keeps.
+    #     the advisory guard whose held-memo resets on a boundary rollback.
     # ========================================================================
     @contextmanager
     def transaction(self) -> Iterator[None]:
@@ -107,8 +113,11 @@ class SqlAlchemyChannelRegistry:
 
         ``begin_nested()`` releases the savepoint on clean exit and rolls
         back to it on exception before re-raising — undoing exactly the
-        writes made inside the boundary while the outer request transaction,
-        its locks, and any earlier writes stand. SAVEPOINTs would stack, but
+        writes made inside the boundary while the outer request
+        transaction, the locks it took BEFORE this boundary, and any
+        earlier writes stand; locks FIRST acquired inside the boundary are
+        released by the rollback (see the memo reset below). SAVEPOINTs
+        would stack, but
         the protocol says one enter per logical operation, so same-store
         nesting is refused here exactly as the in-memory adapter refuses it —
         the two tiers must not drift on the contract (PR #196 round 2, qodo).

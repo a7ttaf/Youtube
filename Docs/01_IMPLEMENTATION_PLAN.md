@@ -488,10 +488,13 @@ on real ingestion (Phase 2) and the inventory load workflow.
   as a real SAVEPOINT (`Session.begin_nested`) on the request's session —
   rolled back to on exception, released on success, never a commit of the
   outer transaction — so the all-or-nothing promise holds even for a direct
-  caller that catches the failure and commits the session; row locks and the
-  advisory close guard are transaction-scoped and unaffected by a savepoint
-  rollback, the guard's held-memo resets when a boundary that acquired it
-  rolls back, and the stores' flush-conflict handlers recover via their own
+  caller that catches the failure and commits the session; locks taken
+  before the savepoint survive its rollback, while row locks and the
+  advisory close guard first acquired inside the boundary are released by
+  the rollback-to (PostgreSQL's savepoint rules) — which is why the guard's
+  held-memo resets when a boundary that acquired it rolls back, and why a
+  catching direct caller must not rely on post-savepoint locks remaining
+  held — and the stores' flush-conflict handlers recover via their own
   savepoints instead of rolling back the root transaction. The in-memory
   adapters keep a PER-THREAD undo JOURNAL of their own write methods with
   compare-and-restore replay (own writes undone only while the key still
