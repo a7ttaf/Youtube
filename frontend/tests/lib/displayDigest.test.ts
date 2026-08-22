@@ -141,7 +141,7 @@ describe("displayDigest", () => {
     brokenWorkerFactory.prototype.postMessage = function postMessage(
       this: { terminated: boolean },
     ): void {
-      void this.terminated;
+      this.terminated = false;
       postMessageCalls += 1;
       throw new Error("detached or broken data channel");
     };
