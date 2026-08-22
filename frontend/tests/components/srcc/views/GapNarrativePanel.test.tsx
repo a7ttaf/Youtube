@@ -95,6 +95,7 @@ const GAP_EXPLANATION_BODY: MonthGapExplanation = {
       },
     ],
     unexplained_residual_usd: "0",
+    unexplained_residual_confidence: { label: "HIGH", score: "0.95" },
     narrative:
       "YouTube revenue of $930.00 exceeds paid AdSense payments of $900.00 " +
       "by $30.00. $30.00 is not yet PAID (1 payment); $0.00 remains unexplained.",
@@ -122,6 +123,7 @@ const GAP_EXPLANATION_BODY: MonthGapExplanation = {
       },
     ],
     unexplained_residual_usd: "3",
+    unexplained_residual_confidence: { label: "LOW", score: "0" },
     narrative:
       "Paid AdSense payments of $900.00 exceed normalized bank receipts of " +
       "$880.00 by $20.00. Evidence: $12.00 in bank transfer fees (1 bank " +
@@ -187,6 +189,7 @@ const renderCommandView = (overrides?: {
   canViewFinance?: boolean;
   canViewPayments?: boolean;
   canViewBankReconciliation?: boolean;
+  canViewRevenueGlobal?: boolean;
 }) => {
   return render(
     <TenantProvider initialSlug="ums">
@@ -194,6 +197,7 @@ const renderCommandView = (overrides?: {
         canViewFinance={overrides?.canViewFinance ?? true}
         canViewPayments={overrides?.canViewPayments ?? true}
         canViewBankReconciliation={overrides?.canViewBankReconciliation ?? true}
+        canViewRevenueGlobal={overrides?.canViewRevenueGlobal ?? true}
       />
     </TenantProvider>,
   );
@@ -219,9 +223,11 @@ describe("GapNarrativePanel in CommandView", () => {
     expect(screen.getByText("Bank-side FX difference")).toBeInTheDocument();
     expect(screen.getByText("$12.00")).toBeInTheDocument();
     expect(screen.getByText("$5.00")).toBeInTheDocument();
-    // Confidence badges use the API labels.
+    // Confidence badges use the API labels — components AND residuals: the
+    // payment residual reads HIGH (reconciled to zero), the bank residual LOW.
     expect(screen.getAllByText("HIGH").length).toBeGreaterThan(0);
     expect(screen.getAllByText("MEDIUM").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("LOW").length).toBeGreaterThan(0);
     // One residual row per leg.
     expect(screen.getAllByText("Unexplained residual")).toHaveLength(2);
     // Month narrative line plus the read-only close badge.
@@ -287,6 +293,20 @@ describe("GapNarrativePanel in CommandView", () => {
       expect(screen.getAllByText("UC-DRAMA-01").length).toBeGreaterThan(0),
     );
     // The composed endpoint was never called — no-fetch-when-restricted.
+    const calls = (globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls;
+    expect(
+      calls.some((call) => String(call[0]).includes("/gap-explanation")),
+    ).toBe(false);
+  });
+
+  it("scoped revenue viewers get the restricted band, not a doomed fetch", async () => {
+    // A company/sector/channel-scoped revenue viewer has canViewFinance (the
+    // scope-aware hint) but NOT the global-scope grant this endpoint gates
+    // on — the panel must restrict without firing the guaranteed-403 request.
+    routeFetch({});
+    renderCommandView({ canViewFinance: true, canViewRevenueGlobal: false });
+
+    expect(await screen.findByText("Gap narrative restricted")).toBeInTheDocument();
     const calls = (globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls;
     expect(
       calls.some((call) => String(call[0]).includes("/gap-explanation")),

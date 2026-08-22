@@ -23,6 +23,7 @@ const FULL_SESSION: SessionMe = {
   disabled: false,
   capabilities: {
     canViewRevenue: true,
+    canViewRevenueGlobal: true,
     canViewConfidence: true,
     canViewPayments: true,
     canViewBankReconciliation: true,
@@ -356,6 +357,7 @@ const sessionBody = (
     ...FULL_SESSION,
     capabilities: {
       canViewRevenue: false,
+      canViewRevenueGlobal: false,
       canViewConfidence: false,
       canViewPayments: false,
       canViewBankReconciliation: false,

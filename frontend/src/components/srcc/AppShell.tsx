@@ -46,6 +46,9 @@ type AccessPermissions = {
   role: Role;
   canViewFinance: boolean;
   canViewRevenue: boolean;
+  // Global-scope-only revenue gate for surfaces whose backend boundary is
+  // VIEW_REVENUE @ global (the composed gap-explanation read).
+  canViewRevenueGlobal: boolean;
   canViewPayments: boolean;
   canViewBankReconciliation: boolean;
   canManageRegistry: boolean;
@@ -126,6 +129,7 @@ const capabilitiesToPermissions = (
     role,
     canViewFinance: capabilities.canViewRevenue,
     canViewRevenue: capabilities.canViewRevenue,
+    canViewRevenueGlobal: capabilities.canViewRevenueGlobal,
     canViewPayments: capabilities.canViewPayments,
     canViewBankReconciliation: capabilities.canViewBankReconciliation,
     canManageRegistry: capabilities.canManageRegistry,
@@ -665,6 +669,7 @@ const ViewRouter = ({
         canViewAnalytics={permissions.canViewAnalytics}
         canViewPayments={permissions.canViewPayments}
         canViewBankReconciliation={permissions.canViewBankReconciliation}
+        canViewRevenueGlobal={permissions.canViewRevenueGlobal}
       />
     ),
     registry: () => (

@@ -65,7 +65,12 @@ constants (`explanations.py::_NET_CONFIDENCE_TO_EXPLAIN`):
 | Evidence-backed component on a leg with residual beyond tolerance | MEDIUM | 0.80 |
 | Any `unexplained_residual` beyond tolerance; any component on an INCOMPLETE leg | LOW | 0 |
 
-Deterministic table, no scoring heuristics. `money_provenance` covers **every**
+Deterministic table, no scoring heuristics. Residual confidence is carried on
+the wire as `unexplained_residual_confidence` on each leg (the review round
+caught the draft JSON omitting what this prose already promised). The
+PARTIALLY/UNEXPLAINED split checks whether ANY component is nonzero, not the
+components' net sum — offsetting evidence (fee `+5`, FX `-5`) is still
+evidence. `money_provenance` covers **every**
 numeric field in the response (`{source, formula, confidence, export_value}`,
 the bank-recon idiom extended to the payment leg — closes the flagged
 provenance gap on payment-match numbers as *stated by this endpoint*; the
@@ -94,7 +99,13 @@ the reconciliation-explanation twin.
   422 message as payment-match).
 - **Audit**: `REVENUE_VIEWED` + `PAYMENT_VIEWED` + `BANK_RECONCILIATION_VIEWED`
   (it discloses all three surfaces' numbers — the smart-alerts triple-audit
-  precedent), `entity_type="month_gap_explanation"`, `entity_id=month`.
+  precedent), `entity_type="month_gap_explanation"`, `entity_id=month`. The
+  three appends land inside ONE `AuditSink.transaction()` boundary — a late
+  append failure retracts the accepted prefix on every tier, so no partial
+  triple can describe a response that was never returned.
+- **Response model**: the wire shape is validated by a Pydantic
+  `MonthGapExplanationResponse` (field order = wire order), the
+  smart-alerts idiom — serializer drift cannot reach clients as a 200.
 - **Month close**: read-only path, no close guard (consistent with both source
   GETs); `close_status` (OPEN/LOCKED) included read-only, the smart-alerts
   precedent, so finance sees the lock context next to the story.
@@ -123,6 +134,7 @@ the reconciliation-explanation twin.
        "confidence": {"label": "HIGH", "score": "0.95"}}
     ],
     "unexplained_residual_usd": "0",
+    "unexplained_residual_confidence": {"label": "HIGH", "score": "0.95"},
     "narrative": "..."
   },
   "bank_leg": {
@@ -140,6 +152,7 @@ the reconciliation-explanation twin.
        "confidence": {"label": "MEDIUM", "score": "0.80"}}
     ],
     "unexplained_residual_usd": "3",
+    "unexplained_residual_confidence": {"label": "LOW", "score": "0"},
     "narrative": "..."
   },
   "warnings": [{"code": "...", "message": "..."}],
@@ -169,8 +182,13 @@ Command Center panel "Gap narrative" adjacent to the #127 bank cards
 rows with confidence badges (`confidenceDisplay`), residual row, and the month
 narrative line. This finally renders `fx_difference_usd`. New hook
 `useGapExplanation` (the `useBankReconciliation` shape), types in
-`types.ts`, permission-gated client-side by the same three-way composition.
-Tests mirror the CommandView test idioms.
+`types.ts`, permission-gated client-side by the same three-way composition —
+whose revenue term is the new GLOBAL-scope session capability
+`canViewRevenueGlobal` (`_can(VIEW_REVENUE)` in `session.py`), not the
+scope-aware `canViewRevenue` hint: the endpoint gates VIEW_REVENUE @ global,
+and a company/sector/channel-scoped revenue viewer must see the restricted
+band, not fire a guaranteed-403 fetch. Tests mirror the CommandView test
+idioms.
 
 ## Docs deltas (same PR)
 

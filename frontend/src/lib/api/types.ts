@@ -56,6 +56,10 @@ export type SessionPermissionGrant = {
 // Source: SessionCapabilities (session.py:67-95).
 export type SessionCapabilities = {
   canViewRevenue: boolean;
+  // Global-scope-only variant of canViewRevenue: true ONLY when VIEW_REVENUE
+  // is held at global scope. Gates surfaces whose backend boundary checks
+  // VIEW_REVENUE @ global specifically (the composed gap-explanation read).
+  canViewRevenueGlobal: boolean;
   canViewConfidence: boolean;
   canViewPayments: boolean;
   canViewBankReconciliation: boolean;
@@ -308,6 +312,9 @@ type GapExplanationLegBase = {
   status: string;
   components: GapExplanationComponent[];
   unexplained_residual_usd: MoneyString | null;
+  // HIGH when the residual is explained away within tolerance, LOW otherwise
+  // (including INCOMPLETE legs where the residual itself is null).
+  unexplained_residual_confidence: ExplanationConfidence;
   narrative: string;
 };
 

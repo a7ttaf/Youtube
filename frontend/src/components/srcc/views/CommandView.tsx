@@ -1066,6 +1066,7 @@ type GapLegDescriptor = {
   status: string;
   components: GapComponentRow[];
   residualDisplay: string;
+  residualConfidenceLabel: string;
 };
 
 /** Pre-format one leg's component rows (display strings only). */
@@ -1117,6 +1118,7 @@ const buildGapLegDescriptors = (
       status: payment.status,
       components: buildGapComponentRows(payment.components, money),
       residualDisplay: money(payment.unexplained_residual_usd),
+      residualConfidenceLabel: payment.unexplained_residual_confidence?.label ?? "—",
     },
     {
       id: "bank-leg",
@@ -1127,6 +1129,7 @@ const buildGapLegDescriptors = (
       status: bank.status,
       components: buildGapComponentRows(bank.components, money),
       residualDisplay: money(bank.unexplained_residual_usd),
+      residualConfidenceLabel: bank.unexplained_residual_confidence?.label ?? "—",
     },
   ];
 };
@@ -1160,7 +1163,14 @@ const GapLegRows = ({ leg }: { leg: GapLegDescriptor }) => (
       tone={gapStatusTone(leg.status)}
       title="Unexplained residual"
       sub="Gap remaining after the evidence components"
-      trailing={<span className="money finance-data">{leg.residualDisplay}</span>}
+      trailing={
+        <>
+          <span className="money finance-data">{leg.residualDisplay}</span>
+          <Badge tone={confidenceDisplay("", leg.residualConfidenceLabel).tone}>
+            {leg.residualConfidenceLabel}
+          </Badge>
+        </>
+      }
     />
   </>
 );
@@ -2333,6 +2343,7 @@ const CommandView = ({
   canViewAnalytics = false,
   canViewPayments = false,
   canViewBankReconciliation = false,
+  canViewRevenueGlobal = false,
 }: {
   canViewFinance: boolean;
   // Optional so the existing prop contract (canViewFinance-only) stays valid; a
@@ -2343,6 +2354,11 @@ const CommandView = ({
   // values fail closed so standalone tests cannot accidentally grant this read.
   canViewPayments?: boolean;
   canViewBankReconciliation?: boolean;
+  // Global-scope-only revenue gate: the gap-explanation endpoint requires
+  // VIEW_REVENUE at GLOBAL scope, which the scope-aware canViewFinance hint
+  // cannot certify (a company-scoped revenue viewer holds it too). Missing
+  // fails closed.
+  canViewRevenueGlobal?: boolean;
 }) => {
   const [month, setMonth] = useState<string>(DEFAULT_MONTH);
   // Stable {scopeType, scopeId} identity instead of a positional index: the
@@ -2410,8 +2426,12 @@ const CommandView = ({
   // The composed gap-explanation endpoint enforces the UNION of the revenue,
   // finalized-payment, and bank-reconciliation reads — mirror it client-side
   // so a partially-granted session renders the restricted band, not a 403.
+  // The revenue term is the GLOBAL-scope capability, not the scope-aware
+  // canViewFinance hint: the endpoint gates VIEW_REVENUE @ global, and a
+  // company/sector/channel-scoped revenue viewer must not fire a
+  // guaranteed-403 fetch.
   const canViewGapNarrative =
-    canViewFinance && canViewPayments && canViewBankReconciliation;
+    canViewRevenueGlobal && canViewPayments && canViewBankReconciliation;
 
   return (
     <>

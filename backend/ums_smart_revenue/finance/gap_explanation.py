@@ -115,6 +115,8 @@ class GapExplanationLeg:
     source_status: str
     components: tuple[GapExplanationComponent, ...]
     unexplained_residual_usd: Decimal | None
+    residual_confidence_label: str
+    residual_confidence_score: str
     narrative: str
 
     def to_api(self) -> dict[str, object]:
@@ -126,6 +128,10 @@ class GapExplanationLeg:
         payload[self.source_status_field] = self.source_status
         payload["components"] = [component.to_api() for component in self.components]
         payload["unexplained_residual_usd"] = _decimal_to_api(self.unexplained_residual_usd)
+        payload["unexplained_residual_confidence"] = {
+            "label": self.residual_confidence_label,
+            "score": self.residual_confidence_score,
+        }
         payload["narrative"] = self.narrative
         return payload
 
@@ -317,12 +323,18 @@ def _build_leg(
     residual = None if gap_usd is None else _quantize_money(gap_usd - explained_total)
     status = _leg_status(
         gap_usd=gap_usd,
-        explained_total=explained_total,
+        # UNEXPLAINED is reserved for a leg with NO nonzero component, so the
+        # check is per-component: offsetting evidence (fee +5, FX -5) still
+        # counts as evidence even though its net sum is zero.
+        has_nonzero_component=any(amount != 0 for _, _, amount, _ in component_inputs),
         residual=residual,
         tolerance_usd=tolerance_usd,
     )
     confidence_label, confidence_score = _component_confidence(
         status=status, residual=residual, tolerance_usd=tolerance_usd
+    )
+    residual_confidence_label, residual_confidence_score = _residual_confidence(
+        residual=residual, tolerance_usd=tolerance_usd
     )
     components = tuple(
         GapExplanationComponent(
@@ -345,6 +357,8 @@ def _build_leg(
         source_status=source_status,
         components=components,
         unexplained_residual_usd=residual,
+        residual_confidence_label=residual_confidence_label,
+        residual_confidence_score=residual_confidence_score,
         narrative="",
     )
     # The narrative reads the finished numbers, so it is attached last onto
@@ -355,18 +369,24 @@ def _build_leg(
 def _leg_status(
     *,
     gap_usd: Decimal | None,
-    explained_total: Decimal,
+    has_nonzero_component: bool,
     residual: Decimal | None,
     tolerance_usd: Decimal,
 ) -> str:
-    """Classify one leg per the plan's five statuses."""
+    """Classify one leg per the plan's five statuses.
+
+    The PARTIALLY/UNEXPLAINED split checks whether ANY component is nonzero,
+    not the components' net sum: offsetting evidence (a fee and an equal
+    opposite FX difference) is still evidence, and UNEXPLAINED is reserved
+    for a leg with no nonzero component at all.
+    """
     if gap_usd is None or residual is None:
         return "INCOMPLETE"
     if abs(gap_usd) <= tolerance_usd:
         return "MATCHED"
     if abs(residual) <= tolerance_usd:
         return "FULLY_EXPLAINED"
-    if explained_total != 0:
+    if has_nonzero_component:
         return "PARTIALLY_EXPLAINED"
     return "UNEXPLAINED"
 

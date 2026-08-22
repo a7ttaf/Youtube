@@ -77,6 +77,12 @@ class SessionCapabilities(BaseModel):
     model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
 
     can_view_revenue: bool
+    # Global-scope-only variant of can_view_revenue: true ONLY when
+    # VIEW_REVENUE is held at global scope. Gates surfaces whose backend
+    # boundary checks VIEW_REVENUE @ global specifically (the composed
+    # gap-explanation read), where the scope-aware hint above would let a
+    # company/sector/channel-scoped viewer fire a guaranteed-403 fetch.
+    can_view_revenue_global: bool
     can_view_confidence: bool
     can_view_analytics: bool
     can_view_payments: bool
@@ -143,6 +149,11 @@ def _derive_capabilities(principal: UserPrincipal) -> SessionCapabilities:
             principal,
             Permission.VIEW_REVENUE,
         ),
+        # Global-only (the _can check, deliberately NOT the scope-aware hint):
+        # the composed gap-explanation route gates on VIEW_REVENUE @ global,
+        # so a scoped revenue viewer must see the restricted band, not fire a
+        # guaranteed-403 fetch.
+        can_view_revenue_global=_can(Permission.VIEW_REVENUE),
         can_view_confidence=_can(Permission.VIEW_CONFIDENCE),
         # Scope-aware (NOT the global-only _can): VIEW_ANALYTICS is held by
         # nearly every role, many only at company/sector/channel scope. A

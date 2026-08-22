@@ -587,7 +587,9 @@ plus `finance.view_finalized_payments` and `finance.view_bank_reconciliation`
 for the requested finance-month scope (global grants satisfy the month
 scope), and it audits all three view events (`REVENUE_VIEWED`,
 `PAYMENT_VIEWED`, `BANK_RECONCILIATION_VIEWED`) with
-`entity_type="month_gap_explanation"`. `close_status` (OPEN/LOCKED) is
+`entity_type="month_gap_explanation"`, recorded atomically inside one
+audit-sink transaction so a late append failure cannot leave a partial
+triple. `close_status` (OPEN/LOCKED) is
 included read-only; the read path is never close-guarded. The endpoint is
 month-grain only (the PAYMENT-grain receipt-to-account bridge does not
 exist), performs no FX conversion anywhere (non-USD payment rows are counted

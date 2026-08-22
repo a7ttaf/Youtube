@@ -215,6 +215,7 @@ def test_finance_viewer_reads_gap_explanation_with_triple_audit(tmp_path):
         "payment_match_status",
         "components",
         "unexplained_residual_usd",
+        "unexplained_residual_confidence",
         "narrative",
     ]
     assert list(body["bank_leg"]) == [
@@ -225,6 +226,7 @@ def test_finance_viewer_reads_gap_explanation_with_triple_audit(tmp_path):
         "bank_reconciliation_status",
         "components",
         "unexplained_residual_usd",
+        "unexplained_residual_confidence",
         "narrative",
     ]
     assert body["month"] == "2026-03"
@@ -242,6 +244,7 @@ def test_finance_viewer_reads_gap_explanation_with_triple_audit(tmp_path):
     assert payment_leg["components"][0]["key"] == "non_paid_adsense_payments"
     assert payment_leg["components"][0]["amount_usd"] == "30"
     assert payment_leg["unexplained_residual_usd"] == "0"
+    assert payment_leg["unexplained_residual_confidence"] == {"label": "HIGH", "score": "0.95"}
 
     bank_leg = body["bank_leg"]
     assert bank_leg["status"] == "PARTIALLY_EXPLAINED"
@@ -252,6 +255,7 @@ def test_finance_viewer_reads_gap_explanation_with_triple_audit(tmp_path):
         "fx_difference": "5",
     }
     assert bank_leg["unexplained_residual_usd"] == "3"
+    assert bank_leg["unexplained_residual_confidence"] == {"label": "LOW", "score": "0"}
 
     assert [event["event_type"] for event in body["audit_events"]] == [
         "REVENUE_VIEWED",
@@ -275,6 +279,46 @@ def test_finance_viewer_reads_gap_explanation_with_triple_audit(tmp_path):
             audit_logs_by_type[month_scoped].scope_type,
             audit_logs_by_type[month_scoped].scope_id,
         ) == ("finance-month", "2026-03")
+
+
+class _ThirdAppendFailsSink(InMemoryAuditSink):
+    """Sink whose third append raises, staged inside the real boundary."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._appends = 0
+
+    def append(self, record) -> None:  # noqa: ANN001 - protocol shape
+        self._appends += 1
+        if self._appends == 3:
+            raise RuntimeError("staged third-append failure")
+        super().append(record)
+
+
+def test_failed_third_audit_append_retracts_the_whole_triple(tmp_path):
+    """The audit triple lands atomically: a late append failure keeps nothing.
+
+    The three records disclose ONE composed read, so a failure on the third
+    append must retract the first two via the sink's transaction boundary —
+    no partial audit triple may describe a response that was never returned.
+    """
+    from ums_smart_revenue.api.revenue import current_revenue_audit_sink
+
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    failing_sink = _ThirdAppendFailsSink()
+    app = create_app(database_url=database_url)
+    app.dependency_overrides[current_revenue_audit_sink] = lambda: failing_sink
+
+    with TestClient(app) as client:
+        with pytest.raises(RuntimeError, match="staged third-append failure"):
+            client.get(
+                "/revenue/months/2026-03/gap-explanation",
+                headers=auth_headers("finance_viewer", "global"),
+            )
+
+    # The boundary retracted the accepted prefix: not one record retained.
+    assert failing_sink.records == []
 
 
 def test_locked_month_reads_pass_through_close_status(tmp_path):

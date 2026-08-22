@@ -114,6 +114,8 @@ def test_both_legs_decompose_with_signed_evidence_and_residuals():
     assert payment_leg["components"][0]["evidence_count"] == 1
     assert payment_leg["components"][0]["confidence"] == {"label": "HIGH", "score": "0.95"}
     assert payment_leg["unexplained_residual_usd"] == "0"
+    # A residual explained away to zero is HIGH-confidence reconciled.
+    assert payment_leg["unexplained_residual_confidence"] == {"label": "HIGH", "score": "0.95"}
 
     bank_leg = payload["bank_leg"]
     assert bank_leg["status"] == "PARTIALLY_EXPLAINED"
@@ -123,6 +125,8 @@ def test_both_legs_decompose_with_signed_evidence_and_residuals():
     for component in bank_leg["components"]:
         assert component["confidence"] == {"label": "MEDIUM", "score": "0.80"}
     assert bank_leg["unexplained_residual_usd"] == "3"
+    # A residual beyond tolerance carries LOW confidence per the plan's table.
+    assert bank_leg["unexplained_residual_confidence"] == {"label": "LOW", "score": "0"}
 
     # Month status is the worst leg.
     assert payload["status"] == "PARTIALLY_EXPLAINED"
@@ -171,6 +175,12 @@ def test_incomplete_legs_win_the_month_and_carry_low_confidence():
     assert payload["payment_leg"]["payment_gap_usd"] is None
     assert payload["payment_leg"]["unexplained_residual_usd"] is None
     assert payload["payment_leg"]["components"][0]["confidence"] == {
+        "label": "LOW",
+        "score": "0",
+    }
+    # An unavailable residual is LOW-confidence, distinguishing it from a
+    # reconciled zero on the wire.
+    assert payload["payment_leg"]["unexplained_residual_confidence"] == {
         "label": "LOW",
         "score": "0",
     }
@@ -280,6 +290,27 @@ def test_negative_fx_difference_widens_the_residual_and_stays_signed():
         "entry); -$5.00 in bank-side fx difference (1 bank entry). -$2.00 "
         "remains unexplained."
     )
+
+
+def test_offsetting_components_still_read_partially_explained():
+    """Nonzero components that sum to zero are evidence, not UNEXPLAINED.
+
+    UNEXPLAINED is reserved for a leg with NO nonzero component; a fee and an
+    equal opposite FX difference offset in the residual arithmetic but both
+    remain visible evidence rows.
+    """
+    explanation = _explain(
+        facts=[_fact(amount="930")],
+        payments=[_payment(amount="930")],
+        # gap = 930 - 920 = 10; evidence = 5 + (-5) = 0 -> residual = 10
+        bank_entries=[_bank_entry(received="920", fee="5", fx="-5")],
+    )
+
+    bank_leg = explanation.to_api()["bank_leg"]
+    assert bank_leg["status"] == "PARTIALLY_EXPLAINED"
+    amounts = {c["key"]: c["amount_usd"] for c in bank_leg["components"]}
+    assert amounts == {"transfer_fee": "5", "fx_difference": "-5"}
+    assert bank_leg["unexplained_residual_usd"] == "10"
 
 
 def test_partial_payment_leg_and_incomplete_bank_leg():

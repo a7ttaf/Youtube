@@ -284,6 +284,83 @@ class MonthDeductionComponentsResponse(BaseModel):
     audit_events: list[AuditEventResponse]
 
 
+class GapExplanationConfidenceResponse(BaseModel):
+    """Explain-shape confidence pair carried by gap components and residuals."""
+
+    label: str
+    score: str
+
+
+class GapExplanationComponentResponse(BaseModel):
+    """One evidence-backed component of a gap leg."""
+
+    key: str
+    label: str
+    amount_usd: str
+    evidence_count: int
+    confidence: GapExplanationConfidenceResponse
+
+
+class GapExplanationWarningResponse(BaseModel):
+    """One non-blocking data caveat attached to the gap explanation."""
+
+    code: str
+    message: str
+
+
+class GapPaymentLegResponse(BaseModel):
+    """Payment leg of the composed gap explanation (field order = wire order)."""
+
+    status: str
+    youtube_revenue_total_usd: str
+    adsense_paid_amount_usd: str
+    payment_gap_usd: str | None
+    payment_match_status: str
+    components: list[GapExplanationComponentResponse]
+    unexplained_residual_usd: str | None
+    unexplained_residual_confidence: GapExplanationConfidenceResponse
+    narrative: str
+
+
+class GapBankLegResponse(BaseModel):
+    """Bank leg of the composed gap explanation (field order = wire order)."""
+
+    status: str
+    adsense_paid_amount_usd: str
+    bank_received_amount_usd: str
+    bank_gap_usd: str | None
+    bank_reconciliation_status: str
+    components: list[GapExplanationComponentResponse]
+    unexplained_residual_usd: str | None
+    unexplained_residual_confidence: GapExplanationConfidenceResponse
+    narrative: str
+
+
+class GapMoneyProvenanceEntryResponse(BaseModel):
+    """Provenance entry for one numeric gap-explanation field."""
+
+    source: str
+    formula: str
+    confidence: str
+    export_value: str | None
+
+
+class MonthGapExplanationResponse(BaseModel):
+    """Typed composed month gap-explanation response."""
+
+    month: str
+    currency: str
+    close_status: str
+    status: str
+    tolerance_usd: str
+    payment_leg: GapPaymentLegResponse
+    bank_leg: GapBankLegResponse
+    warnings: list[GapExplanationWarningResponse]
+    money_provenance: dict[str, GapMoneyProvenanceEntryResponse]
+    narrative: str
+    audit_events: list[AuditEventResponse]
+
+
 class RevenueFactImportRequest(BaseModel):
     """Validated request payload for importing a connector-sourced monthly revenue fact."""
 
@@ -2100,7 +2177,10 @@ def get_month_bank_reconciliation(
 #   disclose, so it must not be readable with less than both gates. USD-only
 #   via the shared normalizer; month-grain only; no FX conversion. Triple
 #   audit (REVENUE_VIEWED + PAYMENT_VIEWED + BANK_RECONCILIATION_VIEWED),
-#   the smart-alerts precedent, because all three surfaces' numbers appear.
+#   the smart-alerts precedent, because all three surfaces' numbers appear;
+#   the three appends land inside ONE AuditSink.transaction() boundary so no
+#   tier can retain a partial triple for a failed response. The wire shape is
+#   validated by MonthGapExplanationResponse (field order = wire order).
 # Blast Radius: New read-only finance surface; payment-match and
 #   bank-reconciliation payloads unchanged. No allocation, no net math,
 #   no month-close writes.
@@ -2111,7 +2191,7 @@ def get_month_bank_reconciliation(
 #   - File: frontend/src/lib/api/useGapExplanation.ts -> the Command Center
 #     consumer.
 # ============================================================================
-@router.get("/months/{month}/gap-explanation")
+@router.get("/months/{month}/gap-explanation", response_model=MonthGapExplanationResponse)
 def get_month_gap_explanation(
     month: str,
     user: Annotated[UserPrincipal, Depends(current_principal_from_headers)],
@@ -2176,42 +2256,47 @@ def get_month_gap_explanation(
         ) from exc
 
     explanation_api = explanation.to_api()
-    revenue_record = record_audit_event(
-        sink=audit_sink,
-        actor=user,
-        event_type=AuditEventType.REVENUE_VIEWED,
-        entity_type="month_gap_explanation",
-        entity_id=month,
-        scope=global_scope,
-        details={
-            "status": explanation.status,
-            "payment_leg_status": explanation.payment_leg.status,
-        },
-    )
-    payment_record = record_audit_event(
-        sink=audit_sink,
-        actor=user,
-        event_type=AuditEventType.PAYMENT_VIEWED,
-        entity_type="month_gap_explanation",
-        entity_id=month,
-        scope=month_scope,
-        details={
-            "status": explanation.status,
-            "payment_match_status": explanation.payment_leg.source_status,
-        },
-    )
-    bank_record = record_audit_event(
-        sink=audit_sink,
-        actor=user,
-        event_type=AuditEventType.BANK_RECONCILIATION_VIEWED,
-        entity_type="month_gap_explanation",
-        entity_id=month,
-        scope=month_scope,
-        details={
-            "status": explanation.status,
-            "bank_reconciliation_status": explanation.bank_leg.source_status,
-        },
-    )
+    # The three records disclose ONE composed read, so they land atomically:
+    # if a later append fails, the sink's transaction boundary retracts the
+    # accepted prefix instead of leaving a partial audit triple describing a
+    # response that was never returned.
+    with audit_sink.transaction():
+        revenue_record = record_audit_event(
+            sink=audit_sink,
+            actor=user,
+            event_type=AuditEventType.REVENUE_VIEWED,
+            entity_type="month_gap_explanation",
+            entity_id=month,
+            scope=global_scope,
+            details={
+                "status": explanation.status,
+                "payment_leg_status": explanation.payment_leg.status,
+            },
+        )
+        payment_record = record_audit_event(
+            sink=audit_sink,
+            actor=user,
+            event_type=AuditEventType.PAYMENT_VIEWED,
+            entity_type="month_gap_explanation",
+            entity_id=month,
+            scope=month_scope,
+            details={
+                "status": explanation.status,
+                "payment_match_status": explanation.payment_leg.source_status,
+            },
+        )
+        bank_record = record_audit_event(
+            sink=audit_sink,
+            actor=user,
+            event_type=AuditEventType.BANK_RECONCILIATION_VIEWED,
+            entity_type="month_gap_explanation",
+            entity_id=month,
+            scope=month_scope,
+            details={
+                "status": explanation.status,
+                "bank_reconciliation_status": explanation.bank_leg.source_status,
+            },
+        )
     explanation_api["audit_events"] = [
         audit_record_to_api(revenue_record),
         audit_record_to_api(payment_record),
