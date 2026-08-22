@@ -3,15 +3,10 @@
 # Database/ORM: None.
 # Standards: Reads pyproject.toml and STACK_VERSION_BASELINE via imports.
 # Blast Radius: Version drift detection tests only.
-# Connections:
+# Connections: expected pins and the documented baseline.
 #   - File: backend/ums_smart_revenue/config/version_baseline.py -> Expected pins.
 #   - File: Docs/implementation/TECH_VERSION_BASELINE.md -> Documented baseline.
 # ============================================================================
-# skipcq: PYL-R0401 -- DeepSource attributes pre-existing backend import cycles
-# (api.allocation/channels/revenue; finance.month_close/month_close_readiness/
-# reconciliation/revenue_facts) to this top-level module via whole-package import
-# analysis. The cycles are not introduced here and resolve at runtime; they are
-# tracked for a dedicated backend decoupling refactor (see PR #104 report).
 import tomllib
 from pathlib import Path
 
