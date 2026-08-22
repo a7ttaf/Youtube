@@ -32,7 +32,7 @@ def test_backend_dependencies_are_pinned_to_checked_latest_stable_versions():
         "alembic==1.19.1",
         "psycopg[binary]==3.3.4",
         # httpx2 is the successor of httpx (starlette 1.3+ deprecates the old
-        # package for its testclient); migrated 2026-08-21, backlog PR 2 of 3.
+        # package for its testclient); migrated 2026-08-21 (backlog item 2/3).
         "httpx2==2.12.0",
         "celery==5.6.3",
         "redis==8.1.0",
