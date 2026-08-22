@@ -1,7 +1,7 @@
 import { useCallback } from "react";
 
 import { useApiClient } from "@/lib/api/client";
-import { displayDigestMatchesDisclosed } from "@/lib/displayDigest";
+import { displayDigestMatchesDisclosedAsync } from "@/lib/displayDigest";
 import type { ChannelImportResult, ChannelImportRowResult } from "@/lib/api/types";
 
 // ============================================================================
@@ -1151,8 +1151,7 @@ export const isChannelImportResult = (payload: unknown): payload is ChannelImpor
   return (
     PLAN_PAYLOAD_FIELDS.every(([field, isValid]) => isValid(payload[field])) &&
     countsMatchRows(payload) &&
-    diffsMatchTheirFields(payload) &&
-    displayDigestMatchesDisclosed(payload as ChannelImportResult)
+    diffsMatchTheirFields(payload)
   );
 };
 
@@ -1297,8 +1296,14 @@ const RESULT_CHECKS: ReadonlyArray<
  * because every failure above is the same outcome for the caller — on an apply
  * the write may well have committed and only the body was unreadable.
  */
-const assertUsableResult = (result: ChannelImportResult, request: ImportRequestTarget): void => {
+const assertUsableResult = async (
+  result: ChannelImportResult,
+  request: ImportRequestTarget,
+): Promise<void> => {
   if (!RESULT_CHECKS.every((holds) => holds(result, request))) {
+    throw new ChannelImportShapeError();
+  }
+  if (!(await displayDigestMatchesDisclosedAsync(result))) {
     throw new ChannelImportShapeError();
   }
 };
@@ -1378,8 +1383,8 @@ export const useChannelImport = (): ((
       }
       return client
         .post<ChannelImportResult>("/channels/import", form)
-        .then((result) => {
-          assertUsableResult(result, {
+        .then(async (result) => {
+          await assertUsableResult(result, {
             dryRun,
             contentOwnerId,
             expectedPlanFingerprint,

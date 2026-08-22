@@ -759,8 +759,6 @@ def import_channels(
         tenant_id=str(_resolve_tenant_uuid(user)),
     )
 
-    if plan.has_errors and not dry_run:
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=payload)
     if dry_run:
         return ChannelImportResult.model_validate(payload)
 
@@ -772,6 +770,9 @@ def import_channels(
     # plan, so approval is re-sought against reality instead of a stale
     # preview (review #184). Optional for API clients that never previewed —
     # they are not re-approving anything — but the SPA always sends it.
+    # FIX: Binding-token mismatches run BEFORE the ERROR-row 422 branch so a
+    # stale digest/fingerprint is classified as plan drift (409 + refreshed
+    # plan), not as a roster-validation failure (422).
     if (
         expected_plan_fingerprint is not None
         and expected_plan_fingerprint != payload["plan_fingerprint"]
@@ -788,6 +789,9 @@ def import_channels(
         and expected_display_digest != payload["display_digest"]
     ):
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=payload)
+
+    if plan.has_errors:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=payload)
 
     try:
         apply_channel_import(

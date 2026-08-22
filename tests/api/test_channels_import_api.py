@@ -721,6 +721,45 @@ def test_apply_rejects_a_stale_display_digest():
     assert audit_sink.records == []
 
 
+def test_stale_display_digest_returns_409_even_when_replan_has_errors():
+    """A digest mismatch is plan drift (409), not a roster error (422).
+
+    When state changes between preview and apply such that the re-plan now
+    holds ERROR rows, a client that bound `expected_display_digest` must still
+    get the refreshed plan in a 409 — not a 422 that misclassifies drift as
+    validation failure.
+    """
+    client, registry, groups, audit_sink = create_import_app()
+    header = "youtube_channel_id,channel_name,group_id,view_revenue"
+    body = import_csv(f"{CHANNEL_ID},Alpha News,cms-tv,Yes", header=header)
+
+    preview = post_import(client, body, dry_run="true")
+    assert preview.status_code == 200, preview.text
+    stale_digest = preview.json()["display_digest"]
+
+    first = post_import(client, import_csv(f"{CHANNEL_ID},Alpha News,cms-tv,Yes", header=header))
+    assert first.status_code == 200
+    group = groups.get_group_by_cms_id("cms-tv")
+    assert group is not None
+    groups.update_group(group_id=group.id, name=None, active=False)
+    audit_sink.records.clear()
+
+    second_channel = "UC3Dci3BzZXDo4jw4dU8KqWg"
+    conflict = post_import(
+        client,
+        import_csv(f"{second_channel},Beta News,cms-tv,Yes", header=header),
+        expected_display_digest=stale_digest,
+    )
+
+    assert conflict.status_code == 409, conflict.text
+    refreshed = conflict.json()["detail"]
+    assert refreshed["counts"]["ERROR"] == 1
+    assert "archived" in refreshed["rows"][0]["reason"]
+    assert refreshed["display_digest"] != stale_digest
+    assert registry.get_channel(second_channel) is None
+    assert audit_sink.records == []
+
+
 def test_apply_proceeds_when_the_display_digest_matches():
     """A matching disclosed digest admits the apply — with no fingerprint sent."""
     client, registry, _groups, _sink = create_import_app()

@@ -79,7 +79,19 @@ const pythonCanonicalJson = (value: unknown): string => {
   throw new TypeError("display digest canonical JSON rejects unsupported values");
 };
 
-// Minimal SHA-256 (RFC 6234) for sync digest verification in the browser bundle.
+// ============================================================================
+// Purpose: RFC 6234 SHA-256 over UTF-8 bytes for display_digest verification.
+// Database/ORM: None (frontend) — pure digest primitive; no I/O.
+// Standards: Sync implementation kept for unit-test fixtures and pinned
+//   digests; production verification uses sha256HexAsync (Web Crypto) so
+//   hashing does not block the main thread on large canonical payloads.
+// Blast Radius: Import preview/apply binding — a wrong digest rejects a
+//   plan the operator would otherwise trust (review #184, C1).
+// Connections:
+// - File: frontend/src/lib/displayDigest.ts -> computeDisplayDigest(Async).
+// - File: backend/ums_smart_revenue/api/channels.py -> _display_digest recipe.
+// - File: Docs/12_BACKEND_API_SPEC.md -> import plan contract.
+// ============================================================================
 const sha256Hex = (message: string): string => {
   const msg = new TextEncoder().encode(message);
   const roundConstants = new Uint32Array([
@@ -147,6 +159,14 @@ const sha256Hex = (message: string): string => {
   return Array.from(state, (word) => word.toString(16).padStart(8, "0")).join("");
 };
 
+const sha256HexAsync = async (message: string): Promise<string> => {
+  const msg = new TextEncoder().encode(message);
+  const hashBuffer = await crypto.subtle.digest("SHA-256", msg);
+  return Array.from(new Uint8Array(hashBuffer), (byte) =>
+    byte.toString(16).padStart(2, "0"),
+  ).join("");
+};
+
 // ============================================================================
 // Purpose: Recompute the server display_digest from exactly the disclosed plan
 //   fields so the SPA can verify a 2xx body before trusting preview state.
@@ -175,6 +195,19 @@ export const computeDisplayDigest = (plan: Pick<
   return sha256Hex(canonical);
 };
 
+/** Async variant using Web Crypto so hashing stays off the synchronous hot path. */
+export const computeDisplayDigestAsync = async (
+  plan: Pick<ChannelImportResult, "content_owner_id" | "cms_status" | "counts" | "rows">,
+): Promise<string> => {
+  const canonical = pythonCanonicalJson({
+    content_owner_id: plan.content_owner_id,
+    cms_status: plan.cms_status,
+    counts: plan.counts,
+    rows: plan.rows,
+  });
+  return sha256HexAsync(canonical);
+};
+
 // ============================================================================
 // Purpose: Verify a plan's display_digest matches a client-side recomputation
 //   from its disclosed fields before the import flow trusts preview/apply state.
@@ -196,6 +229,20 @@ export const displayDigestMatchesDisclosed = (plan: ChannelImportResult): boolea
   }
   try {
     return computeDisplayDigest(plan) === plan.display_digest;
+  } catch {
+    return false;
+  }
+};
+
+/** Async verify path for response validation before trusted UI state updates. */
+export const displayDigestMatchesDisclosedAsync = async (
+  plan: ChannelImportResult,
+): Promise<boolean> => {
+  if (typeof plan.display_digest !== "string" || plan.display_digest === "") {
+    return false;
+  }
+  try {
+    return (await computeDisplayDigestAsync(plan)) === plan.display_digest;
   } catch {
     return false;
   }

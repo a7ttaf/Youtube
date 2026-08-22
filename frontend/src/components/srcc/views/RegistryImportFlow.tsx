@@ -13,6 +13,7 @@ import {
   isChannelImportResult,
   useChannelImport,
 } from "@/lib/api/useChannelImport";
+import { displayDigestMatchesDisclosedAsync } from "@/lib/displayDigest";
 import { useContentOwners } from "@/lib/api/useContentOwners";
 import type { Severity } from "@/lib/mock/data";
 import { ActionStepper } from "../ActionStepper";
@@ -172,16 +173,19 @@ const PLAN_BEARING_STATUSES = new Set([409, 422]);
 //       the 409/422 whose `detail` is a full ChannelImportResult.
 //   - File: Docs/12_BACKEND_API_SPEC.md -> the documented rejection contract.
 // ============================================================================
-const applyRaceDetail = (
+const applyRaceDetail = async (
   err: unknown,
   contentOwnerId: string,
-): ChannelImportResult | null => {
+): Promise<ChannelImportResult | null> => {
   if (!(err instanceof ApiError) || !PLAN_BEARING_STATUSES.has(err.status)) {
     return null;
   }
   const body = err.body as { detail?: unknown } | null;
   const detail = body?.detail;
   if (!isChannelImportResult(detail)) {
+    return null;
+  }
+  if (!(await displayDigestMatchesDisclosedAsync(detail))) {
     return null;
   }
   // The refreshed plan must describe the TARGET this request named, the same
@@ -1544,8 +1548,8 @@ export const RegistryImportFlow = ({
   //   - File: backend/ums_smart_revenue/api/channels.py -> the route emitting
   //       the 409/422 whose `detail` carries the refreshed plan.
   // ==========================================================================
-  const handleApplyFailure = (caught: unknown) => {
-    const race = applyRaceDetail(caught, ownerId);
+  const handleApplyFailure = async (caught: unknown) => {
+    const race = await applyRaceDetail(caught, ownerId);
     if (race) {
       // Replacing the preview also re-binds the fingerprint: the next Apply
       // sends the refreshed plan's digest, so approval always tracks what the
@@ -1773,7 +1777,7 @@ export const RegistryImportFlow = ({
       setStep("applied");
     } catch (caught) {
       // Stay on Preview; the Apply button re-enables in finally for a retry.
-      handleApplyFailure(caught);
+      await handleApplyFailure(caught);
     } finally {
       setBusy(false);
       setApplying(false);

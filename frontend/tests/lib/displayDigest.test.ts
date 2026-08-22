@@ -1,10 +1,10 @@
 import { describe, expect, it } from "vitest";
 
-import { computeDisplayDigest, displayDigestMatchesDisclosed } from "@/lib/displayDigest";
+import { computeDisplayDigest, computeDisplayDigestAsync, displayDigestMatchesDisclosedAsync } from "@/lib/displayDigest";
 import type { ChannelImportResult } from "@/lib/api/types";
 
 describe("displayDigest", () => {
-  it("matches the backend canonical recipe including non-ASCII channel names", () => {
+  it("matches the backend canonical recipe including non-ASCII channel names", async () => {
     const plan: Pick<ChannelImportResult, "content_owner_id" | "cms_status" | "counts" | "rows"> = {
       content_owner_id: "COabc",
       cms_status: "INSIDE_CMS",
@@ -25,12 +25,13 @@ describe("displayDigest", () => {
       ],
     };
     const digest = computeDisplayDigest(plan);
+    expect(await computeDisplayDigestAsync(plan)).toBe(digest);
     expect(digest).toBe("b84ea3d6d06c0fca721a49d4c994765aed33ef494ab493248542df51c06f15d1");
-    expect(displayDigestMatchesDisclosed({ ...plan, display_digest: digest, dry_run: true, plan_fingerprint: "fp" })).toBe(true);
-    expect(displayDigestMatchesDisclosed({ ...plan, display_digest: "deadbeef", dry_run: true, plan_fingerprint: "fp" })).toBe(false);
+    expect(await displayDigestMatchesDisclosedAsync({ ...plan, display_digest: digest, dry_run: true, plan_fingerprint: "fp" })).toBe(true);
+    expect(await displayDigestMatchesDisclosedAsync({ ...plan, display_digest: "deadbeef", dry_run: true, plan_fingerprint: "fp" })).toBe(false);
   });
 
-  it("escapes DEL (U+007F) the way Python ensure_ascii does", () => {
+  it("escapes DEL (U+007F) the way Python ensure_ascii does", async () => {
     const plan: Pick<ChannelImportResult, "content_owner_id" | "cms_status" | "counts" | "rows"> = {
       content_owner_id: "COabc",
       cms_status: "INSIDE_CMS",
@@ -52,10 +53,10 @@ describe("displayDigest", () => {
     };
     const digest = computeDisplayDigest(plan);
     expect(digest).toBe("2ccc2e316b542138b558bd277104910ec17123216f74443f78fd638c0a6452ce");
-    expect(displayDigestMatchesDisclosed({ ...plan, display_digest: digest, dry_run: true, plan_fingerprint: "fp" })).toBe(true);
+    expect(await displayDigestMatchesDisclosedAsync({ ...plan, display_digest: digest, dry_run: true, plan_fingerprint: "fp" })).toBe(true);
   });
 
-  it("returns false instead of throwing when canonical JSON cannot be built", () => {
+  it("returns false instead of throwing when canonical JSON cannot be built", async () => {
     const plan = {
       content_owner_id: "COabc",
       cms_status: "INSIDE_CMS",
@@ -65,6 +66,6 @@ describe("displayDigest", () => {
       dry_run: true,
       plan_fingerprint: "fp",
     } as unknown as ChannelImportResult;
-    expect(displayDigestMatchesDisclosed(plan)).toBe(false);
+    expect(await displayDigestMatchesDisclosedAsync(plan)).toBe(false);
   });
 });
