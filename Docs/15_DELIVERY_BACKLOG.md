@@ -2310,8 +2310,8 @@ show.
 | `uv run pytest -q` | **2817 passed, 15 warnings, exit 0** | 9m38s and 8m56s on two runs — expect ~9-10 min, not a fixed number |
 | `uv run ruff check backend tests scripts` | All checks passed | `line-length = 100` (`pyproject.toml:47`) — matches DeepSource FLK-E501 |
 | `uv run mypy backend` | **1 error** | NOT one of the four AGENTS.md gates — see B below |
-| `bun run test` (frontend) | 477 passed, 41 files | `bun`, never `npx` |
-| `bunx tsc --noEmit` / `bun run build` | clean | |
+| `bun run test` (frontend) | 477 passed, 41 files | run from `frontend/` — `(cd frontend && bun run test)`; `bun`, never `npx` |
+| `(cd frontend && bunx tsc --noEmit)` / `(cd frontend && bun run build)` | clean | scripts live in `frontend/package.json`, not repo root |
 | `git diff --check` | clean | |
 | DeepSource (6 analyzers) | all SUCCESS | |
 
@@ -2319,12 +2319,39 @@ show.
 It needs `UMS_TEST_DATABASE_URL`; a reused container carrying a stray schema
 from an earlier round reports **23 failures**, every one an RLS/migration test
 and none of them touching the code under change. Both runs above used a
-disposable `postgres:16` container created for the run and removed after.
+disposable `postgres:18-alpine` container created for the run and removed after.
+Matches the repo-standard image in `tests/db/_postgres_helpers.py` and
+`docker-compose.yml` (PostgreSQL 18).
+
+**POSIX shell** (inline env assignment is POSIX-only):
 
 ```bash
-docker run -d --name ums-verify -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=test_ums -p 55505:5432 postgres:16
+docker run -d --name ums-verify \
+  -e POSTGRES_PASSWORD=postgres \
+  -e POSTGRES_DB=test_ums \
+  -p 127.0.0.1:55505:5432 \
+  postgres:18-alpine
+until docker exec ums-verify pg_isready -U postgres -d test_ums >/dev/null 2>&1; do sleep 1; done
 UMS_TEST_DATABASE_URL="postgresql+psycopg://postgres:postgres@127.0.0.1:55505/test_ums" uv run pytest -q -rw
+pytest_exit=$?
 docker rm -f ums-verify
+exit $pytest_exit
+```
+
+**PowerShell** (Windows dev — use `$env:` assignment, not inline prefix):
+
+```powershell
+docker run -d --name ums-verify `
+  -e POSTGRES_PASSWORD=postgres `
+  -e POSTGRES_DB=test_ums `
+  -p 127.0.0.1:55505:5432 `
+  postgres:18-alpine
+do { Start-Sleep -Seconds 1 } until (docker exec ums-verify pg_isready -U postgres -d test_ums 2>$null)
+$env:UMS_TEST_DATABASE_URL = "postgresql+psycopg://postgres:postgres@127.0.0.1:55505/test_ums"
+uv run pytest -q -rw
+$pytestExit = $LASTEXITCODE
+docker rm -f ums-verify
+exit $pytestExit
 ```
 
 ### A. The 15 pytest warnings — two causes, both dependency-config
@@ -2423,12 +2450,18 @@ merged 2026-06-15. It has been on `main` for about two months.
 
 **Why it survived that long, which is the part worth fixing.** `mypy` is not
 one of the four AGENTS.md baseline gates (L113-121: `uv sync`, `ruff`,
-`pytest`, `git diff --check`), so nothing in the normal flow runs it — but
+`pytest`, `git diff --check`), but **`CONTRIBUTING.md` and `README.md` still
+direct contributors to run `uv run mypy backend` before push**, and
 **DeepSource's Python analyzer does**. That makes it an ungated gate: reachable
-by review, invisible to the local loop. Run `uv run mypy backend` before any
-push regardless of the four gates.
+by review and documented workflow, invisible to the four-gate local loop. Run
+`uv run mypy backend` before any push regardless of the four gates.
 
 ### C. Deferred design questions from PR #184
+
+> **Post-snapshot update.** Everything above reflects `main` at `9435af29`.
+> The rulings below were recorded on 2026-08-21; the implementing code lives
+> on the follow-up branches cited (PR #195, PR #196), not on `9435af29` itself.
+> Re-derive ship status from those PR heads, not from this snapshot commit.
 
 Both were escalated during review rather than guessed at, and both were RULED
 on 2026-08-21 (operator decision, recorded per-question below). Each is a real
@@ -2441,8 +2474,8 @@ change with a real failure mode, not a nit.
    but structurally valid plan passes every client-side check; Apply then echoes
    the original token with the original CSV and the backend writes the real
    plan, though the operator reviewed different contents. **Ruled: display
-   digest** (not the tenant-disclosure option) — and **shipped as PR #195**
-   (2026-08-22): `display_digest` = SHA-256 over canonical JSON of exactly the
+   digest** (not the tenant-disclosure option) — **tracked in PR #195**
+   (`feat/import-display-digest`): `display_digest` = SHA-256 over canonical JSON of exactly the
    disclosed reviewed set (counts, rows, content_owner_id, cms_status;
    tenant-free, hence recomputable), optional `expected_display_digest` on the
    apply checked independently of the fingerprint, either token opts into
@@ -2459,15 +2492,15 @@ change with a real failure mode, not a nit.
    every channel, and a store without a transaction cannot take those back when
    the group pass raises. Production SQL is transactional; the exposure is the
    in-memory adapters used by direct/test/bootstrap callers. **Ruled:
-   transaction boundary** (not a compensating restore) — and **shipped as
-   PR #196** (2026-08-22): an explicit `transaction()` boundary on both store
-   protocols. The SQL adapters delegate to the request's own session
-   transaction (nothing opens, nothing commits, no savepoint); the in-memory
+   transaction boundary** (not a compensating restore) — **tracked in PR #196**
+   (`feat/import-store-transaction`): an explicit `transaction()` boundary on both store
+   protocols (implemented on that branch; absent on `main` at `9435af29`). The SQL adapters delegate to the request's own session
+   transaction (nothing opens, nothing commits; internal savepoints only). The in-memory
    adapters keep an undo JOURNAL of their own write methods and replay it
    backwards on raise — own writes undone, a concurrent writer's interleaved
    change survives, matching SQL rollback semantics, which the existing race
    tests pin. `apply_channel_import` wraps the pre-flight, both passes, and a
-   buffered audit flush (`_BufferedAuditSink`) in one boundary, so a mid-apply
+   buffered audit flush (`_BufferedAuditSink`, defined on the PR #196 branch) in one boundary, so a mid-apply
    failure no longer even transiently writes audit rows on any tier. Noted
    follow-up on the PR: `channel_group_sync_apply.py` has the analogous
    in-memory exposure and can now adopt the same boundary.
@@ -2496,7 +2529,7 @@ from the two that need design.
 | --- | --- | --- |
 | 1 | A1 (`path_separator = os`) + B (`candidates: list[Path]`) | two lines, plus a re-run of `tests/db/` and `tests/tenancy/` |
 | 2 | A2 — `httpx2` migration | dependency-wide; re-exercise the connector HTTP paths |
-| 3 | C1 and/or C2 — the two #184 design questions | one each; both RULED 2026-08-21 and both SHIPPED — C1 = PR #195 (3a), C2 = PR #196 (3b) |
+| 3 | C1 and/or C2 — the two #184 design questions | one each; both RULED 2026-08-21; C1 tracked in PR #195, C2 tracked in PR #196 (code on those branches, not on `9435af29`) |
 
 ## Hard problems to solve early
 
