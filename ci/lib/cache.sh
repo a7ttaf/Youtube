@@ -191,8 +191,12 @@ ci::cache::gc() {
 
   # Find entries whose meta.json is older than max_age_days
   local entry stale_list
-  # Use find with -mtime; +N means strictly older than N*24h
-  stale_list="$(find "$CI_GATE_CACHE_DIR" -maxdepth 2 -name "meta.json" -mtime +"${max_age_days}" 2>/dev/null)"
+  # `-mtime +N` means strictly older than N*24h, and is POSIX. The depth limit is
+  # spelled as a prune for the reason ci/checks/node.sh spells it that way:
+  # `-maxdepth` is not. `$CI_GATE_CACHE_DIR/*/*/*` is depth three and below, so
+  # pruning it leaves the two levels a cache entry lives at.
+  stale_list="$(find "$CI_GATE_CACHE_DIR" -path "$CI_GATE_CACHE_DIR/*/*/*" -prune -o \
+                  -name "meta.json" -mtime +"${max_age_days}" -print 2>/dev/null)"
   while IFS= read -r entry; do
     [ -z "$entry" ] && continue
     local entry_dir

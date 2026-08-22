@@ -93,11 +93,11 @@ touch any other file** unless the spec or this plan asks for it.
 | `backend/ums_smart_revenue/api/tenants.py` | New router exposing `GET /tenants/me`. |
 | `tests/api/test_tenants_api.py` | Cases 1–9 from the spec. |
 | `frontend/src/contexts/TenantContext.tsx` | `TenantProvider`, `useTenant()`, `hydrate()`. |
-| `frontend/src/contexts/__tests__/TenantContext.test.tsx` | Provider/hook unit tests. |
+| `frontend/tests/contexts/TenantContext.test.tsx` | Provider/hook unit tests. |
 | `frontend/src/lib/api/client.ts` | `useApiClient()`, `ApiError`, URL + header helpers. |
 | `frontend/src/lib/api/types.ts` | `TenantRead` TS type. |
-| `frontend/src/lib/api/__tests__/client.test.ts` | Header-injection + ApiError + URL tests. |
-| `frontend/src/components/srcc/__tests__/AppShell.test.tsx` | Happy-path / error-path / StrictMode-guard smoke tests. |
+| `frontend/tests/lib/api/client.test.tsx` | Header-injection + ApiError + URL tests. |
+| `frontend/tests/components/srcc/AppShell.test.tsx` | Happy-path / error-path / StrictMode-guard smoke tests. |
 | `frontend/vitest.config.ts` | jsdom env, alias, setupFiles, globals. |
 | `frontend/src/test-setup.ts` | `@testing-library/jest-dom/vitest` + `afterEach(cleanup)`. |
 
@@ -1019,12 +1019,12 @@ EOF
 
 **Files:**
 - Create: `frontend/src/contexts/TenantContext.tsx`
-- Create: `frontend/src/contexts/__tests__/TenantContext.test.tsx`
+- Create: `frontend/tests/contexts/TenantContext.test.tsx`
 
 - [ ] **Step 1: Write the failing test file**
 
 ```tsx
-// frontend/src/contexts/__tests__/TenantContext.test.tsx
+// frontend/tests/contexts/TenantContext.test.tsx
 import { renderHook, act } from "@testing-library/react";
 import type { ReactNode } from "react";
 
@@ -1151,7 +1151,7 @@ Expected: 3 passing.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add frontend/src/contexts/TenantContext.tsx frontend/src/contexts/__tests__/TenantContext.test.tsx
+git add frontend/src/contexts/TenantContext.tsx frontend/tests/contexts/TenantContext.test.tsx
 git commit -m "$(cat <<'EOF'
 feat(frontend): add TenantContext seeded with bootstrap slug
 
@@ -1172,7 +1172,7 @@ EOF
 
 **Files:**
 - Create: `frontend/src/lib/api/types.ts`
-- Create: `frontend/src/lib/api/__tests__/client.test.ts`
+- Create: `frontend/tests/lib/api/client.test.tsx`
 
 The tests are written first; the impl lands in Task 4.2.
 
@@ -1190,7 +1190,7 @@ export type TenantRead = {
 - [ ] **Step 2: Create the test file with all client cases**
 
 ```ts
-// frontend/src/lib/api/__tests__/client.test.ts
+// frontend/tests/lib/api/client.test.tsx
 import { renderHook } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -1515,7 +1515,7 @@ Expected: TenantContext + client tests all pass.
 - [ ] **Step 4: Commit**
 
 ```bash
-git add frontend/src/lib/api/client.ts frontend/src/lib/api/types.ts frontend/src/lib/api/__tests__/client.test.ts
+git add frontend/src/lib/api/client.ts frontend/src/lib/api/types.ts frontend/tests/lib/api/client.test.tsx
 git commit -m "$(cat <<'EOF'
 feat(frontend): add useApiClient + ApiError + TenantRead type
 
@@ -1604,7 +1604,7 @@ EOF
 ### Task 5.2: AppShell mount-time `/tenants/me` call + dev-only proof tag (failing tests → impl → pass)
 
 **Files:**
-- Create: `frontend/src/components/srcc/__tests__/AppShell.test.tsx`
+- Create: `frontend/tests/components/srcc/AppShell.test.tsx`
 - Modify: `frontend/src/components/srcc/AppShell.tsx`
 
 - [ ] **Step 1: Read the existing AppShell**
@@ -1620,7 +1620,7 @@ element. Do **not** restructure the existing layout.
 - [ ] **Step 2: Write the failing test file**
 
 ```tsx
-// frontend/src/components/srcc/__tests__/AppShell.test.tsx
+// frontend/tests/components/srcc/AppShell.test.tsx
 import { render, screen } from "@testing-library/react";
 import { StrictMode } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -1796,7 +1796,7 @@ pass.
 - [ ] **Step 7: Commit**
 
 ```bash
-git add frontend/src/components/srcc/AppShell.tsx frontend/src/components/srcc/__tests__/AppShell.test.tsx
+git add frontend/src/components/srcc/AppShell.tsx frontend/tests/components/srcc/AppShell.test.tsx
 git commit -m "$(cat <<'EOF'
 feat(frontend): AppShell calls /tenants/me on mount with dev-only proof tag
 

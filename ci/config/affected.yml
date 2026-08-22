@@ -15,12 +15,168 @@ rules:
   - source: "src/**/*.jsx"
     tests: "tests/**/*.test.jsx"
 
+  # The frontend is a subdirectory workspace, so the root-relative rules above
+  # never match frontend/src/**. Without these, a frontend-only change yields no
+  # JavaScript patterns; if any other language contributed one, AFFECTED_TESTS
+  # is non-empty and ci/checks/tests.sh reports "skipped: no affected
+  # JavaScript tests" while frontend code did in fact change.
+  - source: "frontend/src/**/*.ts"
+    tests: "frontend/tests/**/*.test.ts"
+  - source: "frontend/src/**/*.tsx"
+    tests: "frontend/tests/**/*.test.tsx"
+  - source: "frontend/src/**/*.js"
+    tests: "frontend/tests/**/*.test.ts"
+  - source: "frontend/src/**/*.jsx"
+    tests: "frontend/tests/**/*.test.tsx"
+  # The matcher collapses "**" to "*" and then compares with `case`, so
+  # "frontend/src/**/*.ts" requires at least one path segment under src/ and
+  # would not match frontend/src/test-setup.ts on its own. Spell the direct
+  # children out rather than relying on a broader rule happening to cover them.
+  - source: "frontend/src/*.ts"
+    tests: "frontend/tests/**/*.test.ts"
+  - source: "frontend/src/*.tsx"
+    tests: "frontend/tests/**/*.test.tsx"
+  - source: "frontend/src/*.js"
+    tests: "frontend/tests/**/*.test.ts"
+  - source: "frontend/src/*.jsx"
+    tests: "frontend/tests/**/*.test.tsx"
+  # TypeScript's module-specific extensions are source like any other. One
+  # spelling is enough for these: the matcher compares with `case`, where `*`
+  # crosses `/`, so "frontend/src/*.mts" already covers frontend/src/lib/x.mts.
+  # The pair of rules above exists for the opposite reason — "**" collapses to
+  # "*/" and so cannot match a direct child — not because "*" misses nested
+  # ones. ci/tests/test_js_lane.bats pins the nested case either way.
+  - source: "frontend/src/*.mts"
+    tests: "frontend/tests/**/*.test.ts"
+  - source: "frontend/src/*.cts"
+    tests: "frontend/tests/**/*.test.ts"
+  - source: "frontend/src/*.mjs"
+    tests: "frontend/tests/**/*.test.ts"
+  - source: "frontend/src/*.cjs"
+    tests: "frontend/tests/**/*.test.ts"
+  # A change to a test, or to the runner config the layout is declared in, must
+  # run the suite too.
+  - source: "frontend/tests/**/*.ts"
+    tests: "frontend/tests/**/*.test.ts"
+  - source: "frontend/tests/**/*.tsx"
+    tests: "frontend/tests/**/*.test.tsx"
+  # Same "**" collapse as under src/: the declared vitest glob permits a
+  # root-level frontend/tests/App.test.tsx, which the rules above cannot match.
+  - source: "frontend/tests/*.ts"
+    tests: "frontend/tests/**/*.test.ts"
+  - source: "frontend/tests/*.tsx"
+    tests: "frontend/tests/**/*.test.tsx"
+  - source: "frontend/*.ts"
+    tests: "frontend/tests/**/*.test.ts"
+  - source: "frontend/package.json"
+    tests: "frontend/tests/**/*.test.ts"
+  # A lockfile change resolves different code into node_modules, so the suite
+  # has to run. Without these, a lockfile staged next to a Python change leaves
+  # the JavaScript slice of AFFECTED_TESTS empty and tests.sh skips the lane.
+  - source: "frontend/bun.lock"
+    tests: "frontend/tests/**/*.test.ts"
+  - source: "frontend/bun.lockb"
+    tests: "frontend/tests/**/*.test.ts"
+  - source: "frontend/package-lock.json"
+    tests: "frontend/tests/**/*.test.ts"
+  - source: "frontend/npm-shrinkwrap.json"
+    tests: "frontend/tests/**/*.test.ts"
+  - source: "frontend/pnpm-lock.yaml"
+    tests: "frontend/tests/**/*.test.ts"
+  - source: "frontend/yarn.lock"
+    tests: "frontend/tests/**/*.test.ts"
+  - source: "frontend/tsconfig.json"
+    tests: "frontend/tests/**/*.test.ts"
+  # Stylesheets and the entry document, kept in step with the `javascript`
+  # classification in ci/lib/changeset.sh. The two paths decide the same thing —
+  # does the frontend suite need to run — and disagreeing means the lane is
+  # scheduled but then finds nothing affected.
+  #
+  # Single-star on purpose: the matcher collapses "**" to "*" and a "*" in a
+  # case pattern matches "/" too, so "frontend/*.css" already covers both
+  # frontend/app.css and frontend/src/styles.css. Spelling both forms would just
+  # emit the same pattern twice.
+  # Every extension ci/lib/changeset.sh classifies as `javascript` needs a rule
+  # here, or the lane it schedules finds nothing affected and skips. The bats
+  # case `classifier and mapping agree on every javascript extension` derives
+  # its list from the classifier, so adding one there without adding it here
+  # fails rather than silently regressing.
+  - source: "frontend/*.css"
+    tests: "frontend/tests/**/*.test.ts"
+  - source: "frontend/*.scss"
+    tests: "frontend/tests/**/*.test.ts"
+  - source: "frontend/*.sass"
+    tests: "frontend/tests/**/*.test.ts"
+  - source: "frontend/*.less"
+    tests: "frontend/tests/**/*.test.ts"
+  - source: "frontend/*.html"
+    tests: "frontend/tests/**/*.test.ts"
+  - source: "frontend/*.htm"
+    tests: "frontend/tests/**/*.test.ts"
+  - source: "frontend/*.vue"
+    tests: "frontend/tests/**/*.test.ts"
+  - source: "frontend/*.svelte"
+    tests: "frontend/tests/**/*.test.ts"
+  - source: "frontend/*.astro"
+    tests: "frontend/tests/**/*.test.ts"
+  - source: "frontend/*.mts"
+    tests: "frontend/tests/**/*.test.ts"
+  - source: "frontend/*.cts"
+    tests: "frontend/tests/**/*.test.ts"
+  - source: "frontend/*.mjs"
+    tests: "frontend/tests/**/*.test.ts"
+  - source: "frontend/*.cjs"
+    tests: "frontend/tests/**/*.test.ts"
+  - source: "frontend/*.tsx"
+    tests: "frontend/tests/**/*.test.tsx"
+  - source: "frontend/*.jsx"
+    tests: "frontend/tests/**/*.test.tsx"
+  - source: "frontend/*.js"
+    tests: "frontend/tests/**/*.test.ts"
+  # Catch-all for the workspace's remaining build inputs. ci/lib/changeset.sh
+  # classifies anything under a package.json tree as `javascript`, so a change
+  # to frontend/.env or frontend/public/fonts/*.woff2 now schedules the node
+  # lane; without a rule here that lane would run and immediately report "no
+  # affected JavaScript tests". The matcher collapses "**" to "*" and a case
+  # "*" matches "/", so this single pattern covers every depth.
+  #
+  # It deliberately overlaps the explicit rules above. Those stay because the
+  # bats case `classifier and mapping agree on every javascript extension`
+  # derives its list from the classifier and asserts a per-extension rule, which
+  # is what keeps the two files from drifting apart one extension at a time.
+  - source: "frontend/*"
+    tests: "frontend/tests/**/*.test.ts"
+    also: "frontend/tests/**/*.test.tsx"
+
   # Python: module -> test file
+  #
+  # Both naming conventions from both rules, and the catch-all needs it more than
+  # the specific one. pytest collects `test_*.py` and `*_test.py` alike, and the
+  # narrowing hands it a concrete file list -- so a rule emitting only the prefix
+  # pattern, in a repository that has any prefix-style test, produces a non-empty
+  # list that omits the changed suffix-style file. Non-empty is what narrows, so
+  # `tests/payments_test.py` is edited, pytest runs on somebody else's tests, and
+  # the change passes unexecuted.
+  #
+  # Latent until the expansion landed: before it, these patterns reached pytest
+  # verbatim and it exited 4 on all of them, so the asymmetry could not select
+  # the wrong subset because it never selected anything.
   - source: "src/**/*.py"
     tests: "tests/**/test_*.py"
     also: "tests/**/*_test.py"
   - source: "**/*.py"
     tests: "tests/**/test_*.py"
+    also: "tests/**/*_test.py"
+  # The same "**" collapse the frontend rules above carry a note about, found
+  # while probing the two rules above: `**/*.py` requires at least one directory
+  # separator, so a Python file at the repository root -- `conftest.py`,
+  # `setup.py`, a root-level `payments_test.py` -- matched no rule at all and
+  # contributed no pattern. On its own that does not narrow; in a changeset with
+  # any other mapped file it is a silent omission, which is the same shape as the
+  # finding this rule was edited for.
+  - source: "*.py"
+    tests: "tests/**/test_*.py"
+    also: "tests/**/*_test.py"
 
   # Go: package -> package tests
   - source: "**/*.go"

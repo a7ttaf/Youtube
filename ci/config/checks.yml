@@ -2,10 +2,15 @@
 # severity: blocker | warning | advisory
 # required: true means fail if tool is missing (default: false = skip gracefully)
 #
-# UMS configuration: only Python + shell + yaml + actions + markdown lanes are
-# enabled. JS / Go / Rust / IaC / container lanes are disabled because the
-# v1.0 stack is FastAPI / SQLAlchemy / Alembic on Python 3.14. Re-enable a
-# lane by flipping its `enabled` field to `true`. See ci/UMS_INTEGRATION.md.
+# UMS configuration: Python + shell + yaml + actions + markdown lanes are
+# enabled, plus the JS test and typecheck lanes now that frontend/ exists. Go /
+# Rust / IaC / container lanes stay disabled because the v1.0 stack is FastAPI /
+# SQLAlchemy / Alembic on Python 3.14 with a React frontend. Re-enable a lane by
+# flipping its `enabled` field to `true`. See ci/UMS_INTEGRATION.md.
+#
+# These toggles are coarser than they look: preflight skips the whole `node`
+# lane only when *every* JS check here is disabled, so leaving all four off is
+# what kept frontend tests and tsc out of the gate entirely.
 
 checks:
   # --- Lint ---
@@ -17,7 +22,7 @@ checks:
     timeout_sec: 60
 
   lint-js:
-    enabled: false  # UMS: no JS in v1.0 (frontend lands in Phase 5)
+    enabled: false  # UMS: no eslint config or lint script in frontend/ yet
     severity: blocker
     required: false
     tool: eslint
@@ -66,7 +71,7 @@ checks:
 
   # --- Typecheck ---
   typecheck-js:
-    enabled: false  # UMS: no JS in v1.0
+    enabled: true  # UMS: frontend/ tsc --noEmit, standalone lane + via node
     severity: blocker
     required: false
     tool: tsc
@@ -97,7 +102,7 @@ checks:
     tool: shfmt
 
   format-js:
-    enabled: false  # UMS: no JS in v1.0
+    enabled: false  # UMS: no prettier config or format:check script in frontend/ yet
     severity: blocker
     required: false
     tool: prettier
@@ -122,7 +127,7 @@ checks:
 
   # --- Tests ---
   tests-js:
-    enabled: false  # UMS: no JS in v1.0
+    enabled: true  # UMS: frontend/ vitest suite, run via the node lane
     severity: blocker
     required: false
 
@@ -146,6 +151,12 @@ checks:
     severity: blocker
     required: false
     tool: bats
+    # The suites drive ci/preflight.sh, ci/checks/node.sh and
+    # ci/checks/test-layout.sh against synthetic trees, several of which spawn a
+    # package manager or init a repository; ~200 cases run for well over the
+    # 20-minute gate default. At that default the lane was killed and reported
+    # FAIL_INFRA, so a blocking check silently stopped running.
+    timeout_sec: 3600
 
   # --- Coverage ---
   coverage:

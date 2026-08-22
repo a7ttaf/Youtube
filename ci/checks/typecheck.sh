@@ -22,21 +22,322 @@ _tc_tool_missing() {
 # Per-language typecheck functions
 # ---------------------------------------------------------------------------
 
+# Use the workspace's own tsc and nothing else. A globally resolved binary can
+# be a different major version than the one the lockfile pins, and npx in
+# particular will walk out of the workspace to find one.
+# Returns 127 when the workspace-local tsc is not available.
+_tc_js_workspace() {
+  local ws="$1"
+  cd "$ws" || return 30
+
+  # Every TypeScript project under this root, not only one at the root itself.
+  #
+  # `[ ! -f tsconfig.json ]` read "does this package have TypeScript" as "is
+  # there a config beside package.json", so a package whose only project is
+  # `e2e/tsconfig.json` -- an ordinary shape -- was reported as having none and
+  # its type errors were never looked for. That blind spot arrived with the
+  # switch to package-root discovery, which was right for the ambiguity rule it
+  # removed and wrong to keep the root-file test alongside it.
+  #
+  # Through a file so the producer's status is something this can act on: an
+  # unreadable subtree must not read as a package with no TypeScript in it.
+  local _tc_list _tc_rc=0
+  _tc_list="$(ci::common::mktemp_file tc-projects 2>/dev/null)" || return 30
+  # The same name list as _ts_project_files in ci/checks/node.sh, which decides
+  # whether this workspace is *required* to have a typecheck script. When the
+  # two disagree the gate demands a check of a project this lane then declines
+  # to compile, or -- as it did -- neither of them sees `tsconfig.app.json` and
+  # a Vite scaffold's only project is checked by nobody. ci/lib/changeset.sh's
+  # classifier arm is the third, and node.sh's orphan scan -- which decides
+  # whether a directory that lost its manifest is noticed at all -- is the
+  # fourth; all four have to agree.
+  find . -name 'node_modules' -prune -o -name '.git' -prune -o \
+    -type f \( -name 'tsconfig.json' -o -name 'tsconfig.*.json' \
+               -o -name 'jsconfig.json' -o -name 'jsconfig.*.json' \) \
+    -print 2>/dev/null > "$_tc_list" || _tc_rc=$?
+  if [ "$_tc_rc" -ne 0 ]; then
+    rm -f "$_tc_list"
+    echo "Cannot enumerate the TypeScript projects in ${ws} (exit ${_tc_rc})." >&2
+    echo "  An empty list reads exactly like a package with none." >&2
+    return 30
+  fi
+  # A config-shaped name is not by itself a project this lane should compile.
+  # `tests/fixtures/broken/tsconfig.json` holds errors on purpose and
+  # `dist/tsconfig.generated.json` is output, so `tsc -p` on either fails a
+  # valid tree over a file the repository already classifies as not-source.
+  #
+  # Through ci::common::is_vendored_path, which is the definition
+  # ci::common::node_workspaces and ci/lib/changeset.sh's classifier already
+  # read, and which _ts_project_files in ci/checks/node.sh now reads too -- the
+  # two lists have to agree or the gate demands a check of a project this lane
+  # declines to compile, which is the comment above this block.
+  local _tc_keepf _tc_one
+  _tc_keepf="$(ci::common::mktemp_file tc-keep 2>/dev/null)" || { rm -f "$_tc_list"; return 30; }
+  while IFS= read -r _tc_one; do
+    [ -n "$_tc_one" ] || continue
+    ci::common::is_vendored_path "$_tc_one" && continue
+    printf '%s\n' "$_tc_one" >> "$_tc_keepf"
+  done < "$_tc_list"
+  mv -f "$_tc_keepf" "$_tc_list" 2>/dev/null || { rm -f "$_tc_keepf" "$_tc_list"; return 30; }
+  # Which tree this list describes. `find` stats the worktree, and in ship mode
+  # the worktree is the commit being built, not the one being pushed -- so an
+  # untracked `local-only/tsconfig.json` was compiled as part of a push that
+  # will never carry it, and a tracked project deleted locally was skipped by a
+  # push that still does. The same narrowing ci::common::node_workspaces applies
+  # to manifests, one layer down, through the reader they share: a fifth answer
+  # to "is this file part of the push" is what the comment above is warning
+  # about.
+  if [ "${CI_GATE_MODE:-}" = "ship" ] \
+    && command -v git >/dev/null 2>&1 \
+    && git rev-parse --git-dir >/dev/null 2>&1 \
+    && git rev-parse --verify HEAD >/dev/null 2>&1; then
+    # Two spellings of the same location, and they are not interchangeable.
+    # `HEAD:<dir>` names a tree and is what ls-tree takes; a single file is
+    # `HEAD:<dir>/<file>`. Built as one rev with a second colon it is not a path
+    # at all -- `git cat-file -e HEAD:frontend:tsconfig.json` is fatal, every
+    # project failed the test, and the narrowing emptied a list it was only
+    # supposed to filter. That reports "no TypeScript project" for a workspace
+    # that has one, which is the false pass this block exists to prevent.
+    local _tc_rev="HEAD" _tc_pfx="" _tc_keep _tc_p _tc_head _tc_missing=""
+    if [ "$ws" != "." ]; then
+      _tc_rev="HEAD:${ws}"
+      _tc_pfx="${ws}/"
+    fi
+    _tc_keep="$(ci::common::mktemp_file tc-vouched 2>/dev/null)" || { rm -f "$_tc_list"; return 30; }
+    while IFS= read -r _tc_p; do
+      [ -n "$_tc_p" ] || continue
+      if git cat-file -e "HEAD:${_tc_pfx}${_tc_p#./}" 2>/dev/null; then
+        printf '%s\n' "$_tc_p" >> "$_tc_keep"
+      fi
+    done < "$_tc_list"
+    mv -f "$_tc_keep" "$_tc_list" 2>/dev/null || { rm -f "$_tc_keep" "$_tc_list"; return 30; }
+
+    # And the direction narrowing cannot reach: a project the push carries that
+    # is not on disk. Reporting "no TypeScript project" for it would pass the
+    # push having compiled none of it, so this run says it cannot check it.
+    # `--full-tree`, because this runs after `cd "$ws"` and `git ls-tree`
+    # applies the current directory as an implicit path filter. From inside
+    # frontend/, listing the tree `HEAD:frontend` -- whose entries are
+    # `package.json` and `tsconfig.json` -- filters them against the prefix
+    # `frontend/`, matches nothing, and hands back an empty listing. Empty reads
+    # exactly like "the push carries no projects", so the missing-project
+    # refusal below never fired and the lane reported a skip instead.
+    #
+    # Captured fail-closed, not tested in an `if`. `ls_tree_paths` returns
+    # non-zero precisely when it could not enumerate the tree reliably -- a
+    # failed read, or a path it cannot spell -- and skipping the scan on that
+    # leaves the empty `_tc_list` below to be read as "this workspace carries no
+    # TypeScript project", which returns 3 and passes the push having compiled
+    # none of it. That is the same could-not-ask/nothing-there conflation this
+    # block was written to remove, reintroduced at its own producer. A listing
+    # that failed is broken infrastructure and says so.
+    local _tc_lt_rc=0
+    _tc_head="$(ci::common::ls_tree_paths -r --full-tree --name-only "$_tc_rev")" || _tc_lt_rc=$?
+    if [ "$_tc_lt_rc" -ne 0 ]; then
+      rm -f "$_tc_list"
+      echo "Cannot read ${_tc_rev} to find the TypeScript projects this push carries." >&2
+      if [ "$_tc_lt_rc" -eq 2 ]; then
+        echo "  A path in that tree carries a newline, which this listing cannot" >&2
+        echo "  carry without splitting it into two entries that match nothing." >&2
+      fi
+      echo "  Refusing to conclude the workspace has no project from a listing" >&2
+      echo "  that failed to produce one." >&2
+      return 30
+    fi
+    while IFS= read -r _tc_p; do
+      case "$_tc_p" in
+        tsconfig.json|tsconfig.*.json|jsconfig.json|jsconfig.*.json \
+          |*/tsconfig.json|*/tsconfig.*.json|*/jsconfig.json|*/jsconfig.*.json) ;;
+        *) continue ;;
+      esac
+      case "$_tc_p" in */node_modules/*|node_modules/*) continue ;; esac
+      # The same not-first-party filter the worktree side above applies. Both
+      # halves have to agree about what a project is, and an asymmetry here is
+      # not a missed case but an inverted one: this side reports a project the
+      # push carries and the worktree does not, so a fixture config deleted
+      # locally would fail the push as a missing project the other side had
+      # already -- correctly -- decided not to look for.
+      if ci::common::is_vendored_path "$_tc_p"; then continue; fi
+      # `[ -f x ] && continue` is a statement whose status is the test's, and
+      # this file runs under `set -Eeuo pipefail`: on the last iteration a
+      # present file makes it 0 and an absent one makes the loop's status 1.
+      # Spelled as an `if` so the check cannot decide the function's exit code.
+      if [ -f "$_tc_p" ]; then continue; fi
+      _tc_missing="${_tc_missing} ${_tc_p}"
+    done <<< "$_tc_head"
+    if [ -n "$_tc_missing" ]; then
+      rm -f "$_tc_list"
+      echo "These TypeScript projects are in the commit being pushed but not in" >&2
+      echo "  ${ws}:${_tc_missing}" >&2
+      echo "  Reporting none would pass the push having compiled none of it." >&2
+      return 30
+    fi
+  fi
+
+  if [ ! -s "$_tc_list" ]; then
+    rm -f "$_tc_list"
+    # A package root with no TypeScript project has nothing for this lane to
+    # check, and that is a fact about the workspace rather than a guess about
+    # it. Distinguished from "the compiler is missing" below, which is the
+    # opposite statement: a project exists and could not be compiled.
+    return 3
+  fi
+
+  local bin="" candidate
+  for candidate in node_modules/.bin/tsc node_modules/.bin/tsc.exe node_modules/.bin/tsc.cmd; do
+    if [ -x "$candidate" ]; then
+      bin="$candidate"
+      break
+    fi
+  done
+  if [ -z "$bin" ]; then
+    rm -f "$_tc_list"
+    # Deliberately no PATH fallback, for the same reason the JS test runner has
+    # none: a global tsc is not the version this workspace pins. An older one
+    # rejects supported syntax and a newer one accepts what the locked
+    # toolchain would refuse, so either way the result is not reproducible.
+    # Reporting the compiler unavailable is recoverable; a false red or a false
+    # green is not.
+    return 127
+  fi
+
+  # The root project by its default resolution, and every other project by name.
+  #
+  # A nested config is compiled as its own project rather than assumed to be
+  # reachable from the root: `tsc --noEmit` at the root compiles what the root
+  # config includes, and a config the root neither includes nor references is
+  # exactly the one whose errors nobody would see. Compiling a referenced
+  # project twice costs time and reports the same errors twice; not compiling an
+  # unreferenced one reports none at all, and only one of those is a wrong
+  # answer.
+  local _tc_proj _tc_status=0 _tc_one
+  if [ -f tsconfig.json ]; then
+    "$bin" --noEmit || _tc_status=$?
+  fi
+  while IFS= read -r _tc_proj; do
+    [ -n "$_tc_proj" ] || continue
+    _tc_proj="${_tc_proj#./}"
+    [ "$_tc_proj" = "tsconfig.json" ] && continue
+    _tc_one=0
+    "$bin" -p "$_tc_proj" --noEmit || _tc_one=$?
+    [ "$_tc_one" -ne 0 ] && _tc_status="$_tc_one"
+  done < "$_tc_list"
+  rm -f "$_tc_list"
+  return "$_tc_status"
+}
+
 typecheck::run_js() {
-  if ! ci::common::command_exists tsc; then
-    _tc_tool_missing tsc
+  local workspaces _ws_rc=0
+  # Package roots, not every tsconfig.json in the tree.
+  #
+  # A nested `frontend/e2e/tsconfig.json` extending its parent is ordinary
+  # TypeScript -- project references and per-area configs are how the language
+  # is used -- and asking node_workspaces about tsconfig.json applied the
+  # package-manager ambiguity rule to it: two configs became "a workspace with a
+  # nested workspace", which is a statement about lockfiles and means nothing
+  # here. ci/checks/node.sh already treats the same layout as ordinary.
+  #
+  # A package root is the unit that owns a compiler and a tsconfig, which is
+  # exactly what this lane runs, so it is the unit to discover. A root with no
+  # tsconfig.json is reported as having no TypeScript project rather than
+  # skipped silently.
+  #
+  # And the status is captured rather than left to `set -e`. The substitution
+  # below aborts this script outright on a non-zero producer -- raw exit 1,
+  # outside the 0/10/20/30 contract, before the Python, Go and Rust typechecks
+  # have run -- so an unreadable tree or an ambiguous layout took the whole lane
+  # down with a message that named neither.
+  workspaces="$(ci::common::node_workspaces package.json)" || _ws_rc=$?
+  if [ "$_ws_rc" -ne 0 ]; then
+    OVERALL_RESULT="$(ci::common::merge_results "$OVERALL_RESULT" "$CI_RESULT_FAIL_INFRA")"
+    ci::log::error "Could not enumerate JavaScript workspaces (exit ${_ws_rc}); see above."
+    ci::log::error "  This lane cannot report on a set of workspaces it could not determine."
     return 0
   fi
-  if [ ! -f tsconfig.json ]; then
-    ci::log::info "skipped: no tsconfig.json found"
+
+  if [ -z "$workspaces" ]; then
+    ci::log::info "skipped: no package.json found"
     return 0
   fi
-  ci::log::info "Running tsc --noEmit..."
-  local rc=0
-  tsc --noEmit || rc=$?
-  if [ "$rc" -ne 0 ]; then
-    OVERALL_RESULT="$(ci::common::merge_results "$OVERALL_RESULT" "$CI_RESULT_FAIL_NEW_ISSUE")"
+
+  # Narrowing the project list to HEAD chose *which* files are compiled and
+  # said nothing about their *contents*. This lane runs the workspace's own tsc
+  # over the worktree, so a type error committed in HEAD and fixed only on disk
+  # compiled clean and the push carrying it was reported PASS.
+  #
+  # ci/checks/node.sh has refused this since "Workspace files differ between
+  # HEAD and the worktree", and typecheck-js never asked because it is
+  # scheduled as its own blocker lane and does not go through node.sh. Asked
+  # here through the shared reader rather than a second copy of the comparison.
+  if [ "${CI_GATE_MODE:-}" = "ship" ]; then
+    local _tc_ws
+    while IFS= read -r _tc_ws; do
+      [ -n "$_tc_ws" ] || continue
+      ci::common::refuse_on_workspace_drift "$_tc_ws"
+    done <<< "$workspaces"
   fi
+
+  local ws rc
+  while IFS= read -r ws; do
+    [ -n "$ws" ] || continue
+
+    rc=0
+    # Subshell so the cd cannot leak into later languages.
+    ( _tc_js_workspace "$ws" ) || rc=$?
+
+    if [ "$rc" -eq 3 ]; then
+      ci::log::info "skipped: no tsconfig.json in ${ws}"
+      continue
+    fi
+
+    if [ "$rc" -eq 127 ]; then
+      # A detected TypeScript workspace with no compiler is broken
+      # infrastructure, not a skip. Reaching here means ci::common::node_workspaces
+      # found a tsconfig.json and this lane was scheduled for it, so "no tsc"
+      # does not mean "nothing to check" -- it means the project that exists
+      # could not be checked, and logging a skip left OVERALL_RESULT at PASS.
+      # An uninstalled node_modules then took an enabled typecheck-js lane green
+      # over a tree nothing compiled.
+      #
+      # The same rule ci/checks/tests.sh applies to a missing workspace-local
+      # test runner, and ci/checks/tests-shell.sh to a missing bats: an enabled
+      # blocker that cannot find its tool has not passed.
+      OVERALL_RESULT="$(ci::common::merge_results "$OVERALL_RESULT" "$CI_RESULT_FAIL_INFRA")"
+      ci::log::error "No workspace-local tsc in ${ws}/node_modules/.bin"
+      ci::log::error "  (a global tsc is deliberately not used: it is not the version this"
+      ci::log::error "  workspace pins). This workspace declares tsconfig.json and was"
+      ci::log::error "  scheduled, so reporting PASS here would mean its types were never"
+      ci::log::error "  checked. Install its dependencies, or remove the workspace."
+      continue
+    fi
+
+    if [ "$rc" -eq "$CI_RESULT_FAIL_INFRA" ]; then
+      # _tc_js_workspace returns 30 deliberately, and in more than one place: the
+      # project enumeration failing, `mktemp` failing, and the vouched-tree
+      # listing failing -- ship mode meeting a path this repository's readers
+      # cannot quote is one way to reach the last of those. The catch-all below
+      # turned every one of them into "tsc --noEmit failed", which sends someone
+      # looking for a type error that does not exist and, worse, reports a
+      # repository or tooling fault as a defect in the tree being pushed.
+      #
+      # Kept as 30 rather than merged down, for the reason the branch above keeps
+      # it: FAIL_INFRA outranks FAIL_NEW_ISSUE in ci::common::merge_results, and
+      # "the check could not run" is the more urgent of the two statements. The
+      # same shape ci/checks/tests.sh carries beside its own missing-runner
+      # branch.
+      OVERALL_RESULT="$(ci::common::merge_results "$OVERALL_RESULT" "$CI_RESULT_FAIL_INFRA")"
+      ci::log::error "TypeScript in ${ws} could not be checked (see above)."
+      continue
+    fi
+
+    if [ "$rc" -ne 0 ]; then
+      ci::log::error "tsc --noEmit failed in ${ws} (exit ${rc})"
+      OVERALL_RESULT="$(ci::common::merge_results "$OVERALL_RESULT" "$CI_RESULT_FAIL_NEW_ISSUE")"
+    else
+      ci::log::info "tsc --noEmit passed in ${ws}"
+    fi
+  done <<< "$workspaces"
+
   return 0
 }
 

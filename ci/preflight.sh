@@ -83,6 +83,18 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
+# Validate the mode here rather than at dispatch. The changeset check below can
+# short-circuit with "No relevant changes detected" and exit 0 before run_mode
+# is ever reached, so on a clean tree an unknown --mode was silently accepted.
+case "$MODE" in
+  quick|full|ship|debt) ;;
+  *)
+    echo "ERROR: unknown --mode '$MODE'" >&2
+    usage >&2
+    exit 1
+    ;;
+esac
+
 # ---------------------------------------------------------------------------
 # Setup
 # ---------------------------------------------------------------------------
@@ -147,7 +159,19 @@ _changeset_content_hash() {
     case "$status" in
       R*|C*) [ -n "$extra" ] && path="$extra" ;;
     esac
-    [ -f "$path" ] && files+=("$path")
+    # The record spells a path in the changeset's internal form, where a tab or
+    # a newline in a filename is escaped. Hashing that spelling hashes a name
+    # no file has: `[ -f ]` was false, the file dropped out of the key, and a
+    # cacheable lane could restore an earlier PASS over contents nothing had
+    # scanned. The key has to name the file on disk.
+    ci::changeset::_decode_path "$path"
+    path="$_CI_CHANGESET_PATH"
+    # `if`, not `&&`. A final record whose path is not a regular file -- a
+    # deletion, which is an ordinary entry -- leaves the test false, and that
+    # becomes the status of the loop, of this function, and of the assignment
+    # calling it. Under this script's `set -e` the gate aborts there, before a
+    # check has run.
+    if [ -f "$path" ]; then files+=("$path"); fi
   done <<< "$entries"
   ci::cache::_sha256 "${entries}:$(ci::cache::hash_files "${files[@]}")"
 }
@@ -250,52 +274,128 @@ run_check() {
   _collect_check_result "$label" "$rc" "$output" "$check_start" "$check_end"
 }
 
-_check_disabled_in_config() {
-  local wanted="$1"
+# _check_disabled_in_config <id> – 0 when checks.yml disables that id.
+#
+# One awk pass, where this used to be a `while read` loop that piped each line
+# into six separate greps and seds. The parse is unchanged, line for line; only
+# the number of processes is different, and it was the dominant cost of running
+# the gate at all. Measured on this repository's 213-line checks.yml: a single
+# call took 34 seconds, and _check_should_skip makes one per lane plus one per
+# related check, so a `quick` run spent minutes deciding what to run before it
+# ran anything -- against a mode that declares a pre-commit budget.
+# Which copy of ci/config/checks.yml the toggles are read from, resolved once.
+#
+# In ship mode: HEAD's, for the reason the lane plan is read from HEAD one
+# function down. These toggles decide which lanes run at all, and reading them
+# from the worktree let an *unstaged* edit switch lanes off for a push that does
+# not carry the edit. Setting `tests-shell`, `tests-js` and `typecheck-js` to
+# false is enough on its own -- `lint-js` and `format-js` are already disabled,
+# so `_all_related_checks_disabled` then drops the whole `node` lane too, and
+# `tests-shell` is the lane that would have reported the config file as drift.
+# A pushed frontend commit with failing tests passes on toggles that exist in
+# nobody's tree but the pusher's.
+#
+# Resolved once and cached because `_check_should_skip` asks per lane *and* per
+# related check: materialising HEAD's copy per call would be one `git show` per
+# question, against a mode with a budget.
+#
+# An unreadable HEAD copy falls back to `/dev/null`, not to the worktree. An
+# empty configuration disables nothing, so every lane runs -- the failure
+# direction is more work, not less, which is the same direction the lane plan
+# takes when its own HEAD read fails. `full` is deliberately a whole-tree run
+# against the worktree and keeps reading it.
+_CHECKS_CONFIG_FILE=""
+_CHECKS_CONFIG_TMP=""
+# Removed at exit rather than after the first read: the answer is cached for the
+# whole run, so the file has to outlive every caller. Guarded rather than
+# unconditional, so the trap is inert until there is something to remove, and
+# written inline rather than as a function so it is visibly the command that
+# runs -- a named helper here is a definition with no call site any linter can
+# see. `[ -z ]` short-circuits to status 0 when there is nothing to do, which
+# keeps the trap from reporting a status of its own.
+trap '[ -z "${_CHECKS_CONFIG_TMP:-}" ] || rm -f "$_CHECKS_CONFIG_TMP"' EXIT
 
-  if [ -f "ci/config/checks.yml" ]; then
-    local in_checks=0 in_list_check=0 check_id="" enabled="true" line=""
-    while IFS= read -r line; do
-      case "$line" in
-        ''|'#'*) continue ;;  
-      esac
-
-      if printf '%s\n' "$line" | grep -qE '^checks:[[:space:]]*$'; then
-        in_checks=1
-        continue
-      fi
-
-      if [ "$in_checks" = "1" ] && printf '%s\n' "$line" | grep -qE '^[^[:space:]]'; then
-        in_checks=0
-        check_id=""
-      fi
-
-      if [ "$in_checks" = "1" ] && printf '%s\n' "$line" | grep -qE '^  [A-Za-z0-9_-]+:[[:space:]]*(#.*)?$'; then
-        check_id=$(printf '%s\n' "$line" | sed -E 's/^  ([A-Za-z0-9_-]+):[[:space:]]*(#.*)?$/\1/')
-        enabled="true"
-        in_list_check=0
-        continue
-      fi
-
-      if printf '%s\n' "$line" | grep -qE '^[[:space:]]*-[[:space:]]*id:[[:space:]]*(.*)$'; then
-        in_list_check=1
-        check_id=$(printf '%s\n' "$line" | sed -E 's/^[[:space:]]*-[[:space:]]*id:[[:space:]]*(.*)$/\1/')
-        check_id="$(echo "$check_id" | tr -d ' ' | tr -d '"')"
-        enabled="true"
-      fi
-
-      if { [ "$in_checks" = "1" ] || [ "$in_list_check" = "1" ]; } && printf '%s\n' "$line" | grep -qE '^[[:space:]]*enabled:[[:space:]]*(.*)$'; then
-        enabled=$(printf '%s\n' "$line" | sed -E 's/^[[:space:]]*enabled:[[:space:]]*(.*)$/\1/')
-        enabled="$(echo "$enabled" | sed 's/[[:space:]]//g; s/#.*$//')"
-      fi
-
-      if [ "$check_id" = "$wanted" ] && [ "$enabled" = "false" ]; then
-        return 0  # skip
-      fi
-    done < "ci/config/checks.yml"
+# Sets `_CHECKS_CONFIG_FILE`; prints nothing.
+#
+# Assignment rather than output, and it is not a style choice: a caller reading
+# this through `$(...)` would run it in a subshell, where both the cached answer
+# and the temp file's lifetime die with the substitution -- the `git show` would
+# repeat on every question, which is the cost this cache exists to avoid.
+_checks_config_resolve() {
+  # `${...:-}` rather than a bare expansion: ci/tests/test_preflight.bats lifts
+  # these functions out one at a time, so the cache variable's top-level
+  # initialiser is not necessarily in scope where they run. A helper that only
+  # works when the whole file is present is a helper the suite cannot drive.
+  [ -z "${_CHECKS_CONFIG_FILE:-}" ] || return 0
+  _CHECKS_CONFIG_FILE="ci/config/checks.yml"
+  if [ "${MODE:-}" = "ship" ]; then
+    local _cc_tmp=""
+    if command -v git >/dev/null 2>&1 \
+      && git rev-parse --verify HEAD >/dev/null 2>&1 \
+      && _cc_tmp="$(ci::common::mktemp_file checks-config 2>/dev/null)" \
+      && git show "HEAD:ci/config/checks.yml" > "$_cc_tmp" 2>/dev/null \
+      && [ -s "$_cc_tmp" ]; then
+      _CHECKS_CONFIG_FILE="$_cc_tmp"
+      _CHECKS_CONFIG_TMP="$_cc_tmp"
+    else
+      [ -n "$_cc_tmp" ] && rm -f "$_cc_tmp"
+      _CHECKS_CONFIG_FILE="/dev/null"
+      echo "ci/config/checks.yml is not readable in HEAD; running every lane." >&2
+    fi
   fi
+}
 
-  return 1
+_check_disabled_in_config() {
+  local wanted="$1" _cc_file
+  # A plain call, not `$(...)`: see _checks_config_resolve.
+  _checks_config_resolve
+  _cc_file="$_CHECKS_CONFIG_FILE"
+
+  [ -f "$_cc_file" ] || return 1
+
+  awk -v want="$wanted" '
+    BEGIN { in_checks = 0; in_list = 0; id = ""; enabled = "true" }
+    {
+      line = $0
+      if (line == "" || substr(line, 1, 1) == "#") next
+
+      if (line ~ /^checks:[[:space:]]*$/) { in_checks = 1; next }
+
+      if (in_checks == 1 && line ~ /^[^[:space:]]/) { in_checks = 0; id = "" }
+
+      if (in_checks == 1 && line ~ /^  [A-Za-z0-9_-]+:[[:space:]]*(#.*)?$/) {
+        id = line
+        sub(/^  /, "", id)
+        sub(/:.*$/, "", id)
+        enabled = "true"
+        in_list = 0
+        next
+      }
+
+      if (line ~ /^[[:space:]]*-[[:space:]]*id:[[:space:]]*/) {
+        in_list = 1
+        id = line
+        sub(/^[[:space:]]*-[[:space:]]*id:[[:space:]]*/, "", id)
+        gsub(/[ "]/, "", id)
+        enabled = "true"
+      }
+
+      if ((in_checks == 1 || in_list == 1) \
+        && line ~ /^[[:space:]]*enabled:[[:space:]]*/) {
+        enabled = line
+        sub(/^[[:space:]]*enabled:[[:space:]]*/, "", enabled)
+        # Whitespace first, then the comment -- the order the sed pair used, so
+        # "true  # note" reduces the same way it always did.
+        gsub(/[[:space:]]/, "", enabled)
+        sub(/#.*$/, "", enabled)
+      }
+
+      # Flagged rather than `exit 0`: an exit inside a rule still runs END, and
+      # an END that exits with its own status overrides this one.
+      if (id == want && enabled == "false") { disabled = 1; exit }
+    }
+    END { exit(disabled ? 0 : 1) }
+  ' "$_cc_file"
 }
 
 _checks_for_lane_label() {
@@ -352,10 +452,65 @@ _check_should_skip() {
           ;;
       esac
     done
+    # The bats suites assert on the gate's own inputs, and those inputs are not
+    # all classifiable by language: test_js_lane.bats validates
+    # ci/config/affected.yml and checks.yml (yaml -> lint-yaml only) and the
+    # .gitignore negations that keep frontend tests trackable (unknown -> no
+    # checks at all). Either would filter this lane and let a regression past
+    # the very test written to catch it. Matched by path rather than language so
+    # unrelated yaml elsewhere does not pull in a four-minute suite.
+    #
+    # frontend/README.md is here for the same reason: test_test_layout.bats
+    # asserts on its prose about which modes run the guard, and a README-only
+    # change classifies as markdown, which schedules lint-markdown and nothing
+    # else -- so the gate could publish a false coverage claim without running
+    # the case written to reject it.
+    #
+    # Keep this list in step with what ci/tests/ actually asserts on.
+    #
+    # The whole-path entries are anchored on a field boundary, not on end of
+    # line. _CI_CHANGESET_FILES_RAW holds `STATUS<TAB>PATH` records, and a
+    # rename is `R100<TAB>old<TAB>new` — so `\.gitignore$` matched only the
+    # destination, and renaming .gitignore away filtered out the suite that
+    # guards it. The `ci/` and `.githooks/` entries are prefixes and were never
+    # affected.
+    #
+    # `Makefile` joined that list because the suites assert on it. The
+    # classifier derives a language from each path and `Makefile` yields `make`,
+    # which no lane maps -- so a commit touching only the Makefile scheduled
+    # nothing, and `ci/tests/test_preflight.bats` asserts that the `bats-install`
+    # target exists and is what the lane's own refusal message names. Deleting or
+    # breaking that target could therefore pass the gate and leave the documented
+    # remedy for a missing Bats unusable, which is the one failure a provisioning
+    # target has. The rule here is the same one the other four entries follow: a
+    # path a suite reads is a path that schedules the suite.
+    if [ "$found" = "0" ] && [ "$label" = "tests-shell" ] \
+      && printf '%s\n' "${_CI_CHANGESET_FILES_RAW:-}" \
+        | grep -qE '(^|[[:space:]])(ci/|\.githooks/|\.gitignore([[:space:]]|$)|Makefile([[:space:]]|$)|frontend/README\.md([[:space:]]|$))'; then
+      found=1
+    fi
+
     if [ "$found" = "0" ]; then
-      # Always-run checks are never skipped by changeset
+      # Always-run checks are never skipped by changeset.
+      # test-layout belongs here rather than in the reverse mapping above: the
+      # changeset emits language-derived check ids and never emits test-layout,
+      # so any mapping entry would still leave it filtered whenever the diff
+      # does not look like JavaScript — which is exactly when a misplaced test
+      # goes unnoticed. The check is a pruned walk of one directory tree and
+      # costs milliseconds.
+      # branch-protection belongs here for the same reason as test-layout, and
+      # its absence was total rather than conditional: nothing anywhere emits
+      # `branch-protection` as a changeset check id -- not the always-checks
+      # seed ("secrets commit-hygiene"), not the language mapping -- so the
+      # only arm that could set found=0 to 1 for this label was unreachable and
+      # the filter dropped the lane on every run, in every mode, including a
+      # direct commit on main. Reproduced: the check alone exits 20 on a
+      # protected branch, while the same tree through the gate prints
+      # "Skipping [branch-protection] (filtered)" and exits 0. Which branch you
+      # are on is not a function of the changed-file list, so no changeset can
+      # ever be the thing that decides whether this runs.
       case "$label" in
-        git-safety|changed-files|security|debt) ;;
+        git-safety|changed-files|security|debt|test-layout|branch-protection) ;;
         *) return 0 ;;
       esac
     fi
@@ -364,13 +519,170 @@ _check_should_skip() {
   return 1
 }
 
+# Checks whose result is not a function of the changed-file list, so a cache
+# entry keyed on that list can be served when the answer has actually changed.
+#
+# test-layout reads the git index and walks the whole frontend tree.
+# _changeset_content_hash hashes worktree copies of the changed paths, so
+# staging a narrowed vitest.config.ts while keeping the previously passing
+# worktree copy leaves both the path list and the content hash identical — and
+# the guard would report a cached PASS for a commit it never inspected. It costs
+# under a second; caching it buys nothing worth that hole.
+_check_is_cacheable() {
+  case "$1" in
+    # test-layout reads the git index and walks the whole frontend tree, neither
+    # of which the changed-file key describes.
+    test-layout) return 1 ;;
+    # tests-shell asserts on the entire ci/ tree and on files the changeset need
+    # not mention at all -- .gitignore rules, frontend/README.md, every gate
+    # script the suites exercise. A PASS cached for a .gitignore-only branch and
+    # then rebased onto a base carrying a regression in ci/checks/node.sh has an
+    # identical key: same tools, same changed files, same checks.yml. Listing
+    # the suite's inputs was the alternative, but "did we list them all?" is the
+    # question that produced this bug, and the suite runs only in full and ship.
+    tests-shell) return 1 ;;
+    # node runs the workspace's complete test, typecheck and build scripts, so
+    # its result depends on every file in that workspace -- not just the ones
+    # this branch happens to touch. A PASS cached for one frontend change and
+    # then rebased onto a base carrying a regression in another frontend file
+    # has an identical key, and the lane is restored without executing
+    # anything. Same argument as tests-shell, one lane over.
+    node) return 1 ;;
+    # typecheck-js compiles every project ci/checks/typecheck.sh discovers, not
+    # the ones this branch touched, so the changed-file key does not describe
+    # what it read -- the same argument as `node` above, and it arrived with the
+    # lane. A PASS cached for a branch touching frontend/src/a.ts is replayed
+    # after a rebase onto a base where tsconfig.node.json now has a type error,
+    # and the node lane does not cover that gap: the `-p <project>` rule in
+    # ci/checks/node.sh accepts a typecheck script naming one project *because*
+    # this lane compiles the rest. Cached, it compiles nothing.
+    #
+    # Reported by review, and separately met head-on: the case asserting this
+    # lane is scheduled began failing under ci/preflight.sh --mode ship, because
+    # a hit restored the lane and the stub never printed its marker.
+    #
+    #   RAN:node
+    #     [cache hit] typecheck-js
+    #   Result [typecheck-js]: PASS
+    #
+    # That was a test-isolation bug and is fixed in ci/tests/gate_env.bash; this
+    # is the product half of the same observation, and only this half stops a
+    # green result standing for a compile that did not happen.
+    typecheck-js) return 1 ;;
+    # python is the same lane one language over, and it was left cacheable.
+    # It runs `ruff check`, `ruff format --check`, a bare `pytest` and
+    # `compileall` across the whole of PYTHON_PACKAGE_DIR, none of which is
+    # scoped to the changed files. Reproduced: with one .py staged so the lane
+    # is scheduled and a syntax error left *unstaged* in a second file — absent
+    # from the changeset, so invisible to the key — a cached run returned
+    # "[cache hit] python PASS" while the identical tree with CI_GATE_NO_CACHE=1
+    # returned FAIL_INFRA.
+    python) return 1 ;;
+    # git-safety and branch-protection read the outgoing commit *history*, and
+    # the cache key describes the endpoint changeset: the paths that differ and
+    # the worktree contents. Two branches with identical final files have
+    # identical keys, so a PASS cached for one is served for the other — and an
+    # amend or rebase can add and remove a secret in an intermediate commit, or
+    # replace a signed commit with an unsigned one, without changing a single
+    # final byte. That is precisely the history these two now walk per commit,
+    # and precisely what the key cannot see. Listing the commit identities in
+    # the key would work; not caching a check whose input is the history is
+    # simpler and cannot drift out of step with what the check reads.
+    git-safety | branch-protection) return 1 ;;
+    # security runs `pnpm audit` / `yarn npm audit` / `npm audit` against a live
+    # advisory database. Its answer changes when a CVE is published and no file
+    # in this repository changes at all, so there is nothing for the key to
+    # move: same paths, same contents, same tool versions, same checks.yml, and
+    # a PASS from before the advisory landed is served after it.
+    security) return 1 ;;
+    # build runs `bash -n` and, where it is installed, shellcheck over
+    # `ci/*.sh ci/checks/*.sh ci/lib/*.sh ci/scripts/*.sh .githooks/*` plus
+    # install.sh and deploy.sh -- the whole set, not the changed part of it.
+    # This is the tests-shell argument one lane over: a PASS cached for a
+    # docs-only branch and then rebased onto a base carrying a syntax error in
+    # ci/checks/node.sh has an identical key, because that file is not in the
+    # changeset the key describes.
+    build) return 1 ;;
+    # debt executes the underlying tools across the repository and counts
+    # signature occurrences in their output against ci/debt/known-failures.yml.
+    # What it reads is whatever those tools read, which is everything; the
+    # ratchet it compares against is a file the changeset need never mention.
+    debt) return 1 ;;
+    # Named positively, and it is the only one: this lane writes the three file
+    # lists under ci/reports/ and returns PASS, and nothing else in the gate
+    # reads them. Its output is a function of exactly the thing the key is made
+    # of, so a hit and a run produce the same bytes.
+    changed-files) return 0 ;;
+  esac
+  # Closed by default, and that is the fix behind the three arms above.
+  #
+  # This was `return 0`: a list of lanes that may not be cached, with everything
+  # else cacheable for not being on it. An exclusion has no tail -- it has to
+  # name every lane that must never reach the default, including the ones added
+  # after it was written -- and security, build and debt were three that never
+  # were. The same shape, in the same file, that made `--mode debt` run the full
+  # plan for not being `quick`.
+  #
+  # Turned round, a lane nobody has classified is simply run. That costs time
+  # and cannot report a PASS for work that did not happen, which is the
+  # direction to be wrong in. `preflight: every lane it schedules is classified
+  # for the cache` enumerates the plan and fails on a lane this function has
+  # never heard of, so the classification is made deliberately rather than by
+  # falling off the end of a case.
+  return 1
+}
+
+# _tool_fingerprint <tool> – echo "<tool>-<version>", or "<tool>-absent".
+#
+# The version probe goes through ci::cache::tool_version, which disables errexit
+# around the call. That matters more than it looks: deriving a cache key must
+# never be able to end the run, and under `set -Eeuo pipefail` a bare
+# `$(tool --version | head -1)` aborts preflight the moment a present-but-broken
+# executable exits non-zero -- before a single check has run, with a message
+# about nothing the commit touched.
+#
+# The absent branch stays separate because uninstalling a tool has to change the
+# key too: "absent" and "installed but unreadable" are different states, and
+# collapsing them would let a lane replay a PASS across the removal.
+_tool_fingerprint() {
+  if command -v "$1" >/dev/null 2>&1; then
+    printf '%s-%s' "$1" "$(ci::cache::tool_version "$1")"
+  else
+    printf '%s-absent' "$1"
+  fi
+}
+
+# _cached_reports_for <label> – the report files this lane owns, one per line.
+#
+# A cached lane does not run, so anything it writes besides its result and its
+# output is simply not written. `changed-files` produces three file lists under
+# ci/reports/ and a hit restored neither of them: they were left as whatever an
+# earlier run had put there, or absent on a fresh checkout, while the lane
+# reported PASS. An audit trail describing a different tree is worse than none,
+# and "the lane passed" standing beside it is the false confidence the rest of
+# this gate is built to refuse.
+#
+# Empty for every other lane, which is the honest answer today: those lanes are
+# not cached, and one that becomes cacheable has to declare what it owns here.
+_cached_reports_for() {
+  case "$1" in
+    changed-files)
+      printf '%s\n' changed-files.txt staged-files.txt untracked-files.txt
+      ;;
+  esac
+}
+
 _compute_cache_key() {
   local label="$1"
   local tool_ver="unknown"
+  # Every probe goes through _tool_fingerprint. Lanes whose result depends on a
+  # toolchain the key cannot describe -- node, tests-shell -- are excluded from
+  # the cache outright by _check_is_cacheable rather than given a longer key, so
+  # no branch here needs to enumerate their tools. What remains is the property
+  # that matters for the lanes that ARE cached: a probe can never end the run.
   case "$label" in
-    node) tool_ver="$(ci::cache::tool_version node)" ;;
-    python) tool_ver="$(ci::cache::tool_version python3)" ;;
-    *) tool_ver="bash-$(bash --version | head -1)" ;;
+    python) tool_ver="$(_tool_fingerprint python3)" ;;
+    *) tool_ver="$(_tool_fingerprint bash)" ;;
   esac
 
   local files_hash=""
@@ -379,6 +691,28 @@ _compute_cache_key() {
   else
     files_hash="$(git rev-parse HEAD 2>/dev/null || echo 'none')"
   fi
+
+  # The one cached lane is keyed on what it reports, not on the changeset.
+  #
+  # `changed-files` writes three lists -- changed, staged and untracked -- and
+  # the changeset the key above is made of is at most one of them: in quick mode
+  # it is the staged paths whenever there are any. Two trees with identical
+  # staging and different unstaged or untracked files therefore share a key, and
+  # a hit serves counts and lists describing the other one. Hashing the three
+  # lists themselves makes a hit possible exactly when the answer is the same
+  # answer, which is also what lets the entry carry those lists back (see
+  # _cached_reports_for).
+  case "$label" in
+    changed-files)
+      files_hash="$(ci::cache::_sha256 "$(
+        ci::git::changed_files 2>/dev/null || true
+        printf '\036'
+        ci::git::staged_files 2>/dev/null || true
+        printf '\036'
+        ci::git::untracked_files 2>/dev/null || true
+      )")"
+      ;;
+  esac
 
   local config_hash=""
   if [ -f "ci/config/checks.yml" ]; then
@@ -424,31 +758,51 @@ run_phase() {
 
     # Try cache lookup before submitting
     local cache_digest="" cache_hit=0
-    if [ "${CI_GATE_CACHE_ENABLED:-1}" = "1" ] && type ci::cache::key >/dev/null 2>&1; then
+    if [ "${CI_GATE_CACHE_ENABLED:-1}" = "1" ] && _check_is_cacheable "$label" && type ci::cache::key >/dev/null 2>&1; then
       # Composite content-hash digest identifying this check's cache entry
       # (lane + tool version + files hash + config hash).
       cache_digest="$(_compute_cache_key "$label")"
       local cache_dest="${CI_REPORT_DIR}/.cache/${label}"
       if ci::cache::get "$cache_digest" "$cache_dest"; then
-        echo "  [cache hit] $label"
-        cache_hit=1
-        if [ -f "$cache_dest/result.txt" ]; then
-          local cached_rc
-          cached_rc="$(cat "$cache_dest/result.txt")"
-          local cached_output=""
-          [ -f "$cache_dest/output.txt" ] && cached_output="$(cat "$cache_dest/output.txt")"
-          # Write cached output to runner log file so get_output works
-          local log_file="${CI_REPORT_DIR}/${label}.log"
-          printf '%s' "$cached_output" > "$log_file"
-          if [ -z "${_CI_RUNNER_JOBS_DIR:-}" ]; then
-            _ensure_runner_init
+        # The reports this lane owns come back with it, and an entry that cannot
+        # produce one of them is not a hit. Written before the result is, so a
+        # half-restored ci/reports/ never sits beside a PASS -- and treated as a
+        # miss rather than patched up, because an entry stored by an older
+        # revision of this file has no way to know what it was supposed to
+        # carry. Running the lane is the cheap, correct answer.
+        local _cr_name _cr_ok=1
+        while IFS= read -r _cr_name; do
+          [ -n "$_cr_name" ] || continue
+          if [ -f "${cache_dest}/${_cr_name}" ]; then
+            cp -f "${cache_dest}/${_cr_name}" "${CI_REPORT_DIR}/${_cr_name}" || _cr_ok=0
+          else
+            _cr_ok=0
           fi
-          if [ -n "${_CI_RUNNER_JOBS_DIR:-}" ]; then
-            mkdir -p "$_CI_RUNNER_JOBS_DIR"
-            printf '%d' "$$" > "${_CI_RUNNER_JOBS_DIR}/${label}.pid"
-            printf '%d' "$cached_rc" > "${_CI_RUNNER_JOBS_DIR}/${label}.rc"
-            printf '%s' "$(date '+%s')" > "${_CI_RUNNER_JOBS_DIR}/${label}.start"
-            printf '%s' "$(date '+%s')" > "${_CI_RUNNER_JOBS_DIR}/${label}.end"
+        done <<< "$(_cached_reports_for "$label")"
+        if [ "$_cr_ok" -ne 1 ]; then
+          echo "  [cache entry incomplete] $label — running it"
+          rm -rf "$cache_dest"
+        else
+          echo "  [cache hit] $label"
+          cache_hit=1
+          if [ -f "$cache_dest/result.txt" ]; then
+            local cached_rc
+            cached_rc="$(cat "$cache_dest/result.txt")"
+            local cached_output=""
+            [ -f "$cache_dest/output.txt" ] && cached_output="$(cat "$cache_dest/output.txt")"
+            # Write cached output to runner log file so get_output works
+            local log_file="${CI_REPORT_DIR}/${label}.log"
+            printf '%s' "$cached_output" > "$log_file"
+            if [ -z "${_CI_RUNNER_JOBS_DIR:-}" ]; then
+              _ensure_runner_init
+            fi
+            if [ -n "${_CI_RUNNER_JOBS_DIR:-}" ]; then
+              mkdir -p "$_CI_RUNNER_JOBS_DIR"
+              printf '%d' "$$" > "${_CI_RUNNER_JOBS_DIR}/${label}.pid"
+              printf '%d' "$cached_rc" > "${_CI_RUNNER_JOBS_DIR}/${label}.rc"
+              printf '%s' "$(date '+%s')" > "${_CI_RUNNER_JOBS_DIR}/${label}.start"
+              printf '%s' "$(date '+%s')" > "${_CI_RUNNER_JOBS_DIR}/${label}.end"
+            fi
           fi
         fi
       fi
@@ -487,11 +841,22 @@ run_phase() {
     _collect_check_result "$lbl" "$rc" "$output" "$check_start" "$check_end"
 
     # Store result in cache
-    if [ "${CI_GATE_CACHE_ENABLED:-1}" = "1" ] && type ci::cache::key >/dev/null 2>&1; then
+    if [ "${CI_GATE_CACHE_ENABLED:-1}" = "1" ] && _check_is_cacheable "$lbl" && type ci::cache::key >/dev/null 2>&1; then
       local cache_dest="${CI_REPORT_DIR}/.cache/${lbl}"
       mkdir -p "$cache_dest"
       printf '%d' "$rc" > "$cache_dest/result.txt"
       printf '%s' "$output" > "$cache_dest/output.txt"
+      # And whatever this lane owns besides its result, or the entry cannot
+      # stand in for the run. A report the lane did not write is not stored:
+      # the restore side treats a missing one as a miss, which is the same
+      # answer and reached without guessing here what a failed run should have
+      # produced.
+      local _cs_name
+      while IFS= read -r _cs_name; do
+        [ -n "$_cs_name" ] || continue
+        [ -f "${CI_REPORT_DIR}/${_cs_name}" ] || continue
+        cp -f "${CI_REPORT_DIR}/${_cs_name}" "${cache_dest}/${_cs_name}" || true
+      done <<< "$(_cached_reports_for "$lbl")"
       local put_digest
       # Same composite content-hash digest as the cache-get call site above.
       put_digest="$(_compute_cache_key "$lbl")"
@@ -502,33 +867,208 @@ run_phase() {
 
 # ---- Mode check groups ----
 run_common_checks() {
-  run_phase     "git-safety:./ci/checks/git-safety.sh"     "changed-files:./ci/checks/changed-files.sh"
+  run_phase     "git-safety:./ci/checks/git-safety.sh"     "changed-files:./ci/checks/changed-files.sh"     "test-layout:./ci/checks/test-layout.sh"
   run_phase     "node:./ci/checks/node.sh"     "python:./ci/checks/python.sh"
+  # typecheck-js belongs to every mode that runs the node lane, not to full and
+  # ship alone.
+  #
+  # ci/checks/node.sh accepts a typecheck script that names one of several
+  # discovered projects -- `tsc -p tsconfig.app.json --noEmit` in a workspace
+  # that also has tsconfig.node.json -- and the entire justification for
+  # accepting it is that this lane compiles the rest. The comment carrying that
+  # justification says so, and says the two are one decision.
+  #
+  # They had come apart by mode. This lane was scheduled only from
+  # run_full_or_ship_checks, so in quick the acceptance stood while the lane
+  # that makes it true never ran:
+  #
+  #   --mode quick  ->  git-safety node test-layout
+  #   --mode ship   ->  ... node ... typecheck-js
+  #
+  # and a type error in tsconfig.node.json passed the pre-commit gate, surfacing
+  # only at the next full or ship run. That is the same "reasoning about a lane
+  # instead of checking that it runs" the comment above the -p rule was written
+  # to record, one mode over.
+  #
+  # Cost is bounded by the changeset the way every other language lane is: this
+  # id maps from `node`, so a commit touching no JavaScript filters it out
+  # before it executes.
+  run_phase     "typecheck-js:./ci/checks/typecheck-js.sh"
 }
 
+# A push that carries no content has nothing for a content lane to report on.
+#
+# `git push --delete origin feature` is every record being a deletion, so
+# hook-dispatch sets CI_GATE_PUSH_DELETIONS_ONLY and git-safety self-skips on
+# it -- and the ship plan still ran test-layout, security, the node lane, the
+# build and the shell suites against whatever happens to be checked out. So
+# deleting an unprotected branch could be refused for a layout error or a
+# failing suite in a worktree the push is not sending anywhere, and it cost the
+# half hour the shell suites take. A gate that blocks correct work gets switched
+# off, and then it guards nothing.
+#
+# Destination protection is the one thing that must still run: `git push origin
+# :main` deletes a protected branch outright, and that is precisely the push
+# that has to be refused. branch-protection.sh reads the same flag and has its
+# own arms for it.
+run_ship_deletion_only_checks() {
+  echo "Push carries only ref deletions; content lanes have nothing to report on."
+  echo "  Destination protection still runs."
+  run_phase "branch-protection:./ci/checks/branch-protection.sh"
+}
+
+# The other push that carries no content: one that publishes only a name.
+#
+# `git tag v1.2 <commit the destination already has>; git push origin v1.2`
+# sends no tree. ci::git::worktree_covers_push accepts it on exactly that
+# ground -- the tag adds a label and no content -- and then this dispatch ran
+# the complete ship plan anyway, because deletions were the only content-free
+# case it knew. So test-layout, the node lane, python, the build and the shell
+# suites all ran against whatever happened to be checked out, and any failure
+# already sitting there blocked an ordinary release. Same reasoning as the
+# deletions path above, and the same exception: destination protection still
+# runs, because where a push is going is a question a label-only push still
+# answers.
+run_ship_label_only_checks() {
+  echo "Push publishes only refs the destination already carries; no tree is going out."
+  echo "  Destination protection still runs."
+  run_phase "branch-protection:./ci/checks/branch-protection.sh"
+}
+
+# ci/checks/typecheck.sh is scheduled here, and was not scheduled anywhere.
+#
+# It is registered in ci/checks/manifest.yml with `severity: blocker`, and no
+# mode ran it: `typecheck-js` survives only as a changeset id that
+# _lane_for_check maps back to the combined `node` lane above, so the file has
+# never executed in quick, full or ship. Registered at one layer and run at
+# none, which is the failure this whole branch is about.
+#
+# Through ci/checks/typecheck-js.sh rather than typecheck.sh directly: run_phase
+# splits a phase entry on the first `:` and executes the command path, so an
+# entry cannot carry CI_GATE_CHECK_ID, and typecheck.sh's default is `all` --
+# which would run the Python, Go and Rust typecheckers under a `-js` label,
+# duplicating the `python` lane beside it. ci/checks/tests-shell.sh is the same
+# wrapper for the same reason.
+#
+# It is not a duplicate of what `node` does. The node lane runs the workspace's
+# own `typecheck` script, whatever that script happens to compile; this lane
+# compiles the root project and then every other discovered project by name. A
+# workspace whose script is `tsc -p tsconfig.app.json --noEmit` has
+# tsconfig.node.json checked by this lane and by nothing else -- and the
+# argument rule in ci/checks/node.sh accepts that script *because* this lane
+# covers the rest. That justification was written before this line existed and
+# was false until it did.
 run_full_or_ship_checks() {
-  run_phase     "git-safety:./ci/checks/git-safety.sh"     "changed-files:./ci/checks/changed-files.sh"     "branch-protection:./ci/checks/branch-protection.sh"
+  run_phase     "git-safety:./ci/checks/git-safety.sh"     "changed-files:./ci/checks/changed-files.sh"     "branch-protection:./ci/checks/branch-protection.sh"     "test-layout:./ci/checks/test-layout.sh"
   run_phase     "security:./ci/checks/security.sh"
   run_phase     "node:./ci/checks/node.sh"     "python:./ci/checks/python.sh"     "build:./ci/checks/build.sh"
+  run_phase     "typecheck-js:./ci/checks/typecheck-js.sh"
+  run_phase     "tests-shell:./ci/checks/tests-shell.sh"
   run_phase     "debt:./ci/checks/debt.sh"
 }
 
 run_mode() {
-  # If lanes.conf exists and CI_GATE_USE_LANES=1, read it. Otherwise use hardcoded defaults.
-  if [ "${CI_GATE_USE_LANES:-0}" = "1" ] && [ -f "ci/config/lanes.conf" ]; then
-    # lanes.conf has 5 columns (id|name|command|blocking|description); only id and
-    # command are consumed here. Unused columns are read into `_` so shellcheck does
-    # not flag them (SC2034) while still consuming every delimited field.
-    local lane_id="" lane_cmd=""
-    while IFS='|' read -r lane_id _ lane_cmd _ _; do
-      lane_id="$(echo "$lane_id" | tr -d ' ')"
-      lane_cmd="$(echo "$lane_cmd" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
-      [ -z "$lane_id" ] && continue
-      case "$lane_id" in '#'* ) continue ;; esac
-      [ -z "$lane_cmd" ] && continue
-      run_phase "${lane_id}:${lane_cmd}"
-    done < "ci/config/lanes.conf"
+  # Whether a push carries a tree is a fact about the push, and it is settled
+  # before any scheduler is chosen.
+  #
+  # These two cases used to live inside the `full|ship` arm below, past a
+  # `return 0`: with CI_GATE_USE_LANES=1 and ci/config/lanes.conf present -- a
+  # supported configuration -- a deletion-only push ran the whole lane list over
+  # whatever happened to be checked out, and never reached the content-free
+  # path. Worse in that mode than in this one, because lanes.conf carries no
+  # branch-protection entry:
+  #
+  #   grep -c 'branch-protection' ci/config/lanes.conf   -> 0
+  #
+  # so the one check that both content-free paths deliberately keep -- where the
+  # push is going -- was the single check that could not run. The narrow path
+  # and the wide path were each missing the other's protection.
+  #
+  # Hoisted rather than duplicated into the lanes branch: a rule stated twice is
+  # a rule that will be true in one place, which is the shape of nearly every
+  # finding on this branch.
+  if [ "$MODE" = "ship" ] && [ "${CI_GATE_PUSH_DELETIONS_ONLY:-0}" = "1" ]; then
+    run_ship_deletion_only_checks
     return 0
+  fi
+  if [ "$MODE" = "ship" ] && ci::git::push_is_label_only; then
+    run_ship_label_only_checks
+    return 0
+  fi
+
+  # If lanes.conf exists and CI_GATE_USE_LANES=1, read it. Otherwise use hardcoded defaults.
+  #
+  # Full and ship only. ci/config/lanes.conf carries no mode column, so this
+  # branch ran every lane in it whatever the mode -- and the file is a
+  # description of the full plan: security, build, debt and tests-shell are all
+  # in it and none of them belongs to a pre-commit run. `--mode quick` under
+  # CI_GATE_USE_LANES=1 therefore ran the whole bats suite, about an hour here
+  # against a 30s pre-commit budget, and could fail a commit on gate self-tests
+  # unrelated to anything staged.
+  #
+  # Named positively, and the first version of this was not. It read
+  # `[ "$MODE" != "quick" ]`, which fixed the mode in the report and let every
+  # other one through: `--mode debt` is not quick, so a debt-ratchet run took
+  # this branch and executed node, security, build and the shell suites before
+  # returning, instead of the two lanes the `debt)` arm below schedules. An
+  # exclusion list has to name every mode that must not reach here, including
+  # the ones added later; naming the two that must is the same rule with no
+  # tail. Reported one round after the exclusion landed.
+  #
+  # Gated by mode rather than by adding a column, because the alternative is a
+  # second list of which lanes are pre-commit lanes -- run_common_checks below
+  # is the first, and ci/checks/manifest.yml's `pre_commit:` field is arguably a
+  # third. Quick keeps the one that already decides it.
+  if [ "${CI_GATE_USE_LANES:-0}" = "1" ] \
+     && { [ "$MODE" = "full" ] || [ "$MODE" = "ship" ]; } \
+     && [ -f "ci/config/lanes.conf" ]; then
+    # In ship mode the plan is read from the pushed tree, not from disk.
+    #
+    # This branch selected the lanes *and* read them from the worktree copy, so
+    # an unstaged edit deleting the `node` and `tests-shell` rows removed the
+    # frontend tests from the run and -- with `tests-shell` gone -- removed the
+    # one lane whose drift scan would have reported the edit. A pushed commit
+    # carrying a failing frontend test then passed, on a plan that is not in the
+    # push. Which lanes run is gate configuration like any other, and ship mode
+    # reports on HEAD.
+    #
+    # An unreadable HEAD copy falls through to the standard ship plan below
+    # rather than to the worktree file. That plan is the wider one -- it runs
+    # every lane rather than the configured subset -- so the failure direction
+    # is more work, not less, and it needs no error path of its own. `full` is
+    # deliberately a whole-tree run against the worktree and keeps reading it.
+    local _lp_file="ci/config/lanes.conf" _lp_tmp="" _lp_ok=1
+    if [ "$MODE" = "ship" ]; then
+      _lp_ok=0
+      if command -v git >/dev/null 2>&1 \
+        && git rev-parse --verify HEAD >/dev/null 2>&1 \
+        && _lp_tmp="$(ci::common::mktemp_file lane-plan 2>/dev/null)" \
+        && git show "HEAD:ci/config/lanes.conf" > "$_lp_tmp" 2>/dev/null \
+        && [ -s "$_lp_tmp" ]; then
+        _lp_file="$_lp_tmp"
+        _lp_ok=1
+      else
+        [ -n "$_lp_tmp" ] && rm -f "$_lp_tmp"
+        _lp_tmp=""
+        echo "ci/config/lanes.conf is not readable in HEAD; running the full ship plan." >&2
+      fi
+    fi
+    if [ "$_lp_ok" -eq 1 ]; then
+      # lanes.conf has 5 columns (id|name|command|blocking|description); only id and
+      # command are consumed here. Unused columns are read into `_` so shellcheck does
+      # not flag them (SC2034) while still consuming every delimited field.
+      local lane_id="" lane_cmd=""
+      while IFS='|' read -r lane_id _ lane_cmd _ _; do
+        lane_id="$(echo "$lane_id" | tr -d ' ')"
+        lane_cmd="$(echo "$lane_cmd" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+        [ -z "$lane_id" ] && continue
+        case "$lane_id" in '#'* ) continue ;; esac
+        [ -z "$lane_cmd" ] && continue
+        run_phase "${lane_id}:${lane_cmd}"
+      done < "$_lp_file"
+      [ -n "$_lp_tmp" ] && rm -f "$_lp_tmp"
+      return 0
+    fi
   fi
 
   case "$MODE" in
@@ -536,6 +1076,10 @@ run_mode() {
       run_common_checks
       ;;
     full|ship)
+      # The content-free cases are decided at the top of this function, above
+      # the scheduler choice. Only ship reaches them, and only when the hook
+      # said so: `full` is a deliberate whole-tree run and must not be narrowed
+      # by an environment variable.
       run_full_or_ship_checks
       ;;
     debt)
@@ -561,6 +1105,46 @@ if [ "$RUN_FIX" -eq 1 ] && [ -f "./ci/checks/format.sh" ]; then
   echo "=== --fix: format pass complete; continuing gate ==="
 fi
 
+# Which tree is this run vouching for? Checks that compare the worktree against
+# what will be committed need to know, and the answer is not the changeset mode:
+# --all rewrites that to "all" without changing what the gate is standing behind.
+# quick is the pre-commit gate and stands behind the index; ship is the pre-push
+# gate and stands behind HEAD, which is already committed.
+export CI_GATE_MODE="$MODE"
+
+# The runner reads its per-check `timeout_sec` from checks.yml too, and it was
+# reading the worktree's while scheduling read HEAD's. Same file, two answers,
+# and both directions bite: an unstaged `timeout_sec: 1` on typecheck-js kills an
+# unrelated outgoing check seconds in and blocks the push, while an unstaged
+# increase weakens the budget using configuration the push does not carry.
+#
+# Pointed at the copy _checks_config_resolve already materialised, so there is
+# one HEAD-derived file and not a second `git show`. Resolved here rather than
+# left to the first lane, because this is the point where the value has to be in
+# the environment the runner inherits. Outside ship mode the resolver hands back
+# the worktree path, which is what `full` and `quick` are supposed to read, so
+# the export is correct in every mode rather than conditional on one.
+_checks_config_resolve
+export CI_CHECKS_CONFIG="$_CHECKS_CONFIG_FILE"
+
+# And is that tree the one being pushed? Ship mode resolves its *ranges* from
+# the hook's SHAs, so the history checks read the right commits — but every
+# check that runs content reads the worktree, and `git push origin
+# other-branch` leaves those two describing different branches. The gate would
+# then install, typecheck, test and build the branch you are standing on and
+# report the result as a verdict on the one going out.
+#
+# Refused rather than worked around. Running the outgoing tip would mean
+# checking it out, or building a second worktree, inside a pre-push hook —
+# which is a much larger change than this is a bug, and one that fails badly
+# on a dirty tree. Declining to answer is the honest option, and the remedy is
+# one command for the developer.
+if [ "$MODE" = "ship" ] && type ci::git::worktree_covers_push >/dev/null 2>&1 \
+  && ! ci::git::worktree_covers_push; then
+  ci::git::explain_push_tip_drift >&2
+  exit "$CI_RESULT_FAIL_NEW_ISSUE"
+fi
+
 # ---- Changeset detection ----
 CHANGESET_MODE="pre-commit"
 case "$MODE" in
@@ -572,12 +1156,69 @@ esac
 [ "$RUN_ALL" -eq 1 ] && CHANGESET_MODE="all"
 
 if type ci::changeset::detect >/dev/null 2>&1; then
-  ci::changeset::detect "$CHANGESET_MODE" || true
+  # The status matters. Detection failing and detection finding nothing produce
+  # the same empty result, and the fast-exit below reads an empty result as
+  # "nothing relevant changed" — so with `git diff` broken but everything else
+  # working, a tree with two staged secrets exited 0 with "No relevant changes
+  # detected. Skipping gate.", no check run and no report written, while
+  # git-safety.sh run directly against that same tree exited 20. Every
+  # per-check hardening sits downstream of this line; nothing downstream can
+  # recover from never being called.
+  #
+  # A failure here means the gate does not know what changed, which is not a
+  # licence to skip — it is the reason to run everything. RUN_ALL both
+  # suppresses the fast-exit and makes _check_should_skip stop filtering.
+  _changeset_rc=0
+  ci::changeset::detect "$CHANGESET_MODE" || _changeset_rc=$?
+  if [ "$_changeset_rc" -ne 0 ]; then
+    echo "Changeset detection failed (status ${_changeset_rc}); running the full set." >&2
+    RUN_ALL=1
+    # RUN_ALL alone only suppresses the fast-exit below. _check_should_skip
+    # filters on _CI_CHANGESET_CHECKS, and that list is seeded non-empty
+    # (_CI_CHANGESET_ALWAYS_CHECKS) even when nothing was detected — so leaving
+    # it set would keep the filter live and drop every lane it does not name,
+    # turning a detection failure into a near-silent skip by another route.
+    # Empty is what the filter's own guard treats as "do not filter".
+    _CI_CHANGESET_CHECKS=""
+    _CI_CHANGESET_LANGUAGES=""
+  fi
   if type ci::changeset::emit_json >/dev/null 2>&1; then
     ci::changeset::emit_json || true
   fi
   # Fast-exit if no relevant files changed (applies to every mode except --all).
-  if [ "$RUN_ALL" -eq 0 ] && [ -z "${_CI_CHANGESET_LANGUAGES:-}" ]; then
+  #
+  # "No language detected" is not the same as "nothing relevant changed". The
+  # gate's own inputs — ci/, .githooks/, .gitignore — carry no language, so a
+  # commit touching only those would exit 0 here, before run_mode, making the
+  # tests-shell path exception in _check_should_skip unreachable. That is how a
+  # regression in the frontend lib/ negations could ship with its own test never
+  # running.
+  #
+  # And never in ship mode, whatever the changeset says. The changeset here is
+  # derived from an endpoint diff, and ship mode's safety checks are not: they
+  # walk every outgoing commit. Both ways the two disagree are live. A first
+  # push with no upstream and no default-branch merge base yields an empty
+  # changeset; and a secret added by one outgoing commit and removed by a later
+  # one leaves the endpoint diff clean while both commits are pushed. Either
+  # exits here with PASS, before git-safety.sh has run at all — the pre-push
+  # gate skipped on the strength of a diff that was never what it stands behind.
+  #
+  # And "no relevant changes" now means no changes. It used to mean "no path
+  # that named a language", which is a statement about the *lanes* and not about
+  # the tree: every path can be auto-ignored -- `dist/`, `build/`, `vendor/`,
+  # `node_modules/` -- or simply carry no language at all, a .md file or a
+  # LICENSE, and the changeset comes out with an empty language list and a
+  # perfectly non-empty file list. git-safety is the lane that blocks exactly
+  # those paths, and it never ran: staging `dist/bundle.js` containing an AWS
+  # key exits 20 from git-safety.sh directly and exited 0 through preflight,
+  # with no lane executed at all. The changeset filter downstream is where a
+  # lane decides it has nothing to do; this exit is only for a run with nothing
+  # in front of it.
+  _pf_has_paths=0
+  case "${_CI_CHANGESET_FILES_RAW:-}" in *[![:space:]]*) _pf_has_paths=1 ;; esac
+  if [ "$RUN_ALL" -eq 0 ] && [ "$MODE" != "ship" ] \
+    && [ "$_pf_has_paths" -eq 0 ] \
+    && [ -z "${_CI_CHANGESET_LANGUAGES:-}" ]; then
     echo "No relevant changes detected. Skipping gate."
     exit 0
   fi
