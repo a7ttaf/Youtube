@@ -2321,12 +2321,19 @@ from an earlier round reports **23 failures**, every one an RLS/migration test
 and none of them touching the code under change. Both runs above used a
 disposable `postgres:18-alpine` container created for the run and removed after.
 Matches the repo-standard image in `tests/db/_postgres_helpers.py` and
-`docker-compose.yml` (PostgreSQL 18).
+`docker-compose.yml` (PostgreSQL 18). This recipe is **self-contained** — do
+not mix its DSN (`127.0.0.1:55505`, db `test_ums`, password `postgres`) with
+the migration-tier example in `tests/db/_postgres_helpers.py` (`55432`,
+db `postgres`, password `ums`, container `ums-mig-pg`).
 
 **POSIX shell** (inline env assignment is POSIX-only):
 
 ```bash
 uv sync --extra dev --extra test --extra lint
+command -v docker >/dev/null 2>&1 || {
+  echo "docker is required for this recipe" >&2
+  exit 1
+}
 docker rm -f ums-verify 2>/dev/null || true
 docker run -d --name ums-verify \
   -e POSTGRES_PASSWORD=postgres \
@@ -2338,12 +2345,14 @@ if [ $? -ne 0 ]; then
   exit 1
 fi
 ready=0
-for _ in $(seq 1 60); do
+i=0
+while [ "$i" -lt 60 ]; do
   if docker exec ums-verify pg_isready -U postgres -d test_ums >/dev/null 2>&1; then
     ready=1
     break
   fi
   sleep 1
+  i=$((i + 1))
 done
 if [ "$ready" -ne 1 ]; then
   echo "Postgres did not become ready within 60s; try: docker logs ums-verify" >&2
@@ -2360,6 +2369,7 @@ exit $pytest_exit
 
 ```powershell
 uv sync --extra dev --extra test --extra lint
+$null = Get-Command docker -ErrorAction Stop
 docker rm -f ums-verify 2>$null
 docker run -d --name ums-verify `
   -e POSTGRES_PASSWORD=postgres `
