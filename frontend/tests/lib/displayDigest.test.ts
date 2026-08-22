@@ -105,4 +105,47 @@ describe("displayDigest", () => {
       Object.defineProperty(globalThis.crypto, "subtle", { configurable: true, value: subtle });
     }
   });
+
+  it("falls back to the main thread and leaks no waiter when postMessage throws", async () => {
+    // Regression (PR #195 review): a synchronously throwing postMessage must
+    // delete its own waiter entry before the fallback unwinds, so the map
+    // never accumulates stale entries for the rest of the session. The map is
+    // closure-private with no externally observable symptom, so this test pins
+    // the observable contract: both calls still return the sync-recipe digest
+    // and a broken worker never poisons later calls.
+    class ThrowingPostMessageWorker {
+      onmessage: ((event: MessageEvent) => void) | null = null;
+      onerror: ((event: ErrorEvent) => void) | null = null;
+      onmessageerror: ((event: MessageEvent) => void) | null = null;
+      postMessage(): void {
+        throw new Error("detached or broken data channel");
+      }
+      terminate(): void {}
+      addEventListener(): void {}
+      removeEventListener(): void {}
+      dispatchEvent(): boolean {
+        return false;
+      }
+    }
+    const previousWorker = (globalThis as { Worker?: unknown }).Worker;
+    (globalThis as { Worker?: unknown }).Worker = ThrowingPostMessageWorker;
+    try {
+      const plan: Pick<
+        ChannelImportResult,
+        "content_owner_id" | "cms_status" | "counts" | "rows"
+      > = {
+        content_owner_id: "COabc",
+        cms_status: "INSIDE_CMS",
+        counts: { CREATE: 1, UPDATE: 0, UNCHANGED: 0, ERROR: 0 },
+        rows: [],
+      };
+      const expected = computeDisplayDigest(plan);
+      const first = await computeDisplayDigestAsync(plan);
+      expect(first).toBe(expected);
+      const second = await computeDisplayDigestAsync(plan);
+      expect(second).toBe(expected);
+    } finally {
+      (globalThis as { Worker?: unknown }).Worker = previousWorker;
+    }
+  });
 });

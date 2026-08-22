@@ -25,8 +25,11 @@ export const isImportPlanPayload = (body: unknown): body is ChannelImportResult 
   return hasPlanShape(body as Record<string, unknown>);
 };
 
-const attachMatchingDigest = (plan: ChannelImportResult): ChannelImportResult => {
+const recomputeProvidedDigest = (plan: ChannelImportResult): ChannelImportResult => {
   if (typeof plan.display_digest !== "string" || plan.display_digest === "") {
+    // Deliberate: a missing or empty digest is left as-is so tests can
+    // exercise the SPA's fail-closed missing-digest path; this helper only
+    // repairs an INCORRECT digest that a mock body already provides.
     return plan;
   }
   try {
@@ -41,12 +44,12 @@ const normalizeDetailWrapper = (body: Record<string, unknown>): unknown => {
   if (!isImportPlanPayload(detail)) {
     return body;
   }
-  return { ...body, detail: attachMatchingDigest(detail) };
+  return { ...body, detail: recomputeProvidedDigest(detail) };
 };
 
 const normalizeImportPlanBody = (body: object): unknown => {
   if (isImportPlanPayload(body)) {
-    return attachMatchingDigest(body);
+    return recomputeProvidedDigest(body);
   }
   if ("detail" in body) {
     return normalizeDetailWrapper(body as Record<string, unknown>);
@@ -54,7 +57,11 @@ const normalizeImportPlanBody = (body: object): unknown => {
   return body;
 };
 
-/** Normalize mock import-plan bodies so display_digest matches disclosed fields. */
+/**
+ * Normalize mock import-plan bodies so display_digest matches disclosed fields.
+ * A missing or empty digest is left as-is — the SPA's verify gate fail-closes
+ * on it; passing `trustDigest` skips normalization entirely.
+ */
 export const normalizePlanBody = (body: unknown, trustDigest?: boolean): unknown => {
   if (trustDigest) {
     return body;

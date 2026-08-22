@@ -123,11 +123,12 @@ never previewed is not re-approving anything — but the SPA always sends it and
 re-binds to the refreshed plan on a 409. Sending it also OPTS IN to strict
 pre-state enforcement at the write boundary (see "the file wins" below): it is
 the request's declaration that only the reviewed diff may be applied.
-`display_digest` (added 2026-08-22; decision 2026-08-21, review #184 C1) is the fingerprint's
-RECOMPUTABLE companion. The fingerprint's tenant input is what makes it a
-tenancy boundary, and the same input is why a client cannot check the token
-against the plan it rendered — a response showing one plan while carrying
-another plan's fingerprint would be echoed back unnoticed. `display_digest`
+`display_digest` (added 2026-08-22; decision 2026-08-21, review #184 C1) is
+the fingerprint's RECOMPUTABLE companion. The fingerprint's tenant input is
+what makes it a tenancy boundary, and the same input is why a client cannot
+check the token against the plan it rendered — a response showing one plan
+while carrying another plan's fingerprint would be echoed back unnoticed.
+`display_digest`
 covers exactly the DISCLOSED reviewed set and nothing more: SHA-256 over
 canonical JSON of `{"content_owner_id", "cms_status", "counts", "rows"}`,
 UTF-8 encoded. Canonical means exactly `json.dumps(payload, sort_keys=True,

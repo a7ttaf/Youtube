@@ -1298,7 +1298,7 @@ const RESULT_CHECKS: ReadonlyArray<
 //   throws ChannelImportShapeError (never silently accepts indeterminate bodies).
 // Blast Radius: Import preview/apply trust boundary — blocks malformed 2xx that
 //   substitute rows or digest tokens (review #184, C1).
-// Connections:
+// Connections: the async digest gate this runs, plus its wire contracts.
 //   - File: frontend/src/lib/displayDigest.ts -> displayDigestMatchesDisclosedAsync.
 //   - File: backend/ums_smart_revenue/api/channels.py -> import route contract.
 //   - File: Docs/12_BACKEND_API_SPEC.md -> display_digest + fingerprint rules.

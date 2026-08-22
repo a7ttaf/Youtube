@@ -15,7 +15,7 @@ type DigestWorkerResponse =
 // Standards: Structured postMessage responses; errors returned as strings so
 //   the orchestrator can reject pending waiters and fall back to sync digest.
 // Blast Radius: Import preview/apply trust boundary (review #184, C1).
-// Connections:
+// Connections: the orchestrator that spawns this worker and the shared recipe.
 //   - File: frontend/src/lib/displayDigest.ts -> Worker spawn and message routing.
 //   - File: frontend/src/lib/displayDigestCore.ts -> Canonical JSON + SHA-256.
 //   - File: backend/ums_smart_revenue/api/channels.py -> Server-side digest recipe.

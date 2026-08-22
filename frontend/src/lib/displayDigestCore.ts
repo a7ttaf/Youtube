@@ -65,8 +65,8 @@ const canonicalizeScalar = (value: unknown): string | null => {
 // Standards: sort_keys=True, separators=(',', ':'), ensure_ascii=True; rejects
 //   non-finite numbers and unsupported value types with TypeError.
 // Blast Radius: Import digest trust boundary — serialization drift causes false
-//   409s or accepts mismatched plans (review #184, C1).
-// Connections:
+//   rejections or accepts mismatched plans (review #184, C1).
+// Connections: server recipe, the digest entry point built on it, and the contract.
 //   - File: backend/ums_smart_revenue/api/channels.py -> server json.dumps recipe.
 //   - File: frontend/src/lib/displayDigestCore.ts -> computeDisplayDigestFromFields.
 //   - File: Docs/12_BACKEND_API_SPEC.md -> canonical JSON contract.
@@ -94,7 +94,7 @@ const pythonCanonicalJson = (value: unknown): string => {
 //   plain-HTTP fallback when Web Crypto or Workers are unavailable.
 // Blast Radius: Import preview/apply binding — a wrong digest rejects a
 //   plan the operator would otherwise trust (review #184, C1).
-// Connections:
+// Connections: every digest compute path, worker and main thread alike.
 //   - File: frontend/src/lib/displayDigest.ts -> worker orchestration + async verify.
 //   - File: frontend/src/lib/displayDigest.worker.ts -> off-thread digest compute.
 //   - File: backend/ums_smart_revenue/api/channels.py -> _display_digest recipe.
@@ -179,8 +179,8 @@ export type DisplayDigestPlanFields = Pick<
 // Standards: Field list must stay aligned with backend canonical JSON inputs;
 //   sync path for worker, tests, and plain-HTTP fallback.
 // Blast Radius: Import preview/apply trust boundary — drift from the backend
-//   recipe causes false 409s or accepts mismatched plans (review #184, C1).
-// Connections:
+//   recipe rejects legitimate plans or accepts mismatched ones (review #184, C1).
+// Connections: async verify orchestration, server recipe, and the contract doc.
 //   - File: frontend/src/lib/displayDigest.ts -> async verify orchestration.
 //   - File: backend/ums_smart_revenue/api/channels.py -> server-side digest.
 //   - File: Docs/12_BACKEND_API_SPEC.md -> canonical JSON + SHA-256 contract.

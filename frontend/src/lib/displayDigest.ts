@@ -95,10 +95,10 @@ const getDigestWorker = (): Worker | null => {
 //   falls back to sync computeDisplayDigestFromFields on the main thread.
 // Blast Radius: Import preview/apply binding — worker path must match sync recipe
 //   (review #184, C1).
-// Connections:
+// Connections: worker entry, shared recipe, and the async verify callers below.
 //   - File: frontend/src/lib/displayDigest.worker.ts -> onmessage handler.
 //   - File: frontend/src/lib/displayDigestCore.ts -> computeDisplayDigestFromFields.
-//   - File: frontend/src/lib/displayDigest.ts -> computeDisplayDigestAsync wrapper.
+//   - File: frontend/src/lib/api/useChannelImport.ts -> assertUsableResult verify.
 // ============================================================================
 const computeDisplayDigestInWorker = async (plan: DisplayDigestPlanFields): Promise<string> => {
   const worker = getDigestWorker();
@@ -111,7 +111,15 @@ const computeDisplayDigestInWorker = async (plan: DisplayDigestPlanFields): Prom
   try {
     return await new Promise<string>((resolve, reject) => {
       workerWaiters.set(id, { resolve, reject });
-      worker.postMessage({ id, plan });
+      // FIX: postMessage can throw synchronously (e.g. unusable data channel);
+      // drop this request's waiter before that rejection unwinds so the map
+      // never accumulates stale entries (PR #195 review, worker waiter leak).
+      try {
+        worker.postMessage({ id, plan });
+      } catch (error: unknown) {
+        workerWaiters.delete(id);
+        throw error;
+      }
     });
   } catch {
     await yieldToMainThread();
@@ -128,9 +136,10 @@ const computeDisplayDigestInWorker = async (plan: DisplayDigestPlanFields): Prom
 //   ensure_ascii=True) byte match; sync SHA-256 in-browser.
 // Blast Radius: Import preview/apply binding — rejects substituted rows while
 //   echoing an unverified digest token (review #184, C1).
-// Connections:
+// Connections: backend recipe and the verify gates that consume the digest.
 //   - File: backend/ums_smart_revenue/api/channels.py -> _display_digest recipe.
-//   - File: frontend/src/lib/api/useChannelImport.ts -> isChannelImportResult.
+//   - File: frontend/src/lib/displayDigest.ts -> displayDigestMatchesDisclosed
+//     and displayDigestMatchesDisclosedAsync recompute with this exact recipe.
 //   - File: Docs/12_BACKEND_API_SPEC.md -> import plan contract.
 // ============================================================================
 /** Recompute the server ``display_digest`` from exactly the disclosed plan fields. */
@@ -144,9 +153,10 @@ export const computeDisplayDigest = (plan: DisplayDigestPlanFields): string =>
 //   to main thread and falls back to sync computeDisplayDigestFromFields.
 // Blast Radius: Import preview/apply binding — digest drift rejects trusted plans
 //   (review #184, C1).
-// Connections:
+// Connections: worker entry, shared recipe, and the production verify callers.
 //   - File: frontend/src/lib/displayDigest.worker.ts -> Worker entry point.
 //   - File: frontend/src/lib/displayDigestCore.ts -> Canonical JSON + SHA-256.
+//   - File: frontend/src/lib/displayDigest.ts -> displayDigestMatchesDisclosedAsync.
 //   - File: frontend/src/lib/api/useChannelImport.ts -> assertUsableResult verify.
 // ============================================================================
 /** Off-main-thread variant: canonicalization + hashing run in a dedicated worker. */
@@ -165,10 +175,12 @@ export const computeDisplayDigestAsync = async (
 // Blast Radius: Import preview/apply binding — blocks malformed 2xx payloads
 //   that echo an unverified digest while substituting disclosed rows (review
 //   #184, C1).
-// Connections:
-//   - File: frontend/src/lib/displayDigest.ts -> computeDisplayDigest recipe.
-//   - File: frontend/src/lib/api/useChannelImport.ts -> isChannelImportResult.
-//   - File: Docs/12_BACKEND_API_SPEC.md -> import plan contract.
+// Connections: test-only sync twin of the async production verify gate.
+//   - File: frontend/src/lib/displayDigestCore.ts -> computeDisplayDigestFromFields
+//     supplies the shared recipe this gate recomputes with.
+//   - File: frontend/src/lib/displayDigest.ts -> displayDigestMatchesDisclosedAsync
+//     is the production gate; production callers use that one, not this sync twin.
+//   - File: frontend/tests/lib/displayDigest.test.ts -> exercises this gate.
 // ============================================================================
 /** True when the body carries a digest matching its disclosed plan contents. */
 export const displayDigestMatchesDisclosed = (plan: ChannelImportResult): boolean => {
@@ -191,10 +203,11 @@ export const displayDigestMatchesDisclosed = (plan: ChannelImportResult): boolea
 //   yielding so non-secure contexts remain supported.
 // Blast Radius: Import preview/apply binding — blocks malformed 2xx payloads
 //   and unverified 409/422 refresh plans from replacing operator-approved state.
-// Connections:
+// Connections: off-thread compute plus every production verify call site.
 //   - File: frontend/src/lib/displayDigest.worker.ts -> off-thread canonicalize+hash.
 //   - File: frontend/src/lib/api/useChannelImport.ts -> assertUsableResult.
 //   - File: frontend/src/components/srcc/views/RegistryImportFlow.tsx -> applyRaceDetail.
+//   - File: Docs/12_BACKEND_API_SPEC.md -> import plan contract.
 //   - File: Docs/12_BACKEND_API_SPEC.md -> import plan contract.
 // ============================================================================
 /** Async verify path for response validation before trusted UI state updates. */
