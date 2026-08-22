@@ -44,26 +44,25 @@ const normalizeDetailWrapper = (body: Record<string, unknown>): unknown => {
   return { ...body, detail: attachMatchingDigest(detail) };
 };
 
-const PLAN_BODY_NORMALIZERS: ReadonlyArray<(body: unknown) => unknown | undefined> = [
-  (body) => (isImportPlanPayload(body) ? attachMatchingDigest(body) : undefined),
-  (body) =>
-    body && typeof body === "object" && "detail" in body
-      ? normalizeDetailWrapper(body as Record<string, unknown>)
-      : undefined,
-];
+const normalizeImportPlanBody = (body: object): unknown => {
+  if (isImportPlanPayload(body)) {
+    return attachMatchingDigest(body);
+  }
+  if ("detail" in body) {
+    return normalizeDetailWrapper(body as Record<string, unknown>);
+  }
+  return body;
+};
 
 /** Normalize mock import-plan bodies so display_digest matches disclosed fields. */
 export const normalizePlanBody = (body: unknown, trustDigest?: boolean): unknown => {
-  if (trustDigest || !body || typeof body !== "object") {
+  if (trustDigest) {
     return body;
   }
-  for (const normalize of PLAN_BODY_NORMALIZERS) {
-    const result = normalize(body);
-    if (result !== undefined) {
-      return result;
-    }
+  if (!body || typeof body !== "object") {
+    return body;
   }
-  return body;
+  return normalizeImportPlanBody(body);
 };
 
 export const importPlanJsonResponse = (
