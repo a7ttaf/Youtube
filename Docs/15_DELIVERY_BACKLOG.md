@@ -2366,7 +2366,7 @@ docker run -d --name ums-verify `
   -e POSTGRES_DB=test_ums `
   -p 127.0.0.1:55505:5432 `
   postgres:18-alpine
-if ($LASTEXITCODE -ne 0) {
+if (-not $? -or $LASTEXITCODE -ne 0) {
   Write-Error "Failed to create ums-verify container; remove stale instance and retry"
   exit 1
 }
