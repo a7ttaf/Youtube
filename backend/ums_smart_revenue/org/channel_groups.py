@@ -396,6 +396,20 @@ class ChannelGroupRegistry:
             finally:
                 self._txn.undo = None
 
+    # ========================================================================
+    # Purpose: Transaction bookkeeping — record one write's (key, pre-image,
+    #   written-entry) triple into this thread's active undo journal, or do
+    #   nothing when no boundary is open. Mirror of ChannelRegistry._journal,
+    #   whose block carries the full calling contract.
+    # Database/ORM: None (per-thread in-memory list).
+    # Standards: Called by every write method just before mutating, under
+    #   the store lock, with the exact object being installed.
+    # Blast Radius: Whether a boundary rollback restores exactly this
+    #   store's own writes.
+    # Connections:
+    #   - File: backend/ums_smart_revenue/org/channel_registry.py -> the
+    #     mirrored journal helper and full rationale.
+    # ========================================================================
     def _journal(self, group_id: str, written: ChannelGroupEntry) -> None:
         """Record (key, pre-image, written-entry) for the active boundary, if any."""
         undo: list[tuple[str, ChannelGroupEntry | None, ChannelGroupEntry]] | None = getattr(

@@ -136,13 +136,26 @@ class _BufferedAuditSink:
             del self._pending[marked:]
             raise
 
+    # ========================================================================
+    # Purpose: The audit BATCH-DELIVERY point — replay every buffered record
+    #   into the real sink, in the exact order the apply built them, only
+    #   after both passes succeeded.
+    # Database/ORM: None here; the real sink owns the INSERTs (inside the
+    #   caller's transaction and, for the import, the store savepoints).
+    # Standards: The caller MUST wrap this in ``sink.transaction()`` —
+    #   sequential appends alone are not atomic, and a raise on the Nth
+    #   record must take the accepted 1..N-1 prefix with it (PR #196 round
+    #   2, codex/qodo). Record content and timestamps are untouched: only
+    #   delivery timing moves. The buffer clears afterwards so a reused
+    #   sink cannot double-deliver.
+    # Blast Radius: Audit-trail atomicity for the bulk import on every
+    #   tier; the flush-order pin rides on the preserved ordering.
+    # Connections:
+    #   - File: backend/ums_smart_revenue/auth/audit_service.py -> the
+    #     AuditSink protocol and its transaction() boundary contract.
+    # ========================================================================
     def flush_to(self, sink: AuditSink) -> None:
-        """Replay every buffered record, in order, into the real sink.
-
-        The caller wraps this in ``sink.transaction()`` — sequential appends
-        alone are not atomic, and a raise on the Nth record must take the
-        accepted prefix with it (review #196 round 2, codex/qodo).
-        """
+        """Replay every buffered record, in order, into the real sink."""
         for record in self._pending:
             sink.append(record)
         self._pending.clear()
