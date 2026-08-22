@@ -3,24 +3,20 @@ import type { ChannelImportResult } from "@/lib/api/types";
 const rightRotate = (value: number, amount: number): number =>
   (value >>> amount) | (value << (32 - amount));
 
-const CHAR_ESCAPES: Readonly<Record<number, string>> = {
+const JSON_CHAR_ESCAPES: Readonly<Record<number, string>> = {
   0x08: "\\b",
   0x09: "\\t",
   0x0a: "\\n",
   0x0c: "\\f",
   0x0d: "\\r",
+  0x22: '\\"',
+  0x5c: "\\\\",
 };
 
 const escapeJsonCodePoint = (code: number): string | null => {
-  if (code === 0x22) {
-    return '\\"';
-  }
-  if (code === 0x5c) {
-    return "\\\\";
-  }
-  const short = CHAR_ESCAPES[code];
-  if (short !== undefined) {
-    return short;
+  const known = JSON_CHAR_ESCAPES[code];
+  if (known !== undefined) {
+    return known;
   }
   if (code < 0x20 || code > 0x7f) {
     return `\\u${code.toString(16).padStart(4, "0")}`;
@@ -43,21 +39,26 @@ const pythonJsonString = (value: string): string => {
   return out;
 };
 
+const serializeNumber = (value: number): string => {
+  if (!Number.isFinite(value)) {
+    throw new TypeError("display digest canonical JSON rejects non-finite numbers");
+  }
+  return Number.isInteger(value) ? String(value) : JSON.stringify(value);
+};
+
+const SCALAR_SERIALIZERS: ReadonlyArray<(value: unknown) => string | null> = [
+  (value) => (value === null ? "null" : null),
+  (value) => (typeof value === "boolean" ? (value ? "true" : "false") : null),
+  (value) => (typeof value === "number" ? serializeNumber(value) : null),
+  (value) => (typeof value === "string" ? pythonJsonString(value) : null),
+];
+
 const canonicalizeScalar = (value: unknown): string | null => {
-  if (value === null) {
-    return "null";
-  }
-  if (typeof value === "boolean") {
-    return value ? "true" : "false";
-  }
-  if (typeof value === "number") {
-    if (!Number.isFinite(value)) {
-      throw new TypeError("display digest canonical JSON rejects non-finite numbers");
+  for (const serialize of SCALAR_SERIALIZERS) {
+    const result = serialize(value);
+    if (result !== null) {
+      return result;
     }
-    return Number.isInteger(value) ? String(value) : JSON.stringify(value);
-  }
-  if (typeof value === "string") {
-    return pythonJsonString(value);
   }
   return null;
 };
@@ -117,31 +118,31 @@ const sha256Hex = (message: string): string => {
         (schedule[index - 2] >>> 10);
       schedule[index] = (schedule[index - 16] + s0 + schedule[index - 7] + s1) >>> 0;
     }
-    let [a, b, c, d, e, f, g, h] = state;
+    let [word0, word1, word2, word3, word4, word5, word6, word7] = state;
     for (let index = 0; index < 64; index += 1) {
-      const S1 = rightRotate(e, 6) ^ rightRotate(e, 11) ^ rightRotate(e, 25);
-      const ch = (e & f) ^ (~e & g);
-      const temp1 = (h + S1 + ch + roundConstants[index] + schedule[index]) >>> 0;
-      const S0 = rightRotate(a, 2) ^ rightRotate(a, 13) ^ rightRotate(a, 22);
-      const maj = (a & b) ^ (a & c) ^ (b & c);
+      const S1 = rightRotate(word4, 6) ^ rightRotate(word4, 11) ^ rightRotate(word4, 25);
+      const ch = (word4 & word5) ^ (~word4 & word6);
+      const temp1 = (word7 + S1 + ch + roundConstants[index] + schedule[index]) >>> 0;
+      const S0 = rightRotate(word0, 2) ^ rightRotate(word0, 13) ^ rightRotate(word0, 22);
+      const maj = (word0 & word1) ^ (word0 & word2) ^ (word1 & word2);
       const temp2 = (S0 + maj) >>> 0;
-      h = g;
-      g = f;
-      f = e;
-      e = (d + temp1) >>> 0;
-      d = c;
-      c = b;
-      b = a;
-      a = (temp1 + temp2) >>> 0;
+      word7 = word6;
+      word6 = word5;
+      word5 = word4;
+      word4 = (word3 + temp1) >>> 0;
+      word3 = word2;
+      word2 = word1;
+      word1 = word0;
+      word0 = (temp1 + temp2) >>> 0;
     }
-    state[0] = (state[0] + a) >>> 0;
-    state[1] = (state[1] + b) >>> 0;
-    state[2] = (state[2] + c) >>> 0;
-    state[3] = (state[3] + d) >>> 0;
-    state[4] = (state[4] + e) >>> 0;
-    state[5] = (state[5] + f) >>> 0;
-    state[6] = (state[6] + g) >>> 0;
-    state[7] = (state[7] + h) >>> 0;
+    state[0] = (state[0] + word0) >>> 0;
+    state[1] = (state[1] + word1) >>> 0;
+    state[2] = (state[2] + word2) >>> 0;
+    state[3] = (state[3] + word3) >>> 0;
+    state[4] = (state[4] + word4) >>> 0;
+    state[5] = (state[5] + word5) >>> 0;
+    state[6] = (state[6] + word6) >>> 0;
+    state[7] = (state[7] + word7) >>> 0;
   }
   return Array.from(state, (word) => word.toString(16).padStart(8, "0")).join("");
 };
