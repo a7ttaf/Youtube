@@ -206,16 +206,20 @@ export const displayDigestMatchesDisclosed = (plan: ChannelImportResult): boolea
 // Purpose: Production fail-closed verify path before trusted import UI state.
 // Database/ORM: None (frontend) — async boolean gate over canonical JSON +
 //   SHA-256 executed off the main thread when Workers are available.
-// Standards: Fail closed — empty/missing digest returns false; worker or
-//   digest failures return false; plain HTTP falls back to sync SHA-256 after
-//   yielding so non-secure contexts remain supported.
+// Standards: Fail closed on empty/missing digest or a failed digest
+//   recomputation. Worker/postMessage failure does NOT fail the gate by
+//   itself — computeDisplayDigestInWorker yields and falls back to sync
+//   computeDisplayDigestFromFields; only a failed fallback (or a digest that
+//   does not match the disclosed plan) returns false. Plain HTTP / no-Worker
+//   contexts use the same sync path after yielding.
 // Blast Radius: Import preview/apply binding — blocks malformed 2xx payloads
 //   and unverified 409/422 refresh plans from replacing operator-approved state.
 // Connections: off-thread compute plus every production verify call site.
 //   - File: frontend/src/lib/displayDigest.worker.ts -> off-thread canonicalize+hash.
+//   - File: frontend/src/lib/displayDigest.ts -> computeDisplayDigestInWorker
+//     owns the worker-failure → sync-fallback recovery path.
 //   - File: frontend/src/lib/api/useChannelImport.ts -> assertUsableResult.
 //   - File: frontend/src/components/srcc/views/RegistryImportFlow.tsx -> applyRaceDetail.
-//   - File: Docs/12_BACKEND_API_SPEC.md -> import plan contract.
 //   - File: Docs/12_BACKEND_API_SPEC.md -> import plan contract.
 // ============================================================================
 /** Async verify path for response validation before trusted UI state updates. */

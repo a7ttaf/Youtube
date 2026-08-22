@@ -153,26 +153,24 @@ const planBearingDetail = (err: unknown): unknown | null => {
 //   front of the operator, and hand it back only if it does. This is the one
 //   path where a payload from a FAILED request replaces the preview the
 //   operator already approved and becomes what the next fingerprint-bound
-//   apply is reviewed against.
+//   apply is reviewed against. Execution is async: the digest gate awaits
+//   displayDigestMatchesDisclosedAsync (worker-backed with sync fallback).
 // Database/ORM: None (frontend) — an async gate over a decoded error body.
 //   It dispatches nothing and mutates no state; the caller decides what to do
 //   with the plan it returns.
-// Standards: Three gates, all required, checked in order. The status must be
-//   plan-bearing (409 or 422, the two that mean "the plan you saw is not the
-//   plan we would execute"), the body must pass isChannelImportResult, then
-//   the AWAITED worker-backed displayDigestMatchesDisclosedAsync recomputes
-//   the digest off the main thread (sync SHA-256 fallback when Workers are
-//   unavailable) — a refreshed plan carrying a digest that does not match its
-//   disclosed rows is rejected here — then echoesRequestedTarget applies the
-//   same target rule as the 2xx path, which matters MORE here because this
-//   payload becomes the reviewed plan while the next Apply still sends the
-//   CAPTURED owner. Fails CLOSED in all directions: anything unrecognised,
-//   a digest mismatch, or a worker failure returns null, the error falls
-//   through to the ordinary banner, and the operator keeps the plan they
-//   actually reviewed. Not every 409 carries a plan — this flow always sends
-//   expected_plan_fingerprint, so it opts into the backend's strict pre-state
-//   check, whose 409 detail is a STRING naming the row that moved; that lands
-//   in the banner verbatim, which already says to re-run the preview.
+// Standards: Three gates, all required, checked in order after the status is
+//   plan-bearing (409 or 422): (1) isChannelImportResult on the detail body,
+//   (2) awaited displayDigestMatchesDisclosedAsync (worker-backed; on worker
+//   failure the verify path yields and falls back to sync SHA-256 — worker
+//   failure alone does not reject), (3) echoesRequestedTarget against the
+//   CAPTURED owner. Returns null (fails closed) when the body is unrecognised,
+//   the digest does not match disclosed rows, or digest recomputation itself
+//   fails; otherwise the error falls through to the ordinary banner and the
+//   operator keeps the plan they actually reviewed. Not every 409 carries a
+//   plan — this flow always sends expected_plan_fingerprint, so it opts into
+//   the backend's strict pre-state check, whose 409 detail is a STRING naming
+//   the row that moved; that lands in the banner verbatim, which already says
+//   to re-run the preview.
 // Blast Radius: FINANCE + group membership, at one remove. A wrongly accepted
 //   payload does not itself write; it changes what the operator APPROVES, and
 //   the apply that follows is bound to a fingerprint for a plan they never
@@ -180,9 +178,9 @@ const planBearingDetail = (err: unknown): unknown | null => {
 //   under the banner of the one they did.
 // Connections: the three gates applied here and the wire contract behind them.
 //   - File: frontend/src/lib/api/useChannelImport.ts -> isChannelImportResult
-//       and echoesRequestedTarget, two of the three gates applied here.
-//   - File: frontend/src/lib/displayDigest.ts -> displayDigestMatchesDisclosedAsync,
-//       the awaited worker-backed digest gate (review #184, C1).
+//       and echoesRequestedTarget (gates 1 and 3).
+//   - File: frontend/src/lib/displayDigest.ts -> displayDigestMatchesDisclosedAsync
+//       (gate 2) and its worker-failure → sync-fallback contract (review #184, C1).
 //   - File: backend/ums_smart_revenue/api/channels.py -> the route that emits
 //       the 409/422 whose `detail` is a full ChannelImportResult.
 //   - File: Docs/12_BACKEND_API_SPEC.md -> the documented rejection contract.

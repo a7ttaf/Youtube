@@ -117,10 +117,10 @@ describe("displayDigest", () => {
     // The module memoizes `digestWorker` on first use, and earlier tests in
     // this file already called computeDisplayDigestAsync — so replacing
     // globalThis.Worker alone would leave the cached worker in place and the
-    // stub never constructed. Reset the module registry so this test imports
-    // a fresh copy whose cache is empty, and assert the stub WAS constructed
-    // (constructedCount > 0), which is what makes this test effective rather
-    // than a silent no-op.
+    // stub never constructed. Reset the module registry FIRST (clears the
+    // memoized digestWorker), THEN install the stub, THEN import a fresh
+    // copy — and assert the stub's postMessage WAS called (postMessageCalls
+    // > 0), which is what makes this test effective rather than a silent no-op.
     const previousWorker = (globalThis as { Worker?: unknown }).Worker;
     let constructedCount = 0;
     let postMessageCalls = 0;
@@ -138,7 +138,10 @@ describe("displayDigest", () => {
       this.terminated = false;
       constructedCount += 1;
     };
-    brokenWorkerFactory.prototype.postMessage = function postMessage(): void {
+    brokenWorkerFactory.prototype.postMessage = function postMessage(
+      this: { terminated: boolean },
+    ): void {
+      void this.terminated;
       postMessageCalls += 1;
       throw new Error("detached or broken data channel");
     };
@@ -147,9 +150,11 @@ describe("displayDigest", () => {
     ): void {
       this.terminated = true;
     };
-    (globalThis as { Worker?: unknown }).Worker = brokenWorkerFactory as unknown;
-    vi.resetModules();
     try {
+      // Order matters: clear the cached module (and its memoized Worker)
+      // before installing the stub, then import so construction uses the stub.
+      vi.resetModules();
+      (globalThis as { Worker?: unknown }).Worker = brokenWorkerFactory as unknown;
       const freshModule = await import("@/lib/displayDigest");
       const plan: Pick<
         ChannelImportResult,
