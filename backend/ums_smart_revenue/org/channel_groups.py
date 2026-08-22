@@ -137,6 +137,11 @@ class ClearedContentOwner:
 
 
 class ChannelGroupRegistryStore(Protocol):
+    # The store's transactional backing, REQUIRED by the protocol — see
+    # ChannelRegistryStore.sql_unit_of_work for the full contract
+    # (PR #196 rounds 6+8, codex).
+    sql_unit_of_work: object | None
+
     def list_groups(self) -> list[ChannelGroupEntry]:
         pass
 
@@ -319,6 +324,9 @@ class ChannelGroupRegistryStore(Protocol):
 
 
 class ChannelGroupRegistry:
+    # No SQL backing — see ChannelRegistry.sql_unit_of_work.
+    sql_unit_of_work: object | None = None
+
     def __init__(self, groups: list[ChannelGroupEntry] | None = None):
         self._groups = {group.id: group for group in groups or []}
         # PER-THREAD boundary state, mirroring ChannelRegistry: this store is

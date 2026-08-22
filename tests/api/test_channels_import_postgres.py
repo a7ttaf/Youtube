@@ -272,6 +272,11 @@ class _FailingGroupStore:
         self._inner = inner
         self._fail_on_call = fail_on_call
         self.calls = 0
+        # A wrapper must delegate its inner adapter's unit-of-work
+        # declaration: the apply refuses an undeclared adapter outright,
+        # since an optional attribute would let exactly this wrapper shape
+        # hide its inner session (PR #196 round 8, codex).
+        self.sql_unit_of_work = inner.sql_unit_of_work
 
     def transaction(self) -> AbstractContextManager[None]:
         """Delegate the boundary to the real store — this wrapper adds no writes.

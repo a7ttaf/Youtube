@@ -100,6 +100,10 @@ AUDIT_SOURCE_BULK_IMPORT = "bulk_import"
 class _BufferedAuditSink:
     """Append-only buffer that replays into the real sink only on success."""
 
+    # No SQL backing of its own: the buffer flushes into the REAL sink,
+    # whose declaration is what the shared-session validation checks.
+    sql_unit_of_work: object | None = None
+
     def __init__(self) -> None:
         self._pending: list[AuditRecord] = []
 
@@ -319,34 +323,50 @@ def plan_channel_import_with_stores(
 #   cross-resource atomicity this module promises and cannot provide without
 #   a distributed coordinator (PR #196 round 6, codex).
 # Database/ORM: None — identity comparison over the adapters' declared
-#   ``sql_unit_of_work`` sessions. Adapters that declare none (the in-memory
-#   tier) are exempt: their journals are their own unit of work, and a mixed
-#   wiring is a test composition with no cross-session commit to protect.
+#   ``sql_unit_of_work``. The declaration is REQUIRED (part of the store and
+#   sink protocols): a MISSING attribute is refused outright, because an
+#   optional one would let a protocol-conforming wrapper delegate a SQL
+#   store's transaction while silently hiding its inner session from this
+#   check (PR #196 round 8, codex) — fail-open where the whole point is to
+#   fail closed. ``None`` means self-contained (the in-memory tier, whose
+#   journals are their own unit of work) and is exempt from the identity
+#   comparison; a mixed SQL/in-memory wiring is a test composition with no
+#   cross-session commit to protect.
 # Standards: Fail-loud wiring validation, RuntimeError like the boundary's
 #   nesting guard — a wiring bug is a programming error, never a domain 409.
 # Blast Radius: Direct callers only; the FastAPI route wires every adapter
 #   from one request session and never trips this.
 # Connections:
-#   - File: backend/ums_smart_revenue/org/sql_channel_registry.py ->
-#     declares sql_unit_of_work (as does sql_channel_groups.py).
+#   - File: backend/ums_smart_revenue/org/channel_registry.py -> the
+#     protocol attribute contract (mirrored by channel_groups.py and
+#     audit_service.py).
 #   - File: backend/ums_smart_revenue/auth/sql_audit_sink.py -> declares it
-#     on both SQL sinks.
+#     on both SQL sinks (as do both SQL stores).
 # ============================================================================
+_UNDECLARED = object()
+
+
 def _require_shared_sql_unit_of_work(
     registry: ChannelRegistryStore,
     groups: ChannelGroupRegistryStore,
     audit_sink: AuditSink,
 ) -> None:
-    """Raise RuntimeError when SQL adapters are wired over distinct sessions."""
-    sessions = [
-        session
-        for session in (
-            getattr(adapter, "sql_unit_of_work", None)
-            for adapter in (registry, groups, audit_sink)
-        )
-        if session is not None
-    ]
-    if len({id(session) for session in sessions}) > 1:
+    """Refuse a missing unit-of-work declaration or distinct SQL sessions."""
+    identities: set[int] = set()
+    for adapter in (registry, groups, audit_sink):
+        declared = getattr(adapter, "sql_unit_of_work", _UNDECLARED)
+        if declared is _UNDECLARED:
+            raise RuntimeError(
+                f"{type(adapter).__name__} does not declare sql_unit_of_work: "
+                "the store/sink protocols require every adapter to expose its "
+                "transactional backing (the session for SQL adapters, None "
+                "for self-contained in-memory ones), and a wrapper must "
+                "delegate its inner adapter's declaration — otherwise the "
+                "import cannot verify that its savepoints share one session"
+            )
+        if declared is not None:
+            identities.add(id(declared))
+    if len(identities) > 1:
         raise RuntimeError(
             "apply_channel_import requires its SQL-backed registry, group "
             "store, and audit sink to share ONE session: their savepoints "

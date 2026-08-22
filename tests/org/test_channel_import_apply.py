@@ -408,6 +408,10 @@ def test_group_pass_failure_undoes_the_inventory_writes() -> None:
 class _UnavailableSink:
     """AuditSink double whose very first append raises — a sink outage."""
 
+    # Self-contained double, no SQL backing (the protocol requires the
+    # declaration; the apply refuses an adapter without one).
+    sql_unit_of_work = None
+
     @staticmethod
     def append(record: AuditRecord) -> None:
         """Refuse every record; static because the outage needs no state."""
@@ -974,6 +978,37 @@ def test_apply_refuses_sql_adapters_wired_over_distinct_sessions() -> None:
 
     with pytest.raises(RuntimeError, match="share ONE session"):
         _apply(_empty_plan(), registry, groups, sink)
+
+    assert registry.list_channels() == []
+    assert sink.records == []
+
+
+class _UndeclaredGroupStore:
+    """A wrapper that hides its transactional backing — the round-8 shape.
+
+    Deliberately declares no ``sql_unit_of_work`` even though it wraps a
+    real store: with an OPTIONAL declaration the shared-session validation
+    would silently skip it, and a wrapper around a SQL store on a different
+    session would slip through. The apply must refuse it at entry, so this
+    double needs no working protocol methods at all.
+    """
+
+    def __init__(self, inner: ChannelGroupRegistry) -> None:
+        self._inner = inner
+
+
+def test_apply_refuses_an_adapter_that_hides_its_unit_of_work() -> None:
+    """A missing declaration is refused outright, never silently exempted.
+
+    Exemption is only for a declared ``None`` (self-contained in-memory
+    adapters); an adapter that says nothing cannot be verified and fails
+    closed before anything is written or locked (PR #196 round 8, codex).
+    """
+    registry = ChannelRegistry()
+    sink = InMemoryAuditSink()
+
+    with pytest.raises(RuntimeError, match="does not declare sql_unit_of_work"):
+        _apply(_empty_plan(), registry, _UndeclaredGroupStore(ChannelGroupRegistry()), sink)
 
     assert registry.list_channels() == []
     assert sink.records == []

@@ -77,7 +77,7 @@ class SqlAlchemyChannelGroupRegistry:
         self._txn_active = False
         # PUBLIC unit-of-work identity — see SqlAlchemyChannelRegistry:
         # apply_channel_import validates shared-session wiring through it.
-        self.sql_unit_of_work: Session = session
+        self.sql_unit_of_work: object | None = session
 
     # ========================================================================
     # Purpose: SQL implementation of the group store's transaction boundary —

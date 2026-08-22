@@ -104,6 +104,16 @@ class ChannelRevenueRequirementLockedMonthError(ChannelRegistryError):
 
 
 class ChannelRegistryStore(Protocol):
+    # The store's transactional backing, REQUIRED by the protocol: the
+    # session object for SQL adapters, None for self-contained in-memory
+    # ones (their journal is their own unit of work). A wrapper must
+    # delegate its inner store's declaration — apply_channel_import refuses
+    # both a missing declaration and adapters whose declared sessions
+    # differ, because an optional attribute would let a conforming wrapper
+    # silently hide its inner session from that check (PR #196 rounds 6+8,
+    # codex).
+    sql_unit_of_work: object | None
+
     def list_channels(self) -> list[ChannelRegistryEntry]:
         pass
 
@@ -240,6 +250,10 @@ class ChannelRegistryStore(Protocol):
 
 
 class ChannelRegistry:
+    # No SQL backing: the per-thread journal is this store's own unit of
+    # work, so the import's shared-session validation has nothing to check.
+    sql_unit_of_work: object | None = None
+
     def __init__(self, channels: list[ChannelRegistryEntry] | None = None):
         self._channels: dict[str, ChannelRegistryEntry] = {}
         # Boundary state is PER-THREAD (threading.local): the no-database tier

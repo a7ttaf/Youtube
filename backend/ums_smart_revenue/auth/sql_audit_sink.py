@@ -42,7 +42,7 @@ class SqlAlchemyAuditSink:
         # PUBLIC unit-of-work identity — apply_channel_import validates that
         # every SQL adapter it composes shares ONE session through this
         # attribute (see SqlAlchemyChannelRegistry; PR #196 round 6, codex).
-        self.sql_unit_of_work: Session = session
+        self.sql_unit_of_work: object | None = session
 
     def append(self, record: AuditRecord) -> None:
         """Append one audit log row and flush so failures happen before commit."""
@@ -158,7 +158,7 @@ class PlatformLaneAuditSink:
         self._inner = SqlAlchemyAuditSink(session, tenant_id=tenant_id)
         # PUBLIC unit-of-work identity — same contract as the inner sink's;
         # the wrapper is what callers hand to apply_channel_import.
-        self.sql_unit_of_work: Session = session
+        self.sql_unit_of_work: object | None = session
 
     def append(self, record: AuditRecord) -> None:
         """Append one audit row inside the caller's transaction, elevated.

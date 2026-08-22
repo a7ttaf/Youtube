@@ -68,7 +68,7 @@ class SqlAlchemyChannelRegistry:
         # import) are atomic only when every SQL adapter shares it —
         # apply_channel_import validates that at entry via this attribute
         # (PR #196 round 6, codex).
-        self.sql_unit_of_work: Session = session
+        self.sql_unit_of_work: object | None = session
 
     # ========================================================================
     # Purpose: SQL implementation of the store's transaction boundary — a
