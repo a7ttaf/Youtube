@@ -127,6 +127,14 @@ const computeDisplayDigestInWorker = async (plan: DisplayDigestPlanFields): Prom
   }
 };
 
+/**
+ * Test-only introspection: the number of unresolved worker waiters. The
+ * waiter map is closure-private by design; tests import a fresh module copy
+ * (vi.resetModules) and read this after a failed postMessage to prove no
+ * stale waiter entry leaks (PR #195 review). Undefined outside tests.
+ */
+export const __workerWaiterCount = (): number => workerWaiters.size;
+
 // ============================================================================
 // Purpose: Recompute the server display_digest from exactly the disclosed plan
 //   fields so the SPA can verify a 2xx body before trusting preview state.

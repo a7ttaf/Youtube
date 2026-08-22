@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { computeDisplayDigest, computeDisplayDigestAsync, displayDigestMatchesDisclosedAsync } from "@/lib/displayDigest";
 import type { ChannelImportResult } from "@/lib/api/types";
@@ -113,13 +113,17 @@ describe("displayDigest", () => {
     // closure-private with no externally observable symptom, so this test pins
     // the observable contract: both calls still return the sync-recipe digest
     // and a broken worker never poisons later calls.
-    // A structural Worker stand-in whose postMessage always throws: the
-    // module-level `digestWorker` latch is shared across tests in this file,
-    // so this test may run against an already-cached broken instance — which
-    // is exactly the leak scenario under test. Object shape, not a class,
-    // avoids analyzer complaints about unused `this`/empty methods while
-    // satisfying the same structural interface the module reads.
+    //
+    // The module memoizes `digestWorker` on first use, and earlier tests in
+    // this file already called computeDisplayDigestAsync — so replacing
+    // globalThis.Worker alone would leave the cached worker in place and the
+    // stub never constructed. Reset the module registry so this test imports
+    // a fresh copy whose cache is empty, and assert the stub WAS constructed
+    // (constructedCount > 0), which is what makes this test effective rather
+    // than a silent no-op.
     const previousWorker = (globalThis as { Worker?: unknown }).Worker;
+    let constructedCount = 0;
+    let postMessageCalls = 0;
     const brokenWorkerFactory = function WorkerStub(
       this: {
         onmessage: ((event: MessageEvent) => void) | null;
@@ -132,8 +136,10 @@ describe("displayDigest", () => {
       this.onerror = null;
       this.onmessageerror = null;
       this.terminated = false;
+      constructedCount += 1;
     };
     brokenWorkerFactory.prototype.postMessage = function postMessage(): void {
+      postMessageCalls += 1;
       throw new Error("detached or broken data channel");
     };
     brokenWorkerFactory.prototype.terminate = function terminate(
@@ -142,7 +148,9 @@ describe("displayDigest", () => {
       this.terminated = true;
     };
     (globalThis as { Worker?: unknown }).Worker = brokenWorkerFactory as unknown;
+    vi.resetModules();
     try {
+      const freshModule = await import("@/lib/displayDigest");
       const plan: Pick<
         ChannelImportResult,
         "content_owner_id" | "cms_status" | "counts" | "rows"
@@ -153,12 +161,22 @@ describe("displayDigest", () => {
         rows: [],
       };
       const expected = computeDisplayDigest(plan);
-      const first = await computeDisplayDigestAsync(plan);
+      const first = await freshModule.computeDisplayDigestAsync(plan);
       expect(first).toBe(expected);
-      const second = await computeDisplayDigestAsync(plan);
+      const second = await freshModule.computeDisplayDigestAsync(plan);
       expect(second).toBe(expected);
+      // Effectiveness proof: the stub was constructed and its throwing
+      // postMessage was actually called on both requests — the fallback path
+      // under test is genuinely exercised, not bypassed.
+      expect(constructedCount).toBe(1);
+      expect(postMessageCalls).toBe(2);
+      // Leak proof: both throwing requests removed their own waiter entries,
+      // so the fresh module's waiter map is empty. Without the fix, the map
+      // holds exactly the two stale entries (observable via the count probe).
+      expect(freshModule.__workerWaiterCount()).toBe(0);
     } finally {
       (globalThis as { Worker?: unknown }).Worker = previousWorker;
+      vi.resetModules();
     }
   });
 });

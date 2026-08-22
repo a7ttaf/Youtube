@@ -154,18 +154,22 @@ const planBearingDetail = (err: unknown): unknown | null => {
 //   path where a payload from a FAILED request replaces the preview the
 //   operator already approved and becomes what the next fingerprint-bound
 //   apply is reviewed against.
-// Database/ORM: None (frontend) — a pure predicate over a decoded error body.
+// Database/ORM: None (frontend) — an async gate over a decoded error body.
 //   It dispatches nothing and mutates no state; the caller decides what to do
 //   with the plan it returns.
-// Standards: Two gates, both required. The status must be plan-bearing (409 or
-//   422, the two that mean "the plan you saw is not the plan we would
-//   execute"), and the body must pass isChannelImportResult AND
-//   echoesRequestedTarget — the same target rule the 2xx path applies, which
-//   matters MORE here because this payload becomes the reviewed plan while the
-//   next Apply still sends the CAPTURED owner. Fails CLOSED in both
-//   directions: anything unrecognised returns null, the error falls through to
-//   the ordinary banner, and the operator keeps the plan they actually
-//   reviewed. Not every 409 carries a plan — this flow always sends
+// Standards: Three gates, all required, checked in order. The status must be
+//   plan-bearing (409 or 422, the two that mean "the plan you saw is not the
+//   plan we would execute"), the body must pass isChannelImportResult, then
+//   the AWAITED worker-backed displayDigestMatchesDisclosedAsync recomputes
+//   the digest off the main thread (sync SHA-256 fallback when Workers are
+//   unavailable) — a refreshed plan carrying a digest that does not match its
+//   disclosed rows is rejected here — then echoesRequestedTarget applies the
+//   same target rule as the 2xx path, which matters MORE here because this
+//   payload becomes the reviewed plan while the next Apply still sends the
+//   CAPTURED owner. Fails CLOSED in all directions: anything unrecognised,
+//   a digest mismatch, or a worker failure returns null, the error falls
+//   through to the ordinary banner, and the operator keeps the plan they
+//   actually reviewed. Not every 409 carries a plan — this flow always sends
 //   expected_plan_fingerprint, so it opts into the backend's strict pre-state
 //   check, whose 409 detail is a STRING naming the row that moved; that lands
 //   in the banner verbatim, which already says to re-run the preview.
@@ -174,9 +178,11 @@ const planBearingDetail = (err: unknown): unknown | null => {
 //   the apply that follows is bound to a fingerprint for a plan they never
 //   saw — a different group action or revenue-source classification reviewed
 //   under the banner of the one they did.
-// Connections:
+// Connections: the three gates applied here and the wire contract behind them.
 //   - File: frontend/src/lib/api/useChannelImport.ts -> isChannelImportResult
-//       and echoesRequestedTarget, the two gates applied here.
+//       and echoesRequestedTarget, two of the three gates applied here.
+//   - File: frontend/src/lib/displayDigest.ts -> displayDigestMatchesDisclosedAsync,
+//       the awaited worker-backed digest gate (review #184, C1).
 //   - File: backend/ums_smart_revenue/api/channels.py -> the route that emits
 //       the 409/422 whose `detail` is a full ChannelImportResult.
 //   - File: Docs/12_BACKEND_API_SPEC.md -> the documented rejection contract.
