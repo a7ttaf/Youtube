@@ -191,28 +191,24 @@ const routeFetch = (opts: { gapExplanation?: () => Response }) => {
 
 const GLOBAL_SCOPES: ScopedFinanceViewHint = { globalScope: true, financeMonths: [] };
 
-const renderCommandView = (overrides?: {
-  canViewFinance?: boolean;
-  canViewPayments?: boolean;
-  canViewBankReconciliation?: boolean;
-  canViewRevenueGlobal?: boolean;
-  canViewConfidence?: boolean;
-  paymentsViewScopes?: ScopedFinanceViewHint;
-  bankReconciliationViewScopes?: ScopedFinanceViewHint;
-}) => {
+// Every grant on by default; tests override exactly what they restrict. The
+// spread keeps this helper's cyclomatic complexity at 1 (no per-prop `??`).
+const FULLY_GRANTED_VIEW_PROPS = {
+  canViewFinance: true,
+  canViewPayments: true,
+  canViewBankReconciliation: true,
+  canViewRevenueGlobal: true,
+  canViewConfidence: true,
+  paymentsViewScopes: GLOBAL_SCOPES,
+  bankReconciliationViewScopes: GLOBAL_SCOPES,
+};
+
+const renderCommandView = (
+  overrides: Partial<typeof FULLY_GRANTED_VIEW_PROPS> = {},
+) => {
   return render(
     <TenantProvider initialSlug="ums">
-      <CommandView
-        canViewFinance={overrides?.canViewFinance ?? true}
-        canViewPayments={overrides?.canViewPayments ?? true}
-        canViewBankReconciliation={overrides?.canViewBankReconciliation ?? true}
-        canViewRevenueGlobal={overrides?.canViewRevenueGlobal ?? true}
-        canViewConfidence={overrides?.canViewConfidence ?? true}
-        paymentsViewScopes={overrides?.paymentsViewScopes ?? GLOBAL_SCOPES}
-        bankReconciliationViewScopes={
-          overrides?.bankReconciliationViewScopes ?? GLOBAL_SCOPES
-        }
-      />
+      <CommandView {...FULLY_GRANTED_VIEW_PROPS} {...overrides} />
     </TenantProvider>,
   );
 };

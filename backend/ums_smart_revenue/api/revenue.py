@@ -2166,6 +2166,28 @@ def get_month_bank_reconciliation(
     return summary_api
 
 
+# ============================================================================
+# Purpose: Data-access + composition step for the month gap explanation,
+#   extracted out of the route handler (thin-orchestration rule): normalize
+#   the currency, fetch each source exactly once (facts, payments, bank
+#   entries, close status), build both source summaries, and compose the
+#   explanation.
+# Database/ORM: Read-only via the four injected repositories — the same
+#   repositories the payment-match, bank-reconciliation, and smart-alerts
+#   endpoints already read; no writes, no new queries beyond their list/get
+#   methods.
+# Standards: One fetch feeds every builder (no double reads, no drift
+#   between the legs' inputs); source ValidationErrors propagate untouched
+#   for the route's 422 translation; close_status defaults to OPEN when no
+#   close row exists.
+# Blast Radius: Every number the gap-explanation endpoint serves. Read-only
+#   — no audit, no mutation (the route owns the audit triple).
+# Connections:
+#   - File: backend/ums_smart_revenue/finance/gap_explanation.py -> the
+#     composition this loader feeds.
+#   - File: tests/api/test_gap_explanation_api.py -> gate tests prove denial
+#     precedes this loader (fail-if-touched repository stubs).
+# ============================================================================
 def _load_month_gap_explanation(
     *,
     month: str,
@@ -2175,12 +2197,7 @@ def _load_month_gap_explanation(
     bank_repository: SqlAlchemyBankReconciliationRepository,
     close_repository: SqlAlchemyFinanceMonthCloseRepository,
 ) -> MonthGapExplanation:
-    """Fetch the month's sources once and compose the gap explanation.
-
-    The data-access + composition step extracted out of the route handler
-    (thin-orchestration rule): one fetch per source feeds every builder, and
-    the source ValidationErrors propagate for the route's 422 translation.
-    """
+    """Fetch the month's sources once and compose the gap explanation."""
     normalized_currency = normalize_payment_match_currency(currency)
     facts = revenue_repository.list_month_facts(month=month)
     payments = payment_repository.list_month_payments(month=month)
