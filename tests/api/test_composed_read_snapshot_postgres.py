@@ -365,6 +365,7 @@ def _move_channel_out_then_begin(owner_engine: sa.Engine, fired: dict[str, bool]
     """
 
     def _hook(session: Session) -> None:
+        """Commit the channel move, then begin the real snapshot."""
         if not fired["done"]:
             fired["done"] = True
             with Session(owner_engine) as writer:
@@ -410,7 +411,8 @@ def test_begin_composed_read_snapshot_rejects_active_transaction(pg_url: str) ->
 def test_snapshot_isolation_resets_after_the_transaction(pg_url: str) -> None:
     """REPEATABLE READ never leaks into later transactions on the pooled
     connection: after the snapshot transaction ends, the next one is back on
-    the engine default."""
+    the engine default.
+    """
     session = build_platform_session_factory(pg_url)()
     try:
         begin_composed_read_snapshot(session)
@@ -429,7 +431,8 @@ def test_payment_match_composes_one_snapshot_under_concurrent_writer(
     owner_engine: sa.Engine, client: TestClient
 ) -> None:
     """A payment committing between the facts read and the payments read must
-    not appear in the response: both totals come from one MVCC snapshot."""
+    not appear in the response: both totals come from one MVCC snapshot.
+    """
     _seed_month(owner_engine)
     fired = {"done": False}
     original = SqlAlchemyAdSensePaymentRepository.list_month_payments
@@ -437,6 +440,7 @@ def test_payment_match_composes_one_snapshot_under_concurrent_writer(
     def _interleaved(
         self: SqlAlchemyAdSensePaymentRepository, *, month: str
     ) -> list[AdSensePaymentEntry]:
+        """Commit a late payment, then delegate to the wrapped payments read."""
         if not fired["done"]:
             fired["done"] = True
             with Session(owner_engine) as writer:
@@ -472,7 +476,8 @@ def test_smart_alerts_close_transition_cannot_mislabel_locked(
     owner_engine: sa.Engine, client: TestClient
 ) -> None:
     """A month close committing mid-read must not suppress MONTH_NOT_LOCKED:
-    the close status pairs with the pre-lock totals of the same snapshot."""
+    the close status pairs with the pre-lock totals of the same snapshot.
+    """
     _seed_month(owner_engine)
     fired = {"done": False}
     original = SqlAlchemyBankReconciliationRepository.list_month_entries
@@ -480,6 +485,7 @@ def test_smart_alerts_close_transition_cannot_mislabel_locked(
     def _interleaved(
         self: SqlAlchemyBankReconciliationRepository, *, month: str
     ) -> list[BankReconciliationEntry]:
+        """Commit the mid-read write, then delegate to the wrapped entries read."""
         if not fired["done"]:
             fired["done"] = True
             with Session(owner_engine) as writer:
@@ -502,7 +508,8 @@ def test_smart_alerts_coverage_pairs_with_the_snapshot_facts(
 ) -> None:
     """An active revenue-required channel committing mid-read must not flip the
     missing-facts coverage alert: the coverage query is not audit-gated, so it
-    reads inside the same snapshot as the facts it is compared against."""
+    reads inside the same snapshot as the facts it is compared against.
+    """
     _seed_month(owner_engine)
     fired = {"done": False}
     original = SqlAlchemyBankReconciliationRepository.list_month_entries
@@ -510,6 +517,7 @@ def test_smart_alerts_coverage_pairs_with_the_snapshot_facts(
     def _interleaved(
         self: SqlAlchemyBankReconciliationRepository, *, month: str
     ) -> list[BankReconciliationEntry]:
+        """Commit the mid-read write, then delegate to the wrapped entries read."""
         if not fired["done"]:
             fired["done"] = True
             with Session(owner_engine) as writer:
@@ -542,7 +550,8 @@ def test_net_revenue_company_scope_attribution_rides_the_snapshot(
     """A channel moved to another company after authorization but before the
     snapshot begins must not have its revenue attributed to the old company:
     the org-derived selection set re-resolves on the same MVCC snapshot as
-    the money rows it selects."""
+    the money rows it selects.
+    """
     _seed_month(owner_engine)
     with Session(owner_engine) as seeder:
         seeder.add(
@@ -558,6 +567,7 @@ def test_net_revenue_company_scope_attribution_rides_the_snapshot(
     fired = {"done": False}
 
     def _move_then_begin(session: Session) -> None:
+        """Commit the org move, then begin the real snapshot."""
         # The tenant-lane org index was loaded at dependency time; committing
         # the move here lands it deterministically between that load and the
         # snapshot begin — the exact window the attribution re-resolution
@@ -596,7 +606,8 @@ def test_recalculation_dry_run_scope_attribution_rides_the_snapshot(
     """A channel moved to another company after authorization but before the
     dry-run snapshot begins must not be previewed under its former company:
     the dry run re-resolves selection and the COMPANY_UNMAPPED readiness map
-    on the same MVCC snapshot as the facts it counts."""
+    on the same MVCC snapshot as the facts it counts.
+    """
     _seed_month(owner_engine)
     with Session(owner_engine) as seeder:
         seeder.add(
@@ -612,6 +623,7 @@ def test_recalculation_dry_run_scope_attribution_rides_the_snapshot(
     fired = {"done": False}
 
     def _move_then_begin(session: Session) -> None:
+        """Commit the org move, then begin the real snapshot."""
         if not fired["done"]:
             fired["done"] = True
             with Session(owner_engine) as writer:
@@ -652,7 +664,8 @@ def test_net_revenue_selection_stays_within_the_authorized_set(
 ) -> None:
     """A channel moved INTO the requested company after authorization must not
     be selected: snapshot membership is intersected with the gate-time set, so
-    a channel covered in neither database state is never served."""
+    a channel covered in neither database state is never served.
+    """
     _seed_month(owner_engine)
     with Session(owner_engine) as seeder:
         seeder.add(
@@ -678,6 +691,7 @@ def test_net_revenue_selection_stays_within_the_authorized_set(
     fired = {"done": False}
 
     def _move_then_begin(session: Session) -> None:
+        """Commit the org move, then begin the real snapshot."""
         # Move the channel INTO company A between the gate-time resolution and
         # the snapshot begin: snapshot membership alone would now select it.
         if not fired["done"]:
@@ -714,7 +728,8 @@ def test_net_revenue_close_probe_rides_the_snapshot(
     """A month lock committing after the snapshot begins must not pair a fresh
     LOCKED probe with an older in-snapshot committed run: the close probe
     reads through the same snapshot as the run it selects, so the response
-    falls back to live compute instead of mislabeling the stale run."""
+    falls back to live compute instead of mislabeling the stale run.
+    """
     _seed_month(owner_engine)
     with Session(owner_engine) as seeder:
         # An older committed run left behind by a previous lock/unlock cycle;
@@ -749,6 +764,7 @@ def test_net_revenue_close_probe_rides_the_snapshot(
         youtube_channel_ids: set[str] | None = None,
         component_kinds: Collection[str] | None = None,
     ) -> list[DeductionComponent]:
+        """Commit the mid-read month lock, then delegate to the wrapped read."""
         # Lands after the loader's snapshot began and before the allocation
         # resolver runs: a tenant-lane close probe would see this LOCKED while
         # the platform snapshot still holds only the stale v1 run.
@@ -780,7 +796,8 @@ def test_scoped_read_refuses_reparented_target_on_the_snapshot(
     """A sector-granted caller whose target company was reparented out of the
     granted sector before the snapshot must be refused (403), not served
     snapshot-era finance data under gate-era containment: the loader
-    re-asserts grant coverage against the snapshot index, deny-only."""
+    re-asserts grant coverage against the snapshot index, deny-only.
+    """
     _seed_month(owner_engine)
     with Session(owner_engine) as seeder:
         seeder.add(
@@ -830,28 +847,33 @@ def test_scoped_read_refuses_reparented_target_on_the_snapshot(
             updated_at=now,
         )
     )
-    platform_session = build_platform_session_factory(pg_url)()
+    # FIX (codex #203): construct the platform session INSIDE the reset
+    # guard - a factory failure after TENANT_CTX.set would otherwise leak
+    # the tenant context into subsequent tests.
     try:
-        with pytest.raises(HTTPException) as excinfo:
-            _load_month_net_revenue(
-                month=MONTH,
-                currency="USD",
-                user=user,
-                target_scope=AccessScope.company(str(COMPANY_ID)),
-                channel_ids={CHANNEL_ID},
-                platform_session=platform_session,
-                revenue_repository=SqlAlchemyRevenueFactRepository(platform_session),
-                override_repository=SqlAlchemyManualOverrideRepository(platform_session),
-                deduction_component_repository=SqlAlchemyDeductionComponentRepository(
-                    platform_session
-                ),
-                link_repository=SqlAlchemyChannelAccountLinkRepository(platform_session),
-                committed_repository=SqlAlchemyCommittedAllocationRepository(platform_session),
-            )
-        assert excinfo.value.status_code == 403
+        platform_session = build_platform_session_factory(pg_url)()
+        try:
+            with pytest.raises(HTTPException) as excinfo:
+                _load_month_net_revenue(
+                    month=MONTH,
+                    currency="USD",
+                    user=user,
+                    target_scope=AccessScope.company(str(COMPANY_ID)),
+                    channel_ids={CHANNEL_ID},
+                    platform_session=platform_session,
+                    revenue_repository=SqlAlchemyRevenueFactRepository(platform_session),
+                    override_repository=SqlAlchemyManualOverrideRepository(platform_session),
+                    deduction_component_repository=SqlAlchemyDeductionComponentRepository(
+                        platform_session
+                    ),
+                    link_repository=SqlAlchemyChannelAccountLinkRepository(platform_session),
+                    committed_repository=SqlAlchemyCommittedAllocationRepository(platform_session),
+                )
+            assert excinfo.value.status_code == 403
+        finally:
+            platform_session.rollback()
+            platform_session.close()
     finally:
-        platform_session.rollback()
-        platform_session.close()
         TENANT_CTX.reset(tenant_token)
 
 
@@ -861,7 +883,8 @@ def test_net_revenue_group_scope_membership_rides_the_snapshot(
     """A channel dropped from the requested group after authorization but
     before the snapshot begins must not keep feeding the group rollup: active
     membership re-reads on the same MVCC snapshot as the money rows it selects
-    and is intersected with the gate-time authorized set, deny-only."""
+    and is intersected with the gate-time authorized set, deny-only.
+    """
     _seed_month(owner_engine)
     with Session(owner_engine) as seeder:
         seeder.add(
@@ -880,6 +903,7 @@ def test_net_revenue_group_scope_membership_rides_the_snapshot(
     fired = {"done": False}
 
     def _drop_member_then_begin(session: Session) -> None:
+        """Commit the membership delete, then begin the real snapshot."""
         # The tenant-lane group registry resolved the roster at gate time;
         # committing the membership delete here lands it deterministically
         # between that resolution and the snapshot begin — the exact window
@@ -916,7 +940,8 @@ def test_channel_read_refuses_moved_channel_on_the_snapshot(
     channel moved out of the granted sector before the snapshot must be
     refused (403), not served snapshot-era finance data under gate-era
     containment: the deny-only grant re-check covers channel targets, while
-    direct channel grants keep passing on scope identity alone."""
+    direct channel grants keep passing on scope identity alone.
+    """
     _seed_month(owner_engine)
     with Session(owner_engine) as seeder:
         seeder.add_all(
@@ -979,28 +1004,33 @@ def test_channel_read_refuses_moved_channel_on_the_snapshot(
             updated_at=now,
         )
     )
-    platform_session = build_platform_session_factory(pg_url)()
+    # FIX (codex #203): construct the platform session INSIDE the reset
+    # guard - a factory failure after TENANT_CTX.set would otherwise leak
+    # the tenant context into subsequent tests.
     try:
-        with pytest.raises(HTTPException) as excinfo:
-            _load_month_net_revenue(
-                month=MONTH,
-                currency="USD",
-                user=user,
-                target_scope=AccessScope.channel(CHANNEL_ID),
-                channel_ids={CHANNEL_ID},
-                platform_session=platform_session,
-                revenue_repository=SqlAlchemyRevenueFactRepository(platform_session),
-                override_repository=SqlAlchemyManualOverrideRepository(platform_session),
-                deduction_component_repository=SqlAlchemyDeductionComponentRepository(
-                    platform_session
-                ),
-                link_repository=SqlAlchemyChannelAccountLinkRepository(platform_session),
-                committed_repository=SqlAlchemyCommittedAllocationRepository(platform_session),
-            )
-        assert excinfo.value.status_code == 403
+        platform_session = build_platform_session_factory(pg_url)()
+        try:
+            with pytest.raises(HTTPException) as excinfo:
+                _load_month_net_revenue(
+                    month=MONTH,
+                    currency="USD",
+                    user=user,
+                    target_scope=AccessScope.channel(CHANNEL_ID),
+                    channel_ids={CHANNEL_ID},
+                    platform_session=platform_session,
+                    revenue_repository=SqlAlchemyRevenueFactRepository(platform_session),
+                    override_repository=SqlAlchemyManualOverrideRepository(platform_session),
+                    deduction_component_repository=SqlAlchemyDeductionComponentRepository(
+                        platform_session
+                    ),
+                    link_repository=SqlAlchemyChannelAccountLinkRepository(platform_session),
+                    committed_repository=SqlAlchemyCommittedAllocationRepository(platform_session),
+                )
+            assert excinfo.value.status_code == 403
+        finally:
+            platform_session.rollback()
+            platform_session.close()
     finally:
-        platform_session.rollback()
-        platform_session.close()
         TENANT_CTX.reset(tenant_token)
 
 
@@ -1010,7 +1040,8 @@ def test_channel_facts_listing_refuses_moved_channel_on_the_snapshot(
     """A per-channel facts listing admitted by an inherited sector grant must
     be refused (403) when the channel moved out of the granted sector between
     the gate and the snapshot: the shared per-channel loader re-checks the
-    channel target against the snapshot index, deny-only."""
+    channel target against the snapshot index, deny-only.
+    """
     _seed_month(owner_engine)
     _seed_sector_b_with_company_b(owner_engine)
     fired = {"done": False}
@@ -1036,7 +1067,8 @@ def test_reconciliation_issue_queue_selection_rides_the_snapshot(
     paged into the issue queue: the loader recomputes the covered sets on the
     snapshot index and intersects them with the gate-time set, deny-only —
     and the audit records the snapshot-EFFECTIVE scope count, not the stale
-    gate-time set the recheck already narrowed away."""
+    gate-time set the recheck already narrowed away.
+    """
     _seed_month(owner_engine)
     _seed_sector_b_with_company_b(owner_engine)
     with Session(owner_engine) as seeder:
@@ -1097,7 +1129,8 @@ def test_group_scope_member_containment_rides_the_snapshot(
     net-revenue route also gates finance-month VIEW_FINALIZED_PAYMENTS, which
     a single sector-scoped gateway role cannot carry, so the epoch mix is
     reproduced by committing the move before the loader runs under a
-    sector-granted principal."""
+    sector-granted principal.
+    """
     _seed_month(owner_engine)
     _seed_sector_b_with_company_b(owner_engine)
     with Session(owner_engine) as seeder:
@@ -1155,27 +1188,32 @@ def test_group_scope_member_containment_rides_the_snapshot(
             updated_at=now,
         )
     )
-    platform_session = build_platform_session_factory(pg_url)()
+    # FIX (codex #203): construct the platform session INSIDE the reset
+    # guard - a factory failure after TENANT_CTX.set would otherwise leak
+    # the tenant context into subsequent tests.
     try:
-        summary, _, _ = _load_month_net_revenue(
-            month=MONTH,
-            currency="USD",
-            user=user,
-            target_scope=AccessScope.group(str(GROUP_ID)),
-            channel_ids={CHANNEL_ID},
-            platform_session=platform_session,
-            revenue_repository=SqlAlchemyRevenueFactRepository(platform_session),
-            override_repository=SqlAlchemyManualOverrideRepository(platform_session),
-            deduction_component_repository=SqlAlchemyDeductionComponentRepository(
-                platform_session
-            ),
-            link_repository=SqlAlchemyChannelAccountLinkRepository(platform_session),
-            committed_repository=SqlAlchemyCommittedAllocationRepository(platform_session),
-        )
-        assert summary.channel_count == 0
+        platform_session = build_platform_session_factory(pg_url)()
+        try:
+            summary, _, _ = _load_month_net_revenue(
+                month=MONTH,
+                currency="USD",
+                user=user,
+                target_scope=AccessScope.group(str(GROUP_ID)),
+                channel_ids={CHANNEL_ID},
+                platform_session=platform_session,
+                revenue_repository=SqlAlchemyRevenueFactRepository(platform_session),
+                override_repository=SqlAlchemyManualOverrideRepository(platform_session),
+                deduction_component_repository=SqlAlchemyDeductionComponentRepository(
+                    platform_session
+                ),
+                link_repository=SqlAlchemyChannelAccountLinkRepository(platform_session),
+                committed_repository=SqlAlchemyCommittedAllocationRepository(platform_session),
+            )
+            assert summary.channel_count == 0
+        finally:
+            platform_session.rollback()
+            platform_session.close()
     finally:
-        platform_session.rollback()
-        platform_session.close()
         TENANT_CTX.reset(tenant_token)
 
 
@@ -1184,7 +1222,8 @@ def test_group_scope_active_flag_rides_the_snapshot(
 ) -> None:
     """A group archived after the gate-time active check but before the
     snapshot begins must not keep serving its roster: the selection re-reads
-    the group row on the snapshot and empties when it is inactive there."""
+    the group row on the snapshot and empties when it is inactive there.
+    """
     _seed_month(owner_engine)
     with Session(owner_engine) as seeder:
         seeder.add(
@@ -1201,6 +1240,7 @@ def test_group_scope_active_flag_rides_the_snapshot(
     fired = {"done": False}
 
     def _archive_then_begin(session: Session) -> None:
+        """Commit the group archive, then begin the real snapshot."""
         # The gate-time resolver saw the group active; committing the archive
         # here lands it deterministically between that check and the snapshot
         # begin - the window the snapshot-side active re-read closes.
@@ -1235,7 +1275,8 @@ def test_finance_export_preview_composes_one_snapshot_under_concurrent_writer(
     """A payment committing between the export builder's facts read and its
     payments read must not appear in the workbook preview: a persisted-bound
     export artifact composes the same finance sources as the dashboard reads,
-    so its totals must come from one MVCC snapshot too."""
+    so its totals must come from one MVCC snapshot too.
+    """
     _seed_month(owner_engine)
     with Session(owner_engine) as seeder:
         seeder.add(
@@ -1260,6 +1301,7 @@ def test_finance_export_preview_composes_one_snapshot_under_concurrent_writer(
     def _interleaved(
         self: SqlAlchemyAdSensePaymentRepository, *, month: str
     ) -> list[AdSensePaymentEntry]:
+        """Commit a late payment, then delegate to the wrapped payments read."""
         # Lands between the builder's facts read and its payments read - the
         # exact READ COMMITTED window that pairs fresh payment totals with
         # stale fact totals inside a downloadable artifact.
@@ -1304,7 +1346,8 @@ def test_finance_export_builder_releases_the_snapshot_before_artifact_work(
     reads complete: artifact byte generation and filesystem persistence run
     AFTER it returns and must not hold the snapshot open (idle-in-transaction
     timeouts, vacuum pressure) - the platform session is request-scoped and
-    would otherwise keep the transaction until teardown."""
+    would otherwise keep the transaction until teardown.
+    """
     _seed_month(owner_engine)
     export_job = ExportJobEntry(
         id="exp-snapshot-release",
@@ -1343,24 +1386,29 @@ def test_finance_export_builder_releases_the_snapshot_before_artifact_work(
             updated_at=now,
         )
     )
-    platform_session = build_platform_session_factory(pg_url)()
+    # FIX (codex #203): construct the platform session INSIDE the reset
+    # guard - a factory failure after TENANT_CTX.set would otherwise leak
+    # the tenant context into subsequent tests.
     try:
-        summaries = _build_finance_source_summaries_for_export(
-            context=_FinanceExportSourceContext(
-                export_job=export_job,
-                user=user,
-                # The tenant-lane session is only touched for audit-derived
-                # alert reads, disabled here; the platform session stands in.
-                session=platform_session,
-                platform_session=platform_session,
-                org_index=OrgAccessIndex(),
-                group_registry=ChannelGroupRegistry(),
-                include_audit_derived_alerts=False,
-            ),
-        )
-        assert summaries.net_revenue.month == MONTH
-        assert platform_session.in_transaction() is False
+        platform_session = build_platform_session_factory(pg_url)()
+        try:
+            summaries = _build_finance_source_summaries_for_export(
+                context=_FinanceExportSourceContext(
+                    export_job=export_job,
+                    user=user,
+                    # The tenant-lane session is only touched for audit-derived
+                    # alert reads, disabled here; the platform session stands in.
+                    session=platform_session,
+                    platform_session=platform_session,
+                    org_index=OrgAccessIndex(),
+                    group_registry=ChannelGroupRegistry(),
+                    include_audit_derived_alerts=False,
+                ),
+            )
+            assert summaries.net_revenue.month == MONTH
+            assert platform_session.in_transaction() is False
+        finally:
+            platform_session.rollback()
+            platform_session.close()
     finally:
-        platform_session.rollback()
-        platform_session.close()
         TENANT_CTX.reset(tenant_token)
