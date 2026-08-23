@@ -6,7 +6,9 @@
 #   reconciliation-preview (both ride the same guard-then-select repository
 #   read — two statements, so the single-select exemption was disproven in
 #   review), the deduction-components page (a three-statement repository
-#   read), and the dry-run recalculation preview each call
+#   read), the dry-run recalculation preview, and the finance export
+#   builder (the workbook preview pin covers the shared source-summaries
+#   loader every export artifact rides) each call
 #   begin_composed_read_snapshot exactly once before reading. The
 #   recalculation WRITE branch and the explain POST stay READ COMMITTED by
 #   the recorded write-path ruling. The snapshot ruling is platform-wide; a
@@ -42,10 +44,12 @@ from sqlalchemy.orm import Session
 from ums_smart_revenue.app import create_app
 from ums_smart_revenue.db.finance_models import FinanceBase
 from ums_smart_revenue.db.org_models import OrgBase, YouTubeChannelORM
+from ums_smart_revenue.db.report_models import ExportJobORM, ReportBase
 from ums_smart_revenue.db.security_models import SecurityBase, UserORM
 
 USER_ID = UUID("00000000-0000-0000-0000-00000000c401")
 CHANNEL_ID = "channel-snapshot-wiring"
+EXPORT_JOB_ID = UUID("00000000-0000-0000-0000-00000000c501")
 
 COMPOSED_READ_PATHS = [
     "/revenue/months/2026-03/payment-match",
@@ -142,6 +146,62 @@ def test_recalculation_dry_run_begins_exactly_one_snapshot(tmp_path: Path) -> No
                 "dry_run": True,
                 "reason": "snapshot wiring pin",
             },
+        )
+
+    assert response.status_code == 200
+    assert len(calls) == 1
+
+
+def test_finance_export_preview_begins_exactly_one_snapshot(tmp_path: Path) -> None:
+    """The finance export builder is a composed read: one snapshot per build.
+
+    The workbook preview, workbook download, executive PDF, and slide pack all
+    build through one shared source-summaries loader, so the preview pin
+    covers the builder every artifact rides.
+    """
+    database_url = f"sqlite+pysqlite:///{(tmp_path / f'{uuid4()}.db').as_posix()}"
+    engine = create_engine(database_url)
+    try:
+        OrgBase.metadata.create_all(engine)
+        SecurityBase.metadata.create_all(engine)
+        FinanceBase.metadata.create_all(engine)
+        ReportBase.metadata.create_all(engine)
+        with Session(engine) as session:
+            session.add_all(
+                [
+                    UserORM(
+                        id=USER_ID,
+                        email="snapshot-wiring@example.com",
+                        display_name="Snapshot Wiring User",
+                    ),
+                    ExportJobORM(
+                        id=EXPORT_JOB_ID,
+                        export_type="FINANCE_EXCEL",
+                        scope_type="global",
+                        scope_id=None,
+                        month="2026-03",
+                        currency="USD",
+                        requested_by=USER_ID,
+                        status="QUEUED",
+                        month_lock_status="OPEN",
+                        include_confidence_notes=True,
+                        include_manual_override_notes=True,
+                    ),
+                ]
+            )
+            session.commit()
+    finally:
+        engine.dispose()
+    client = TestClient(create_app(database_url=database_url, authz_source="headers"))
+    calls: list[object] = []
+    with patch(
+        "ums_smart_revenue.api.exports.begin_composed_read_snapshot",
+        create=True,
+        side_effect=calls.append,
+    ):
+        response = client.get(
+            f"/exports/{EXPORT_JOB_ID}/finance-workbook-preview",
+            headers={**auth_headers(), "x-role": "finance_admin"},
         )
 
     assert response.status_code == 200

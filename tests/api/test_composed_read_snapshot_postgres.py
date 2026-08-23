@@ -77,6 +77,7 @@ from ums_smart_revenue.db.read_snapshot import (
     ComposedReadSnapshotError,
     begin_composed_read_snapshot,
 )
+from ums_smart_revenue.db.report_models import ExportJobORM
 from ums_smart_revenue.db.security_models import UserORM
 from ums_smart_revenue.db.session import build_platform_session_factory
 from ums_smart_revenue.finance.adsense_payments import (
@@ -114,6 +115,7 @@ CHANNEL_ROW_ID = UUID("00000000-0000-0000-0000-00000000d301")
 LATE_CHANNEL_ROW_ID = UUID("00000000-0000-0000-0000-00000000d302")
 USER_ID = UUID("00000000-0000-0000-0000-00000000d401")
 GROUP_ID = UUID("00000000-0000-0000-0000-00000000d501")
+EXPORT_ID = UUID("00000000-0000-0000-0000-00000000d601")
 
 _UPGRADED_URLS: set[str] = set()
 
@@ -143,7 +145,8 @@ def _purge_test_rows(engine: sa.Engine) -> None:
                 "('monthly_payment_match', 'monthly_smart_alerts', "
                 "'month_bank_reconciliation', 'month_gap_explanation', "
                 "'monthly_net_revenue_summary', 'revenue_recalculation_preview', "
-                "'monthly_channel_revenue_fact', 'revenue_reconciliation_issue_queue')"
+                "'monthly_channel_revenue_fact', 'revenue_reconciliation_issue_queue', "
+                "'export_job', 'audit_log_page')"
             )
         )
         conn.execute(sa.text("DELETE FROM finance_month_close WHERE month = :m"), {"m": MONTH})
@@ -160,6 +163,7 @@ def _purge_test_rows(engine: sa.Engine) -> None:
             ),
             {"c": CHANNEL_ID},
         )
+        conn.execute(sa.text("DELETE FROM export_jobs WHERE id = :e"), {"e": str(EXPORT_ID)})
         conn.execute(
             sa.text("DELETE FROM channel_group_members WHERE group_id = :g"),
             {"g": str(GROUP_ID)},
@@ -1217,3 +1221,71 @@ def test_group_scope_active_flag_rides_the_snapshot(
     assert fired["done"] is True
     assert response.status_code == 200
     assert response.json()["channel_count"] == 0
+
+
+def test_finance_export_preview_composes_one_snapshot_under_concurrent_writer(
+    owner_engine: sa.Engine, client: TestClient
+) -> None:
+    """A payment committing between the export builder's facts read and its
+    payments read must not appear in the workbook preview: a persisted-bound
+    export artifact composes the same finance sources as the dashboard reads,
+    so its totals must come from one MVCC snapshot too."""
+    _seed_month(owner_engine)
+    with Session(owner_engine) as seeder:
+        seeder.add(
+            ExportJobORM(
+                id=EXPORT_ID,
+                export_type="FINANCE_EXCEL",
+                scope_type="global",
+                scope_id=None,
+                month=MONTH,
+                currency="USD",
+                requested_by=USER_ID,
+                status="QUEUED",
+                month_lock_status="OPEN",
+                include_confidence_notes=True,
+                include_manual_override_notes=True,
+            )
+        )
+        seeder.commit()
+    fired = {"done": False}
+    original = SqlAlchemyAdSensePaymentRepository.list_month_payments
+
+    def _interleaved(
+        self: SqlAlchemyAdSensePaymentRepository, *, month: str
+    ) -> list[AdSensePaymentEntry]:
+        # Lands between the builder's facts read and its payments read - the
+        # exact READ COMMITTED window that pairs fresh payment totals with
+        # stale fact totals inside a downloadable artifact.
+        if not fired["done"]:
+            fired["done"] = True
+            with Session(owner_engine) as writer:
+                writer.add(
+                    AdSensePaymentORM(
+                        id=uuid4(),
+                        month=MONTH,
+                        payment_name="AdSense late arrival",
+                        payment_date=date(2026, 4, 23),
+                        payment_amount=Decimal("100.00"),
+                        payment_currency="USD",
+                        payment_status="PAID",
+                        raw_payload={"paymentId": "pay-snapshot-late-export"},
+                        source_report_id="adsense-payment-snapshot-late-export",
+                        source_account_id="pub-1",
+                        imported_by=USER_ID,
+                    )
+                )
+                writer.commit()
+        return original(self, month=month)
+
+    with patch.object(SqlAlchemyAdSensePaymentRepository, "list_month_payments", _interleaved):
+        response = client.get(
+            f"/exports/{EXPORT_ID}/finance-workbook-preview",
+            headers={**auth_headers(), "x-role": "finance_admin"},
+        )
+
+    assert fired["done"] is True
+    assert response.status_code == 200
+    payment_match = response.json()["source_summaries"]["payment_match"]
+    assert Decimal(payment_match["youtube_revenue_total_usd"]) == Decimal("930.00")
+    assert Decimal(payment_match["adsense_paid_amount"]) == Decimal("900.00")

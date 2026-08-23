@@ -46,6 +46,10 @@
 #     listing and the reconciliation-preview (both ride one shared loader;
 #     the single-select exemption was disproven: the repository read is
 #     guard-then-select) and the dry-run recalculation preview.
+#   - File: backend/ums_smart_revenue/api/exports.py -> the finance export
+#     source builder begins this snapshot on the platform session for every
+#     export artifact's finance reads (its audit-derived signal reads stay
+#     tenant-lane by the same residual ruling as smart-alerts).
 #   - File: Docs/12_BACKEND_API_SPEC.md -> the read-consistency contract.
 # ============================================================================
 """Composed-read snapshot: one REPEATABLE READ transaction per composed finance read."""

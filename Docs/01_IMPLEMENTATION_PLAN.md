@@ -853,6 +853,20 @@ channel↔account map, and multi-currency FX) stays out per Docs/18.
   `tests/api/test_composed_read_snapshot_wiring.py` (eleven GET routes plus
   the dry-run recalculation POST).
   `No migration/backfill required.` — reuses the session-level helper.
+  **Composed-read snapshot exports follow-up shipped 2026-08-23**
+  (`feat/export-read-snapshot`): the finance export builder — the shared
+  source-summaries loader behind the workbook preview and the
+  workbook/executive-PDF/slide-pack downloads — begins the same REPEATABLE
+  READ snapshot on the platform session after the route gates, so a writer
+  committing mid-build can no longer tear the totals inside a persisted
+  artifact (red→green-proven on Postgres: a payment committing between the
+  facts and payments reads leaked into the preview pre-fix). The finance
+  reads moved from the tenant-lane request session (already mid-transaction
+  from the job lookup) to the platform lane, matching the revenue
+  endpoints' finance laning; audit-derived signal reads stay tenant-lane by
+  the recorded residual ruling, and the frozen channel set stays gate-time
+  by the export-determinism rule. Pinned in the snapshot wiring + Postgres
+  modules. `No migration/backfill required.`
 
 ### Acceptance gate
 
