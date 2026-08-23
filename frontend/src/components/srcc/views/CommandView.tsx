@@ -1085,6 +1085,16 @@ const objectRowsOf = <T,>(rows: T[]): T[] =>
     (row) => typeof row === "object" && row !== null && !Array.isArray(row),
   );
 
+// Fallback copy when a malformed payload drops a leg's narrative: the
+// residual row's sub-line is load-bearing (on an INCOMPLETE leg it is the
+// only place naming the missing source), so a blank line is data loss —
+// say explicitly that the explanation is missing instead.
+const MISSING_LEG_NARRATIVE = "No explanation returned for this leg.";
+
+/** The leg narrative, or the explicit missing-narrative copy — never blank. */
+const legNarrativeOf = (narrative: string): string =>
+  typeof narrative === "string" && narrative.trim() ? narrative : MISSING_LEG_NARRATIVE;
+
 /** Pre-format one leg's component rows (display strings only). */
 const buildGapComponentRows = (
   components: GapExplanationComponent[],
@@ -2429,16 +2439,6 @@ const financeMonthHintSatisfies = (
   hint: ScopedFinanceViewHint,
   month: string,
 ): boolean => hint.globalScope || hint.financeMonths.includes(month);
-
-// Fallback copy when a malformed payload drops a leg's narrative: the
-// residual row's sub-line is load-bearing (on an INCOMPLETE leg it is the
-// only place naming the missing source), so a blank line is data loss —
-// say explicitly that the explanation is missing instead.
-const MISSING_LEG_NARRATIVE = "No explanation returned for this leg.";
-
-/** The leg narrative, or the explicit missing-narrative copy — never blank. */
-const legNarrativeOf = (narrative: string): string =>
-  typeof narrative === "string" && narrative.trim() ? narrative : MISSING_LEG_NARRATIVE;
 
 const CommandView = ({
   canViewFinance,
