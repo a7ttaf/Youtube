@@ -20,6 +20,7 @@
 from datetime import date
 from decimal import Decimal
 from pathlib import Path
+from types import SimpleNamespace
 from uuid import UUID, uuid4
 
 import pytest
@@ -282,6 +283,75 @@ def test_finance_viewer_reads_gap_explanation_with_triple_audit(tmp_path):
             audit_logs_by_type[month_scoped].scope_type,
             audit_logs_by_type[month_scoped].scope_id,
         ) == ("finance-month", "2026-03")
+
+
+class _CountingEmptyRepository:
+    """Source repository stub returning empty months and counting fetches."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def _count(self) -> list[object]:
+        self.calls += 1
+        return []
+
+    def list_month_facts(self, *, month: str) -> list[object]:
+        """Return no facts; count the fetch."""
+        return self._count()
+
+    def list_month_payments(self, *, month: str) -> list[object]:
+        """Return no payments; count the fetch."""
+        return self._count()
+
+    def list_month_entries(self, *, month: str) -> list[object]:
+        """Return no bank entries; count the fetch."""
+        return self._count()
+
+
+class _FlippingCloseRepository:
+    """Close repository stub that transitions OPEN -> LOCKED between reads."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def get(self, month: str) -> object | None:
+        """Return no close row first, then a LOCKED close."""
+        self.calls += 1
+        if self.calls == 1:
+            return None
+        return SimpleNamespace(status="LOCKED")
+
+
+def test_close_transition_mid_read_refetches_sources_once():
+    """A close committing mid-read must not label pre-lock totals LOCKED.
+
+    The loader reads the close status before and after the source fetches;
+    on a detected transition it refetches the sources exactly once so the
+    reported close state pairs with the totals it actually froze.
+    """
+    from ums_smart_revenue.api.revenue import _load_month_gap_explanation
+
+    revenue_repository = _CountingEmptyRepository()
+    payment_repository = _CountingEmptyRepository()
+    bank_repository = _CountingEmptyRepository()
+    close_repository = _FlippingCloseRepository()
+
+    explanation = _load_month_gap_explanation(
+        month="2026-03",
+        currency="USD",
+        revenue_repository=revenue_repository,
+        payment_repository=payment_repository,
+        bank_repository=bank_repository,
+        close_repository=close_repository,
+    )
+
+    assert explanation.close_status == "LOCKED"
+    # One refetch each: the initial read plus the post-transition retry.
+    assert revenue_repository.calls == 2
+    assert payment_repository.calls == 2
+    assert bank_repository.calls == 2
+    # Close reads: the pre-read plus one per source-fetch round.
+    assert close_repository.calls == 3
 
 
 class _ThirdAppendFailsSink(InMemoryAuditSink):

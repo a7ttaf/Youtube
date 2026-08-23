@@ -375,6 +375,32 @@ describe("GapNarrativePanel in CommandView", () => {
     ).toBe(false);
   });
 
+  it("drops non-object component and warning elements without crashing", async () => {
+    // A body can pass the container checks with null ELEMENTS inside
+    // well-formed arrays; those rows must be dropped, not dereferenced.
+    const nullElements = {
+      ...GAP_EXPLANATION_WITH_WARNINGS,
+      payment_leg: {
+        ...GAP_EXPLANATION_WITH_WARNINGS.payment_leg,
+        components: [
+          null,
+          ...GAP_EXPLANATION_WITH_WARNINGS.payment_leg.components,
+        ],
+      },
+      warnings: [null, ...GAP_EXPLANATION_WITH_WARNINGS.warnings],
+    };
+    routeFetch({ gapExplanation: () => jsonResponse(nullElements) });
+    renderCommandView();
+
+    // The real rows still render; the null elements are silently dropped.
+    expect(
+      await screen.findByText("AdSense payments not yet PAID"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText("1 CANCELLED AdSense payment row is excluded from the components."),
+    ).toBeInTheDocument();
+  });
+
   it("degrades a malformed 200 body to the empty state without crashing the view", async () => {
     // Contract-drift guard: a truthy body without the leg objects must render
     // the panel's empty state — never throw inside CommandView (the regression

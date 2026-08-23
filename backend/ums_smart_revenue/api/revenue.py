@@ -2179,7 +2179,14 @@ def get_month_bank_reconciliation(
 # Standards: One fetch feeds every builder (no double reads, no drift
 #   between the legs' inputs); source ValidationErrors propagate untouched
 #   for the route's 422 translation; close_status defaults to OPEN when no
-#   close row exists.
+#   close row exists. The close status is read BEFORE and AFTER the source
+#   fetches: under READ COMMITTED a close can commit mid-read, and labeling
+#   pre-lock totals "LOCKED" would misstate a frozen month — on a detected
+#   transition the sources are refetched ONCE (post-lock sources are frozen
+#   by the locked-month write guards, so the retry pairs consistently). A
+#   second transition inside the retry (an unlock racing the read) is
+#   accepted best-effort, the same isolation reality as every sibling
+#   finance read.
 # Blast Radius: Every number the gap-explanation endpoint serves. Read-only
 #   — no audit, no mutation (the route owns the audit triple).
 # Connections:
@@ -2199,10 +2206,19 @@ def _load_month_gap_explanation(
 ) -> MonthGapExplanation:
     """Fetch the month's sources once and compose the gap explanation."""
     normalized_currency = normalize_payment_match_currency(currency)
-    facts = revenue_repository.list_month_facts(month=month)
-    payments = payment_repository.list_month_payments(month=month)
-    bank_entries = bank_repository.list_month_entries(month=month)
     close = close_repository.get(month)
+    close_status = close.status if close else "OPEN"
+    for _ in range(2):
+        facts = revenue_repository.list_month_facts(month=month)
+        payments = payment_repository.list_month_payments(month=month)
+        bank_entries = bank_repository.list_month_entries(month=month)
+        close_after = close_repository.get(month)
+        close_after_status = close_after.status if close_after else "OPEN"
+        if close_after_status == close_status:
+            break
+        # A close transition committed mid-read: refetch the sources once so
+        # the reported close state pairs with the totals it actually froze.
+        close_status = close_after_status
     payment_summary = build_monthly_payment_match_summary(
         month=month,
         facts=facts,
@@ -2219,7 +2235,7 @@ def _load_month_gap_explanation(
         payment_summary=payment_summary,
         bank_summary=bank_summary,
         payments=payments,
-        close_status=close.status if close else "OPEN",
+        close_status=close_status,
     )
 
 

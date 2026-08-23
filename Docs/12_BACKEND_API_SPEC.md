@@ -593,7 +593,11 @@ scope), and it audits all three view events (`REVENUE_VIEWED`,
 `entity_type="month_gap_explanation"`, recorded atomically inside one
 audit-sink transaction so a late append failure cannot leave a partial
 triple. `close_status` (OPEN/LOCKED) is
-included read-only; the read path is never close-guarded. The endpoint is
+included read-only; the read path is never close-guarded. The close status
+is read before and after the source fetches: if a close transition commits
+mid-read, the sources are refetched once so the reported close state pairs
+with the totals it actually froze (post-lock sources are frozen by the
+locked-month write guards). The endpoint is
 month-grain only (the PAYMENT-grain receipt-to-account bridge does not
 exist), performs no FX conversion anywhere (non-USD payment rows are counted
 and warned about, never converted), and `currency` must be `USD` via the

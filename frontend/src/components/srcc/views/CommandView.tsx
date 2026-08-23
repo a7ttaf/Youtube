@@ -1070,14 +1070,23 @@ type GapLegDescriptor = {
   residualConfidenceLabel: string;
 };
 
+// Element-level defensive read: a malformed payload can pass the container
+// checks with null/primitive ELEMENTS (e.g. components: [null]), which would
+// crash the first property dereference. Keep only object rows.
+const objectRowsOf = <T,>(rows: T[]): T[] =>
+  (Array.isArray(rows) ? rows : []).filter(
+    (row) => typeof row === "object" && row !== null,
+  );
+
 /** Pre-format one leg's component rows (display strings only). */
 const buildGapComponentRows = (
   components: GapExplanationComponent[],
   money: (value: string | null) => string,
 ): GapComponentRow[] =>
-  // Read defensively (the safeAlerts precedent): a missing/non-array field
-  // renders as no components rather than throwing inside the panel.
-  (Array.isArray(components) ? components : []).map((component) => ({
+  // Read defensively (the safeAlerts precedent): a missing/non-array field —
+  // or a non-object element inside a well-formed array — renders as no row
+  // rather than throwing inside the panel.
+  objectRowsOf(components).map((component) => ({
     key: component.key,
     label: component.label,
     evidenceSub: gapEvidenceSub(component.evidence_count),
@@ -1232,9 +1241,9 @@ const GapNarrativeHeaderBadge = ({
 };
 
 // Read warnings defensively (the safeAlerts precedent): a missing/non-array
-// field renders as no warning rows rather than throwing inside the panel.
-const safeGapWarnings = (data: MonthGapExplanation) =>
-  Array.isArray(data.warnings) ? data.warnings : [];
+// field — or a non-object element inside the array — renders as no warning
+// rows rather than throwing inside the panel.
+const safeGapWarnings = (data: MonthGapExplanation) => objectRowsOf(data.warnings);
 
 /** Loading/empty fallback rows shown before a renderable payload exists. */
 const GapNarrativePendingRows = ({
@@ -1385,9 +1394,11 @@ const GapNarrativeDataPanel = ({ month }: { month: string }) => {
 //   (this is where fx_difference_usd finally reaches the UI), each leg's
 //   unexplained residual, the month narrative line, and any data warnings.
 // Database/ORM: None (frontend) — consumes GET /revenue/months/{month}/gap-explanation.
-// Standards: Mounts its data variant ONLY behind the same three-way grant the
-//   backend enforces (VIEW_REVENUE + VIEW_FINALIZED_PAYMENTS +
-//   VIEW_BANK_RECONCILIATION); a missing grant renders the restricted band
+// Standards: Mounts its data variant ONLY behind the backend's FOUR-gate set
+//   (the smart-alerts set): VIEW_REVENUE @ global + VIEW_CONFIDENCE @ global
+//   (the response is confidence-bearing) + VIEW_FINALIZED_PAYMENTS +
+//   VIEW_BANK_RECONCILIATION satisfied for the SELECTED month via the
+//   month-resolution grant hints; anything less renders the restricted band
 //   and fires NO request. Money values are backend strings formatted for
 //   display; the browser derives no finance number. Fails independently of
 //   the surrounding view (SmartAlertsPanel template).
