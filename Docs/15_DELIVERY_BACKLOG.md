@@ -2609,7 +2609,34 @@ from the two that need design.
    mispair the close status; the smart-alerts tenant-lane audit signals stay
    outside the snapshot by ruling (authorization laning wins). Contract:
    Docs/12 "Composed-read consistency"; proofs:
-   `tests/api/test_composed_read_snapshot_postgres.py`.
+   `tests/api/test_composed_read_snapshot_postgres.py`. Extended 2026-08-23
+   (`feat/composed-read-snapshot`): net-revenue, rankings,
+   reconciliation-issues, the channel-month summary, the channel-month
+   facts listing and reconciliation-preview (both ride the same
+   guard-then-select repository read, whose single-select exemption was
+   disproven in review), the deduction-components page (a three-statement
+   repository read), and the dry-run recalculation preview begin the same
+   snapshot inside extracted `_load_*` loaders after their permission
+   gates; scoped attribution (org-unit selection, rankings grouping,
+   recalculation readiness map) re-resolves on the snapshot index
+   intersected with the gate-time authorized set, group-scoped selection
+   re-reads the group row and active roster through the registry on the
+   snapshot, intersects deny-only, permission-filters surviving members on
+   the snapshot index, and empties for a group archived mid-request (the
+   per-member covered-subset authorization stays gate-time), grant coverage
+   over org-unit and channel scopes is re-asserted deny-only on that index
+   (a reparented target unit — or a channel target moved out of its
+   granting unit — 403s; direct channel grants pass on scope identity) with
+   the same channel re-check inside the per-channel facts/preview/summary
+   loaders, the issue-queue loader intersects its covered sets re-derived
+   on the snapshot index before paging, and the allocation resolver's close
+   probe reads through the snapshot too — each red→green-proven against
+   mid-request org moves, reparents, roster drops, channel moves, a group
+   archive, and a mid-request lock.
+   Eleven GET routes plus the dry-run recalculation POST are pinned in
+   `tests/api/test_composed_read_snapshot_wiring.py`; the recalculation
+   write branch and the explain POST stay READ COMMITTED by the recorded
+   write-path ruling.
 4. ⏳ Bank/transfer/local-currency variance evidence — evidence is now
    surfaced: the gap-explanation bank leg reconciles paid AdSense money
    against bank receipts using the operator-entered transfer-fee and signed

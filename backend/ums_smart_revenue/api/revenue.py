@@ -76,6 +76,7 @@ from ums_smart_revenue.db.org_models import YouTubeChannelORM
 from ums_smart_revenue.db.read_snapshot import begin_composed_read_snapshot
 from ums_smart_revenue.db.security_models import AuditLogORM
 from ums_smart_revenue.finance.account_allocation_read import (
+    AllocationProvenance,
     allocation_provenance_to_api,
     resolve_month_account_allocation,
 )
@@ -87,6 +88,7 @@ from ums_smart_revenue.finance.allocation import AllocationLine
 from ums_smart_revenue.finance.bank_reconciliation import (
     BankReconciliationLockedMonthError,
     BankReconciliationValidationError,
+    MonthBankReconciliationSummary,
     SqlAlchemyBankReconciliationRepository,
     build_month_bank_reconciliation_summary,
 )
@@ -102,6 +104,7 @@ from ums_smart_revenue.finance.committed_allocation import (
 from ums_smart_revenue.finance.decimal_formatting import decimal_to_api as _decimal_to_api
 from ums_smart_revenue.finance.deduction_components import DeductionComponent
 from ums_smart_revenue.finance.deduction_ingestion import (
+    DeductionComponentPage,
     DeductionComponentValidationError,
     SqlAlchemyDeductionComponentRepository,
 )
@@ -128,21 +131,25 @@ from ums_smart_revenue.finance.manual_overrides import (
 from ums_smart_revenue.finance.month_close import SqlAlchemyFinanceMonthCloseRepository
 from ums_smart_revenue.finance.net_revenue import (
     NET_APPLICABLE_COMPONENT_KINDS,
+    MonthNetRevenueSummary,
     NetRevenueValidationError,
     build_month_net_revenue_summary,
     filter_account_allocations_to_scope,
     normalize_net_revenue_currency,
 )
 from ums_smart_revenue.finance.payment_matching import (
+    MonthlyPaymentMatchSummary,
     PaymentMatchValidationError,
     build_monthly_payment_match_summary,
     normalize_payment_match_currency,
 )
 from ums_smart_revenue.finance.rankings import (
+    MonthRankingsSummary,
     RankingsValidationError,
     build_month_rankings,
 )
 from ums_smart_revenue.finance.recalculation import (
+    RevenueRecalculationPreview,
     RevenueRecalculationValidationError,
     build_recalculation_preview,
     normalize_allocation_method,
@@ -165,11 +172,14 @@ from ums_smart_revenue.finance.smart_alerts import (
     MISSING_FACT_CHANNEL_SAMPLE_LIMIT,
     MonthlySmartAlertAuditSignals,
     MonthlySmartAlertFinanceInputs,
+    MonthlySmartAlertSummary,
     MonthlySmartAlertTrendSignals,
     build_monthly_smart_alert_summary,
 )
+from ums_smart_revenue.org.access_index import load_org_access_index_from_session
 from ums_smart_revenue.org.channel_groups import ChannelGroupRegistryStore
 from ums_smart_revenue.org.org_units_read import SqlAlchemyOrgUnitReader
+from ums_smart_revenue.org.sql_channel_groups import SqlAlchemyChannelGroupRegistry
 from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
 from ums_smart_revenue.tenancy.context import get_current_tenant
 
@@ -705,6 +715,122 @@ def _commit_recalculation_write(
 
 
 # ============================================================================
+# Purpose: Data-access + composition step for the recalculation preview,
+#   extracted out of the route handler (thin-orchestration rule): on a dry
+#   run, begin the composed-read snapshot; fetch facts and overrides once and
+#   build the readiness preview.
+# Database/ORM: Reads facts and overrides via the RevenueFact and
+#   ManualOverride repositories. dry_run=true begins the platform session's
+#   REPEATABLE READ composed-read snapshot first (db/read_snapshot.py) — the
+#   preview is a composed two-source read, so an override committing between
+#   the fetches can no longer produce a readiness decision from sources that
+#   never coexisted. dry_run=false deliberately does NOT begin it: the same
+#   request continues into the committed-allocation writer, and wiring
+#   reads-then-write into one REPEATABLE READ transaction is the recorded
+#   write-path residual (upsert conflicts would abort rather than degrade —
+#   the same ruling that keeps the explain POST unwired). No writes here
+#   either way.
+# Standards: The snapshot begins here — NOT in a route dependency — so the
+#   route's permission gates always run first: denial must precede any
+#   transaction begin. On a dry run the scoped selection (org units via the
+#   snapshot index, groups via the registry roster —
+#   _snapshot_selection_channel_ids) AND the channel_company readiness map
+#   re-resolve on the snapshot — attribution is money-adjacent, so a channel
+#   moved between org units or dropped from a group roster mid-request is
+#   never previewed under its former scope and COMPANY_UNMAPPED readiness is
+#   judged against the same database state as the facts; the deny-only grant
+#   re-check covers org-unit and channel targets. The WRITE branch keeps the
+#   TENANT-lane index for both: its preflight preview must mirror the commit
+#   engine's fail-closed COMPANY_UNMAPPED behavior from the SAME index
+#   within the same request
+#   (preview/commit parity is load-bearing there). Source ValidationErrors
+#   propagate untouched for the route's 422 translation.
+# Blast Radius: Every readiness number the recalculation preview serves and
+#   the write branch's pre-flight gate. Read-only — the route owns the
+#   write, the audit event, and the response envelope.
+# Connections:
+#   - File: backend/ums_smart_revenue/finance/recalculation.py -> the pure
+#     preview builder.
+#   - File: backend/ums_smart_revenue/db/read_snapshot.py -> the dry-run
+#     snapshot begun before the first fetch.
+# ============================================================================
+def _load_recalculation_preview(
+    *,
+    payload: RevenueRecalculationRequest,
+    user: UserPrincipal,
+    target_scope: AccessScope,
+    channel_ids: set[str] | None,
+    org_index: OrgAccessIndex,
+    platform_session: Session,
+    revenue_repository: SqlAlchemyRevenueFactRepository,
+    override_repository: SqlAlchemyManualOverrideRepository,
+) -> RevenueRecalculationPreview:
+    """Fetch facts and overrides (dry runs: inside the snapshot), build the preview."""
+    selection_channel_ids = channel_ids
+    channel_company = org_index.channel_company
+    if payload.dry_run:
+        # FIX: One MVCC snapshot for both source reads below on the dry-run
+        # preview — an override or fact committing between them can no longer
+        # tear the readiness decision — and for the org attribution: the
+        # selection set and the COMPANY_UNMAPPED readiness map re-resolve
+        # from the snapshot index, so a channel moved between org units
+        # mid-request is never previewed under its former scope (REPEATABLE
+        # READ on Postgres; db/read_snapshot.py holds the ruling). The write
+        # branch stays READ COMMITTED on the tenant index by the recorded
+        # write-path ruling (preview/commit parity within one request).
+        begin_composed_read_snapshot(platform_session)
+        snapshot_index = load_org_access_index_from_session(platform_session)
+        # Deny-only: a sector-granted caller whose target unit was reparented
+        # out of the grant — or whose target channel was moved out of the
+        # granted unit — between the gate and the snapshot must not preview
+        # snapshot-era finance data under gate-era containment.
+        _require_snapshot_org_scope_access(
+            user,
+            permissions=(Permission.VIEW_REVENUE,),
+            target_scope=target_scope,
+            org_index=snapshot_index,
+        )
+        selection_channel_ids = _snapshot_selection_channel_ids(
+            user,
+            permissions=(Permission.VIEW_REVENUE,),
+            target_scope=target_scope,
+            authorized_channel_ids=channel_ids,
+            platform_session=platform_session,
+            org_index=snapshot_index,
+        )
+        channel_company = snapshot_index.channel_company
+    facts = revenue_repository.list_month_facts(
+        month=payload.month,
+        youtube_channel_ids=selection_channel_ids,
+    )
+    overrides = override_repository.list_month_overrides(
+        month=payload.month,
+        youtube_channel_ids=selection_channel_ids,
+    )
+    return build_recalculation_preview(
+        month=payload.month,
+        allocation_method=payload.allocation_method,
+        scope_type=payload.scope_type,
+        scope_id=payload.scope_id,
+        currency=payload.currency,
+        dry_run=payload.dry_run,
+        facts=facts,
+        manual_overrides=overrides,
+        # company_level readiness: the dry run judges COMPANY_UNMAPPED from
+        # the snapshot index; the write branch's preflight mirrors the commit
+        # engine's fail-closed path from the same tenant index it commits
+        # with.
+        channel_company=channel_company,
+        # Pass the scoped channel set so verified channels without fact
+        # rows are also checked against the company mapping, preventing
+        # false READY_FOR_REVIEW before a company_level commit.
+        verified_channel_ids=(
+            frozenset(selection_channel_ids) if selection_channel_ids is not None else None
+        ),
+    )
+
+
+# ============================================================================
 # Purpose: Preview a scoped revenue recalculation (dry_run=true), or commit a
 #   whole-month allocation snapshot (dry_run=false) via the same service path as
 #   the dedicated commit endpoint. dry_run=true never writes; dry_run=false adds a
@@ -715,7 +841,11 @@ def _commit_recalculation_write(
 #   rows + one ALLOCATION_COMMITTED audit row (see _commit_recalculation_write).
 # Standards: thin route; fail-closed gates BEFORE request-shape validation BEFORE
 #   pre-flight BEFORE the service; typed errors -> 422/409; in-memory RECALCULATION
-#   audit carries the final write_status. No secrets, no per-line dump.
+#   audit carries the final write_status. No secrets, no per-line dump. The
+#   dry-run preview reads run inside one REPEATABLE READ composed-read snapshot
+#   on Postgres, begun by _load_recalculation_preview after the gates (the
+#   handler never touches the session); the write branch stays READ COMMITTED
+#   by the recorded write-path ruling.
 # Blast Radius: Authorization (added write gate), finance write, audit. No Neo4j.
 # Connections:
 #   - File: backend/ums_smart_revenue/finance/recalculation.py -> pre-flight.
@@ -770,6 +900,7 @@ def request_revenue_recalculation(
         SqlAlchemyChannelAccountLinkRepository,
         Depends(current_channel_account_link_repository),
     ],
+    platform_session: Annotated[Session, Depends(current_platform_db_session)],
     audit_sink: Annotated[AuditSink, Depends(current_revenue_audit_sink)],
     group_registry: Annotated[
         ChannelGroupRegistryStore,
@@ -807,30 +938,15 @@ def request_revenue_recalculation(
         )
 
     try:
-        facts = revenue_repository.list_month_facts(
-            month=payload.month,
-            youtube_channel_ids=channel_ids,
-        )
-        overrides = override_repository.list_month_overrides(
-            month=payload.month,
-            youtube_channel_ids=channel_ids,
-        )
-        preview = build_recalculation_preview(
-            month=payload.month,
-            allocation_method=payload.allocation_method,
-            scope_type=payload.scope_type,
-            scope_id=payload.scope_id,
-            currency=payload.currency,
-            dry_run=payload.dry_run,
-            facts=facts,
-            manual_overrides=overrides,
-            # company_level parity: the preview mirrors the commit engine's
-            # fail-closed COMPANY_UNMAPPED path from the same org index.
-            channel_company=org_index.channel_company,
-            # Pass the scoped channel set so verified channels without fact
-            # rows are also checked against the company mapping, preventing
-            # false READY_FOR_REVIEW before a company_level commit.
-            verified_channel_ids=(frozenset(channel_ids) if channel_ids is not None else None),
+        preview = _load_recalculation_preview(
+            payload=payload,
+            user=user,
+            target_scope=target_scope,
+            channel_ids=channel_ids,
+            org_index=org_index,
+            platform_session=platform_session,
+            revenue_repository=revenue_repository,
+            override_repository=override_repository,
         )
     except (
         ManualOverrideValidationError,
@@ -968,6 +1084,29 @@ def import_revenue_fact(
     return _with_audit_event(fact, record)
 
 
+# ============================================================================
+# Purpose: List every stored revenue fact for one channel and month — the
+#   raw multi-source rows the reconciliation preview compares. Read-only.
+# Database/ORM: One RevenueFact repository read on the platform-lane session;
+#   appends a REVENUE_VIEWED audit event through the revenue audit sink. No
+#   locks or writes to finance rows.
+# Standards: Single VIEW_REVENUE gate at channel scope through the org-access
+#   index; denial precedes the source read. The read happens inside the
+#   REPEATABLE READ composed-read snapshot begun by _load_channel_month_facts
+#   after the gate (the repository read is two statements — the
+#   active-channel guard, then the facts select — the same guard-then-select
+#   shape whose single-select exemption was disproven on the
+#   reconciliation-preview route); the handler itself never touches the
+#   session (thin-orchestration rule).
+# Blast Radius: Channel-level facts read surface; 404 on unknown
+#   channel/month, 422 on malformed month.
+# Connections:
+#   - File: backend/ums_smart_revenue/finance/revenue_facts.py -> the
+#     two-statement repository read under the snapshot.
+#   - File: backend/ums_smart_revenue/db/read_snapshot.py -> the composed-read
+#     snapshot begun between the gate and the source read.
+#   - File: Docs/12_BACKEND_API_SPEC.md -> channel facts listing contract.
+# ============================================================================
 @router.get("/channels/{channel_id}/months/{month}/facts")
 def list_channel_month_revenue_facts(
     channel_id: str,
@@ -978,13 +1117,21 @@ def list_channel_month_revenue_facts(
         SqlAlchemyRevenueFactRepository,
         Depends(current_revenue_fact_repository),
     ],
+    platform_session: Annotated[Session, Depends(current_platform_db_session)],
     audit_sink: Annotated[AuditSink, Depends(current_revenue_audit_sink)],
 ) -> dict[str, object]:
     """Return all revenue facts recorded for a channel in a given month."""
     target_scope = AccessScope.channel(channel_id)
     _require_permission(user, Permission.VIEW_REVENUE, target_scope, org_index)
     try:
-        facts = repository.list_channel_month_facts(month=month, youtube_channel_id=channel_id)
+        facts = _load_channel_month_facts(
+            month=month,
+            channel_id=channel_id,
+            user=user,
+            permissions=(Permission.VIEW_REVENUE,),
+            platform_session=platform_session,
+            repository=repository,
+        )
     except RevenueFactNotFoundError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
     except RevenueFactValidationError as exc:
@@ -1010,6 +1157,86 @@ def list_channel_month_revenue_facts(
     }
 
 
+# ============================================================================
+# Purpose: Data-access step shared by the per-channel facts listing and the
+#   reconciliation preview, extracted out of the route handlers
+#   (thin-orchestration rule): begin the composed-read snapshot and fetch the
+#   channel's facts.
+# Database/ORM: Begins the platform session's REPEATABLE READ composed-read
+#   snapshot (db/read_snapshot.py), then reads via the RevenueFact
+#   repository. No writes.
+# Standards: The snapshot begins here — NOT in a route dependency — so each
+#   route's permission gates always run first: denial must precede any
+#   transaction begin. These endpoints were originally EXEMPT on a
+#   single-select premise, disproven in review (codex): list_channel_month_facts
+#   issues TWO statements — the active-channel guard, then the facts select —
+#   so a channel deactivated between them could pair a stale guard decision
+#   with the facts; under the snapshot the guard state and the facts provably
+#   coexist. The channel target is then re-checked deny-only against the
+#   snapshot index (_require_snapshot_org_scope_access with each route's own
+#   gate permissions): a caller admitted through an inherited sector/company
+#   grant whose channel moved out of the granting unit mid-request 403s
+#   instead of receiving snapshot-era facts under gate-era containment, while
+#   direct channel grants keep passing on scope identity. Not-found and
+#   ValidationErrors propagate untouched for the routes' 404/422 translation.
+# Blast Radius: The guard/facts coherence and stale-containment refusal of
+#   both per-channel reads. Read-only — each route owns its build and audit
+#   event.
+# Connections:
+#   - File: backend/ums_smart_revenue/finance/revenue_facts.py -> the
+#     two-statement repository read this snapshot makes coherent.
+#   - File: backend/ums_smart_revenue/db/read_snapshot.py -> the snapshot
+#     begun before the first statement.
+# ============================================================================
+def _load_channel_month_facts(
+    *,
+    month: str,
+    channel_id: str,
+    user: UserPrincipal,
+    permissions: tuple[Permission, ...],
+    platform_session: Session,
+    repository: SqlAlchemyRevenueFactRepository,
+) -> list[RevenueFactEntry]:
+    """Begin the composed-read snapshot, re-check the channel, fetch its facts."""
+    # FIX: One MVCC snapshot for the active-channel guard and the facts select
+    # inside list_channel_month_facts — the guard decision and the facts it
+    # authorizes can no longer come from different database states
+    # (REPEATABLE READ on Postgres; db/read_snapshot.py holds the ruling).
+    begin_composed_read_snapshot(platform_session)
+    # Deny-only: a caller admitted via an inherited org grant must not be
+    # served after the channel moved out of the granting unit mid-request.
+    _require_snapshot_org_scope_access(
+        user,
+        permissions=permissions,
+        target_scope=AccessScope.channel(channel_id),
+        org_index=load_org_access_index_from_session(platform_session),
+    )
+    return repository.list_channel_month_facts(month=month, youtube_channel_id=channel_id)
+
+
+# ============================================================================
+# Purpose: Serve the per-channel multi-source reconciliation preview for one
+#   month — every stored fact for the channel/month compared source-by-source.
+#   Read-only; never mutates finance numbers.
+# Database/ORM: One RevenueFact repository read on the platform-lane
+#   session; appends a REVENUE_VIEWED audit event through the revenue audit
+#   sink. No locks or writes to finance rows.
+# Standards: Two-permission gate — VIEW_REVENUE + VIEW_CONFIDENCE at channel
+#   scope through the org-access index; denial precedes the source read.
+#   The read happens inside the REPEATABLE READ composed-read snapshot begun
+#   by _load_channel_month_facts after the gates (the repository read is two
+#   statements — guard, then select — so the single-select exemption this
+#   route once carried was unsound); the handler itself never touches the
+#   session (thin-orchestration rule).
+# Blast Radius: Channel-level reconciliation read surface; 404 on unknown
+#   channel/month, 422 on malformed month.
+# Connections:
+#   - File: backend/ums_smart_revenue/finance/reconciliation.py -> the pure
+#     preview builder.
+#   - File: backend/ums_smart_revenue/db/read_snapshot.py -> the composed-read
+#     snapshot begun between the gates and the source read.
+#   - File: Docs/12_BACKEND_API_SPEC.md -> reconciliation-preview contract.
+# ============================================================================
 @router.get("/channels/{channel_id}/months/{month}/reconciliation-preview")
 def get_channel_month_reconciliation_preview(
     channel_id: str,
@@ -1020,6 +1247,7 @@ def get_channel_month_reconciliation_preview(
         SqlAlchemyRevenueFactRepository,
         Depends(current_revenue_fact_repository),
     ],
+    platform_session: Annotated[Session, Depends(current_platform_db_session)],
     audit_sink: Annotated[AuditSink, Depends(current_revenue_audit_sink)],
 ) -> dict[str, object]:
     """Build and return the multi-source reconciliation preview for a channel and month."""
@@ -1027,7 +1255,14 @@ def get_channel_month_reconciliation_preview(
     _require_permission(user, Permission.VIEW_REVENUE, target_scope, org_index)
     _require_permission(user, Permission.VIEW_CONFIDENCE, target_scope, org_index)
     try:
-        facts = repository.list_channel_month_facts(month=month, youtube_channel_id=channel_id)
+        facts = _load_channel_month_facts(
+            month=month,
+            channel_id=channel_id,
+            user=user,
+            permissions=(Permission.VIEW_REVENUE, Permission.VIEW_CONFIDENCE),
+            platform_session=platform_session,
+            repository=repository,
+        )
     except RevenueFactNotFoundError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
     except RevenueFactValidationError as exc:
@@ -1057,6 +1292,120 @@ def get_channel_month_reconciliation_preview(
     return preview.to_api()
 
 
+# ============================================================================
+# Purpose: Data-access step for the month reconciliation issue queue,
+#   extracted out of the route handler (thin-orchestration rule): begin the
+#   composed-read snapshot, narrow the visible set on it, fetch one
+#   channel-id page and its facts.
+# Database/ORM: Begins the platform session's REPEATABLE READ composed-read
+#   snapshot (db/read_snapshot.py), re-reads the org-access index on it, then
+#   reads the channel-id page and the page's facts via the RevenueFact
+#   repository. No writes.
+# Standards: The snapshot begins here — NOT in a route dependency — so the
+#   route's grant checks always run first: denial must precede any
+#   transaction begin (pinned by the gap-explanation direct-call tests'
+#   fail-if-touched platform-session stubs). The gate-time visible set is
+#   then INTERSECTED with the same covered-set derivation re-run on the
+#   snapshot index, deny-only (both-states rule): a channel moved out of the
+#   caller's granted unit between the gate and the snapshot is dropped
+#   before paging instead of having its snapshot-era facts served under
+#   gate-era containment, and a channel moved in was never gate-covered and
+#   stays out. The route's empty-scope early return never reaches this
+#   loader; a selection that empties ON THE SNAPSHOT returns an empty page
+#   without touching the repository (empty queue, not 403 — the same
+#   contract as the route's gate-time empty). The snapshot-EFFECTIVE scope
+#   set is returned so the route's audit reports the scope that actually
+#   served the page — auditing the stale gate-time set would claim a
+#   channel was in scope after the recheck removed it. Source
+#   ValidationErrors propagate untouched for the route's 422 translation.
+# Blast Radius: The issue queue's page coherence, which channels' facts it
+#   may page, and the audited scope count. Deny-only — the snapshot
+#   intersect can only shrink the selection.
+# Connections:
+#   - File: backend/ums_smart_revenue/finance/reconciliation.py -> the pure
+#     issue-queue builder consuming the page's facts.
+#   - File: backend/ums_smart_revenue/org/access_index.py -> the snapshot
+#     index the covered sets re-derive from.
+#   - File: backend/ums_smart_revenue/db/read_snapshot.py -> the snapshot
+#     begun before the first fetch.
+# ============================================================================
+def _load_month_reconciliation_issue_page(
+    *,
+    month: str,
+    user: UserPrincipal,
+    visible_channel_ids: set[str] | None,
+    limit: int,
+    offset: int,
+    platform_session: Session,
+    repository: SqlAlchemyRevenueFactRepository,
+) -> tuple[list[str], list[RevenueFactEntry], bool, set[str] | None]:
+    """Begin the composed-read snapshot, narrow the scope on it, fetch one page.
+
+    Returns ``(channel_ids_for_page, facts, has_more, effective_scope_channel_ids)``
+    where the last element is the snapshot-narrowed scope the page was
+    actually selected from (``None`` for global callers).
+    """
+    # FIX: One MVCC snapshot for the channel-id page and the facts read below —
+    # a fact committing between them can no longer tear the issue queue against
+    # its own pagination (REPEATABLE READ on Postgres; db/read_snapshot.py
+    # holds the ruling).
+    begin_composed_read_snapshot(platform_session)
+    # Deny-only: re-derive the covered sets on the snapshot index and
+    # intersect with the gate-time visible set, so a channel moved out of the
+    # caller's granted unit mid-request is dropped before paging.
+    snapshot_index = load_org_access_index_from_session(platform_session)
+    snapshot_visible_channel_ids = _intersect_channel_sets(
+        _authorized_channel_ids_for_permission(user, Permission.VIEW_REVENUE, snapshot_index),
+        _authorized_channel_ids_for_permission(user, Permission.VIEW_CONFIDENCE, snapshot_index),
+    )
+    page_scope_channel_ids = _intersect_channel_sets(
+        visible_channel_ids, snapshot_visible_channel_ids
+    )
+    if page_scope_channel_ids is not None and not page_scope_channel_ids:
+        return [], [], False, page_scope_channel_ids
+    page_size = limit + 1
+    page_channel_ids = repository.list_month_channel_ids(
+        month=month,
+        youtube_channel_ids=page_scope_channel_ids,
+        limit=page_size,
+        offset=offset,
+    )
+    channel_ids_for_page = page_channel_ids[:limit]
+    facts = repository.list_month_facts(
+        month=month,
+        youtube_channel_ids=set(channel_ids_for_page),
+    )
+    return channel_ids_for_page, facts, len(page_channel_ids) > limit, page_scope_channel_ids
+
+
+# ============================================================================
+# Purpose: Serve the paginated month reconciliation issue queue — every
+#   authorized channel's facts scanned for cross-source issues, ordered for
+#   finance triage. Read-only; never mutates finance numbers.
+# Database/ORM: Channel-id page + facts reads via the RevenueFact repository
+#   on the platform-lane session; appends a REVENUE_VIEWED audit event through
+#   the revenue audit sink. No locks or writes to finance rows.
+# Standards: VIEW_REVENUE + VIEW_CONFIDENCE, scope-mapped: a caller with no
+#   relevant grant at all is rejected, while a scoped grant that currently
+#   maps to zero channels sees an empty queue (not 403). Both source reads
+#   happen inside one REPEATABLE READ composed-read snapshot on Postgres
+#   (db/read_snapshot.py) begun after the grant checks, so a fact committing
+#   mid-read cannot tear the queue against its own pagination. The channel
+#   authorization itself runs in-memory over the tenant-lane org-access index
+#   before the snapshot (laning is an authorization boundary — platform data
+#   never grants); the loader then re-derives the covered sets on the
+#   snapshot index and intersects them with that gate-time set, deny-only,
+#   so a channel moved out of the granted unit mid-request is dropped before
+#   paging.
+# Blast Radius: Finance triage read surface; pagination contract
+#   (limit/offset/next_offset/has_more) feeds the frontend issue queue.
+# Connections:
+#   - File: backend/ums_smart_revenue/finance/reconciliation.py -> the pure
+#     issue-queue builder.
+#   - File: backend/ums_smart_revenue/db/read_snapshot.py -> the composed-read
+#     snapshot begun between the grant checks and the source reads.
+#   - File: Docs/12_BACKEND_API_SPEC.md -> reconciliation-issues contract.
+# ============================================================================
 @router.get("/months/{month}/reconciliation-issues")
 def list_month_reconciliation_issues(
     month: str,
@@ -1066,6 +1415,7 @@ def list_month_reconciliation_issues(
         SqlAlchemyRevenueFactRepository,
         Depends(current_revenue_fact_repository),
     ],
+    platform_session: Annotated[Session, Depends(current_platform_db_session)],
     audit_sink: Annotated[AuditSink, Depends(current_revenue_audit_sink)],
     limit: int = Query(default=100, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
@@ -1079,6 +1429,12 @@ def list_month_reconciliation_issues(
     if not _granted_scopes_for_permission(user, Permission.VIEW_CONFIDENCE):
         _raise_missing_permission(Permission.VIEW_CONFIDENCE)
 
+    # The channel authorization below runs in-memory over the org-access index
+    # (loaded on the TENANT lane) before the composed-read snapshot, which
+    # _load_month_reconciliation_issue_page begins afterwards: laning is an
+    # authorization boundary and platform data never grants. The loader
+    # re-derives these covered sets on the snapshot index and intersects them
+    # with this gate-time set, deny-only.
     revenue_channel_ids = _authorized_channel_ids_for_permission(
         user,
         Permission.VIEW_REVENUE,
@@ -1117,17 +1473,19 @@ def list_month_reconciliation_issues(
         return response
 
     try:
-        page_size = limit + 1
-        page_channel_ids = repository.list_month_channel_ids(
+        (
+            channel_ids_for_page,
+            facts,
+            has_more,
+            effective_scope_channel_ids,
+        ) = _load_month_reconciliation_issue_page(
             month=month,
-            youtube_channel_ids=visible_channel_ids,
-            limit=page_size,
+            user=user,
+            visible_channel_ids=visible_channel_ids,
+            limit=limit,
             offset=offset,
-        )
-        channel_ids_for_page = page_channel_ids[:limit]
-        facts = repository.list_month_facts(
-            month=month,
-            youtube_channel_ids=set(channel_ids_for_page),
+            platform_session=platform_session,
+            repository=repository,
         )
     except RevenueFactValidationError as exc:
         raise HTTPException(
@@ -1135,7 +1493,6 @@ def list_month_reconciliation_issues(
             detail=str(exc),
         ) from exc
 
-    has_more = len(page_channel_ids) > limit
     queue = build_revenue_reconciliation_issue_queue(facts, month=month)
     record_audit_event(
         sink=audit_sink,
@@ -1149,8 +1506,13 @@ def list_month_reconciliation_issues(
             "page_channel_count": len(channel_ids_for_page),
             "page_fact_count": len(facts),
             "has_more": has_more,
+            # The snapshot-EFFECTIVE scope, not the gate-time set: the loader's
+            # deny-only recheck may have narrowed the selection, and the audit
+            # must not claim a channel was in scope after it was removed.
             "scoped_channel_count": (
-                len(visible_channel_ids) if visible_channel_ids is not None else None
+                len(effective_scope_channel_ids)
+                if effective_scope_channel_ids is not None
+                else None
             ),
         },
     )
@@ -1165,6 +1527,50 @@ def list_month_reconciliation_issues(
 
 
 # ============================================================================
+# Purpose: Data-access + composition step for the monthly payment match,
+#   extracted out of the route handler (thin-orchestration rule): begin the
+#   composed-read snapshot, fetch both sources once, and build the summary.
+# Database/ORM: Begins the platform session's REPEATABLE READ composed-read
+#   snapshot (db/read_snapshot.py), then reads via the RevenueFact and
+#   AdSensePayment repositories. No writes.
+# Standards: The snapshot begins here — NOT in a route dependency — so the
+#   route's permission gates always run first: denial must precede any
+#   transaction begin (pinned by the gap-explanation direct-call tests'
+#   fail-if-touched platform-session stubs). Source ValidationErrors
+#   propagate untouched for the route's 422 translation.
+# Blast Radius: Every number the payment-match endpoint serves. Read-only —
+#   the route owns the audit events.
+# Connections:
+#   - File: backend/ums_smart_revenue/finance/payment_matching.py -> the pure
+#     summary builder and currency normalization.
+#   - File: backend/ums_smart_revenue/db/read_snapshot.py -> the snapshot
+#     begun before the first fetch.
+# ============================================================================
+def _load_month_payment_match(
+    *,
+    month: str,
+    currency: str,
+    platform_session: Session,
+    revenue_repository: SqlAlchemyRevenueFactRepository,
+    payment_repository: SqlAlchemyAdSensePaymentRepository,
+) -> MonthlyPaymentMatchSummary:
+    """Begin the composed-read snapshot, fetch both sources, build the summary."""
+    # FIX: One MVCC snapshot for both source reads below — a payment or fact
+    # committing between them can no longer tear the composed totals
+    # (REPEATABLE READ on Postgres; db/read_snapshot.py holds the ruling).
+    begin_composed_read_snapshot(platform_session)
+    normalized_currency = normalize_payment_match_currency(currency)
+    facts = revenue_repository.list_month_facts(month=month)
+    payments = payment_repository.list_month_payments(month=month)
+    return build_monthly_payment_match_summary(
+        month=month,
+        facts=facts,
+        payments=payments,
+        currency=normalized_currency,
+    )
+
+
+# ============================================================================
 # Purpose: Serve the monthly payment-match summary — YouTube revenue facts
 #   compared against AdSense payments for one month, with the match status
 #   and self-audit trail. Read-only; never mutates finance numbers.
@@ -1174,8 +1580,10 @@ def list_month_reconciliation_issues(
 # Standards: Two-permission gate — VIEW_REVENUE at global scope plus
 #   VIEW_FINALIZED_PAYMENTS at finance-month scope; denial precedes any source
 #   read. Both source reads happen inside one REPEATABLE READ composed-read
-#   snapshot on Postgres (db/read_snapshot.py) begun after the gates, so a
-#   payment or fact committing mid-read cannot tear the composed totals.
+#   snapshot on Postgres (db/read_snapshot.py) begun by
+#   _load_month_payment_match after the gates, so a payment or fact
+#   committing mid-read cannot tear the composed totals; the handler itself
+#   never touches the session (thin-orchestration rule).
 # Blast Radius: Finance dashboard read surface; the payment-match wire
 #   contract feeds the Command Center and the smart-alerts builder reuses the
 #   same summary shape.
@@ -1207,19 +1615,13 @@ def get_month_payment_match(
     payment_scope = AccessScope.finance_month(month)
     _require_permission(user, Permission.VIEW_REVENUE, revenue_scope)
     _require_permission(user, Permission.VIEW_FINALIZED_PAYMENTS, payment_scope)
-    # FIX: One MVCC snapshot for both source reads below — a payment or fact
-    # committing between them can no longer tear the composed totals
-    # (REPEATABLE READ on Postgres; db/read_snapshot.py holds the ruling).
-    begin_composed_read_snapshot(platform_session)
     try:
-        normalized_currency = normalize_payment_match_currency(currency)
-        facts = revenue_repository.list_month_facts(month=month)
-        payments = payment_repository.list_month_payments(month=month)
-        summary = build_monthly_payment_match_summary(
+        summary = _load_month_payment_match(
             month=month,
-            facts=facts,
-            payments=payments,
-            currency=normalized_currency,
+            currency=currency,
+            platform_session=platform_session,
+            revenue_repository=revenue_repository,
+            payment_repository=payment_repository,
         )
     except (
         AdSensePaymentValidationError,
@@ -1265,6 +1667,104 @@ def get_month_payment_match(
 
 
 # ============================================================================
+# Purpose: Data-access + composition step for the monthly smart alerts,
+#   extracted out of the route handler (thin-orchestration rule): begin the
+#   composed-read snapshot, fetch every finance source and the missing-fact
+#   coverage pair once, gather the audit-gated tenant-lane signals, and build
+#   the prioritized alert summary.
+# Database/ORM: Begins the platform session's REPEATABLE READ composed-read
+#   snapshot (db/read_snapshot.py), then reads facts (both months), payments,
+#   bank entries, overrides, close status, and the coverage pair on that
+#   snapshot; the audit-derived signals read through the TENANT-lane
+#   `session` and deliberately stay outside it (their laning is an
+#   authorization boundary). No writes.
+# Standards: The snapshot begins here — NOT in a route dependency — so the
+#   route's permission gates always run first: denial must precede any
+#   transaction begin (pinned by the gap-explanation direct-call tests'
+#   fail-if-touched platform-session stubs). Source ValidationErrors
+#   propagate untouched for the route's 422 translation.
+# Blast Radius: Every alert the smart-alerts endpoint serves. Read-only —
+#   the route owns the audit events.
+# Connections:
+#   - File: backend/ums_smart_revenue/finance/smart_alerts.py -> the pure
+#     alert builder and its input dataclasses.
+#   - File: backend/ums_smart_revenue/db/read_snapshot.py -> the snapshot
+#     begun before the first fetch.
+# ============================================================================
+def _load_month_smart_alerts(
+    *,
+    month: str,
+    session: Session,
+    platform_session: Session,
+    revenue_repository: SqlAlchemyRevenueFactRepository,
+    payment_repository: SqlAlchemyAdSensePaymentRepository,
+    bank_repository: SqlAlchemyBankReconciliationRepository,
+    override_repository: SqlAlchemyManualOverrideRepository,
+    close_repository: SqlAlchemyFinanceMonthCloseRepository,
+    can_view_audit_log: bool,
+    include_sensitive_details: bool,
+) -> tuple[MonthlySmartAlertSummary, MonthlySmartAlertAuditSignals]:
+    """Begin the composed-read snapshot, fetch every source, build the alert summary.
+
+    Returns ``(summary, audit_signals)`` — the route needs the signals again
+    for its AUDIT_LOG_VIEWED self-audit details.
+    """
+    # FIX: One MVCC snapshot for every finance source read below (facts, both
+    # months, payments, bank entries, overrides, close, missing-fact coverage)
+    # — a close committing mid-read can no longer suppress MONTH_NOT_LOCKED
+    # against pre-lock totals, and no writer can tear the cross-source alert
+    # inputs (REPEATABLE READ on Postgres; db/read_snapshot.py holds the
+    # ruling). The coverage query is NOT audit-gated, so it reads through the
+    # platform snapshot like every other finance source; only the audit-derived
+    # signals read through the TENANT-lane `session` and deliberately stay
+    # outside this snapshot: their laning is an authorization boundary.
+    begin_composed_read_snapshot(platform_session)
+    facts = revenue_repository.list_month_facts(month=month)
+    previous_facts = revenue_repository.list_month_facts(month=_previous_month(month))
+    payments = payment_repository.list_month_payments(month=month)
+    bank_entries = bank_repository.list_month_entries(month=month)
+    manual_overrides = override_repository.list_month_overrides(month=month)
+    close = close_repository.get(month)
+    (
+        missing_fact_channel_count,
+        missing_fact_channel_sample,
+    ) = missing_revenue_fact_channel_count_and_sample(platform_session, month=month)
+    audit_signals = _month_smart_alert_audit_signals(
+        session,
+        month=month,
+        missing_fact_channel_count=missing_fact_channel_count,
+        missing_fact_channel_sample=missing_fact_channel_sample,
+        can_view_audit_log=can_view_audit_log,
+        include_sensitive_details=include_sensitive_details,
+    )
+    payment_match = build_monthly_payment_match_summary(
+        month=month,
+        facts=facts,
+        payments=payments,
+    )
+    bank_reconciliation = build_month_bank_reconciliation_summary(
+        month=month,
+        payments=payments,
+        bank_entries=bank_entries,
+    )
+    summary = build_monthly_smart_alert_summary(
+        month=month,
+        finance=MonthlySmartAlertFinanceInputs(
+            payment_match=payment_match,
+            bank_reconciliation=bank_reconciliation,
+            close_status=close.status if close else "OPEN",
+            manual_overrides=manual_overrides,
+        ),
+        audit_signals=audit_signals,
+        trend_signals=MonthlySmartAlertTrendSignals(
+            current_revenue_facts=facts,
+            previous_revenue_facts=previous_facts,
+        ),
+    )
+    return summary, audit_signals
+
+
+# ============================================================================
 # Purpose: Serve the monthly smart-alerts dashboard endpoint. Aggregates
 #   cross-domain finance health signals (payment match, bank reconciliation,
 #   coverage gap, audit-derived skipped source rows, audit-derived failed
@@ -1283,9 +1783,11 @@ def get_month_payment_match(
 #   the count is returned but the breakdown is redacted, mirroring audit.py.
 #   Finance sources — including the non-audit-gated missing-fact coverage
 #   pair — are read inside one REPEATABLE READ composed-read snapshot on
-#   Postgres (db/read_snapshot.py) so the close status and coverage always
-#   pair with the totals of the same snapshot; the tenant-lane audit
-#   signals deliberately stay outside it (authorization laning wins).
+#   Postgres (db/read_snapshot.py), begun by _load_month_smart_alerts after
+#   the gates, so the close status and coverage always pair with the totals
+#   of the same snapshot; the tenant-lane audit signals deliberately stay
+#   outside it (authorization laning wins), and the handler itself never
+#   touches the session (thin-orchestration rule).
 # Blast Radius: Finance dashboard + audit-observability boundary. The audit
 #   gate is the security-relevant change; do not weaken it without an owner
 #   review. No money/ingestion/match/close behavior change.
@@ -1343,44 +1845,18 @@ def get_month_smart_alerts(
     include_sensitive_details = can_view_audit_log and has_permission(
         user, Permission.VIEW_SENSITIVE_AUDIT_PAYLOADS, audit_scope
     )
-    # FIX: One MVCC snapshot for every finance source read below (facts, both
-    # months, payments, bank entries, overrides, close, missing-fact coverage)
-    # — a close committing mid-read can no longer suppress MONTH_NOT_LOCKED
-    # against pre-lock totals, and no writer can tear the cross-source alert
-    # inputs (REPEATABLE READ on Postgres; db/read_snapshot.py holds the
-    # ruling). The coverage query is NOT audit-gated, so it reads through the
-    # platform snapshot like every other finance source; only the audit-derived
-    # signals read through the TENANT-lane `session` and deliberately stay
-    # outside this snapshot: their laning is an authorization boundary.
-    begin_composed_read_snapshot(platform_session)
     try:
-        facts = revenue_repository.list_month_facts(month=month)
-        previous_facts = revenue_repository.list_month_facts(month=_previous_month(month))
-        payments = payment_repository.list_month_payments(month=month)
-        bank_entries = bank_repository.list_month_entries(month=month)
-        manual_overrides = override_repository.list_month_overrides(month=month)
-        close = close_repository.get(month)
-        (
-            missing_fact_channel_count,
-            missing_fact_channel_sample,
-        ) = missing_revenue_fact_channel_count_and_sample(platform_session, month=month)
-        audit_signals = _month_smart_alert_audit_signals(
-            session,
+        summary, audit_signals = _load_month_smart_alerts(
             month=month,
-            missing_fact_channel_count=missing_fact_channel_count,
-            missing_fact_channel_sample=missing_fact_channel_sample,
+            session=session,
+            platform_session=platform_session,
+            revenue_repository=revenue_repository,
+            payment_repository=payment_repository,
+            bank_repository=bank_repository,
+            override_repository=override_repository,
+            close_repository=close_repository,
             can_view_audit_log=can_view_audit_log,
             include_sensitive_details=include_sensitive_details,
-        )
-        payment_match = build_monthly_payment_match_summary(
-            month=month,
-            facts=facts,
-            payments=payments,
-        )
-        bank_reconciliation = build_month_bank_reconciliation_summary(
-            month=month,
-            payments=payments,
-            bank_entries=bank_entries,
         )
     except (
         AdSensePaymentValidationError,
@@ -1394,20 +1870,6 @@ def get_month_smart_alerts(
             detail=str(exc),
         ) from exc
 
-    summary = build_monthly_smart_alert_summary(
-        month=month,
-        finance=MonthlySmartAlertFinanceInputs(
-            payment_match=payment_match,
-            bank_reconciliation=bank_reconciliation,
-            close_status=close.status if close else "OPEN",
-            manual_overrides=manual_overrides,
-        ),
-        audit_signals=audit_signals,
-        trend_signals=MonthlySmartAlertTrendSignals(
-            current_revenue_facts=facts,
-            previous_revenue_facts=previous_facts,
-        ),
-    )
     summary_api = summary.to_api()
     audit_details = {
         "status": summary.status,
@@ -1522,16 +1984,71 @@ def _month_connector_smart_alert_audit_details(
 
 
 # ============================================================================
+# Purpose: Data-access step for the month deduction-components page,
+#   extracted out of the route handler (thin-orchestration rule): begin the
+#   composed-read snapshot and fetch the filtered page.
+# Database/ORM: Begins the platform session's REPEATABLE READ composed-read
+#   snapshot (db/read_snapshot.py), then reads via
+#   SqlAlchemyDeductionComponentRepository.list_month_components_page — a
+#   THREE-statement composition (COUNT, grouped scope totals, page rows)
+#   that a mid-read ingestion commit could otherwise tear against itself
+#   (total_count vs page vs scope sums vs has_more). No writes.
+# Standards: The snapshot begins here — NOT in a route dependency — so the
+#   route's permission gates always run first: denial must precede any
+#   transaction begin. Source ValidationErrors propagate untouched for the
+#   route's 422 translation.
+# Blast Radius: The deduction-evidence page's internal coherence. Read-only —
+#   the route owns the grouping and the audit events.
+# Connections:
+#   - File: backend/ums_smart_revenue/finance/deduction_ingestion.py -> the
+#     three-statement page read this snapshot makes coherent.
+#   - File: backend/ums_smart_revenue/db/read_snapshot.py -> the snapshot
+#     begun before the first statement.
+# ============================================================================
+def _load_month_deduction_components_page(
+    *,
+    month: str,
+    component_kind: str | None,
+    scope_kind: str | None,
+    scope_id: str | None,
+    limit: int,
+    offset: int,
+    platform_session: Session,
+    repository: SqlAlchemyDeductionComponentRepository,
+) -> DeductionComponentPage:
+    """Begin the composed-read snapshot, fetch the filtered deduction page."""
+    # FIX: One MVCC snapshot for the COUNT, the grouped scope totals, and the
+    # page rows inside list_month_components_page — an ingestion commit
+    # between those statements can no longer tear the page against its own
+    # totals (REPEATABLE READ on Postgres; db/read_snapshot.py holds the
+    # ruling).
+    begin_composed_read_snapshot(platform_session)
+    return repository.list_month_components_page(
+        month=month,
+        component_kind=component_kind,
+        scope_kind=scope_kind,
+        scope_id=scope_id,
+        limit=limit,
+        offset=offset,
+    )
+
+
+# ============================================================================
 # Purpose: Read-only per-month deduction-evidence view, grouped by scope
 #   (CHANNEL/ACCOUNT/PAYMENT). Surfaces the typed components PR-A ingested; never
 #   writes, never triggers ingestion, never returns raw_payload.
-# Database/ORM: Reads deduction_components via SqlAlchemyDeductionComponentRepository.
+# Database/ORM: Reads deduction_components via SqlAlchemyDeductionComponentRepository
+#   inside the composed-read snapshot begun by
+#   _load_month_deduction_components_page after the gates (the page read is
+#   three statements; the handler never touches the session).
 # Standards: smart-alerts four-permission auth; audit events match filtered
 #   evidence scopes; month validation -> 422; offset/limit pagination.
 # Blast Radius: Finance read (deduction evidence). No finance mutation, no Neo4j.
 # Connections:
 #   - File: backend/ums_smart_revenue/finance/deduction_ingestion.py -> repo.
 #   - File: backend/ums_smart_revenue/finance/deduction_components.py -> to_api().
+#   - File: backend/ums_smart_revenue/db/read_snapshot.py -> the composed-read
+#     snapshot begun between the gates and the page read.
 # ============================================================================
 @router.get(
     "/months/{month}/deduction-components",
@@ -1544,6 +2061,7 @@ def get_month_deduction_components(
         SqlAlchemyDeductionComponentRepository,
         Depends(current_deduction_component_repository),
     ],
+    platform_session: Annotated[Session, Depends(current_platform_db_session)],
     audit_sink: Annotated[AuditSink, Depends(current_revenue_audit_sink)],
     component_kind: str | None = None,
     scope_kind: str | None = None,
@@ -1559,13 +2077,15 @@ def get_month_deduction_components(
     _require_permission(user, Permission.VIEW_FINALIZED_PAYMENTS, month_scope)
     _require_permission(user, Permission.VIEW_BANK_RECONCILIATION, month_scope)
     try:
-        page = repository.list_month_components_page(
+        page = _load_month_deduction_components_page(
             month=month,
             component_kind=component_kind,
             scope_kind=scope_kind,
             scope_id=scope_id,
             limit=limit,
             offset=offset,
+            platform_session=platform_session,
+            repository=repository,
         )
     except DeductionComponentValidationError as exc:
         raise HTTPException(
@@ -1708,12 +2228,145 @@ def list_authorized_revenue_scopes(
 
 
 # ============================================================================
+# Purpose: Data-access + composition step for the scoped monthly net-revenue
+#   summary, extracted out of the route handler (thin-orchestration rule):
+#   begin the composed-read snapshot, re-resolve org-derived selection on it,
+#   fetch every money source once, and build the summary.
+# Database/ORM: Begins the platform session's REPEATABLE READ composed-read
+#   snapshot (db/read_snapshot.py), then reads facts, overrides, deduction
+#   components, the allocation resolver's close probe + committed-run
+#   selection, and — for org-unit and channel scopes — the snapshot
+#   org-access index (grant re-check + member selection), with GROUP
+#   membership re-read via the registry on the same snapshot: every input
+#   comes from ONE MVCC snapshot, so a lock committing mid-read cannot pair
+#   a fresh LOCKED probe with an older in-snapshot committed run. No writes.
+# Standards: The snapshot begins here — NOT in a route dependency — so the
+#   route's permission gates always run first: denial must precede any
+#   transaction begin (pinned by the gap-explanation direct-call tests'
+#   fail-if-touched platform-session stubs). Scoped member selection is
+#   ATTRIBUTION, so it re-resolves on the snapshot intersected with the
+#   gate-time set (_snapshot_selection_channel_ids: org units via the index,
+#   groups via the registry roster) — a channel moved between org units or
+#   dropped from the roster mid-request is never served under its former
+#   scope — and grant coverage is re-asserted deny-only against the same
+#   snapshot index (_require_snapshot_org_scope_access) so a reparented
+#   target unit, or a channel target moved out of its granting unit, 403s
+#   instead of serving snapshot-era data under gate-era containment. Source
+#   ValidationErrors propagate untouched for the route's 422 translation.
+# Blast Radius: Every number the net-revenue endpoint serves. Read-only —
+#   the route owns the audit events.
+# Connections:
+#   - File: backend/ums_smart_revenue/finance/net_revenue.py -> the pure
+#     summary builder and the scope-leak allocation filter.
+#   - File: backend/ums_smart_revenue/finance/account_allocation_read.py ->
+#     resolve_month_account_allocation (committed snapshot for LOCKED months).
+#   - File: backend/ums_smart_revenue/db/read_snapshot.py -> the snapshot
+#     begun before the first fetch.
+# ============================================================================
+def _load_month_net_revenue(
+    *,
+    month: str,
+    currency: str,
+    user: UserPrincipal,
+    target_scope: AccessScope,
+    channel_ids: set[str] | None,
+    platform_session: Session,
+    revenue_repository: SqlAlchemyRevenueFactRepository,
+    override_repository: SqlAlchemyManualOverrideRepository,
+    deduction_component_repository: SqlAlchemyDeductionComponentRepository,
+    link_repository: SqlAlchemyChannelAccountLinkRepository,
+    committed_repository: SqlAlchemyCommittedAllocationRepository,
+) -> tuple[MonthNetRevenueSummary, AllocationProvenance, str]:
+    """Begin the composed-read snapshot, fetch the money sources, build the summary.
+
+    Returns ``(summary, allocation_provenance, normalized_currency)``.
+    """
+    # FIX: One MVCC snapshot for every platform-lane money read below — facts,
+    # overrides, deduction components, the committed-allocation read or its
+    # live-compute fallback, and the org-derived member selection — so a writer
+    # or an org move committing mid-read can no longer tear the scoped totals
+    # (REPEATABLE READ on Postgres; db/read_snapshot.py holds the ruling).
+    begin_composed_read_snapshot(platform_session)
+    normalized_currency = normalize_net_revenue_currency(currency)
+    snapshot_org_index: OrgAccessIndex | None = None
+    if target_scope.type is not ScopeType.GLOBAL:
+        snapshot_org_index = load_org_access_index_from_session(platform_session)
+        # Deny-only: a sector-granted caller whose target unit was reparented
+        # out of the grant — or whose target channel was moved out of the
+        # granted unit — between the gate and the snapshot must not receive
+        # snapshot-era finance data under gate-era containment. (The helper
+        # gates itself to the recheck scope types; GROUP members are
+        # permission-filtered in the selection helper instead.)
+        _require_snapshot_org_scope_access(
+            user,
+            permissions=(Permission.VIEW_REVENUE, Permission.VIEW_CONFIDENCE),
+            target_scope=target_scope,
+            org_index=snapshot_org_index,
+        )
+    selection_channel_ids = _snapshot_selection_channel_ids(
+        user,
+        permissions=(Permission.VIEW_REVENUE, Permission.VIEW_CONFIDENCE),
+        target_scope=target_scope,
+        authorized_channel_ids=channel_ids,
+        platform_session=platform_session,
+        org_index=snapshot_org_index,
+    )
+    is_global_scope = target_scope == AccessScope.global_scope()
+    facts = revenue_repository.list_month_facts(
+        month=month,
+        youtube_channel_ids=selection_channel_ids,
+    )
+    overrides = override_repository.list_month_overrides(
+        month=month,
+        youtube_channel_ids=selection_channel_ids,
+    )
+    deduction_components = deduction_component_repository.list_month_components(
+        month=month,
+        youtube_channel_ids=selection_channel_ids,
+        component_kinds=NET_APPLICABLE_COMPONENT_KINDS,
+    )
+    # FIX: the close probe inside the resolver reads through the SNAPSHOT
+    # session — a lock committing after this snapshot began can no longer
+    # pair a fresh LOCKED probe with an older in-snapshot committed run and
+    # mislabel that stale run as the locked allocation; close status, run
+    # selection, and live inputs all come from one MVCC snapshot.
+    account_result, allocation_provenance = resolve_month_account_allocation(
+        month=month,
+        session=platform_session,
+        deduction_repository=deduction_component_repository,
+        revenue_repository=revenue_repository,
+        link_repository=link_repository,
+        committed_repository=committed_repository,
+    )
+    # FIX: the account allocation resolves month-wide (live compute or the
+    # committed snapshot), so a scoped read must drop allocation lines for
+    # channels outside the resolved selection before they reach the summary
+    # builder; otherwise a caller authorized for one company/sector/channel
+    # would receive other channels' allocation-derived rows and totals.
+    # selection_channel_ids is None for global reads, which pass through.
+    scoped_account_lines = filter_account_allocations_to_scope(
+        account_result.lines, selection_channel_ids
+    )
+    summary = build_month_net_revenue_summary(
+        month=month,
+        facts=facts,
+        manual_overrides=overrides,
+        deduction_components=deduction_components,
+        account_allocations=scoped_account_lines,
+        unallocated_account_issues=(account_result.unallocated if is_global_scope else None),
+    )
+    return summary, allocation_provenance, normalized_currency
+
+
+# ============================================================================
 # Purpose: Return the scoped monthly net-revenue summary, including
 #   account-allocated net-applicable deductions on the missing-net path only.
 # Database/ORM: Reads revenue facts, manual overrides, deduction components,
-#   and channel-account links; no writes.
+#   and channel-account links via _load_month_net_revenue; no writes.
 # Standards: Enforce revenue/confidence/payment access before data reads;
-#   global-only unallocated-account surface; dual REVENUE_VIEWED/PAYMENT_VIEWED
+#   the composed-read snapshot begins inside the loader after the gates (the
+#   handler never touches the session — thin-orchestration rule); global-only
+#   unallocated-account surface; dual REVENUE_VIEWED/PAYMENT_VIEWED
 #   audit events.
 # Blast Radius: Finance read path only. No persistence, no graph impact.
 # ============================================================================
@@ -1742,7 +2395,7 @@ def get_month_net_revenue(
         SqlAlchemyCommittedAllocationRepository,
         Depends(current_committed_allocation_repository),
     ],
-    session: Annotated[Session, Depends(current_db_session)],
+    platform_session: Annotated[Session, Depends(current_platform_db_session)],
     audit_sink: Annotated[AuditSink, Depends(current_revenue_audit_sink)],
     group_registry: Annotated[
         ChannelGroupRegistryStore,
@@ -1782,46 +2435,19 @@ def get_month_net_revenue(
     # surface and write a malformed entity id).
     normalized_scope_type = target_scope.type.value
     normalized_scope_id = target_scope.id or "global"
-    is_global_scope = target_scope == AccessScope.global_scope()
     try:
-        normalized_currency = normalize_net_revenue_currency(currency)
-        facts = revenue_repository.list_month_facts(
+        summary, allocation_provenance, normalized_currency = _load_month_net_revenue(
             month=month,
-            youtube_channel_ids=channel_ids,
-        )
-        overrides = override_repository.list_month_overrides(
-            month=month,
-            youtube_channel_ids=channel_ids,
-        )
-        deduction_components = deduction_component_repository.list_month_components(
-            month=month,
-            youtube_channel_ids=channel_ids,
-            component_kinds=NET_APPLICABLE_COMPONENT_KINDS,
-        )
-        account_result, allocation_provenance = resolve_month_account_allocation(
-            month=month,
-            session=session,
-            deduction_repository=deduction_component_repository,
+            currency=currency,
+            user=user,
+            target_scope=target_scope,
+            channel_ids=channel_ids,
+            platform_session=platform_session,
             revenue_repository=revenue_repository,
+            override_repository=override_repository,
+            deduction_component_repository=deduction_component_repository,
             link_repository=link_repository,
             committed_repository=committed_repository,
-        )
-        # FIX: the account allocation resolves month-wide (live compute or the
-        # committed snapshot), so a scoped read must drop allocation lines for
-        # channels outside the resolved channel_ids before they reach the summary
-        # builder; otherwise a caller authorized for one company/sector/channel
-        # would receive other channels' allocation-derived rows and totals.
-        # channel_ids is None for global reads, which pass through unchanged.
-        scoped_account_lines = filter_account_allocations_to_scope(
-            account_result.lines, channel_ids
-        )
-        summary = build_month_net_revenue_summary(
-            month=month,
-            facts=facts,
-            manual_overrides=overrides,
-            deduction_components=deduction_components,
-            account_allocations=scoped_account_lines,
-            unallocated_account_issues=(account_result.unallocated if is_global_scope else None),
         )
     except (
         DeductionComponentValidationError,
@@ -1871,6 +2497,146 @@ def get_month_net_revenue(
 
 
 # ============================================================================
+# Purpose: Data-access + composition step for the month rankings, extracted
+#   out of the route handler (thin-orchestration rule): begin the
+#   composed-read snapshot, re-resolve org attribution on it, fetch every
+#   money source once, and roll the per-channel summary up into rankings.
+# Database/ORM: Begins the platform session's REPEATABLE READ composed-read
+#   snapshot (db/read_snapshot.py), then reads facts, overrides, deduction
+#   components, AND the snapshot org-access index — the channel->company/
+#   sector maps both select the scoped channel set and group the roll-up, so
+#   they must come from the same snapshot as the money they attribute. The
+#   allocation resolver's close probe + committed-run selection also read
+#   through the snapshot (a mid-read lock cannot pair a fresh LOCKED probe
+#   with an older in-snapshot run); only the org/channel display-NAME maps
+#   ride the TENANT-lane `session` (recorded residual: labels, not money).
+#   No writes.
+# Standards: The snapshot begins here — NOT in a route dependency — so the
+#   route's permission gates always run first: denial must precede any
+#   transaction begin (pinned by the gap-explanation direct-call tests'
+#   fail-if-touched platform-session stubs). Scoped membership is
+#   ATTRIBUTION, not authorization — a channel moved between org units or
+#   dropped from a group roster mid-request is never ranked under its former
+#   scope (_snapshot_selection_channel_ids), and the deny-only grant
+#   re-check covers org-unit and channel targets. Source ValidationErrors
+#   propagate untouched for the route's 422 translation.
+# Blast Radius: Every ranked number the rankings endpoint serves. Read-only —
+#   the route owns the audit events.
+# Connections:
+#   - File: backend/ums_smart_revenue/finance/rankings.py -> the pure
+#     roll-up builder.
+#   - File: backend/ums_smart_revenue/finance/net_revenue.py -> the
+#     per-channel summary this roll-up consumes.
+#   - File: backend/ums_smart_revenue/db/read_snapshot.py -> the snapshot
+#     begun before the first fetch.
+# ============================================================================
+def _load_month_rankings(
+    *,
+    month: str,
+    user: UserPrincipal,
+    target_scope: AccessScope,
+    channel_ids: set[str] | None,
+    metric: str,
+    limit: int,
+    session: Session,
+    platform_session: Session,
+    revenue_repository: SqlAlchemyRevenueFactRepository,
+    override_repository: SqlAlchemyManualOverrideRepository,
+    deduction_component_repository: SqlAlchemyDeductionComponentRepository,
+    link_repository: SqlAlchemyChannelAccountLinkRepository,
+    committed_repository: SqlAlchemyCommittedAllocationRepository,
+) -> tuple[MonthRankingsSummary, AllocationProvenance]:
+    """Begin the composed-read snapshot, fetch the money sources, build rankings.
+
+    Returns ``(rankings, allocation_provenance)``.
+    """
+    # FIX: One MVCC snapshot for every platform-lane money read below — facts,
+    # overrides, deduction components, the committed-allocation read or its
+    # live-compute fallback, and the org attribution maps that select AND
+    # group the roll-up — so a writer or an org move committing mid-read can
+    # no longer tear the ranked totals (REPEATABLE READ on Postgres;
+    # db/read_snapshot.py holds the ruling).
+    begin_composed_read_snapshot(platform_session)
+    snapshot_org_index = load_org_access_index_from_session(platform_session)
+    # Deny-only: a sector-granted caller whose target unit was reparented out
+    # of the grant — or whose target channel was moved out of the granted
+    # unit — between the gate and the snapshot must not receive snapshot-era
+    # finance data under gate-era containment.
+    _require_snapshot_org_scope_access(
+        user,
+        permissions=(Permission.VIEW_REVENUE, Permission.VIEW_CONFIDENCE),
+        target_scope=target_scope,
+        org_index=snapshot_org_index,
+    )
+    selection_channel_ids = _snapshot_selection_channel_ids(
+        user,
+        permissions=(Permission.VIEW_REVENUE, Permission.VIEW_CONFIDENCE),
+        target_scope=target_scope,
+        authorized_channel_ids=channel_ids,
+        platform_session=platform_session,
+        org_index=snapshot_org_index,
+    )
+    facts = revenue_repository.list_month_facts(
+        month=month,
+        youtube_channel_ids=selection_channel_ids,
+    )
+    overrides = override_repository.list_month_overrides(
+        month=month,
+        youtube_channel_ids=selection_channel_ids,
+    )
+    deduction_components = deduction_component_repository.list_month_components(
+        month=month,
+        youtube_channel_ids=selection_channel_ids,
+        component_kinds=NET_APPLICABLE_COMPONENT_KINDS,
+    )
+    # FIX: the close probe inside the resolver reads through the SNAPSHOT
+    # session (see _load_month_net_revenue) — close status, run selection,
+    # and live inputs all come from one MVCC snapshot.
+    account_result, allocation_provenance = resolve_month_account_allocation(
+        month=month,
+        session=platform_session,
+        deduction_repository=deduction_component_repository,
+        revenue_repository=revenue_repository,
+        link_repository=link_repository,
+        committed_repository=committed_repository,
+    )
+    # Scope-leak guard: account allocation resolves month-wide, so drop lines
+    # for channels outside the resolved selection before they reach the
+    # summary builder. selection_channel_ids is None for global reads.
+    scoped_account_lines = filter_account_allocations_to_scope(
+        account_result.lines, selection_channel_ids
+    )
+    summary = build_month_net_revenue_summary(
+        month=month,
+        facts=facts,
+        manual_overrides=overrides,
+        deduction_components=deduction_components,
+        account_allocations=scoped_account_lines,
+        # Rankings never surface the global unallocated-account diagnostic: it
+        # is a month-wide-only list, not a ranked dimension, so it is
+        # intentionally None on every scope (global and scoped) here. Omitting
+        # it is strictly safer than leaking a month-wide diagnostic into a
+        # scoped ranking response.
+        unallocated_account_issues=None,
+    )
+    company_names, sector_names = _org_unit_name_maps(session)
+    channel_names = _channel_name_map(session)
+    return (
+        build_month_rankings(
+            summary=summary,
+            channel_company=snapshot_org_index.channel_company,
+            channel_sector=snapshot_org_index.channel_sector,
+            company_names=company_names,
+            sector_names=sector_names,
+            channel_names=channel_names,
+            metric=metric,
+            limit=limit,
+        ),
+        allocation_provenance,
+    )
+
+
+# ============================================================================
 # Purpose: Return finance-gated, scope-safe company/sector/channel/group
 #   rankings for a month, rolled up from the per-channel net-revenue summary.
 # Database/ORM: Reads revenue facts, manual overrides, deduction components,
@@ -1917,6 +2683,7 @@ def get_month_rankings(
         Depends(current_committed_allocation_repository),
     ],
     session: Annotated[Session, Depends(current_db_session)],
+    platform_session: Annotated[Session, Depends(current_platform_db_session)],
     audit_sink: Annotated[AuditSink, Depends(current_revenue_audit_sink)],
     group_registry: Annotated[
         ChannelGroupRegistryStore,
@@ -1952,57 +2719,20 @@ def get_month_rankings(
     normalized_scope_type = target_scope.type.value
     normalized_scope_id = target_scope.id or "global"
     try:
-        facts = revenue_repository.list_month_facts(
+        rankings, allocation_provenance = _load_month_rankings(
             month=month,
-            youtube_channel_ids=channel_ids,
-        )
-        overrides = override_repository.list_month_overrides(
-            month=month,
-            youtube_channel_ids=channel_ids,
-        )
-        deduction_components = deduction_component_repository.list_month_components(
-            month=month,
-            youtube_channel_ids=channel_ids,
-            component_kinds=NET_APPLICABLE_COMPONENT_KINDS,
-        )
-        account_result, allocation_provenance = resolve_month_account_allocation(
-            month=month,
-            session=session,
-            deduction_repository=deduction_component_repository,
-            revenue_repository=revenue_repository,
-            link_repository=link_repository,
-            committed_repository=committed_repository,
-        )
-        # Scope-leak guard: account allocation resolves month-wide, so drop lines
-        # for channels outside the authorized channel_ids before they reach the
-        # summary builder. channel_ids is None for global reads (no restriction).
-        scoped_account_lines = filter_account_allocations_to_scope(
-            account_result.lines, channel_ids
-        )
-        summary = build_month_net_revenue_summary(
-            month=month,
-            facts=facts,
-            manual_overrides=overrides,
-            deduction_components=deduction_components,
-            account_allocations=scoped_account_lines,
-            # Rankings never surface the global unallocated-account diagnostic: it
-            # is a month-wide-only list, not a ranked dimension, so it is
-            # intentionally None on every scope (global and scoped) here. Omitting
-            # it is strictly safer than leaking a month-wide diagnostic into a
-            # scoped ranking response.
-            unallocated_account_issues=None,
-        )
-        company_names, sector_names = _org_unit_name_maps(session)
-        channel_names = _channel_name_map(session)
-        rankings = build_month_rankings(
-            summary=summary,
-            channel_company=org_index.channel_company,
-            channel_sector=org_index.channel_sector,
-            company_names=company_names,
-            sector_names=sector_names,
-            channel_names=channel_names,
+            user=user,
+            target_scope=target_scope,
+            channel_ids=channel_ids,
             metric=metric,
             limit=limit,
+            session=session,
+            platform_session=platform_session,
+            revenue_repository=revenue_repository,
+            override_repository=override_repository,
+            deduction_component_repository=deduction_component_repository,
+            link_repository=link_repository,
+            committed_repository=committed_repository,
         )
     except (
         DeductionComponentValidationError,
@@ -2151,6 +2881,48 @@ def record_month_bank_reconciliation(
 
 
 # ============================================================================
+# Purpose: Data-access + composition step for the monthly bank
+#   reconciliation, extracted out of the route handler (thin-orchestration
+#   rule): begin the composed-read snapshot, fetch both sources once, and
+#   build the summary.
+# Database/ORM: Begins the platform session's REPEATABLE READ composed-read
+#   snapshot (db/read_snapshot.py), then reads via the AdSensePayment and
+#   BankReconciliation repositories. No writes.
+# Standards: The snapshot begins here — NOT in a route dependency — so the
+#   route's permission gates always run first: denial must precede any
+#   transaction begin (pinned by the gap-explanation direct-call tests'
+#   fail-if-touched platform-session stubs). Source ValidationErrors
+#   propagate untouched for the route's 422 translation.
+# Blast Radius: Every number the bank-reconciliation endpoint serves.
+#   Read-only — the route owns the audit events.
+# Connections:
+#   - File: backend/ums_smart_revenue/finance/bank_reconciliation.py -> the
+#     pure summary builder and fee/FX evidence sums.
+#   - File: backend/ums_smart_revenue/db/read_snapshot.py -> the snapshot
+#     begun before the first fetch.
+# ============================================================================
+def _load_month_bank_reconciliation(
+    *,
+    month: str,
+    platform_session: Session,
+    payment_repository: SqlAlchemyAdSensePaymentRepository,
+    bank_repository: SqlAlchemyBankReconciliationRepository,
+) -> MonthBankReconciliationSummary:
+    """Begin the composed-read snapshot, fetch both sources, build the summary."""
+    # FIX: One MVCC snapshot for both source reads below — a payment or bank
+    # entry committing between them can no longer tear the composed summary
+    # (REPEATABLE READ on Postgres; db/read_snapshot.py holds the ruling).
+    begin_composed_read_snapshot(platform_session)
+    payments = payment_repository.list_month_payments(month=month)
+    entries = bank_repository.list_month_entries(month=month)
+    return build_month_bank_reconciliation_summary(
+        month=month,
+        payments=payments,
+        bank_entries=entries,
+    )
+
+
+# ============================================================================
 # Purpose: Serve the monthly bank-reconciliation summary — AdSense payments
 #   compared against recorded bank receipts (fee/FX evidence included) for one
 #   month, with the match status and self-audit trail. Read-only; never
@@ -2162,9 +2934,10 @@ def record_month_bank_reconciliation(
 # Standards: Two-permission gate — VIEW_BANK_RECONCILIATION plus
 #   VIEW_FINALIZED_PAYMENTS, both at finance-month scope; denial precedes any
 #   source read. Both source reads happen inside one REPEATABLE READ
-#   composed-read snapshot on Postgres (db/read_snapshot.py) begun after the
-#   gates, so a payment or bank entry committing mid-read cannot tear the
-#   composed summary.
+#   composed-read snapshot on Postgres (db/read_snapshot.py) begun by
+#   _load_month_bank_reconciliation after the gates, so a payment or bank
+#   entry committing mid-read cannot tear the composed summary; the handler
+#   itself never touches the session (thin-orchestration rule).
 # Blast Radius: Finance dashboard read surface; the bank-reconciliation wire
 #   contract feeds the Command Center and the smart-alerts builder reuses the
 #   same summary shape.
@@ -2194,24 +2967,19 @@ def get_month_bank_reconciliation(
     scope = AccessScope.finance_month(month)
     _require_permission(user, Permission.VIEW_BANK_RECONCILIATION, scope)
     _require_permission(user, Permission.VIEW_FINALIZED_PAYMENTS, scope)
-    # FIX: One MVCC snapshot for both source reads below — a payment or bank
-    # entry committing between them can no longer tear the composed summary
-    # (REPEATABLE READ on Postgres; db/read_snapshot.py holds the ruling).
-    begin_composed_read_snapshot(platform_session)
     try:
-        payments = payment_repository.list_month_payments(month=month)
-        entries = bank_repository.list_month_entries(month=month)
+        summary = _load_month_bank_reconciliation(
+            month=month,
+            platform_session=platform_session,
+            payment_repository=payment_repository,
+            bank_repository=bank_repository,
+        )
     except (AdSensePaymentValidationError, BankReconciliationValidationError) as exc:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail=str(exc),
         ) from exc
 
-    summary = build_month_bank_reconciliation_summary(
-        month=month,
-        payments=payments,
-        bank_entries=entries,
-    )
     summary_api = summary.to_api()
     bank_record = record_audit_event(
         sink=audit_sink,
@@ -2269,11 +3037,13 @@ _MONTH_GAP_EXPLANATION_ENTITY_TYPE = "month_gap_explanation"
 #   pre-lock totals "LOCKED" would misstate a frozen month — on a detected
 #   transition the sources are refetched ONCE (post-lock sources are frozen
 #   by the locked-month write guards, so the retry pairs consistently). On
-#   Postgres the route begins a REPEATABLE READ composed-read snapshot
-#   before calling this loader (db/read_snapshot.py), so every fetch here
-#   shares one MVCC snapshot and no transition can be observed mid-read;
-#   the detect-and-retry remains as the guard for non-Postgres dialects and
-#   for any direct caller that runs the loader without the snapshot.
+#   Postgres this loader begins the REPEATABLE READ composed-read snapshot
+#   itself before its first fetch (db/read_snapshot.py) — NOT in a route
+#   dependency, so the route's permission gates always run first (denial
+#   precedes any transaction begin, pinned by the direct-call tests'
+#   fail-if-touched platform-session stubs) — so every fetch here shares one
+#   MVCC snapshot and no transition can be observed mid-read; the
+#   detect-and-retry remains as the guard for non-Postgres dialects.
 # Blast Radius: Every number the gap-explanation endpoint serves. Read-only
 #   — no audit, no mutation (the route owns the audit triple).
 # Connections:
@@ -2286,12 +3056,18 @@ def _load_month_gap_explanation(
     *,
     month: str,
     currency: str,
+    platform_session: Session,
     revenue_repository: SqlAlchemyRevenueFactRepository,
     payment_repository: SqlAlchemyAdSensePaymentRepository,
     bank_repository: SqlAlchemyBankReconciliationRepository,
     close_repository: SqlAlchemyFinanceMonthCloseRepository,
 ) -> MonthGapExplanation:
-    """Fetch the month's sources once and compose the gap explanation."""
+    """Begin the composed-read snapshot, fetch the sources once, compose the explanation."""
+    # FIX: One MVCC snapshot for every source read below — on Postgres a close
+    # transition can no longer be observed mid-read, so the detect-and-retry
+    # loop becomes the non-Postgres tier's guard (REPEATABLE READ;
+    # db/read_snapshot.py holds the ruling).
+    begin_composed_read_snapshot(platform_session)
     normalized_currency = normalize_payment_match_currency(currency)
     close = close_repository.get(month)
     close_status = close.status if close else "OPEN"
@@ -2390,15 +3166,11 @@ def get_month_gap_explanation(
     _require_permission(user, Permission.VIEW_CONFIDENCE, global_scope)
     _require_permission(user, Permission.VIEW_FINALIZED_PAYMENTS, month_scope)
     _require_permission(user, Permission.VIEW_BANK_RECONCILIATION, month_scope)
-    # FIX: One MVCC snapshot for every source read inside the loader — on
-    # Postgres a close transition can no longer be observed mid-read, so the
-    # loader's detect-and-retry becomes the non-Postgres tier's guard
-    # (REPEATABLE READ; db/read_snapshot.py holds the ruling).
-    begin_composed_read_snapshot(platform_session)
     try:
         explanation = _load_month_gap_explanation(
             month=month,
             currency=currency,
+            platform_session=platform_session,
             revenue_repository=revenue_repository,
             payment_repository=payment_repository,
             bank_repository=bank_repository,
@@ -2770,6 +3542,90 @@ def approve_manual_override(
     return _manual_override_with_audit_event(override, record)
 
 
+# ============================================================================
+# Purpose: Data-access step for the per-channel adjusted-revenue summary,
+#   extracted out of the route handler (thin-orchestration rule): begin the
+#   composed-read snapshot and fetch the channel's facts and overrides.
+# Database/ORM: Begins the platform session's REPEATABLE READ composed-read
+#   snapshot (db/read_snapshot.py), then reads via the RevenueFact and
+#   ManualOverride repositories. No writes.
+# Standards: The snapshot begins here — NOT in a route dependency — so the
+#   route's permission gate always runs first: denial must precede any
+#   transaction begin (pinned by the gap-explanation direct-call tests'
+#   fail-if-touched platform-session stubs). The channel target is then
+#   re-checked deny-only against the snapshot index
+#   (_require_snapshot_org_scope_access): a caller admitted through an
+#   inherited sector/company grant whose channel moved out of the granting
+#   unit mid-request 403s instead of receiving snapshot-era sources under
+#   gate-era containment; direct channel grants keep passing on scope
+#   identity. Not-found and ValidationErrors propagate untouched for the
+#   route's 404/422 translation; the summary is built by the route AFTER
+#   that translation, exactly as before the extraction.
+# Blast Radius: The adjusted summary's source coherence and stale-containment
+#   refusal. Read-only — the route owns the build and the audit event.
+# Connections:
+#   - File: backend/ums_smart_revenue/finance/revenue_summary.py -> the
+#     builder the route feeds with this pair.
+#   - File: backend/ums_smart_revenue/db/read_snapshot.py -> the snapshot
+#     begun before the first fetch.
+# ============================================================================
+def _load_channel_month_summary_sources(
+    *,
+    month: str,
+    channel_id: str,
+    user: UserPrincipal,
+    platform_session: Session,
+    revenue_repository: SqlAlchemyRevenueFactRepository,
+    override_repository: SqlAlchemyManualOverrideRepository,
+) -> tuple[list[RevenueFactEntry], list[RevenueManualOverrideEntry]]:
+    """Begin the composed-read snapshot, re-check the channel, fetch its sources."""
+    # FIX: One MVCC snapshot for both source reads below — an override approval
+    # or a fact write committing between them can no longer tear the adjusted
+    # summary (REPEATABLE READ on Postgres; db/read_snapshot.py holds the
+    # ruling).
+    begin_composed_read_snapshot(platform_session)
+    # Deny-only: a caller admitted via an inherited org grant must not be
+    # served after the channel moved out of the granting unit mid-request.
+    _require_snapshot_org_scope_access(
+        user,
+        permissions=(Permission.VIEW_REVENUE,),
+        target_scope=AccessScope.channel(channel_id),
+        org_index=load_org_access_index_from_session(platform_session),
+    )
+    facts = revenue_repository.list_channel_month_facts(
+        month=month,
+        youtube_channel_id=channel_id,
+    )
+    overrides = override_repository.list_channel_month_overrides(
+        month=month,
+        youtube_channel_id=channel_id,
+    )
+    return facts, overrides
+
+
+# ============================================================================
+# Purpose: Serve the per-channel adjusted-revenue summary for one month —
+#   stored facts combined with approved manual overrides into the adjusted
+#   number the dashboards display. Read-only; never mutates finance numbers.
+# Database/ORM: Facts + overrides reads via the RevenueFact and ManualOverride
+#   repositories on the platform-lane session; appends a REVENUE_VIEWED audit
+#   event through the revenue audit sink. No locks or writes to finance rows.
+# Standards: VIEW_REVENUE at channel scope through the org-access index;
+#   denial precedes any source read. Both source reads happen inside one
+#   REPEATABLE READ composed-read snapshot on Postgres (db/read_snapshot.py)
+#   begun by _load_channel_month_summary_sources after the gate, so an
+#   override approval or fact write committing mid-read cannot tear the
+#   adjusted summary; the handler itself never touches the session
+#   (thin-orchestration rule).
+# Blast Radius: Channel-level finance read surface; 404 on unknown
+#   channel/month, 422 on malformed month or override validation.
+# Connections:
+#   - File: backend/ums_smart_revenue/finance/revenue_summary.py -> the
+#     adjusted-summary builder.
+#   - File: backend/ums_smart_revenue/db/read_snapshot.py -> the composed-read
+#     snapshot begun between the gate and the source reads.
+#   - File: Docs/12_BACKEND_API_SPEC.md -> channel-month summary contract.
+# ============================================================================
 @router.get("/channels/{channel_id}/months/{month}/summary")
 def get_channel_month_revenue_summary(
     channel_id: str,
@@ -2784,19 +3640,20 @@ def get_channel_month_revenue_summary(
         SqlAlchemyManualOverrideRepository,
         Depends(current_manual_override_repository),
     ],
+    platform_session: Annotated[Session, Depends(current_platform_db_session)],
     audit_sink: Annotated[AuditSink, Depends(current_revenue_audit_sink)],
 ) -> dict[str, object]:
     """Return the adjusted-revenue summary for a channel and month, including manual overrides."""
     target_scope = AccessScope.channel(channel_id)
     _require_permission(user, Permission.VIEW_REVENUE, target_scope, org_index)
     try:
-        facts = revenue_repository.list_channel_month_facts(
+        facts, overrides = _load_channel_month_summary_sources(
             month=month,
-            youtube_channel_id=channel_id,
-        )
-        overrides = override_repository.list_channel_month_overrides(
-            month=month,
-            youtube_channel_id=channel_id,
+            channel_id=channel_id,
+            user=user,
+            platform_session=platform_session,
+            revenue_repository=revenue_repository,
+            override_repository=override_repository,
         )
     except RevenueFactNotFoundError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
@@ -3248,6 +4105,234 @@ def _resolve_smart_alert_tenant_id() -> UUID:
     if current_tenant is not None:
         return current_tenant.id
     return UUID(UMS_TENANT_ID)
+
+
+# ============================================================================
+# Purpose: The scope types whose grant coverage can drift with org edits
+#   between the tenant-lane permission gates and the composed-read snapshot —
+#   org units (a target unit reparented out of the granting sector) and
+#   channels (a target channel moved between units under an inherited
+#   grant). This tuple decides which composed reads receive the fail-closed
+#   _require_snapshot_org_scope_access re-check.
+# Database/ORM: None; a pure ScopeType constant consumed by the re-check
+#   helper's gate.
+# Standards: Deliberately EXCLUDES GLOBAL (containment cannot drift with org
+#   edits) and GROUP (authorization is per-member at gate time; the surviving
+#   roster is permission-filtered member-by-member inside
+#   _snapshot_selection_channel_ids instead, and the group's own active flag
+#   re-reads there). Adding a type here can only ADD deny-only re-checks;
+#   removing one silently revives the stale-containment epoch mix the
+#   reparent/channel-move pins prove dead.
+# Blast Radius: Which scoped composed reads can 403 on snapshot-state drift.
+#   No grant is ever widened by this tuple.
+# Connections:
+#   - File: backend/ums_smart_revenue/api/revenue.py ->
+#     _require_snapshot_org_scope_access gates on membership here; the
+#     net-revenue/rankings/dry-run-recalculation loaders use it to decide
+#     when to load the snapshot index.
+#   - File: tests/api/test_composed_read_snapshot_postgres.py -> the
+#     reparented-target and moved-channel pins that turn red if a type is
+#     dropped.
+# ============================================================================
+_SNAPSHOT_GRANT_RECHECK_SCOPES = (ScopeType.SECTOR, ScopeType.COMPANY, ScopeType.CHANNEL)
+
+
+# ============================================================================
+# Purpose: Fail-closed re-check of an org-unit or channel scope's grant
+#   coverage against the SNAPSHOT org-access index — deny-only, run by
+#   composed-read loaders after they load the snapshot index.
+# Database/ORM: None; pure has_permission evaluation over the caller's grants
+#   and the passed (snapshot) index. The index itself was read inside the
+#   caller's composed-read snapshot.
+# Standards: DENY-ONLY by design: the tenant-lane permission gates already
+#   admitted the request before any snapshot began (that laning is the
+#   authorization boundary and platform-lane data must never GRANT access);
+#   this re-check can only narrow — a sector-granted caller whose target
+#   company was reparented out of the sector, or whose target CHANNEL was
+#   moved out of the granted unit, between the gate and the snapshot is
+#   refused, so the response never serves snapshot-era finance data under
+#   gate-era containment. Direct channel grants keep passing on scope
+#   identity alone (has_permission needs no index for a same-scope match);
+#   only inherited sector/company containment re-evaluates. The 403 carries
+#   the same missing-permission message as the gate, keeping unauthorized
+#   probes and unauthorized reads indistinguishable. Global targets cannot
+#   drift with org edits, and GROUP targets are not re-checked here as a
+#   unit: their authorization is per-member, so the surviving roster is
+#   permission-filtered member-by-member (and the group's active flag
+#   re-read) inside _snapshot_selection_channel_ids.
+# Blast Radius: Scoped composed reads only; can only turn a would-have-served
+#   response into a 403, never the reverse.
+# Connections:
+#   - File: backend/ums_smart_revenue/auth/policy.py -> has_permission, the
+#     same evaluation the gates ran on the tenant index.
+#   - File: backend/ums_smart_revenue/org/access_index.py -> the snapshot
+#     index this re-check evaluates containment against.
+# ============================================================================
+def _require_snapshot_org_scope_access(
+    user: UserPrincipal,
+    *,
+    permissions: tuple[Permission, ...],
+    target_scope: AccessScope,
+    org_index: OrgAccessIndex,
+) -> None:
+    """Re-assert org-unit/channel scope coverage on the snapshot index (deny-only)."""
+    if target_scope.type not in _SNAPSHOT_GRANT_RECHECK_SCOPES:
+        return
+    for permission in permissions:
+        _require_permission(user, permission, target_scope, org_index)
+
+
+# ============================================================================
+# Purpose: Re-resolve the org-derived SELECTION channel set for a scoped money
+#   read from a given org-access index — the attribution half of scope
+#   resolution, split from authorization so composed-read loaders can rerun it
+#   on the snapshot index.
+# Database/ORM: None; pure derivation over the passed index (mirrors
+#   resolve_revenue_read_scope's sector/company comprehensions exactly).
+# Standards: Company/sector membership is ATTRIBUTION — it decides whose money
+#   rolls into the unit's totals — so it must come from the same MVCC snapshot
+#   as the money rows (a channel moved between units mid-request must never be
+#   served under its former unit). Selection is the INTERSECTION of snapshot
+#   membership with the gate-time authorized set: authorization ran at
+#   org-unit grain on the TENANT-lane index before any snapshot began, and a
+#   channel must belong to the unit in BOTH states to be served — a channel
+#   moved in mid-request is excluded (under a sector grant whose company was
+#   reparented it would be authorized in neither state), and a channel moved
+#   out is excluded by the snapshot side. This function is INDEX-ONLY: GROUP
+#   membership needs the registry, so its snapshot-side re-read lives in
+#   _snapshot_selection_channel_ids, which delegates the org-unit branches
+#   here. Channel scope is a literal id; global is None. An empty result
+#   returns an empty set (empty summary, not 403) — the same contract as the
+#   tenant-side resolver.
+# Blast Radius: Which channels' money feeds scoped net-revenue/rankings
+#   responses. No authorization decision is made here.
+# Connections:
+#   - File: backend/ums_smart_revenue/finance/revenue_scopes.py -> the
+#     tenant-side resolver whose sector/company selection this mirrors.
+#   - File: backend/ums_smart_revenue/org/access_index.py -> the index loader
+#     the composed-read loaders call on the snapshot session.
+# ============================================================================
+def _org_scope_member_channel_ids(
+    *,
+    target_scope: AccessScope,
+    authorized_channel_ids: set[str] | None,
+    org_index: OrgAccessIndex,
+) -> set[str] | None:
+    """Derive the selection channel set for a scope from the given org index.
+
+    Org-unit scopes intersect snapshot membership with the gate-time
+    authorized set: a channel is served only when it belongs to the unit in
+    BOTH database states, so a channel moved in mid-request (authorized in
+    neither the gate-time nor a grant-relevant snapshot state — e.g. under a
+    sector grant whose company was reparented) is never selected, and a
+    channel moved out is dropped by the snapshot side.
+    """
+    if target_scope.type == ScopeType.SECTOR:
+        members = {
+            channel_id
+            for channel_id, sector_id in org_index.channel_sector.items()
+            if sector_id == target_scope.id
+        }
+    elif target_scope.type == ScopeType.COMPANY:
+        members = {
+            channel_id
+            for channel_id, company_id in org_index.channel_company.items()
+            if company_id == target_scope.id
+        }
+    else:
+        return authorized_channel_ids
+    if authorized_channel_ids is None:
+        return members
+    return members & authorized_channel_ids
+
+
+# ============================================================================
+# Purpose: Re-resolve the SELECTION channel set for a scoped composed read on
+#   the caller's snapshot session — one entry point covering every scope
+#   type, so the loaders derive attribution from the same MVCC snapshot as
+#   the money rows it selects.
+# Database/ORM: Org-unit scopes derive from the passed snapshot index
+#   (loading it from the snapshot session if the caller had no other need for
+#   it); GROUP scope re-reads the group row and its active membership via
+#   SqlAlchemyChannelGroupRegistry on the snapshot session. Read-only.
+# Standards: DENY-ONLY throughout: every branch INTERSECTS snapshot
+#   membership with the gate-time authorized set, so platform-lane data can
+#   only narrow the selection, never admit a channel the tenant-lane gates
+#   did not cover — org-unit branches via _org_scope_member_channel_ids
+#   (both-states rule), GROUP via the registry's active-member re-read (a
+#   member dropped from the roster mid-request stops feeding the rollup; a
+#   member added mid-request was never per-member authorized and stays out)
+#   FOLLOWED by a per-member grant filter on the snapshot index: group
+#   authorization is per-member, so a surviving member whose inherited
+#   sector/company containment drifted between the gate and the snapshot is
+#   dropped too, while direct channel grants keep passing on scope identity
+#   alone. The group's own ACTIVE flag also re-reads on the snapshot: a
+#   group archived or deleted mid-request yields an empty selection (empty
+#   summary, not 403 — the resolver's 403 is a GATE decision and already
+#   ran). Channel scope passes the literal gate-time set through (its
+#   containment is re-checked by _require_snapshot_org_scope_access, not
+#   narrowed here); global is None.
+# Blast Radius: Which channels' money feeds scoped net-revenue, rankings,
+#   and dry-run recalculation responses. Deny-only — no channel is ever
+#   added, and the group member filter can only remove.
+# Connections:
+#   - File: backend/ums_smart_revenue/org/sql_channel_groups.py ->
+#     get_group + get_active_member_channels, the same reads the gate-time
+#     resolver ran on the tenant lane.
+#   - File: backend/ums_smart_revenue/auth/policy.py -> has_permission, the
+#     per-member evaluation mirroring the gate's covered-subset check.
+#   - File: backend/ums_smart_revenue/finance/revenue_scopes.py -> the
+#     tenant-side resolver whose selection semantics every branch mirrors.
+# ============================================================================
+def _snapshot_selection_channel_ids(
+    user: UserPrincipal,
+    *,
+    permissions: tuple[Permission, ...],
+    target_scope: AccessScope,
+    authorized_channel_ids: set[str] | None,
+    platform_session: Session,
+    org_index: OrgAccessIndex | None,
+) -> set[str] | None:
+    """Derive the scoped selection set on the snapshot session (deny-only).
+
+    ``org_index`` is the snapshot org-access index when the caller already
+    loaded one for the grant re-check; branches needing it load it from the
+    snapshot session otherwise. ``permissions`` are the route's read gates,
+    re-evaluated per surviving group member.
+    """
+    if target_scope.type in (ScopeType.SECTOR, ScopeType.COMPANY):
+        index = org_index
+        if index is None:
+            index = load_org_access_index_from_session(platform_session)
+        return _org_scope_member_channel_ids(
+            target_scope=target_scope,
+            authorized_channel_ids=authorized_channel_ids,
+            org_index=index,
+        )
+    if target_scope.type == ScopeType.GROUP:
+        registry = SqlAlchemyChannelGroupRegistry(platform_session)
+        group = registry.get_group(target_scope.id or "")
+        if group is None or not group.active:
+            return set()
+        snapshot_members = set(
+            registry.get_active_member_channels(target_scope.id or "") or ()
+        )
+        if authorized_channel_ids is not None:
+            snapshot_members &= authorized_channel_ids
+        if not snapshot_members:
+            return snapshot_members
+        index = org_index
+        if index is None:
+            index = load_org_access_index_from_session(platform_session)
+        return {
+            member
+            for member in snapshot_members
+            if all(
+                has_permission(user, permission, AccessScope.channel(member), index)
+                for permission in permissions
+            )
+        }
+    return authorized_channel_ids
 
 
 # ============================================================================

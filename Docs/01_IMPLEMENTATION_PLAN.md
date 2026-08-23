@@ -817,6 +817,42 @@ channel↔account map, and multi-currency FX) stays out per Docs/18.
   tenant-lane audit signals stay outside the snapshot by ruling
   (authorization laning wins); Docs/12 carries the contract paragraph.
   `No migration/backfill required.` — a session-level isolation helper only.
+  **Composed-read snapshot extension shipped 2026-08-23**
+  (`feat/composed-read-snapshot`, follow-up on the ruling): every remaining
+  composed revenue read — net-revenue, rankings, reconciliation-issues, the
+  channel-month summary, the channel-month facts listing and
+  reconciliation-preview (both ride the same guard-then-select repository
+  read, whose single-select exemption was disproven in review), the
+  deduction-components page (a three-statement repository read), and
+  the dry-run `POST /revenue/recalculate` preview — begins the same
+  REPEATABLE READ snapshot inside its extracted `_load_*` loader right after
+  the route's permission gates (handlers never touch the session). Scoped
+  ATTRIBUTION rides the snapshot too: org-unit member selection for
+  net-revenue/rankings/dry-run-recalculate, the rankings roll-up grouping
+  maps, and the recalculation `COMPANY_UNMAPPED` readiness map re-resolve
+  from a snapshot org-access index, red→green-proven on Postgres against a
+  mid-request company move; org-unit selection additionally intersects with
+  the gate-time authorized set (a channel in the unit in neither state is
+  never served); GROUP selection re-reads the group row and active roster
+  through the registry on the snapshot, intersects with the gate-time set,
+  permission-filters each surviving member against the snapshot index, and
+  empties for a group archived mid-request — all deny-only (the per-member
+  covered-subset authorization stays a gate-time decision); the
+  allocation resolver's close probe reads through the snapshot too (a
+  mid-read lock cannot mislabel an older in-snapshot run as the locked
+  allocation); and grant coverage over org-unit AND channel scopes is
+  re-asserted DENY-ONLY on the snapshot index (a reparented target unit —
+  or a channel target moved out of its granting unit — 403s while direct
+  channel grants pass on scope identity; platform data can narrow but never
+  grant access), with the same channel re-check inside the per-channel
+  facts/preview/summary loaders and the issue-queue loader intersecting
+  its covered sets re-derived on the snapshot index before paging. Tenant-lane residuals: the audit-gated smart-alerts
+  signals and org/channel display-NAME maps (labels). The recalculation
+  WRITE branch and the explain POST stay READ COMMITTED by the recorded
+  write-path ruling. Per-endpoint wiring is pinned in
+  `tests/api/test_composed_read_snapshot_wiring.py` (eleven GET routes plus
+  the dry-run recalculation POST).
+  `No migration/backfill required.` — reuses the session-level helper.
 
 ### Acceptance gate
 

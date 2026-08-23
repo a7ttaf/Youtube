@@ -650,25 +650,85 @@ and percent movement. Reads are audited as `REVENUE_VIEWED`, `PAYMENT_VIEWED`, a
 allocate bank gaps.
 
 Composed-read consistency (platform ruling, the PR #197 codex follow-up): the
-four composed finance reads — `payment-match`, `bank-reconciliation`,
-`smart-alerts`, and `gap-explanation` — begin their request transaction at
-`REPEATABLE READ` on PostgreSQL before the first source fetch
-(`backend/ums_smart_revenue/db/read_snapshot.py`), so every finance source
-composed into one response (revenue facts, AdSense payments, bank entries,
-manual overrides, month-close status, and the smart-alerts missing-fact
-coverage pair behind `CHANNELS_MISSING_REVENUE_FACTS` — not audit-gated, so it
-reads with the facts it is compared against) is read from ONE MVCC snapshot: a
-writer committing mid-read can no longer tear the composed totals, and a month
-close committing mid-read can no longer pair a LOCKED label — or suppress
-`MONTH_NOT_LOCKED` — against pre-lock totals. The snapshot transaction is
-read-plus-append-only (its only writes are the endpoint's own audit rows), so
-it cannot raise serialization failures and never aborts concurrent finance
-writers (REPEATABLE READ deliberately, not SERIALIZABLE). Documented residual:
-the smart-alerts audit-derived signals (`SOURCE_ROWS_SKIPPED`,
-`CONNECTOR_RUNS_FAILED`) read through the tenant-lane session and stay READ
-COMMITTED relative to that snapshot — their laning is an authorization
-boundary (audit gates + tenant RLS) that a consistency preference must not
-move. Responses over OPEN months remain living
+composed finance reads — `payment-match`, `bank-reconciliation`,
+`smart-alerts`, `gap-explanation`, `net-revenue`, `rankings`,
+`reconciliation-issues`, the channel-month `summary`, the channel-month
+`facts` listing, `reconciliation-preview`, `deduction-components` (its
+repository page read is three statements — count, scope totals, rows — that
+must not tear against each other), and the dry-run
+`POST /revenue/recalculate` preview —
+begin their request transaction at `REPEATABLE READ` on PostgreSQL before
+the first source fetch. The begin
+lives in each endpoint's extracted data-access loader
+(`backend/ums_smart_revenue/api/revenue.py::_load_*`,
+`backend/ums_smart_revenue/db/read_snapshot.py`), never in the route handler
+(thin-orchestration rule) and never in a dependency — the permission gates
+run first, so denial always precedes the transaction begin. Every finance
+source composed into one response (revenue facts, AdSense payments, bank
+entries, manual overrides, deduction components, committed allocations,
+month-close status, and the smart-alerts missing-fact coverage pair behind
+`CHANNELS_MISSING_REVENUE_FACTS` — not audit-gated, so it reads with the
+facts it is compared against) is read from ONE MVCC snapshot: a writer
+committing mid-read can no longer tear the composed totals, and a month close
+committing mid-read can no longer pair a LOCKED label — or suppress
+`MONTH_NOT_LOCKED` — against pre-lock totals. Scoped ATTRIBUTION also rides
+the snapshot: for org-unit-scoped `net-revenue`, `rankings`, and the
+dry-run recalculation preview the member-channel selection — and for
+`rankings` the channel→company/sector roll-up grouping — re-resolves from
+the snapshot org-access index intersected with the gate-time authorized set
+(a channel is served only when it belongs to the unit in BOTH states), so a
+channel moved between org units mid-request is never served or ranked under
+its former unit, and a mid-request move-in is never admitted. GROUP-scoped
+selection re-reads the group row and its active member roster through the
+registry on the same snapshot and intersects the roster with the gate-time
+authorized set, deny-only: a member dropped from the roster mid-request
+stops feeding the rollup, a member added mid-request was never per-member
+authorized and stays out, each surviving member is then re-checked against
+the snapshot index (a member whose inherited sector/company containment
+drifted mid-request is dropped; direct channel grants pass on scope
+identity alone), and a group archived or deleted mid-request empties the
+selection — the per-member covered-subset AUTHORIZATION itself remains a
+gate-time decision, the snapshot side can only narrow. Grant coverage
+over org-unit AND channel scopes is additionally re-asserted DENY-ONLY
+against the same snapshot index: a sector-granted caller whose target
+company was reparented out of the sector — or whose channel-scoped target
+was moved out of the granted unit — mid-request receives 403 instead of
+snapshot-era data under gate-era containment, while direct channel grants
+keep passing on scope identity alone. The same deny-only channel re-check
+runs inside the per-channel loaders (the channel-month `facts` listing,
+`reconciliation-preview`, and the channel-month `summary`), and the
+`reconciliation-issues` loader re-derives its covered channel sets on the
+snapshot index and intersects them with the gate-time visible set before
+paging, so a channel moved out of the caller's granted unit mid-request is
+dropped from the queue — and its audit records the snapshot-effective
+scope count, not the stale gate-time set the recheck narrowed away.
+Platform-lane data can narrow but never grant access, preserving the
+laning boundary. The snapshot
+transaction is read-plus-append-only (its only writes are the endpoint's own
+audit rows), so it cannot raise serialization failures and never aborts
+concurrent finance writers (REPEATABLE READ deliberately, not SERIALIZABLE).
+Documented residual: the smart-alerts audit-derived signals
+(`SOURCE_ROWS_SKIPPED`, `CONNECTOR_RUNS_FAILED`) read through the tenant-lane
+session and stay READ COMMITTED relative to that snapshot — their laning is
+an authorization boundary (audit gates + tenant RLS) that a consistency
+preference must not move. The same residual covers the org/channel
+display-name maps inside `rankings` (labels, not money). The allocation
+resolver's month-close probe is NOT a residual: it reads through the
+snapshot session in `net-revenue` and `rankings`, so close status,
+committed-run selection, and live-compute inputs all come from one MVCC
+snapshot — a lock committing mid-read cannot pair a fresh LOCKED probe with
+an older in-snapshot committed run and mislabel that stale run as the locked
+allocation. `reconciliation-preview`
+originally carried a single-select exemption; review disproved its premise
+(the repository read is two statements — the active-channel guard, then the
+facts select), so it — and the channel-month `facts` listing, which rides
+the same guard-then-select repository read through the same shared loader —
+now begins the snapshot like every other composed read and the guard
+decision provably coexists with the facts it authorizes. The
+`POST /revenue/recalculate` write branch and the explain POST stay READ
+COMMITTED by the recorded write-path ruling: they continue into persistence,
+where REPEATABLE READ upsert conflicts would abort rather than degrade.
+Responses over OPEN months remain living
 data — two consecutive requests may differ — but within one response the money
 numbers always coexisted in the database. On SQLite (test tier) every lane
 shares one StaticPool connection, so reads are already transaction-consistent
