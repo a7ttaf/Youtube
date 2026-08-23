@@ -1313,11 +1313,14 @@ def get_channel_month_reconciliation_preview(
 #   stays out. The route's empty-scope early return never reaches this
 #   loader; a selection that empties ON THE SNAPSHOT returns an empty page
 #   without touching the repository (empty queue, not 403 — the same
-#   contract as the route's gate-time empty). Source ValidationErrors
-#   propagate untouched for the route's 422 translation.
-# Blast Radius: The issue queue's page coherence and which channels' facts
-#   it may page. Deny-only — the snapshot intersect can only shrink the
-#   selection.
+#   contract as the route's gate-time empty). The snapshot-EFFECTIVE scope
+#   set is returned so the route's audit reports the scope that actually
+#   served the page — auditing the stale gate-time set would claim a
+#   channel was in scope after the recheck removed it. Source
+#   ValidationErrors propagate untouched for the route's 422 translation.
+# Blast Radius: The issue queue's page coherence, which channels' facts it
+#   may page, and the audited scope count. Deny-only — the snapshot
+#   intersect can only shrink the selection.
 # Connections:
 #   - File: backend/ums_smart_revenue/finance/reconciliation.py -> the pure
 #     issue-queue builder consuming the page's facts.
@@ -1335,10 +1338,12 @@ def _load_month_reconciliation_issue_page(
     offset: int,
     platform_session: Session,
     repository: SqlAlchemyRevenueFactRepository,
-) -> tuple[list[str], list[RevenueFactEntry], bool]:
+) -> tuple[list[str], list[RevenueFactEntry], bool, set[str] | None]:
     """Begin the composed-read snapshot, narrow the scope on it, fetch one page.
 
-    Returns ``(channel_ids_for_page, facts, has_more)``.
+    Returns ``(channel_ids_for_page, facts, has_more, effective_scope_channel_ids)``
+    where the last element is the snapshot-narrowed scope the page was
+    actually selected from (``None`` for global callers).
     """
     # FIX: One MVCC snapshot for the channel-id page and the facts read below —
     # a fact committing between them can no longer tear the issue queue against
@@ -1357,7 +1362,7 @@ def _load_month_reconciliation_issue_page(
         visible_channel_ids, snapshot_visible_channel_ids
     )
     if page_scope_channel_ids is not None and not page_scope_channel_ids:
-        return [], [], False
+        return [], [], False, page_scope_channel_ids
     page_size = limit + 1
     page_channel_ids = repository.list_month_channel_ids(
         month=month,
@@ -1370,7 +1375,7 @@ def _load_month_reconciliation_issue_page(
         month=month,
         youtube_channel_ids=set(channel_ids_for_page),
     )
-    return channel_ids_for_page, facts, len(page_channel_ids) > limit
+    return channel_ids_for_page, facts, len(page_channel_ids) > limit, page_scope_channel_ids
 
 
 # ============================================================================
@@ -1468,7 +1473,12 @@ def list_month_reconciliation_issues(
         return response
 
     try:
-        channel_ids_for_page, facts, has_more = _load_month_reconciliation_issue_page(
+        (
+            channel_ids_for_page,
+            facts,
+            has_more,
+            effective_scope_channel_ids,
+        ) = _load_month_reconciliation_issue_page(
             month=month,
             user=user,
             visible_channel_ids=visible_channel_ids,
@@ -1496,8 +1506,13 @@ def list_month_reconciliation_issues(
             "page_channel_count": len(channel_ids_for_page),
             "page_fact_count": len(facts),
             "has_more": has_more,
+            # The snapshot-EFFECTIVE scope, not the gate-time set: the loader's
+            # deny-only recheck may have narrowed the selection, and the audit
+            # must not claim a channel was in scope after it was removed.
             "scoped_channel_count": (
-                len(visible_channel_ids) if visible_channel_ids is not None else None
+                len(effective_scope_channel_ids)
+                if effective_scope_channel_ids is not None
+                else None
             ),
         },
     )

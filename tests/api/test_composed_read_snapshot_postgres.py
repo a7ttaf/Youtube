@@ -1024,7 +1024,9 @@ def test_reconciliation_issue_queue_selection_rides_the_snapshot(
     """A channel moved out of the caller's granted sector after the visible
     set was computed but before the snapshot begins must not have its facts
     paged into the issue queue: the loader recomputes the covered sets on the
-    snapshot index and intersects them with the gate-time set, deny-only."""
+    snapshot index and intersects them with the gate-time set, deny-only —
+    and the audit records the snapshot-EFFECTIVE scope count, not the stale
+    gate-time set the recheck already narrowed away."""
     _seed_month(owner_engine)
     _seed_sector_b_with_company_b(owner_engine)
     with Session(owner_engine) as seeder:
@@ -1062,6 +1064,15 @@ def test_reconciliation_issue_queue_selection_rides_the_snapshot(
     body = response.json()
     assert body["items"] == []
     assert body["pagination"]["has_more"] is False
+    with owner_engine.connect() as conn:
+        scoped_channel_count = conn.execute(
+            sa.text(
+                "SELECT (details ->> 'scoped_channel_count')::int FROM audit_logs "
+                "WHERE entity_type = 'revenue_reconciliation_issue_queue' "
+                "ORDER BY created_at DESC LIMIT 1"
+            )
+        ).scalar_one()
+    assert scoped_channel_count == 0
 
 
 def test_group_scope_member_containment_rides_the_snapshot(

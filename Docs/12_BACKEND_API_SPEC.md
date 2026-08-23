@@ -700,8 +700,10 @@ runs inside the per-channel loaders (the channel-month `facts` listing,
 `reconciliation-issues` loader re-derives its covered channel sets on the
 snapshot index and intersects them with the gate-time visible set before
 paging, so a channel moved out of the caller's granted unit mid-request is
-dropped from the queue. Platform-lane data can narrow but never grant
-access, preserving the laning boundary. The snapshot
+dropped from the queue — and its audit records the snapshot-effective
+scope count, not the stale gate-time set the recheck narrowed away.
+Platform-lane data can narrow but never grant access, preserving the
+laning boundary. The snapshot
 transaction is read-plus-append-only (its only writes are the endpoint's own
 audit rows), so it cannot raise serialization failures and never aborts
 concurrent finance writers (REPEATABLE READ deliberately, not SERIALIZABLE).
