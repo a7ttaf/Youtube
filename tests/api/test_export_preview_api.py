@@ -19,7 +19,6 @@ from sqlalchemy.orm import Session
 from ums_smart_revenue.api.exports import (
     _artifact_metadata_audit_details,
     _persist_generated_export_artifact,
-    _previous_month,
     _require_persisted_artifact_bytes,
 )
 from ums_smart_revenue.app import create_app
@@ -40,7 +39,6 @@ from ums_smart_revenue.db.org_models import (
 )
 from ums_smart_revenue.db.report_models import ExportJobORM, ReportBase
 from ums_smart_revenue.db.security_models import AuditLogORM, SecurityBase, UserORM
-from ums_smart_revenue.finance.revenue_facts import RevenueFactValidationError
 from ums_smart_revenue.reports.artifact_storage import FileSystemExportArtifactStore
 from ums_smart_revenue.reports.exports import (
     ExportJobEntry,
@@ -359,13 +357,6 @@ def test_artifact_metadata_audit_details_marks_incomplete_metadata():
         "artifact_checksum_sha256",
     }
     assert "artifact_filename" not in details
-
-
-def test_export_previous_month_rejects_malformed_month():
-    """Test that previous month computation rejects malformed
-    month strings by raising a validation error."""
-    with pytest.raises(RevenueFactValidationError, match="export month"):
-        _previous_month("2026-3")
 
 
 def test_group_scoped_finance_workbook_records_channel_revenue_audit(tmp_path):

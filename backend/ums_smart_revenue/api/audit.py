@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
+from ums_smart_revenue.api.authz import require_permission
 from ums_smart_revenue.api.channels import audit_record_to_api, current_audit_sink
 from ums_smart_revenue.api.dependencies import (
     current_db_session,
@@ -71,7 +72,7 @@ def list_audit_events(
 ) -> dict[str, object]:
     """Return the filtered audit-event page and the self-audit record."""
     audit_scope = AccessScope.global_scope()
-    _require_permission(user, Permission.VIEW_AUDIT_LOG, audit_scope)
+    require_permission(user, Permission.VIEW_AUDIT_LOG, audit_scope)
     include_sensitive_details = has_permission(
         user, Permission.VIEW_SENSITIVE_AUDIT_PAYLOADS, audit_scope
     )
@@ -153,7 +154,7 @@ def get_audit_summary(
     audit_scope = AccessScope.global_scope()
     # Fail-closed permission check; counts disclose no payload, so the
     # sensitive-payload gate is intentionally NOT required here.
-    _require_permission(user, Permission.VIEW_AUDIT_LOG, audit_scope)
+    require_permission(user, Permission.VIEW_AUDIT_LOG, audit_scope)
     try:
         counts = repository.count_summary(window_hours=window_hours)
     except AuditLogValidationError as exc:
@@ -213,7 +214,7 @@ def export_audit_events(
     # ========================================================================
     audit_scope = AccessScope.global_scope()
     # Fail-closed permission check BEFORE any audit emission or row gathering.
-    _require_permission(user, Permission.VIEW_AUDIT_LOG, audit_scope)
+    require_permission(user, Permission.VIEW_AUDIT_LOG, audit_scope)
     include_sensitive_details = has_permission(
         user, Permission.VIEW_SENSITIVE_AUDIT_PAYLOADS, audit_scope
     )
@@ -284,15 +285,6 @@ def export_audit_events(
     if truncated:
         headers["X-Truncated"] = "true"
     return Response(content=csv_text, media_type="text/csv", headers=headers)
-
-
-def _require_permission(user: UserPrincipal, permission: Permission, scope: AccessScope) -> None:
-    """Raise HTTP 403 when the caller lacks the requested permission."""
-    if not has_permission(user, permission, scope):
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail=f"Missing permission: {permission.value}",
-        )
 
 
 def _csv_safe(value: str) -> str:

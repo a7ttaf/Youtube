@@ -867,6 +867,23 @@ channel↔account map, and multi-currency FX) stays out per Docs/18.
   the recorded residual ruling, and the frozen channel set stays gate-time
   by the export-determinism rule. Pinned in the snapshot wiring + Postgres
   modules. `No migration/backfill required.`
+  **API-layering refactor shipped 2026-08-24** (`refactor/api-layering`):
+  `api/revenue.py`'s cross-imported internals moved to canonical homes — the
+  smart-alert signal reads (missing-fact coverage pair, skipped-row reasons,
+  month math, tenant resolution) to
+  `backend/ums_smart_revenue/finance/smart_alert_signals.py`, the shared
+  permission gates to `backend/ums_smart_revenue/api/authz.py`, and the
+  revenue audit-sink providers to `api/dependencies_finance.py` — so no
+  route module imports another route module's internals. Nine route modules
+  (reconciliation, exports, adsense, allocation, audit,
+  channel_account_links, exchange_rates, finance_close, reports) dropped
+  their behavior-identical private `_require_permission` /
+  `_raise_missing_permission` copies for the shared gate, and exports'
+  local `_previous_month`/`EXPORT_MONTH_PATTERN` folded into the shared
+  `previous_month` (same acceptance set; only the unit-level error string
+  changed). No route, permission, or response behavior change; no
+  compatibility shims — every caller renamed. `No migration/backfill
+  required.`
 
 ### Acceptance gate
 

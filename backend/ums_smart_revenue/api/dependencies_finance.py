@@ -1,8 +1,10 @@
-"""Shared FastAPI dependency providers for finance-layer repositories.
+"""Shared FastAPI dependency providers for the finance route modules.
 
-Extracted here so both api.allocation and api.revenue can import these
-providers without the api.allocation -> api.revenue -> api.allocation cycle
-that would arise if they were defined (and imported) from api.revenue alone.
+Extracted here so the finance route modules (api.revenue, api.allocation,
+api.reconciliation, api.exports, ...) and the app factory can import the
+org-index, repository, and revenue-audit-sink providers without one route
+module importing another's internals — the cycle-free home for providers
+that more than one router depends on.
 """
 
 from typing import Annotated
@@ -14,7 +16,9 @@ from ums_smart_revenue.api.dependencies import (
     current_db_session,
     current_platform_db_session,
 )
+from ums_smart_revenue.auth.audit_service import InMemoryAuditSink
 from ums_smart_revenue.auth.scopes import OrgAccessIndex
+from ums_smart_revenue.auth.sql_audit_sink import SqlAlchemyAuditSink
 from ums_smart_revenue.finance.channel_account_links import (
     SqlAlchemyChannelAccountLinkRepository,
 )
@@ -65,3 +69,24 @@ def current_channel_account_link_repository(
 ) -> SqlAlchemyChannelAccountLinkRepository:
     """Build the tenant-aware channel-account-link repository for a request."""
     return SqlAlchemyChannelAccountLinkRepository(session)
+
+
+_AUDIT_SINK = InMemoryAuditSink()
+
+
+def current_revenue_audit_sink() -> InMemoryAuditSink:
+    """Return the module-level in-memory audit sink for revenue route events.
+
+    Fail-safe default only; the app factory overrides this with
+    sql_revenue_audit_sink_from_session. Defined here (not api.revenue) so
+    the revenue, reconciliation, and export route modules can all depend on
+    it without importing another route module's internals.
+    """
+    return _AUDIT_SINK
+
+
+def sql_revenue_audit_sink_from_session(
+    session: Annotated[Session, Depends(current_platform_db_session)],
+) -> SqlAlchemyAuditSink:
+    """Build a SQLAlchemy-backed audit sink bound to the current database session."""
+    return SqlAlchemyAuditSink(session)

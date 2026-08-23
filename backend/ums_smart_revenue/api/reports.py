@@ -4,6 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.orm import Session
 
+from ums_smart_revenue.api.authz import raise_missing_permission, require_permission
 from ums_smart_revenue.api.channels import audit_record_to_api, current_audit_sink
 from ums_smart_revenue.api.dependencies import (
     current_db_session,
@@ -87,7 +88,7 @@ def register_raw_report_file(
     audit_sink: Annotated[AuditSink, Depends(current_audit_sink)],
 ) -> dict[str, object]:
     connector_scope = AccessScope.connector(payload.source)
-    _require_permission(user, Permission.RUN_CONNECTOR_JOBS, connector_scope)
+    require_permission(user, Permission.RUN_CONNECTOR_JOBS, connector_scope)
     try:
         raw_file = repository.register_file(
             source=payload.source,
@@ -140,7 +141,7 @@ def list_raw_report_files(
     offset: Annotated[int, Query(ge=0)] = 0,
 ) -> dict[str, object]:
     scope = AccessScope.connector(source) if source else AccessScope.global_scope()
-    _require_permission(user, Permission.VIEW_RAW_FILES, scope)
+    require_permission(user, Permission.VIEW_RAW_FILES, scope)
     try:
         page = repository.list_files(
             source=source,
@@ -184,7 +185,7 @@ def get_raw_report_file(
     audit_sink: Annotated[AuditSink, Depends(current_audit_sink)],
 ) -> dict[str, object]:
     if not _has_any_permission_scope(user, Permission.VIEW_RAW_FILES):
-        _raise_missing_permission(Permission.VIEW_RAW_FILES)
+        raise_missing_permission(Permission.VIEW_RAW_FILES)
 
     try:
         raw_file = repository.get_file(raw_file_id)
@@ -250,7 +251,7 @@ def purge_raw_report_file(
     # Boundary check first: deny without revealing existence to unauthorized
     # callers; the connector-scoped check below uses the resolved source.
     if not _has_any_permission_scope(user, Permission.MANAGE_CONNECTORS):
-        _raise_missing_permission(Permission.MANAGE_CONNECTORS)
+        raise_missing_permission(Permission.MANAGE_CONNECTORS)
 
     try:
         raw_file = repository.get_file(raw_file_id)
@@ -308,18 +309,6 @@ def purge_raw_report_file(
     response["purged_at"] = purged.purged_at.isoformat() if purged.purged_at else None
     response["audit_event"] = audit_record_to_api(record)
     return response
-
-
-def _require_permission(user: UserPrincipal, permission: Permission, scope: AccessScope) -> None:
-    if not has_permission(user, permission, scope):
-        _raise_missing_permission(permission)
-
-
-def _raise_missing_permission(permission: Permission) -> None:
-    raise HTTPException(
-        status_code=status.HTTP_403_FORBIDDEN,
-        detail=f"Missing permission: {permission.value}",
-    )
 
 
 def _has_any_permission_scope(user: UserPrincipal, permission: Permission) -> bool:

@@ -25,7 +25,6 @@ from sqlalchemy import create_engine, select
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
-from ums_smart_revenue.api.revenue import _previous_month
 from ums_smart_revenue.app import create_app
 from ums_smart_revenue.db.finance_models import (
     AdSensePaymentORM,
@@ -36,6 +35,7 @@ from ums_smart_revenue.db.finance_models import (
 from ums_smart_revenue.db.org_models import OrgBase, OrgUnitORM, YouTubeChannelORM
 from ums_smart_revenue.db.security_models import AuditLogORM, SecurityBase, UserORM
 from ums_smart_revenue.finance.revenue_facts import RevenueFactValidationError
+from ums_smart_revenue.finance.smart_alert_signals import previous_month
 from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
 
 SECTOR_ID = UUID("00000000-0000-0000-0000-00000000b101")
@@ -321,7 +321,7 @@ def test_previous_month_rejects_non_padded_month():
         RevenueFactValidationError,
         match="month must use YYYY-MM with a calendar month from 01 to 12",
     ):
-        _previous_month("2026-3")
+        previous_month("2026-3")
 
 
 def test_month_smart_alerts_include_month_over_month_revenue_anomaly(tmp_path):

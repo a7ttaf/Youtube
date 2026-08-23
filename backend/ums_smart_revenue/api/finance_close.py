@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.orm import Session
 
+from ums_smart_revenue.api.authz import raise_missing_permission, require_permission
 from ums_smart_revenue.api.channels import audit_record_to_api, current_audit_sink
 from ums_smart_revenue.api.dependencies import (
     current_db_session,
@@ -16,7 +17,6 @@ from ums_smart_revenue.auth.audit import AuditEventType
 from ums_smart_revenue.auth.audit_service import AuditSink, record_audit_event
 from ums_smart_revenue.auth.models import UserPrincipal
 from ums_smart_revenue.auth.permissions import Permission
-from ums_smart_revenue.auth.policy import has_permission
 from ums_smart_revenue.auth.scopes import AccessScope
 from ums_smart_revenue.auth.seed import ROLE_PERMISSIONS
 from ums_smart_revenue.finance.month_close import (
@@ -120,7 +120,7 @@ def get_finance_close_readiness(
 ) -> dict[str, object]:
     _validate_month(month)
     scope = AccessScope.finance_month(month)
-    _require_permission(user, Permission.LOCK_FINANCE_MONTH, scope)
+    require_permission(user, Permission.LOCK_FINANCE_MONTH, scope)
     readiness = readiness_service.check_month(month)
     record_audit_event(
         sink=audit_sink,
@@ -151,7 +151,7 @@ def lock_finance_month(
 ) -> dict[str, object]:
     _validate_month(month)
     scope = AccessScope.finance_month(month)
-    _require_permission(user, Permission.LOCK_FINANCE_MONTH, scope)
+    require_permission(user, Permission.LOCK_FINANCE_MONTH, scope)
     _validate_actor_user_id(user.user_id)
     try:
         close = repository.lock_month(month=month, actor_user_id=user.user_id)
@@ -188,7 +188,7 @@ def unlock_finance_month(
 ) -> dict[str, object]:
     _validate_month(month)
     scope = AccessScope.finance_month(month)
-    _require_permission(user, Permission.UNLOCK_FINANCE_MONTH, scope)
+    require_permission(user, Permission.UNLOCK_FINANCE_MONTH, scope)
     _validate_actor_user_id(user.user_id)
     try:
         close = repository.unlock_month(month=month, actor_user_id=user.user_id)
@@ -234,7 +234,7 @@ def record_allocation_rule(
 ) -> dict[str, object]:
     _validate_month(month)
     scope = AccessScope.finance_month(month)
-    _require_permission(user, Permission.CHANGE_ALLOCATION_RULE, scope)
+    require_permission(user, Permission.CHANGE_ALLOCATION_RULE, scope)
     try:
         allocation_method = normalize_allocation_method(payload.allocation_method)
     except RevenueRecalculationValidationError as exc:
@@ -267,17 +267,9 @@ def record_allocation_rule(
     return _with_audit_event(close, record)
 
 
-def _require_permission(user: UserPrincipal, permission: Permission, scope: AccessScope) -> None:
-    if not has_permission(user, permission, scope):
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail=f"Missing permission: {permission.value}",
-        )
-
-
 def _require_finance_close_read_permission(user: UserPrincipal, month: str) -> None:
     if user.disabled:
-        _raise_missing_permission(Permission.VIEW_REVENUE)
+        raise_missing_permission(Permission.VIEW_REVENUE)
     for grant in user.direct_permissions:
         if not (grant.active and grant.permission == Permission.VIEW_REVENUE):
             continue
@@ -290,7 +282,7 @@ def _require_finance_close_read_permission(user: UserPrincipal, month: str) -> N
             continue
         if _scope_authorizes_month_close_read(assignment.scope, month):
             return
-    _raise_missing_permission(Permission.VIEW_REVENUE)
+    raise_missing_permission(Permission.VIEW_REVENUE)
 
 
 def _scope_authorizes_month_close_read(scope: AccessScope, month: str) -> bool:
@@ -300,13 +292,6 @@ def _scope_authorizes_month_close_read(scope: AccessScope, month: str) -> bool:
     if scope_type == "finance-month":
         return scope.id == month
     return scope_type in _BROADER_REVENUE_READ_SCOPE_TYPES
-
-
-def _raise_missing_permission(permission: Permission) -> None:
-    raise HTTPException(
-        status_code=status.HTTP_403_FORBIDDEN,
-        detail=f"Missing permission: {permission.value}",
-    )
 
 
 def _validate_month(month: str) -> None:

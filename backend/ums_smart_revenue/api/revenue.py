@@ -6,8 +6,9 @@
 #   HTTP responses. No finance math or audit writes happen here.
 # Database/ORM: Reads/writes via SQLAlchemy repositories
 #   (RevenueFactRepository, AdSensePaymentRepository, BankReconciliationRepository,
-#   ManualOverrideRepository, FinanceMonthCloseRepository, AllocationRepository)
-#   plus tenant-scoped AuditLogORM reads for smart-alert inputs.
+#   ManualOverrideRepository, FinanceMonthCloseRepository, AllocationRepository);
+#   the tenant-scoped smart-alert signal reads (missing-fact coverage, skipped
+#   rows) are delegated to finance.smart_alert_signals.
 # Standards: smart-alerts four-permission gate (VIEW_REVENUE/VIEW_CONFIDENCE
 #   global + VIEW_FINALIZED_PAYMENTS/VIEW_BANK_RECONCILIATION month-scoped);
 #   audit-derived inputs gated by VIEW_AUDIT_LOG with VIEW_SENSITIVE_AUDIT_PAYLOADS
@@ -23,20 +24,24 @@
 #     read path so exported workbooks surface the same alerts.
 #   - File: backend/ums_smart_revenue/auth/audit.py -> audit-log gate pattern
 #     that this module follows for the audit-derived skipped-row signal.
+#   - File: backend/ums_smart_revenue/api/authz.py -> the shared permission
+#     gates; File: backend/ums_smart_revenue/api/dependencies_finance.py ->
+#     the shared providers (org index, repositories, audit sinks). Both
+#     extracted from this module so sibling route modules stop importing its
+#     internals.
 #   - File: Docs/12_BACKEND_API_SPEC.md -> endpoint contracts and alert codes.
 # ============================================================================
-import re
 from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
 from typing import Annotated, cast
-from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from pydantic import BaseModel, Field, field_validator
-from sqlalchemy import Integer, literal_column, select
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from ums_smart_revenue.api.authz import raise_missing_permission, require_permission
 from ums_smart_revenue.api.dependencies import (
     current_db_session,
     current_platform_db_session,
@@ -53,6 +58,7 @@ from ums_smart_revenue.api.dependencies_finance import (
     current_committed_allocation_repository,
     current_deduction_component_repository,
     current_org_access_index,
+    current_revenue_audit_sink,
     current_revenue_fact_repository,
 )
 from ums_smart_revenue.api.org_units import current_org_unit_reader
@@ -62,7 +68,6 @@ from ums_smart_revenue.auth.audit_log import SqlAlchemyAuditLogRepository
 from ums_smart_revenue.auth.audit_service import (
     AuditRecord,
     AuditSink,
-    InMemoryAuditSink,
     record_audit_event,
 )
 from ums_smart_revenue.auth.models import UserPrincipal
@@ -70,11 +75,8 @@ from ums_smart_revenue.auth.permissions import Permission
 from ums_smart_revenue.auth.policy import has_permission
 from ums_smart_revenue.auth.scopes import AccessScope, OrgAccessIndex, ScopeType
 from ums_smart_revenue.auth.seed import ROLE_PERMISSIONS
-from ums_smart_revenue.auth.sql_audit_sink import SqlAlchemyAuditSink
-from ums_smart_revenue.db.finance_models import MonthlyChannelRevenueFactORM
 from ums_smart_revenue.db.org_models import YouTubeChannelORM
 from ums_smart_revenue.db.read_snapshot import begin_composed_read_snapshot
-from ums_smart_revenue.db.security_models import AuditLogORM
 from ums_smart_revenue.finance.account_allocation_read import (
     AllocationProvenance,
     allocation_provenance_to_api,
@@ -168,8 +170,13 @@ from ums_smart_revenue.finance.revenue_facts import (
 )
 from ums_smart_revenue.finance.revenue_scopes import build_authorized_revenue_scopes
 from ums_smart_revenue.finance.revenue_summary import build_adjusted_revenue_summary
+from ums_smart_revenue.finance.smart_alert_signals import (
+    missing_revenue_fact_channel_count_and_sample,
+    previous_month,
+    resolve_smart_alert_tenant_id,
+    skipped_source_row_count_and_reasons,
+)
 from ums_smart_revenue.finance.smart_alerts import (
-    MISSING_FACT_CHANNEL_SAMPLE_LIMIT,
     MonthlySmartAlertAuditSignals,
     MonthlySmartAlertFinanceInputs,
     MonthlySmartAlertSummary,
@@ -180,12 +187,8 @@ from ums_smart_revenue.org.access_index import load_org_access_index_from_sessio
 from ums_smart_revenue.org.channel_groups import ChannelGroupRegistryStore
 from ums_smart_revenue.org.org_units_read import SqlAlchemyOrgUnitReader
 from ums_smart_revenue.org.sql_channel_groups import SqlAlchemyChannelGroupRegistry
-from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
-from ums_smart_revenue.tenancy.context import get_current_tenant
 
 router = APIRouter(prefix="/revenue", tags=["revenue"])
-MONTH_VALUE_PATTERN = re.compile(r"^\d{4}-\d{2}$")
-_AUDIT_SINK = InMemoryAuditSink()
 _REVENUE_SOURCE_KINDS_BY_CONNECTOR_KEY = {
     "youtube-cms": {RevenueFactSourceKind.YOUTUBE_CMS.value},
     "youtube_reporting": {RevenueFactSourceKind.YOUTUBE_CMS.value},
@@ -552,18 +555,6 @@ def current_number_explanation_repository(
     return SqlAlchemyNumberExplanationRepository(session)
 
 
-def current_revenue_audit_sink() -> InMemoryAuditSink:
-    """Return the module-level in-memory audit sink for revenue route events."""
-    return _AUDIT_SINK
-
-
-def sql_revenue_audit_sink_from_session(
-    session: Annotated[Session, Depends(current_platform_db_session)],
-) -> SqlAlchemyAuditSink:
-    """Build a SQLAlchemy-backed audit sink bound to the current database session."""
-    return SqlAlchemyAuditSink(session)
-
-
 @router.get("/channels/{channel_id}/authorization-check", response_model=AuthorizationCheckResponse)
 def check_channel_revenue_authorization(
     channel_id: str,
@@ -572,7 +563,7 @@ def check_channel_revenue_authorization(
 ) -> AuthorizationCheckResponse:
     """Check whether the caller holds VIEW_REVENUE permission for the given channel."""
     target_scope = AccessScope.channel(channel_id)
-    _require_permission(user, Permission.VIEW_REVENUE, target_scope, org_index)
+    require_permission(user, Permission.VIEW_REVENUE, target_scope, org_index)
     return AuthorizationCheckResponse(
         authorized=True,
         channel_id=channel_id,
@@ -926,9 +917,9 @@ def request_revenue_recalculation(
         channel_ids,
         org_index,
     )
-    _require_permission(user, Permission.CHANGE_ALLOCATION_RULE, month_scope)
+    require_permission(user, Permission.CHANGE_ALLOCATION_RULE, month_scope)
     if not payload.dry_run:
-        _require_permission(user, Permission.VIEW_FINALIZED_PAYMENTS, month_scope)
+        require_permission(user, Permission.VIEW_FINALIZED_PAYMENTS, month_scope)
 
     normalized_write_method: str | None = None
     write_idempotency_key: str | None = None
@@ -1038,7 +1029,7 @@ def import_revenue_fact(
 ) -> dict[str, object]:
     """Validate and persist a connector-sourced monthly fact, then audit it."""
     connector_scope = AccessScope.connector(payload.connector_key)
-    _require_permission(user, Permission.RUN_CONNECTOR_JOBS, connector_scope)
+    require_permission(user, Permission.RUN_CONNECTOR_JOBS, connector_scope)
     try:
         source_kind = _validate_connector_source_kind(payload.connector_key, payload.source_kind)
         fact = repository.record_fact(
@@ -1122,7 +1113,7 @@ def list_channel_month_revenue_facts(
 ) -> dict[str, object]:
     """Return all revenue facts recorded for a channel in a given month."""
     target_scope = AccessScope.channel(channel_id)
-    _require_permission(user, Permission.VIEW_REVENUE, target_scope, org_index)
+    require_permission(user, Permission.VIEW_REVENUE, target_scope, org_index)
     try:
         facts = _load_channel_month_facts(
             month=month,
@@ -1252,8 +1243,8 @@ def get_channel_month_reconciliation_preview(
 ) -> dict[str, object]:
     """Build and return the multi-source reconciliation preview for a channel and month."""
     target_scope = AccessScope.channel(channel_id)
-    _require_permission(user, Permission.VIEW_REVENUE, target_scope, org_index)
-    _require_permission(user, Permission.VIEW_CONFIDENCE, target_scope, org_index)
+    require_permission(user, Permission.VIEW_REVENUE, target_scope, org_index)
+    require_permission(user, Permission.VIEW_CONFIDENCE, target_scope, org_index)
     try:
         facts = _load_channel_month_facts(
             month=month,
@@ -1425,9 +1416,9 @@ def list_month_reconciliation_issues(
     # scoped grant currently maps to zero channels (e.g. sector/company with
     # no active mapping) should see an empty queue, not 403.
     if user.disabled or not _granted_scopes_for_permission(user, Permission.VIEW_REVENUE):
-        _raise_missing_permission(Permission.VIEW_REVENUE)
+        raise_missing_permission(Permission.VIEW_REVENUE)
     if not _granted_scopes_for_permission(user, Permission.VIEW_CONFIDENCE):
-        _raise_missing_permission(Permission.VIEW_CONFIDENCE)
+        raise_missing_permission(Permission.VIEW_CONFIDENCE)
 
     # The channel authorization below runs in-memory over the org-access index
     # (loaded on the TENANT lane) before the composed-read snapshot, which
@@ -1613,8 +1604,8 @@ def get_month_payment_match(
     """Compare monthly YouTube revenue facts against AdSense payments."""
     revenue_scope = AccessScope.global_scope()
     payment_scope = AccessScope.finance_month(month)
-    _require_permission(user, Permission.VIEW_REVENUE, revenue_scope)
-    _require_permission(user, Permission.VIEW_FINALIZED_PAYMENTS, payment_scope)
+    require_permission(user, Permission.VIEW_REVENUE, revenue_scope)
+    require_permission(user, Permission.VIEW_FINALIZED_PAYMENTS, payment_scope)
     try:
         summary = _load_month_payment_match(
             month=month,
@@ -1720,7 +1711,7 @@ def _load_month_smart_alerts(
     # outside this snapshot: their laning is an authorization boundary.
     begin_composed_read_snapshot(platform_session)
     facts = revenue_repository.list_month_facts(month=month)
-    previous_facts = revenue_repository.list_month_facts(month=_previous_month(month))
+    previous_facts = revenue_repository.list_month_facts(month=previous_month(month))
     payments = payment_repository.list_month_payments(month=month)
     bank_entries = bank_repository.list_month_entries(month=month)
     manual_overrides = override_repository.list_month_overrides(month=month)
@@ -1831,10 +1822,10 @@ def get_month_smart_alerts(
     """Aggregate cross-domain health signals for a month into a prioritized smart-alert summary."""
     global_scope = AccessScope.global_scope()
     month_scope = AccessScope.finance_month(month)
-    _require_permission(user, Permission.VIEW_REVENUE, global_scope)
-    _require_permission(user, Permission.VIEW_CONFIDENCE, global_scope)
-    _require_permission(user, Permission.VIEW_FINALIZED_PAYMENTS, month_scope)
-    _require_permission(user, Permission.VIEW_BANK_RECONCILIATION, month_scope)
+    require_permission(user, Permission.VIEW_REVENUE, global_scope)
+    require_permission(user, Permission.VIEW_CONFIDENCE, global_scope)
+    require_permission(user, Permission.VIEW_FINALIZED_PAYMENTS, month_scope)
+    require_permission(user, Permission.VIEW_BANK_RECONCILIATION, month_scope)
     # FIX: Audit-derived inputs require VIEW_AUDIT_LOG; without it the
     # SOURCE_ROWS_SKIPPED alert is omitted entirely so finance viewers do
     # not silently gain access to audit payloads. Per-reason breakdown
@@ -2072,10 +2063,10 @@ def get_month_deduction_components(
     """Return one month's deduction evidence grouped by scope for finance review."""
     global_scope = AccessScope.global_scope()
     month_scope = AccessScope.finance_month(month)
-    _require_permission(user, Permission.VIEW_REVENUE, global_scope)
-    _require_permission(user, Permission.VIEW_CONFIDENCE, global_scope)
-    _require_permission(user, Permission.VIEW_FINALIZED_PAYMENTS, month_scope)
-    _require_permission(user, Permission.VIEW_BANK_RECONCILIATION, month_scope)
+    require_permission(user, Permission.VIEW_REVENUE, global_scope)
+    require_permission(user, Permission.VIEW_CONFIDENCE, global_scope)
+    require_permission(user, Permission.VIEW_FINALIZED_PAYMENTS, month_scope)
+    require_permission(user, Permission.VIEW_BANK_RECONCILIATION, month_scope)
     try:
         page = _load_month_deduction_components_page(
             month=month,
@@ -2198,7 +2189,7 @@ def list_authorized_revenue_scopes(
     """Return the caller's authorized rollup scope options; 403 without VIEW_REVENUE."""
     granted = _granted_scopes_for_permission(user, Permission.VIEW_REVENUE)
     if user.disabled or not granted:
-        _raise_missing_permission(Permission.VIEW_REVENUE)
+        raise_missing_permission(Permission.VIEW_REVENUE)
 
     sector_names: dict[str, str] = {}
     company_names: dict[str, str] = {}
@@ -2223,7 +2214,7 @@ def list_authorized_revenue_scopes(
         # to fall back to a synthetic GLOBAL option and fire an unauthorized
         # global read. 403 keeps this rollup-scope listing authoritative and
         # matches the no-rollup-scope -> no-permission contract.
-        _raise_missing_permission(Permission.VIEW_REVENUE)
+        raise_missing_permission(Permission.VIEW_REVENUE)
     return {"scopes": [option.to_api() for option in options]}
 
 
@@ -2426,7 +2417,7 @@ def get_month_net_revenue(
         channel_ids,
         org_index,
     )
-    _require_permission(user, Permission.VIEW_FINALIZED_PAYMENTS, AccessScope.finance_month(month))
+    require_permission(user, Permission.VIEW_FINALIZED_PAYMENTS, AccessScope.finance_month(month))
     # FIX: Derive the global-surface gate and audit entity ids from the resolved
     # AccessScope, not the raw scope_type/scope_id query strings. The permission
     # checks above already run on the normalized target_scope, so keying the
@@ -2715,7 +2706,7 @@ def get_month_rankings(
         channel_ids,
         org_index,
     )
-    _require_permission(user, Permission.VIEW_FINALIZED_PAYMENTS, AccessScope.finance_month(month))
+    require_permission(user, Permission.VIEW_FINALIZED_PAYMENTS, AccessScope.finance_month(month))
     normalized_scope_type = target_scope.type.value
     normalized_scope_id = target_scope.id or "global"
     try:
@@ -2799,7 +2790,7 @@ def _org_unit_name_maps(
 #   by build_month_rankings when a channel is missing from this map).
 # Database/ORM: Read-only SELECT on YouTubeChannelORM, tenant-scoped, no lock.
 # Standards: Tenant resolved exactly like the smart-alert reader
-#   (_resolve_smart_alert_tenant_id -> get_current_tenant, UMS_TENANT_ID
+#   (resolve_smart_alert_tenant_id -> get_current_tenant, UMS_TENANT_ID
 #   fallback); never hardcoded. Read surface only — no write/auth/audit.
 # Blast Radius: Finance read display only; names never feed totals or ordering.
 # Connections:
@@ -2808,7 +2799,7 @@ def _org_unit_name_maps(
 # ============================================================================
 def _channel_name_map(session: Session) -> dict[str, str]:
     """Return active channel id->name for the current tenant (raw-id fallback)."""
-    tenant_id = _resolve_smart_alert_tenant_id()
+    tenant_id = resolve_smart_alert_tenant_id()
     statement = select(
         YouTubeChannelORM.youtube_channel_id,
         YouTubeChannelORM.channel_name,
@@ -2836,7 +2827,7 @@ def record_month_bank_reconciliation(
 ) -> dict[str, object]:
     """Persist a bank-received reconciliation entry for a month and emit an audit event."""
     scope = AccessScope.finance_month(month)
-    _require_permission(user, Permission.MANAGE_BANK_RECONCILIATION, scope)
+    require_permission(user, Permission.MANAGE_BANK_RECONCILIATION, scope)
     try:
         entry = repository.record_entry(
             month=month,
@@ -2965,8 +2956,8 @@ def get_month_bank_reconciliation(
 ) -> dict[str, object]:
     """Return the bank-reconciliation summary for a month."""
     scope = AccessScope.finance_month(month)
-    _require_permission(user, Permission.VIEW_BANK_RECONCILIATION, scope)
-    _require_permission(user, Permission.VIEW_FINALIZED_PAYMENTS, scope)
+    require_permission(user, Permission.VIEW_BANK_RECONCILIATION, scope)
+    require_permission(user, Permission.VIEW_FINALIZED_PAYMENTS, scope)
     try:
         summary = _load_month_bank_reconciliation(
             month=month,
@@ -3159,13 +3150,13 @@ def get_month_gap_explanation(
     """Explain the month's payment and bank gaps as one composed narrative."""
     global_scope = AccessScope.global_scope()
     month_scope = AccessScope.finance_month(month)
-    _require_permission(user, Permission.VIEW_REVENUE, global_scope)
+    require_permission(user, Permission.VIEW_REVENUE, global_scope)
     # Confidence labels, scores, and provenance-confidence tokens appear on
     # every component and residual, so the platform's confidence gate applies
     # exactly as it does on smart-alerts (the identical four-gate set).
-    _require_permission(user, Permission.VIEW_CONFIDENCE, global_scope)
-    _require_permission(user, Permission.VIEW_FINALIZED_PAYMENTS, month_scope)
-    _require_permission(user, Permission.VIEW_BANK_RECONCILIATION, month_scope)
+    require_permission(user, Permission.VIEW_CONFIDENCE, global_scope)
+    require_permission(user, Permission.VIEW_FINALIZED_PAYMENTS, month_scope)
+    require_permission(user, Permission.VIEW_BANK_RECONCILIATION, month_scope)
     try:
         explanation = _load_month_gap_explanation(
             month=month,
@@ -3290,8 +3281,8 @@ def explain_channel_month_revenue_metric(
     #     allocation lines reused for account-allocated net provenance.
     # ========================================================================
     target_scope = AccessScope.channel(channel_id)
-    _require_permission(user, Permission.VIEW_REVENUE, target_scope, org_index)
-    _require_permission(user, Permission.VIEW_CONFIDENCE, target_scope, org_index)
+    require_permission(user, Permission.VIEW_REVENUE, target_scope, org_index)
+    require_permission(user, Permission.VIEW_CONFIDENCE, target_scope, org_index)
     # FIX: refuse the smart reconciliation metric on the generic explain route.
     # The reconciliation explanation is built and persisted only by the
     # dedicated ReconciliationWorkflowService workflow (see
@@ -3324,7 +3315,7 @@ def explain_channel_month_revenue_metric(
         # so gate them at finance_month(month) exactly like the PR-2 net-revenue
         # route (revenue.py:1100-1102). finance_month is not an org-hierarchy
         # scope, so no org_index is passed.
-        _require_permission(
+        require_permission(
             user, Permission.VIEW_FINALIZED_PAYMENTS, AccessScope.finance_month(month)
         )
     try:
@@ -3431,7 +3422,7 @@ def create_manual_override(
 ) -> dict[str, object]:
     """Create a pending manual revenue adjustment for a channel-month and emit an audit event."""
     target_scope = AccessScope.channel(payload.youtube_channel_id)
-    _require_permission(user, Permission.CREATE_MANUAL_OVERRIDE, target_scope, org_index)
+    require_permission(user, Permission.CREATE_MANUAL_OVERRIDE, target_scope, org_index)
     try:
         override = repository.create_override(
             month=payload.month,
@@ -3486,7 +3477,7 @@ def approve_manual_override(
         )
         == set()
     ):
-        _raise_missing_permission(Permission.APPROVE_MANUAL_OVERRIDE)
+        raise_missing_permission(Permission.APPROVE_MANUAL_OVERRIDE)
 
     try:
         target_channel_id = repository.get_override_channel_id(manual_override_id)
@@ -3645,7 +3636,7 @@ def get_channel_month_revenue_summary(
 ) -> dict[str, object]:
     """Return the adjusted-revenue summary for a channel and month, including manual overrides."""
     target_scope = AccessScope.channel(channel_id)
-    _require_permission(user, Permission.VIEW_REVENUE, target_scope, org_index)
+    require_permission(user, Permission.VIEW_REVENUE, target_scope, org_index)
     try:
         facts, overrides = _load_channel_month_summary_sources(
             month=month,
@@ -3710,7 +3701,7 @@ def _require_revenue_read_permission(
 ) -> None:
     """Raise HTTP 403 unless the principal can read the resolved revenue scope."""
     if target_scope.type != ScopeType.GROUP:
-        _require_permission(user, permission, target_scope, org_index)
+        require_permission(user, permission, target_scope, org_index)
         return
     if not channel_ids:
         raise HTTPException(
@@ -3728,28 +3719,6 @@ def _require_revenue_read_permission(
             status_code=status.HTTP_403_FORBIDDEN,
             detail=f"Missing permission: {permission.value}",
         )
-
-
-def _require_permission(
-    user: UserPrincipal,
-    permission: Permission,
-    scope: AccessScope,
-    org_index: OrgAccessIndex | None = None,
-) -> None:
-    """Raise HTTP 403 if the principal does not hold the given permission for the given scope."""
-    if not has_permission(user, permission, scope, org_index):
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail=f"Missing permission: {permission.value}",
-        )
-
-
-def _raise_missing_permission(permission: Permission) -> None:
-    """Unconditionally raise HTTP 403 for a missing permission without revealing caller details."""
-    raise HTTPException(
-        status_code=status.HTTP_403_FORBIDDEN,
-        detail=f"Missing permission: {permission.value}",
-    )
 
 
 def _authorized_channel_ids_for_permission(
@@ -3820,33 +3789,6 @@ def _intersect_channel_sets(left: set[str] | None, right: set[str] | None) -> se
     return left & right
 
 
-def _previous_month(month: str) -> str:
-    """Return the YYYY-MM string for the calendar month immediately preceding the given month."""
-    if not MONTH_VALUE_PATTERN.fullmatch(month):
-        raise RevenueFactValidationError(
-            "month must use YYYY-MM with a calendar month from 01 to 12"
-        )
-    try:
-        year_value, month_value = month.split("-", maxsplit=1)
-        year = int(year_value)
-        month_number = int(month_value)
-    except ValueError as exc:
-        raise RevenueFactValidationError(
-            "month must use YYYY-MM with a calendar month from 01 to 12"
-        ) from exc
-    if year == 0 or month_number < 1 or month_number > 12:
-        raise RevenueFactValidationError(
-            "month must use YYYY-MM with a calendar month from 01 to 12"
-        )
-    if month_number == 1:
-        if year == 1:
-            raise RevenueFactValidationError(
-                "month must use YYYY-MM with a calendar month from 01 to 12"
-            )
-        return f"{year - 1:04d}-12"
-    return f"{year:04d}-{month_number - 1:02d}"
-
-
 # ============================================================================
 # Purpose: Assemble the audit-derived smart-alert inputs for the monthly
 #   dashboard route around the caller-provided coverage pair. Connector audit
@@ -3894,7 +3836,7 @@ def _month_smart_alert_audit_signals(
     )
     failed_connector_runs = SqlAlchemyAuditLogRepository(
         session,
-        tenant_id=_resolve_smart_alert_tenant_id(),
+        tenant_id=resolve_smart_alert_tenant_id(),
     ).connector_run_failure_summary(
         month=month,
     )
@@ -3906,205 +3848,6 @@ def _month_smart_alert_audit_signals(
         failed_connector_run_count=failed_connector_runs.count,
         failed_connector_runs_by_status=failed_connector_runs.by_status,
     )
-
-
-# ============================================================================
-# Purpose: Read the active, revenue-required channels that have no revenue fact
-#   for the month, so the smart-alert builder can emit per-channel coverage
-#   gaps. Bounded: returns the total COUNT plus an ordered sample capped at
-#   `MISSING_FACT_CHANNEL_SAMPLE_LIMIT` ids, so a bad ingestion month cannot
-#   turn the alert endpoint into an unbounded scan/transfer.
-# Database/ORM: Read-only LEFT JOIN of YouTubeChannelORM x
-#   MonthlyChannelRevenueFactORM (no FOR UPDATE), tenant-scoped, source of
-#   truth in PostgreSQL. The count uses `COUNT(*)` server-side; the
-#   sample is a separate ordered `LIMIT 20` SELECT.
-# Standards: Mirrors month_close_readiness._missing_required_revenue_fact_count
-#   exactly (active.is_(True) AND revenue_required.is_(True) AND fact.id IS NULL).
-#   No write, no lock, no Neo4j.
-# Blast Radius: Finance read surface only; no auth/audit/finance mutation.
-# Connections:
-#   - File: backend/ums_smart_revenue/finance/month_close_readiness.py ->
-#     shared query shape (count there; count + bounded sample here).
-#   - File: backend/ums_smart_revenue/finance/smart_alerts.py -> consumes
-#     (count, sample) for the coverage alert details.
-# ============================================================================
-def missing_revenue_fact_channel_count_and_sample(
-    session: Session,
-    *,
-    month: str,
-    youtube_channel_ids: set[str] | None = None,
-) -> tuple[int, list[str]]:
-    """Return (count, sample) of active revenue-required channels with no fact for the month.
-
-    `count` is the total matching channels; `sample` is a sorted list of at
-    most `MISSING_FACT_CHANNEL_SAMPLE_LIMIT` channel ids. The two values are
-    read by two independent queries so a large factless set never materializes
-    a full id list on the application side.
-
-    When `youtube_channel_ids` is provided (non-None), the read is scoped to
-    those channels — used by the export helper so a company/sector/group
-    export never leaks factless channel ids outside the exported scope. When
-    omitted (None), the read is tenant-global — the smart-alerts API
-    endpoint stays global by design.
-    """
-    tenant_id = _resolve_smart_alert_tenant_id()
-    join_predicates = (
-        (MonthlyChannelRevenueFactORM.tenant_id == YouTubeChannelORM.tenant_id)
-        & (MonthlyChannelRevenueFactORM.youtube_channel_id == YouTubeChannelORM.youtube_channel_id)
-        & (MonthlyChannelRevenueFactORM.tenant_id == tenant_id)
-        & (MonthlyChannelRevenueFactORM.month == month),
-    )
-    where_predicates = [
-        YouTubeChannelORM.tenant_id == tenant_id,
-        YouTubeChannelORM.active.is_(True),
-        YouTubeChannelORM.revenue_required.is_(True),
-        MonthlyChannelRevenueFactORM.id.is_(None),
-    ]
-    if youtube_channel_ids is not None:
-        where_predicates.append(YouTubeChannelORM.youtube_channel_id.in_(youtube_channel_ids))
-    count_statement = (
-        select(literal_column("COUNT(*)", type_=Integer()))
-        .select_from(YouTubeChannelORM)
-        .outerjoin(MonthlyChannelRevenueFactORM, *join_predicates)
-        .where(*where_predicates)
-    )
-    sample_statement = (
-        select(YouTubeChannelORM.youtube_channel_id)
-        .select_from(YouTubeChannelORM)
-        .outerjoin(MonthlyChannelRevenueFactORM, *join_predicates)
-        .where(*where_predicates)
-        .order_by(YouTubeChannelORM.youtube_channel_id)
-        .limit(MISSING_FACT_CHANNEL_SAMPLE_LIMIT)
-    )
-    count_value = int(session.execute(count_statement).scalar_one())
-    sample_ids = list(session.scalars(sample_statement).all())
-    return count_value, sample_ids
-
-
-# ============================================================================
-# Purpose: Read connector normalization audit edges for a finance month and
-#   derive the current smart-alert source-row skip signal from the newest
-#   relevant connector-run edge only. Filtering the JSON lifecycle in Python
-#   keeps the read portable across SQLite tests and PostgreSQL production while
-#   the SQL predicates stay tenant/month/event scoped.
-# Database/ORM: Read-only SELECT on AuditLogORM / audit_logs; no locks or
-#   writes. PostgreSQL remains the source of truth for audit observability.
-# Standards: Tenant-scoped via _resolve_smart_alert_tenant_id; a newer clean
-#   connector edge clears older ROWS_SKIPPED history; ignores malformed or
-#   zero-count audit details instead of making the dashboard fail on legacy
-#   audit rows; preserves valid reason counts exactly.
-# Blast Radius: Finance dashboard read surface; no finance calculation,
-#   authorization, export, ingestion, or audit-write behavior changes.
-# Connections:
-#   - File: backend/ums_smart_revenue/connectors/runs/normalization.py ->
-#     emits lifecycle=ROWS_SKIPPED with skipped_count/skipped_by_reason.
-#   - File: backend/ums_smart_revenue/finance/smart_alerts.py -> consumes the
-#     aggregate as SOURCE_ROWS_SKIPPED.
-# ============================================================================
-def skipped_source_row_count_and_reasons(
-    session: Session,
-    *,
-    month: str,
-    include_sensitive_details: bool = True,
-) -> tuple[int, dict[str, int]]:
-    """Return skipped source rows + skip reasons for one finance month.
-
-    Reads connector `ROWS_SKIPPED` audit edges scoped by tenant,
-    `CONNECTOR_JOB_RUN` event type, `FINANCE_MONTH` scope, and the requested
-    month. The function returns the newest connector-run signal only — not
-    the sum across re-runs — because fact projection is idempotent and each
-    connector run emits its own edge for the same month; aggregating across
-    runs would over-count stale or duplicate signals (review threads #1 and
-    #10). A newer clean connector edge clears older `ROWS_SKIPPED` history.
-    Malformed or zero-count rows are tolerated: `skipped_count` and
-    `skipped_by_reason` are reconciled via `max()` so the returned pair is
-    internally consistent (review thread #8).
-
-    Args:
-        session: Active SQLAlchemy session.
-        month: Finance month in `YYYY-MM` format (already validated by caller).
-        include_sensitive_details: When False, the returned reason breakdown is
-            redacted to an empty dict so callers without
-            `VIEW_SENSITIVE_AUDIT_PAYLOADS` cannot learn per-reason counts.
-            The total `skipped_count` is still returned because the count is
-            operational, not sensitive.
-
-    Returns:
-        A (count, reasons_by_label) tuple. `reasons_by_label` is always
-        returned in deterministic key-sorted order.
-    """
-    tenant_id = _resolve_smart_alert_tenant_id()
-    # FIX: Read only the newest relevant connector edge for the month. If that
-    # newest edge is not ROWS_SKIPPED, a clean re-run has superseded the older
-    # skipped-row audit history and the dashboard must not show a stale alert.
-    details_rows = session.scalars(
-        select(AuditLogORM.details)
-        .where(
-            AuditLogORM.tenant_id == tenant_id,
-            AuditLogORM.event_type == AuditEventType.CONNECTOR_JOB_RUN.value,
-            AuditLogORM.scope_type == ScopeType.FINANCE_MONTH.value,
-            AuditLogORM.scope_id == month,
-        )
-        .order_by(AuditLogORM.created_at.desc(), AuditLogORM.id.desc())
-    ).all()
-    latest_details: dict[str, object] | None = None
-    for details in details_rows:
-        if not isinstance(details, dict):
-            continue
-        if details.get("lifecycle") != "ROWS_SKIPPED":
-            return 0, {}
-        latest_details = details
-        break
-    if latest_details is None:
-        return 0, {}
-    reason_counts = _skipped_reason_counts_from_details(latest_details)
-    skipped_count = _positive_int(latest_details.get("skipped_count"))
-    reasons_total = sum(reason_counts.values())
-    if skipped_count > 0 and reasons_total > 0:
-        effective_count = max(skipped_count, reasons_total)
-    elif skipped_count > 0:
-        effective_count = skipped_count
-    elif reasons_total > 0:
-        effective_count = reasons_total
-    else:
-        effective_count = 0
-    if not include_sensitive_details:
-        # Redact per-reason breakdown; keep total count visible.
-        return effective_count, {}
-    return effective_count, dict(sorted(reason_counts.items()))
-
-
-def _skipped_reason_counts_from_details(details: dict[str, object]) -> dict[str, int]:
-    """Extract positive reason counts from one ROWS_SKIPPED audit detail payload."""
-    raw_reason_counts = details.get("skipped_by_reason")
-    if not isinstance(raw_reason_counts, dict):
-        return {}
-    reason_counts: dict[str, int] = {}
-    for raw_reason, raw_count in raw_reason_counts.items():
-        reason = str(raw_reason).strip()
-        count = _positive_int(raw_count)
-        if reason and count > 0:
-            reason_counts[reason] = reason_counts.get(reason, 0) + count
-    return reason_counts
-
-
-def _positive_int(value: object) -> int:
-    """Return positive JSON integer-like values; malformed values collapse to zero."""
-    if isinstance(value, bool):
-        return 0
-    if isinstance(value, int):
-        return value if value > 0 else 0
-    if isinstance(value, str) and value.strip().isdecimal():
-        return int(value)
-    return 0
-
-
-def _resolve_smart_alert_tenant_id() -> UUID:
-    """Resolve the request tenant id, mirroring the finance repositories."""
-    current_tenant = get_current_tenant()
-    if current_tenant is not None:
-        return current_tenant.id
-    return UUID(UMS_TENANT_ID)
 
 
 # ============================================================================
@@ -4179,7 +3922,7 @@ def _require_snapshot_org_scope_access(
     if target_scope.type not in _SNAPSHOT_GRANT_RECHECK_SCOPES:
         return
     for permission in permissions:
-        _require_permission(user, permission, target_scope, org_index)
+        require_permission(user, permission, target_scope, org_index)
 
 
 # ============================================================================
