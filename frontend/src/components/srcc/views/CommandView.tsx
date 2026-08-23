@@ -1076,11 +1076,13 @@ type GapLegDescriptor = {
 };
 
 // Element-level defensive read: a malformed payload can pass the container
-// checks with null/primitive ELEMENTS (e.g. components: [null]), which would
-// crash the first property dereference. Keep only object rows.
+// checks with null/primitive/array ELEMENTS (e.g. components: [null] or
+// [[]]), which would crash or render undefined fields on the first property
+// dereference. Keep only plain-object rows — arrays are objects to typeof
+// and must be excluded explicitly.
 const objectRowsOf = <T,>(rows: T[]): T[] =>
   (Array.isArray(rows) ? rows : []).filter(
-    (row) => typeof row === "object" && row !== null,
+    (row) => typeof row === "object" && row !== null && !Array.isArray(row),
   );
 
 /** Pre-format one leg's component rows (display strings only). */
@@ -1167,7 +1169,7 @@ const buildGapLegDescriptors = (
       components: buildGapComponentRows(payment.components, money),
       residualDisplay: money(payment.unexplained_residual_usd),
       residualConfidenceLabel: payment.unexplained_residual_confidence?.label ?? "—",
-      narrative: typeof payment.narrative === "string" ? payment.narrative : "",
+      narrative: legNarrativeOf(payment.narrative),
     },
     {
       id: "bank-leg",
@@ -1179,7 +1181,7 @@ const buildGapLegDescriptors = (
       components: buildGapComponentRows(bank.components, money),
       residualDisplay: money(bank.unexplained_residual_usd),
       residualConfidenceLabel: bank.unexplained_residual_confidence?.label ?? "—",
-      narrative: typeof bank.narrative === "string" ? bank.narrative : "",
+      narrative: legNarrativeOf(bank.narrative),
     },
   ];
 };
@@ -1347,7 +1349,9 @@ const RestrictedGapNarrativePanel = () => (
     <div className="panel-header">
       <div className="panel-title">
         <strong id={GAP_NARRATIVE_TITLE_ID}>Gap narrative</strong>
-        <span>Holding-wide payment and bank gap decomposition</span>
+        {/* Same holding-wide/all-scopes signal as the data variant so the
+            restricted state cannot read as scope-selector-dependent. */}
+        <span>Holding-wide payment and bank gaps (all scopes)</span>
       </div>
       <Badge tone="red">Restricted</Badge>
     </div>
@@ -2425,6 +2429,16 @@ const financeMonthHintSatisfies = (
   hint: ScopedFinanceViewHint,
   month: string,
 ): boolean => hint.globalScope || hint.financeMonths.includes(month);
+
+// Fallback copy when a malformed payload drops a leg's narrative: the
+// residual row's sub-line is load-bearing (on an INCOMPLETE leg it is the
+// only place naming the missing source), so a blank line is data loss —
+// say explicitly that the explanation is missing instead.
+const MISSING_LEG_NARRATIVE = "No explanation returned for this leg.";
+
+/** The leg narrative, or the explicit missing-narrative copy — never blank. */
+const legNarrativeOf = (narrative: string): string =>
+  typeof narrative === "string" && narrative.trim() ? narrative : MISSING_LEG_NARRATIVE;
 
 const CommandView = ({
   canViewFinance,

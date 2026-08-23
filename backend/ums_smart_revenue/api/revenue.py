@@ -2166,6 +2166,11 @@ def get_month_bank_reconciliation(
     return summary_api
 
 
+# One audit entity-type literal for the composed gap-explanation read — the
+# three view events must never drift apart on it.
+_MONTH_GAP_EXPLANATION_ENTITY_TYPE = "month_gap_explanation"
+
+
 # ============================================================================
 # Purpose: Data-access + composition step for the month gap explanation,
 #   extracted out of the route handler (thin-orchestration rule): normalize
@@ -2332,7 +2337,7 @@ def get_month_gap_explanation(
             sink=audit_sink,
             actor=user,
             event_type=AuditEventType.REVENUE_VIEWED,
-            entity_type="month_gap_explanation",
+            entity_type=_MONTH_GAP_EXPLANATION_ENTITY_TYPE,
             entity_id=month,
             scope=global_scope,
             details={
@@ -2344,7 +2349,7 @@ def get_month_gap_explanation(
             sink=audit_sink,
             actor=user,
             event_type=AuditEventType.PAYMENT_VIEWED,
-            entity_type="month_gap_explanation",
+            entity_type=_MONTH_GAP_EXPLANATION_ENTITY_TYPE,
             entity_id=month,
             scope=month_scope,
             details={
@@ -2356,7 +2361,7 @@ def get_month_gap_explanation(
             sink=audit_sink,
             actor=user,
             event_type=AuditEventType.BANK_RECONCILIATION_VIEWED,
-            entity_type="month_gap_explanation",
+            entity_type=_MONTH_GAP_EXPLANATION_ENTITY_TYPE,
             entity_id=month,
             scope=month_scope,
             details={

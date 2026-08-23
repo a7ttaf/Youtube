@@ -603,6 +603,25 @@ def _month_narrative(
     )
 
 
+# ============================================================================
+# Purpose: Provenance entries for ONE leg's numeric fields, dotted-key
+#   namespaced (leg.field, leg.components.key.amount_usd) — operands with
+#   caller-supplied source/formula/confidence, the gap, each component, and
+#   the residual.
+# Database/ORM: None — pure mapping over the built leg.
+# Standards: Count-honest and computability-honest: component confidence is
+#   SOURCE_BACKED only when evidence rows exist, and an uncomputable gap or
+#   residual (None) says MISSING_SOURCE — RECONCILED/VARIANCE are reserved
+#   for values that were actually computed (the bank-reconciliation
+#   _bank_gap_confidence rule).
+# Blast Radius: The money_provenance map for both legs — every audit-facing
+#   claim about where a leg number came from.
+# Connections:
+#   - File: backend/ums_smart_revenue/finance/bank_reconciliation.py -> the
+#     provenance idiom and confidence-token vocabulary this extends.
+#   - File: tests/finance/test_gap_explanation.py -> the programmatic
+#     completeness walk and the MISSING_SOURCE pins.
+# ============================================================================
 def _leg_provenance(
     leg: GapExplanationLeg,
     *,
