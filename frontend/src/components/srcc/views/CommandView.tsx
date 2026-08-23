@@ -6,7 +6,9 @@ import type {
   ChannelIssue,
   ChannelIssuesResponse,
   ChannelNetRevenue,
+  GapExplanationComponent,
   MonthBankReconciliationSummary,
+  MonthGapExplanation,
   MonthRankingsResponse,
   NetRevenueResponse,
   OutsideCmsItem,
@@ -14,12 +16,14 @@ import type {
   RankedEntry,
   RankingMetric,
   RevenueScopeOption,
+  ScopedFinanceViewHint,
   SmartAlert,
   SmartAlertSeverity,
   SmartAlertsSummary,
 } from "@/lib/api/types";
 import { useBankReconciliation } from "@/lib/api/useBankReconciliation";
 import { useChannelIssues } from "@/lib/api/useChannelIssues";
+import { useGapExplanation } from "@/lib/api/useGapExplanation";
 import { useNetRevenue } from "@/lib/api/useNetRevenue";
 import { useOutsideCmsChannels } from "@/lib/api/useOutsideCmsChannels";
 import { useRankings } from "@/lib/api/useRankings";
@@ -1028,6 +1032,427 @@ const BankReconciliationStatusStrip = ({
   return <BankReconciliationDataStrip month={month} />;
 };
 
+// Leg/month gap-explanation status codes -> badge tones. INCOMPLETE is the
+// worst status (finance cannot see the whole chain), so it reads red like
+// UNEXPLAINED; unknown codes stay neutral.
+const GAP_STATUS_TONES: Record<string, Severity> = {
+  MATCHED: "green",
+  FULLY_EXPLAINED: "green",
+  PARTIALLY_EXPLAINED: "amber",
+  UNEXPLAINED: "red",
+  INCOMPLETE: "red",
+};
+
+/** Tone for a gap-explanation status code; unknown codes stay neutral. */
+const gapStatusTone = (status: string): Severity => GAP_STATUS_TONES[status] ?? "blue";
+
+/** Pluralized evidence-count sub-line for a gap component row. */
+const gapEvidenceSub = (count: number): string =>
+  count === 1 ? "1 source row" : `${count} source rows`;
+
+// Display descriptor for one chain leg: every money value is pre-formatted in
+// buildGapLegDescriptors so the row components stay pure presentation.
+type GapComponentRow = {
+  key: string;
+  label: string;
+  evidenceSub: string;
+  amountDisplay: string;
+  confidenceLabel: string;
+};
+
+type GapLegDescriptor = {
+  id: string;
+  label: string;
+  operands: string;
+  status: string;
+  components: GapComponentRow[];
+  residualDisplay: string;
+  residualConfidenceLabel: string;
+  // The leg's API-provided deterministic narrative. Load-bearing on an
+  // INCOMPLETE leg: it names WHICH operand source is missing — the design
+  // deliberately emits no duplicate incompleteness warning because this
+  // sentence carries the reason.
+  narrative: string;
+};
+
+// Element-level defensive read: a malformed payload can pass the container
+// checks with null/primitive/array ELEMENTS (e.g. components: [null] or
+// [[]]), which would crash or render undefined fields on the first property
+// dereference. Keep only plain-object rows — arrays are objects to typeof
+// and must be excluded explicitly.
+const objectRowsOf = <T,>(rows: T[]): T[] =>
+  (Array.isArray(rows) ? rows : []).filter(
+    (row) => typeof row === "object" && row !== null && !Array.isArray(row),
+  );
+
+// Fallback copy when a malformed payload drops a leg's narrative: the
+// residual row's sub-line is load-bearing (on an INCOMPLETE leg it is the
+// only place naming the missing source), so a blank line is data loss —
+// say explicitly that the explanation is missing instead.
+const MISSING_LEG_NARRATIVE = "No explanation returned for this leg.";
+
+/** The leg narrative, or the explicit missing-narrative copy — never blank. */
+const legNarrativeOf = (narrative: string): string =>
+  typeof narrative === "string" && narrative.trim() ? narrative : MISSING_LEG_NARRATIVE;
+
+/** Pre-format one leg's component rows (display strings only). */
+const buildGapComponentRows = (
+  components: GapExplanationComponent[],
+  money: (value: string | null) => string,
+): GapComponentRow[] =>
+  // Read defensively (the safeAlerts precedent): a missing/non-array field —
+  // or a non-object element inside a well-formed array — renders as no row
+  // rather than throwing inside the panel.
+  objectRowsOf(components).map((component) => ({
+    key: component.key,
+    label: component.label,
+    evidenceSub: gapEvidenceSub(component.evidence_count),
+    amountDisplay: money(component.amount_usd),
+    confidenceLabel: component.confidence?.label ?? "—",
+  }));
+
+// Read the payload defensively before rendering legs: a malformed body (e.g.
+// a contract drift serving {} with HTTP 200) must degrade to the empty state,
+// never crash CommandView — the safeAlerts precedent.
+const isRenderableGapExplanation = (
+  data: MonthGapExplanation | null,
+): data is MonthGapExplanation => Boolean(data?.payment_leg && data?.bank_leg);
+
+// Translate gap-explanation fetch failures into safe inline copy for THIS
+// panel (the bankReconciliationErrorCopy idiom): 403s get a role/permission
+// message naming the gap narrative — the capability gate is a coarse hint,
+// so a month-scope-mismatched grant can still 403 here and must read
+// accurately — while other failures keep only the status code.
+const gapNarrativeErrorCopy = (
+  error: ApiError | Error,
+): { title: string; detail: string } => {
+  if (error instanceof ApiError) {
+    if (error.status === 403) {
+      return {
+        title: "No permission",
+        detail: "Your role cannot view the gap narrative for this month.",
+      };
+    }
+    return {
+      title: `Request failed (${error.status})`,
+      detail: "Could not load the gap narrative for this month.",
+    };
+  }
+  return {
+    title: "Network error",
+    detail: "Could not reach the gap explanation service.",
+  };
+};
+
+// ============================================================================
+// Purpose: Convert the composed gap explanation into the two display-ready leg
+//   descriptors (operand chain, component rows, residual). Pure formatting of
+//   backend decimal strings — every gap, component sum, and residual is
+//   backend-computed; the browser never derives a finance number.
+// Database/ORM: None (frontend) — formats the gap-explanation payload only.
+// Standards: Money renders via financeDisplay (permission-gated sentinel);
+//   signs pass through untouched; confidence labels come from the API and
+//   are never recomputed; missing/malformed fields degrade to "—" instead of
+//   throwing (the panel's defensive-read contract).
+// Blast Radius: Gap-narrative display only. No mutation, no authorization,
+//   no finance calculation.
+// Connections:
+//   - File: backend/ums_smart_revenue/finance/gap_explanation.py -> the money
+//     and status semantics rendered here.
+// ============================================================================
+const buildGapLegDescriptors = (
+  data: MonthGapExplanation,
+  canViewFinance: boolean,
+  currency: string,
+): GapLegDescriptor[] => {
+  const money = (value: string | null) => financeDisplay(value, canViewFinance, { currency });
+  const payment = data.payment_leg;
+  const bank = data.bank_leg;
+  return [
+    {
+      id: "payment-leg",
+      label: "Payment leg · YouTube revenue → AdSense paid",
+      operands:
+        `${money(payment.youtube_revenue_total_usd)} → ` +
+        `${money(payment.adsense_paid_amount_usd)} · gap ${money(payment.payment_gap_usd)}`,
+      status: payment.status,
+      components: buildGapComponentRows(payment.components, money),
+      residualDisplay: money(payment.unexplained_residual_usd),
+      residualConfidenceLabel: payment.unexplained_residual_confidence?.label ?? "—",
+      narrative: legNarrativeOf(payment.narrative),
+    },
+    {
+      id: "bank-leg",
+      label: "Bank leg · AdSense paid → bank received",
+      operands:
+        `${money(bank.adsense_paid_amount_usd)} → ` +
+        `${money(bank.bank_received_amount_usd)} · gap ${money(bank.bank_gap_usd)}`,
+      status: bank.status,
+      components: buildGapComponentRows(bank.components, money),
+      residualDisplay: money(bank.unexplained_residual_usd),
+      residualConfidenceLabel: bank.unexplained_residual_confidence?.label ?? "—",
+      narrative: legNarrativeOf(bank.narrative),
+    },
+  ];
+};
+
+/** One leg: header row (operands → gap), component rows, and the residual row. */
+const GapLegRows = ({ leg }: { leg: GapLegDescriptor }) => (
+  <>
+    <ItemRow
+      tone={gapStatusTone(leg.status)}
+      title={leg.label}
+      sub={leg.operands}
+      trailing={<Badge tone={gapStatusTone(leg.status)}>{leg.status}</Badge>}
+    />
+    {leg.components.map((component) => (
+      <ItemRow
+        key={`${leg.id}-${component.key}`}
+        tone="blue"
+        title={component.label}
+        sub={component.evidenceSub}
+        trailing={
+          <>
+            <span className="money finance-data">{component.amountDisplay}</span>
+            <Badge tone={confidenceDisplay("", component.confidenceLabel).tone}>
+              {component.confidenceLabel}
+            </Badge>
+          </>
+        }
+      />
+    ))}
+    <ItemRow
+      tone={gapStatusTone(leg.status)}
+      title="Unexplained residual"
+      // The leg's own narrative, not generic copy: on an INCOMPLETE leg this
+      // sentence is the ONLY place naming which operand source is missing.
+      sub={leg.narrative}
+      trailing={
+        <>
+          <span className="money finance-data">{leg.residualDisplay}</span>
+          <Badge tone={confidenceDisplay("", leg.residualConfidenceLabel).tone}>
+            {leg.residualConfidenceLabel}
+          </Badge>
+        </>
+      }
+    />
+  </>
+);
+
+/** Header badge for the gap-narrative panel: error / loading / empty / status. */
+const GapNarrativeHeaderBadge = ({
+  data,
+  loading,
+  error,
+}: {
+  data: MonthGapExplanation | null;
+  loading: boolean;
+  error: ApiError | Error | null;
+}) => {
+  if (error) {
+    return <Badge tone="blue">—</Badge>;
+  }
+  if (loading && !data) {
+    return <Badge tone="blue">Loading</Badge>;
+  }
+  if (!isRenderableGapExplanation(data)) {
+    return <Badge tone="amber">Empty</Badge>;
+  }
+  return <Badge tone={gapStatusTone(data.status)}>{data.status}</Badge>;
+};
+
+// Read warnings defensively (the safeAlerts precedent): a missing/non-array
+// field — or a non-object element inside the array — renders as no warning
+// rows rather than throwing inside the panel.
+const safeGapWarnings = (data: MonthGapExplanation) => objectRowsOf(data.warnings);
+
+/** Loading/empty fallback rows shown before a renderable payload exists. */
+const GapNarrativePendingRows = ({
+  loading,
+  data,
+}: {
+  loading: boolean;
+  data: MonthGapExplanation | null;
+}) =>
+  loading && !data ? (
+    <div className="issue-list" role="list" aria-busy="true">
+      <ItemRow
+        tone="blue"
+        title="Loading gap narrative…"
+        sub="Decomposing the payment and bank gaps"
+        trailing={<Badge tone="blue">Loading</Badge>}
+      />
+    </div>
+  ) : (
+    <div className="issue-list" role="list">
+      <ItemRow
+        tone="amber"
+        title="No gap explanation returned"
+        sub="The month may not have finance data yet."
+        trailing={<Badge tone="amber">Empty</Badge>}
+      />
+    </div>
+  );
+
+/** Read-only close-state badge for the month narrative row. */
+const GapCloseBadge = ({ closeStatus }: { closeStatus: string }) => (
+  <Badge tone={closeStatus === "LOCKED" ? "amber" : "green"}>{closeStatus}</Badge>
+);
+
+/** Body of the gap-narrative panel: error, loading, empty, and data states. */
+const GapNarrativeBody = ({
+  data,
+  loading,
+  error,
+}: {
+  data: MonthGapExplanation | null;
+  loading: boolean;
+  error: ApiError | Error | null;
+}) => {
+  if (error) {
+    const { title, detail } = gapNarrativeErrorCopy(error);
+    return (
+      <div className="issue-list" role="alert">
+        <ItemRow tone="blue" title={title} sub={detail} trailing={<Badge tone="blue">—</Badge>} />
+      </div>
+    );
+  }
+
+  if (!isRenderableGapExplanation(data)) {
+    return <GapNarrativePendingRows loading={loading} data={data} />;
+  }
+
+  // The mount condition (the backend's FOUR-gate set: global revenue +
+  // global confidence + month-satisfying payments and bank grants) already
+  // embeds finance visibility, so money renders unrestricted here — the
+  // bank strip's pattern. Every one of the four gates is load-bearing for
+  // this bypass of financeDisplay redaction.
+  const legs = buildGapLegDescriptors(data, true, data.currency);
+  return (
+    <div className="issue-list" role="list">
+      {legs.map((leg) => (
+        <GapLegRows key={leg.id} leg={leg} />
+      ))}
+      <ItemRow
+        tone={gapStatusTone(data.status)}
+        title="Month narrative"
+        sub={data.narrative}
+        trailing={<GapCloseBadge closeStatus={data.close_status} />}
+      />
+      {safeGapWarnings(data).map((warning) => (
+        <ItemRow
+          key={warning.code}
+          tone="amber"
+          title={warning.message}
+          sub={warning.code}
+          trailing={<Badge tone="amber">Warning</Badge>}
+        />
+      ))}
+    </div>
+  );
+};
+
+// One id literal for the panel heading — shared by both panel variants and
+// their aria-labelledby references so the identifier cannot drift.
+const GAP_NARRATIVE_TITLE_ID = "gapNarrativeTitle";
+
+/** Restricted variant: no fetch, no money — permission copy only. */
+const RestrictedGapNarrativePanel = () => (
+  <section className="panel" aria-labelledby={GAP_NARRATIVE_TITLE_ID} style={{ marginBottom: 16 }}>
+    <div className="panel-header">
+      <div className="panel-title">
+        <strong id={GAP_NARRATIVE_TITLE_ID}>Gap narrative</strong>
+        {/* Same holding-wide/all-scopes signal as the data variant so the
+            restricted state cannot read as scope-selector-dependent. */}
+        <span>Holding-wide payment and bank gaps (all scopes)</span>
+      </div>
+      <Badge tone="red">Restricted</Badge>
+    </div>
+    <div className="permission-band" role="note">
+      <ItemRow
+        tone="red"
+        title="Gap narrative restricted"
+        sub={
+          "Revenue, confidence, payment, and bank permissions for this month " +
+          `are required. ${RESTRICTED_FINANCE_VALUE}.`
+        }
+        trailing={<Badge tone="red">Restricted</Badge>}
+      />
+    </div>
+  </section>
+);
+
+/** Data variant: owns the gap-explanation fetch and fails independently. */
+const GapNarrativeDataPanel = ({ month }: { month: string }) => {
+  const { data, loading, error, reload } = useGapExplanation({ month });
+
+  return (
+    <section
+      className="panel"
+      aria-labelledby={GAP_NARRATIVE_TITLE_ID}
+      style={{ marginBottom: 16 }}
+    >
+      <div className="panel-header">
+        <div className="panel-title">
+          <strong id={GAP_NARRATIVE_TITLE_ID}>Gap narrative</strong>
+          {/* Holding-wide by contract: the composed endpoint aggregates ALL
+              tenant facts/payments/bank entries — it does NOT follow the
+              view's company/sector scope selector, and the label must say
+              so next to scope-following panels. */}
+          <span>Holding-wide payment and bank gaps for {month} (all scopes)</span>
+        </div>
+        <GapNarrativeHeaderBadge data={data} loading={loading} error={error} />
+        <button
+          type="button"
+          className="icon-button"
+          aria-label="Refresh gap narrative"
+          title="Refresh gap narrative"
+          onClick={reload}
+        >
+          ↻
+        </button>
+      </div>
+      <GapNarrativeBody data={data} loading={loading} error={error} />
+    </section>
+  );
+};
+
+// ============================================================================
+// Purpose: Gap narrative panel for the Command Center (Hard Problem #3).
+//   Renders the composed month gap explanation — both chain legs as compact
+//   rows (operands → gap), the evidence components with confidence badges
+//   (this is where fx_difference_usd finally reaches the UI), each leg's
+//   unexplained residual, the month narrative line, and any data warnings.
+// Database/ORM: None (frontend) — consumes GET /revenue/months/{month}/gap-explanation.
+// Standards: Mounts its data variant ONLY behind the backend's FOUR-gate set
+//   (the smart-alerts set): VIEW_REVENUE @ global + VIEW_CONFIDENCE @ global
+//   (the response is confidence-bearing) + VIEW_FINALIZED_PAYMENTS +
+//   VIEW_BANK_RECONCILIATION satisfied for the SELECTED month via the
+//   month-resolution grant hints; anything less renders the restricted band
+//   and fires NO request. Money values are backend strings formatted for
+//   display; the browser derives no finance number. Fails independently of
+//   the surrounding view (SmartAlertsPanel template).
+// Blast Radius: Finance display only. Read-only — the backend endpoint's
+//   read audit events are its only side effect.
+// Connections:
+//   - File: frontend/src/lib/api/useGapExplanation.ts -> the fetch hook.
+//   - File: frontend/src/lib/api/types.ts -> MonthGapExplanation contract.
+//   - File: backend/ums_smart_revenue/api/revenue.py -> get_month_gap_explanation.
+// ============================================================================
+const GapNarrativePanel = ({
+  month,
+  canViewGapNarrative,
+}: {
+  month: string;
+  canViewGapNarrative: boolean;
+}) => {
+  if (!canViewGapNarrative) {
+    return <RestrictedGapNarrativePanel />;
+  }
+
+  return <GapNarrativeDataPanel month={month} />;
+};
+
 /** Static header row for the channel revenue table. */
 const ChannelTableHead = () => {
   return (
@@ -2005,11 +2430,28 @@ const RankingsPanel = ({
  * Command Center screen: month/scope filters, the real net-revenue status strip
  * and channel table, the smart-alerts panel, and the per-channel explanation.
  */
+// Fail-closed default for the month-resolution grant hints: no global grant,
+// no months — a missing hint can never mount a month-bound finance surface.
+const NO_FINANCE_MONTH_SCOPES: ScopedFinanceViewHint = {
+  globalScope: false,
+  financeMonths: [],
+};
+
+/** True when a month-bound read can possibly succeed for the selected month. */
+const financeMonthHintSatisfies = (
+  hint: ScopedFinanceViewHint,
+  month: string,
+): boolean => hint.globalScope || hint.financeMonths.includes(month);
+
 const CommandView = ({
   canViewFinance,
   canViewAnalytics = false,
   canViewPayments = false,
   canViewBankReconciliation = false,
+  canViewRevenueGlobal = false,
+  canViewConfidence = false,
+  paymentsViewScopes = NO_FINANCE_MONTH_SCOPES,
+  bankReconciliationViewScopes = NO_FINANCE_MONTH_SCOPES,
 }: {
   canViewFinance: boolean;
   // Optional so the existing prop contract (canViewFinance-only) stays valid; a
@@ -2020,6 +2462,21 @@ const CommandView = ({
   // values fail closed so standalone tests cannot accidentally grant this read.
   canViewPayments?: boolean;
   canViewBankReconciliation?: boolean;
+  // Global-scope-only revenue gate: the gap-explanation endpoint requires
+  // VIEW_REVENUE at GLOBAL scope, which the scope-aware canViewFinance hint
+  // cannot certify (a company-scoped revenue viewer holds it too). Missing
+  // fails closed.
+  canViewRevenueGlobal?: boolean;
+  // Confidence-visibility gate: the gap-explanation response carries
+  // confidence labels/scores on every component and residual, so its backend
+  // boundary also requires global VIEW_CONFIDENCE. Missing fails closed.
+  canViewConfidence?: boolean;
+  // Month-resolution grant hints for the payments/bank views, so the
+  // gap-narrative panel restricts per SELECTED month instead of firing a
+  // guaranteed-403 fetch for a month the grants cannot cover. Missing fails
+  // closed.
+  paymentsViewScopes?: ScopedFinanceViewHint;
+  bankReconciliationViewScopes?: ScopedFinanceViewHint;
 }) => {
   const [month, setMonth] = useState<string>(DEFAULT_MONTH);
   // Stable {scopeType, scopeId} identity instead of a positional index: the
@@ -2084,6 +2541,20 @@ const CommandView = ({
     [selectedChannel],
   );
   const canViewBankReconciliationSummary = canViewPayments && canViewBankReconciliation;
+  // The composed gap-explanation endpoint enforces the smart-alerts gate set
+  // (VIEW_REVENUE + VIEW_CONFIDENCE @ global, payments + bank @ the
+  // requested finance month) — mirror it client-side so a session that
+  // cannot possibly pass renders the restricted band and fires nothing. The
+  // revenue term is the GLOBAL-scope capability (a company-scoped revenue
+  // viewer must not fire a guaranteed-403 fetch), and the payments/bank
+  // terms are MONTH-RESOLUTION hints checked against the SELECTED month: a
+  // grant scoped only to another month restricts here instead of fetching.
+  // The backend still re-checks every gate — these hints never broaden.
+  const canViewGapNarrative =
+    canViewRevenueGlobal &&
+    canViewConfidence &&
+    financeMonthHintSatisfies(paymentsViewScopes, month) &&
+    financeMonthHintSatisfies(bankReconciliationViewScopes, month);
 
   return (
     <>
@@ -2157,6 +2628,11 @@ const CommandView = ({
         month={month}
         canViewBankReconciliationSummary={canViewBankReconciliationSummary}
       />
+
+      {/* gap narrative — REAL data, composed payment+bank gap decomposition,
+          fails independently, no-fetch-when-restricted (the four-gate set:
+          global revenue + confidence, month-satisfying payments + bank) */}
+      <GapNarrativePanel month={month} canViewGapNarrative={canViewGapNarrative} />
 
       {/* smart-alerts / problem panel — REAL data, fails independently */}
       <SmartAlertsPanel month={month} />

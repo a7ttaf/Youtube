@@ -483,6 +483,7 @@ GET /revenue/channels?month=2026-03&group_id=abc&currency=USD
 GET /revenue/months/{month}/payment-match?currency=USD
 GET /revenue/months/{month}/bank-reconciliation
 POST /revenue/months/{month}/bank-reconciliation
+GET /revenue/months/{month}/gap-explanation?currency=USD
 GET /revenue/months/{month}/smart-alerts
 GET /revenue/months/{month}/net-revenue?scope_type=company&scope_id=123&currency=USD
 GET /revenue/scopes
@@ -565,6 +566,42 @@ status, paid amount, received
 amount, month-level bank gap, transfer-fee and FX-difference totals, receipt
 entries, issues, and audit event metadata. Non-paid AdSense rows and non-USD
 payment rows are excluded from the paid USD comparison and reported as issues.
+
+`GET /revenue/months/{month}/gap-explanation` is an implemented composed
+holding-level finance read that explains the month's chain
+`youtube_facts -> adsense_paid -> bank_received` as two decomposed legs: each
+leg's gap is expressed as evidence-backed components plus an unexplained
+residual (`payment leg`: non-PAID USD AdSense payment rows; `bank leg`:
+operator-entered transfer fees and signed bank-side FX differences), with a
+per-leg status (`INCOMPLETE` / `MATCHED` / `FULLY_EXPLAINED` /
+`PARTIALLY_EXPLAINED` / `UNEXPLAINED`), a worst-of month status, explain-shape
+`{label, score}` confidence on every component and residual, a
+`money_provenance` map covering every numeric field (dotted keys), warnings
+(`UNSUPPORTED_PAYMENT_CURRENCY`, `CANCELLED_ADSENSE_PAYMENTS`,
+`CHANNELS_WITHOUT_YOUTUBE_SOURCE`), and deterministic narrative prose (no
+LLM). It composes the existing payment-match and bank-reconciliation builders
+plus the month-close status on one read — no new arithmetic sources, no new
+tables. Because the response discloses every number both source reads
+disclose plus confidence labels/scores on every component and residual, it
+requires the UNION of their gates plus the confidence gate — the exact
+smart-alerts gate set: global `finance.view_revenue`, global
+`analytics.view_confidence`, plus `finance.view_finalized_payments` and
+`finance.view_bank_reconciliation`
+for the requested finance-month scope (global grants satisfy the month
+scope), and it audits all three view events (`REVENUE_VIEWED`,
+`PAYMENT_VIEWED`, `BANK_RECONCILIATION_VIEWED`) with
+`entity_type="month_gap_explanation"`, recorded atomically inside one
+audit-sink transaction so a late append failure cannot leave a partial
+triple. `close_status` (OPEN/LOCKED) is
+included read-only; the read path is never close-guarded. The close status
+is read before and after the source fetches: if a close transition commits
+mid-read, the sources are refetched once so the reported close state pairs
+with the totals it actually froze (post-lock sources are frozen by the
+locked-month write guards). The endpoint is
+month-grain only (the PAYMENT-grain receipt-to-account bridge does not
+exist), performs no FX conversion anywhere (non-USD payment rows are counted
+and warned about, never converted), and `currency` must be `USD` via the
+shared payment-match normalizer (422 otherwise).
 
 `GET /revenue/months/{month}/smart-alerts` is an implemented month-level issue
 engine for the internal finance command center. It derives alerts only from SQL

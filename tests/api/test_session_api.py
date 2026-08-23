@@ -121,9 +121,18 @@ def test_session_me_header_mode_finance_admin_capabilities(client_headers_mode):
 
     caps = payload["capabilities"]
     assert caps["canViewRevenue"] is True
+    # Global-scoped finance_admin holds VIEW_REVENUE at global scope, so the
+    # global-only variant is also true.
+    assert caps["canViewRevenueGlobal"] is True
     assert caps["canViewConfidence"] is True
     assert caps["canViewPayments"] is True
     assert caps["canViewBankReconciliation"] is True
+    # Month-resolution hints: a global grant, no explicit month scopes.
+    assert caps["paymentsViewScopes"] == {"globalScope": True, "financeMonths": []}
+    assert caps["bankReconciliationViewScopes"] == {
+        "globalScope": True,
+        "financeMonths": [],
+    }
     assert caps["canCloseMonth"] is True
     assert caps["canUnlockMonth"] is True
     assert caps["canChangeAllocation"] is True
@@ -165,9 +174,20 @@ def test_session_me_header_mode_finance_month_scope_has_bank_capabilities(
     caps = payload["capabilities"]
     assert caps["canViewPayments"] is True
     assert caps["canViewBankReconciliation"] is True
+    # Month-resolution hints name the exact granted month, no global flag —
+    # the gap-narrative panel restricts for any OTHER selected month.
+    assert caps["paymentsViewScopes"] == {
+        "globalScope": False,
+        "financeMonths": ["2026-03"],
+    }
+    assert caps["bankReconciliationViewScopes"] == {
+        "globalScope": False,
+        "financeMonths": ["2026-03"],
+    }
     # Org-data capabilities stay false because finance-month is not a channel,
     # company, sector, or global scope.
     assert caps["canViewRevenue"] is False
+    assert caps["canViewRevenueGlobal"] is False
     assert caps["canExportAnalyticsReports"] is False
     assert payload["roles"] == [
         {"role": "finance_admin", "scope_type": "finance-month", "scope_id": "2026-03"}
@@ -189,6 +209,10 @@ def test_session_me_header_mode_company_scoped_finance_admin_gets_csv_hints(
     assert response.status_code == 200, response.text
     caps = response.json()["capabilities"]
     assert caps["canViewRevenue"] is True
+    # The scope-aware hint is true, but the GLOBAL-only variant is not: a
+    # company-scoped revenue viewer must not be told they can open surfaces
+    # whose backend boundary is VIEW_REVENUE @ global (gap explanation).
+    assert caps["canViewRevenueGlobal"] is False
     assert caps["canExportAnalyticsReports"] is True
     # Revenue workbook exports stay global-only in this session hint.
     assert caps["canExportRevenue"] is False

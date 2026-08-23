@@ -33,6 +33,7 @@ from ums_smart_revenue.auth.policy import (
     has_permission,
     org_data_permission_granted_any_scope,
     payments_view_granted_any_scope,
+    scoped_finance_view_hint,
 )
 from ums_smart_revenue.auth.scopes import AccessScope
 from ums_smart_revenue.tenancy.context import get_current_tenant
@@ -64,6 +65,20 @@ class SessionPermissionGrant(BaseModel):
     scope_id: str | None
 
 
+class ScopedFinanceViewHint(BaseModel):
+    """Where one finance view permission is granted, at month resolution.
+
+    ``global_scope`` is True when any global grant carries the permission;
+    ``finance_months`` lists the explicit finance-month scope ids that do.
+    A render hint only — the guarded routes re-check the requested month.
+    """
+
+    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
+
+    global_scope: bool
+    finance_months: list[str]
+
+
 class SessionCapabilities(BaseModel):
     """Derived global-scope capability booleans the SPA uses to render UI.
 
@@ -77,10 +92,22 @@ class SessionCapabilities(BaseModel):
     model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
 
     can_view_revenue: bool
+    # Global-scope-only variant of can_view_revenue: true ONLY when
+    # VIEW_REVENUE is held at global scope. Gates surfaces whose backend
+    # boundary checks VIEW_REVENUE @ global specifically (the composed
+    # gap-explanation read), where the scope-aware hint above would let a
+    # company/sector/channel-scoped viewer fire a guaranteed-403 fetch.
+    can_view_revenue_global: bool
     can_view_confidence: bool
     can_view_analytics: bool
     can_view_payments: bool
     can_view_bank_reconciliation: bool
+    # Month-resolution variants of the two booleans above: which months a
+    # payments/bank read can possibly succeed for (global flag + explicit
+    # finance-month ids). Lets month-bound surfaces (the gap-narrative panel)
+    # restrict per SELECTED month instead of firing guaranteed-403 fetches.
+    payments_view_scopes: ScopedFinanceViewHint
+    bank_reconciliation_view_scopes: ScopedFinanceViewHint
     can_close_month: bool
     can_unlock_month: bool
     can_change_allocation: bool
@@ -106,6 +133,15 @@ class SessionMe(BaseModel):
     is_service_account: bool
     disabled: bool
     capabilities: SessionCapabilities
+
+
+def _scoped_hint(principal: UserPrincipal, permission: Permission) -> ScopedFinanceViewHint:
+    """Wrap the policy layer's month-resolution hint into the wire model."""
+    global_granted, finance_months = scoped_finance_view_hint(principal, permission)
+    return ScopedFinanceViewHint(
+        global_scope=global_granted,
+        finance_months=list(finance_months),
+    )
 
 
 def _derive_capabilities(principal: UserPrincipal) -> SessionCapabilities:
@@ -143,6 +179,11 @@ def _derive_capabilities(principal: UserPrincipal) -> SessionCapabilities:
             principal,
             Permission.VIEW_REVENUE,
         ),
+        # Global-only (the _can check, deliberately NOT the scope-aware hint):
+        # the composed gap-explanation route gates on VIEW_REVENUE @ global,
+        # so a scoped revenue viewer must see the restricted band, not fire a
+        # guaranteed-403 fetch.
+        can_view_revenue_global=_can(Permission.VIEW_REVENUE),
         can_view_confidence=_can(Permission.VIEW_CONFIDENCE),
         # Scope-aware (NOT the global-only _can): VIEW_ANALYTICS is held by
         # nearly every role, many only at company/sector/channel scope. A
@@ -157,6 +198,12 @@ def _derive_capabilities(principal: UserPrincipal) -> SessionCapabilities:
         # re-check the grant for the requested month, so this stays a render hint.
         can_view_payments=payments_view_granted_any_scope(principal),
         can_view_bank_reconciliation=bank_reconciliation_view_granted_any_scope(principal),
+        payments_view_scopes=_scoped_hint(
+            principal, Permission.VIEW_FINALIZED_PAYMENTS
+        ),
+        bank_reconciliation_view_scopes=_scoped_hint(
+            principal, Permission.VIEW_BANK_RECONCILIATION
+        ),
         can_close_month=_can(Permission.LOCK_FINANCE_MONTH),
         can_unlock_month=_can(Permission.UNLOCK_FINANCE_MONTH),
         can_change_allocation=_can(Permission.CHANGE_ALLOCATION_RULE),
