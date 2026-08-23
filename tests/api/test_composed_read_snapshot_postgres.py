@@ -5,9 +5,11 @@
 #   pool checkin), and the client-observable hazards of READ COMMITTED
 #   composition are dead: a writer committing mid-read cannot tear the
 #   payment-match totals, a month close committing mid-read cannot make
-#   smart-alerts label pre-lock totals as a LOCKED month, and a channel
+#   smart-alerts label pre-lock totals as a LOCKED month, a channel
 #   committing mid-read cannot flip the missing-facts coverage alert against
-#   money alerts built from the pre-commit snapshot.
+#   money alerts built from the pre-commit snapshot, and a channel moved
+#   between companies mid-request cannot have its revenue attributed to its
+#   former company (the org-derived selection re-resolves in-snapshot).
 # Database/ORM: PostgreSQL only (transaction isolation is the subject);
 #   requires UMS_TEST_DATABASE_URL — require_postgres_url() raises, never
 #   skips, preserving the no-skip policy. Seeds finance rows through the
@@ -72,6 +74,7 @@ CHANNEL_ID = "channel-snapshot-pg"
 LATE_CHANNEL_ID = "channel-snapshot-pg-late"
 SECTOR_ID = UUID("00000000-0000-0000-0000-00000000d101")
 COMPANY_ID = UUID("00000000-0000-0000-0000-00000000d201")
+COMPANY_B_ID = UUID("00000000-0000-0000-0000-00000000d202")
 CHANNEL_ROW_ID = UUID("00000000-0000-0000-0000-00000000d301")
 LATE_CHANNEL_ROW_ID = UUID("00000000-0000-0000-0000-00000000d302")
 USER_ID = UUID("00000000-0000-0000-0000-00000000d401")
@@ -102,7 +105,8 @@ def _purge_test_rows(engine: sa.Engine) -> None:
             sa.text(
                 "DELETE FROM audit_logs WHERE entity_type IN "
                 "('monthly_payment_match', 'monthly_smart_alerts', "
-                "'month_bank_reconciliation', 'month_gap_explanation')"
+                "'month_bank_reconciliation', 'month_gap_explanation', "
+                "'monthly_net_revenue_summary')"
             )
         )
         conn.execute(sa.text("DELETE FROM finance_month_close WHERE month = :m"), {"m": MONTH})
@@ -121,8 +125,12 @@ def _purge_test_rows(engine: sa.Engine) -> None:
             {"c": CHANNEL_ID, "late": LATE_CHANNEL_ID},
         )
         conn.execute(
-            sa.text("DELETE FROM org_units WHERE id IN (:company, :sector)"),
-            {"company": str(COMPANY_ID), "sector": str(SECTOR_ID)},
+            sa.text("DELETE FROM org_units WHERE id IN (:company, :company_b, :sector)"),
+            {
+                "company": str(COMPANY_ID),
+                "company_b": str(COMPANY_B_ID),
+                "sector": str(SECTOR_ID),
+            },
         )
         conn.execute(sa.text("DELETE FROM users WHERE id = :u"), {"u": str(USER_ID)})
 
@@ -410,3 +418,57 @@ def test_smart_alerts_coverage_pairs_with_the_snapshot_facts(
     assert response.status_code == 200
     codes = {alert["code"] for alert in response.json()["alerts"]}
     assert "CHANNELS_MISSING_REVENUE_FACTS" not in codes
+
+
+def test_net_revenue_company_scope_attribution_rides_the_snapshot(
+    owner_engine: sa.Engine, client: TestClient
+) -> None:
+    """A channel moved to another company after authorization but before the
+    snapshot begins must not have its revenue attributed to the old company:
+    the org-derived selection set re-resolves on the same MVCC snapshot as
+    the money rows it selects."""
+    _seed_month(owner_engine)
+    with Session(owner_engine) as seeder:
+        seeder.add(
+            OrgUnitORM(
+                id=COMPANY_B_ID,
+                parent_id=SECTOR_ID,
+                type="COMPANY",
+                name="TV Company B",
+                active=True,
+            )
+        )
+        seeder.commit()
+    fired = {"done": False}
+
+    def _move_then_begin(session: Session) -> None:
+        # The tenant-lane org index was loaded at dependency time; committing
+        # the move here lands it deterministically between that load and the
+        # snapshot begin — the exact window the attribution re-resolution
+        # closes.
+        if not fired["done"]:
+            fired["done"] = True
+            with Session(owner_engine) as writer:
+                writer.execute(
+                    sa.text(
+                        "UPDATE youtube_channels SET primary_org_unit_id = :company_b "
+                        "WHERE youtube_channel_id = :channel"
+                    ),
+                    {"company_b": str(COMPANY_B_ID), "channel": CHANNEL_ID},
+                )
+                writer.commit()
+        begin_composed_read_snapshot(session)
+
+    with patch(
+        "ums_smart_revenue.api.revenue.begin_composed_read_snapshot",
+        side_effect=_move_then_begin,
+    ):
+        response = client.get(
+            f"/revenue/months/{MONTH}/net-revenue",
+            params={"scope_type": "company", "scope_id": str(COMPANY_ID)},
+            headers=auth_headers(),
+        )
+
+    assert fired["done"] is True
+    assert response.status_code == 200
+    assert response.json()["channel_count"] == 0

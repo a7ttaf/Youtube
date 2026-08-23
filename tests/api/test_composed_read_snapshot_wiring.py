@@ -1,13 +1,16 @@
 # ============================================================================
 # Purpose: Wiring pins proving EVERY composed finance read begins its
 #   composed-read snapshot — payment-match, bank-reconciliation, smart-alerts,
-#   gap-explanation, net-revenue, rankings, reconciliation-issues, and the
-#   channel-month summary each call begin_composed_read_snapshot exactly once
-#   before reading. reconciliation-preview is exempt by ruling: its response
-#   composes from the single facts select, so the statement-level snapshot
-#   already suffices. The snapshot ruling is platform-wide; a route that stops
-#   calling the helper silently reverts to torn READ COMMITTED composition on
-#   Postgres, so the presence of the call is pinned per endpoint.
+#   gap-explanation, net-revenue, rankings, reconciliation-issues, the
+#   channel-month summary, and the dry-run recalculation preview each call
+#   begin_composed_read_snapshot exactly once before reading.
+#   reconciliation-preview is exempt by ruling: its response composes from the
+#   single facts select, so the statement-level snapshot already suffices; the
+#   recalculation WRITE branch and the explain POST stay READ COMMITTED by the
+#   recorded write-path ruling. The snapshot ruling is platform-wide; a route
+#   that stops calling the helper silently reverts to torn READ COMMITTED
+#   composition on Postgres, so the presence of the call is pinned per
+#   endpoint.
 # Database/ORM: SQLite-tier TestClient over the real app factory; empty
 #   finance month (the builders tolerate empty sources), so only the schema,
 #   the audit actor row, and one active channel row (the channel-scoped
@@ -106,6 +109,35 @@ def test_composed_read_begins_exactly_one_snapshot(tmp_path: Path, path: str) ->
         side_effect=calls.append,
     ):
         response = client.get(path, headers=auth_headers())
+
+    assert response.status_code == 200
+    assert len(calls) == 1
+
+
+def test_recalculation_dry_run_begins_exactly_one_snapshot(tmp_path: Path) -> None:
+    """The dry-run recalculation preview is a composed read: one snapshot.
+
+    The write branch (dry_run=false) deliberately stays READ COMMITTED (the
+    recorded write-path ruling), so only the dry run is pinned here.
+    """
+    client = build_client(tmp_path)
+    calls: list[object] = []
+    with patch(
+        "ums_smart_revenue.api.revenue.begin_composed_read_snapshot",
+        create=True,
+        side_effect=calls.append,
+    ):
+        response = client.post(
+            "/revenue/recalculate",
+            headers={**auth_headers(), "x-role": "finance_admin"},
+            json={
+                "month": "2026-03",
+                "allocation_method": "gross_revenue_proportional",
+                "scope_type": "global",
+                "dry_run": True,
+                "reason": "snapshot wiring pin",
+            },
+        )
 
     assert response.status_code == 200
     assert len(calls) == 1
