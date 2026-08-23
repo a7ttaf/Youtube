@@ -683,12 +683,14 @@ Documented residual: the smart-alerts audit-derived signals
 (`SOURCE_ROWS_SKIPPED`, `CONNECTOR_RUNS_FAILED`) read through the tenant-lane
 session and stay READ COMMITTED relative to that snapshot — their laning is
 an authorization boundary (audit gates + tenant RLS) that a consistency
-preference must not move. The same residual covers the tenant-lane reads
-inside `net-revenue` and `rankings`: the org/channel display-name maps
-(labels, not money) and the month-close status probe that steers the
-allocation resolver — a close committing mid-read can only steer it to the
-conservative live-fallback path, whose money inputs (including the
-committed-run lookup) are read inside the snapshot. `reconciliation-preview`
+preference must not move. The same residual covers the org/channel
+display-name maps inside `rankings` (labels, not money). The allocation
+resolver's month-close probe is NOT a residual: it reads through the
+snapshot session in `net-revenue` and `rankings`, so close status,
+committed-run selection, and live-compute inputs all come from one MVCC
+snapshot — a lock committing mid-read cannot pair a fresh LOCKED probe with
+an older in-snapshot committed run and mislabel that stale run as the locked
+allocation. `reconciliation-preview`
 originally carried a single-select exemption; review disproved its premise
 (the repository read is two statements — the active-channel guard, then the
 facts select), so it now begins the snapshot like every other composed read

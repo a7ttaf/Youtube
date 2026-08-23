@@ -2617,7 +2617,9 @@ from the two that need design.
    recalculation preview begin the same snapshot inside extracted `_load_*`
    loaders after their permission gates; org attribution (company/sector
    selection, rankings grouping, recalculation readiness map) re-resolves on
-   the snapshot index, red→green-proven against a mid-request company move.
+   the snapshot index intersected with the gate-time authorized set, and the
+   allocation resolver's close probe reads through the snapshot too — each
+   red→green-proven against mid-request org moves and a mid-request lock.
    Nine GET routes plus the dry-run recalculation POST are pinned in
    `tests/api/test_composed_read_snapshot_wiring.py`; the recalculation
    write branch and the explain POST stay READ COMMITTED by the recorded

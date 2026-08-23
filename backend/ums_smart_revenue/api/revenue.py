@@ -2057,11 +2057,11 @@ def list_authorized_revenue_scopes(
 #   fetch every money source once, and build the summary.
 # Database/ORM: Begins the platform session's REPEATABLE READ composed-read
 #   snapshot (db/read_snapshot.py), then reads facts, overrides, deduction
-#   components, and — for company/sector scopes — the snapshot org-access
-#   index that selects the member channels. The allocation resolver's
-#   month-close probe rides the TENANT-lane `session` (recorded residual:
-#   a mid-read close can only steer to the conservative live-fallback path,
-#   whose money inputs are read inside the snapshot). No writes.
+#   components, the allocation resolver's close probe + committed-run
+#   selection, and — for company/sector scopes — the snapshot org-access
+#   index that selects the member channels: every input comes from ONE MVCC
+#   snapshot, so a lock committing mid-read cannot pair a fresh LOCKED probe
+#   with an older in-snapshot committed run. No writes.
 # Standards: The snapshot begins here — NOT in a route dependency — so the
 #   route's permission gates always run first: denial must precede any
 #   transaction begin (pinned by the gap-explanation direct-call tests'
@@ -2086,7 +2086,6 @@ def _load_month_net_revenue(
     currency: str,
     target_scope: AccessScope,
     channel_ids: set[str] | None,
-    session: Session,
     platform_session: Session,
     revenue_repository: SqlAlchemyRevenueFactRepository,
     override_repository: SqlAlchemyManualOverrideRepository,
@@ -2124,9 +2123,14 @@ def _load_month_net_revenue(
         youtube_channel_ids=selection_channel_ids,
         component_kinds=NET_APPLICABLE_COMPONENT_KINDS,
     )
+    # FIX: the close probe inside the resolver reads through the SNAPSHOT
+    # session — a lock committing after this snapshot began can no longer
+    # pair a fresh LOCKED probe with an older in-snapshot committed run and
+    # mislabel that stale run as the locked allocation; close status, run
+    # selection, and live inputs all come from one MVCC snapshot.
     account_result, allocation_provenance = resolve_month_account_allocation(
         month=month,
-        session=session,
+        session=platform_session,
         deduction_repository=deduction_component_repository,
         revenue_repository=revenue_repository,
         link_repository=link_repository,
@@ -2189,7 +2193,6 @@ def get_month_net_revenue(
         SqlAlchemyCommittedAllocationRepository,
         Depends(current_committed_allocation_repository),
     ],
-    session: Annotated[Session, Depends(current_db_session)],
     platform_session: Annotated[Session, Depends(current_platform_db_session)],
     audit_sink: Annotated[AuditSink, Depends(current_revenue_audit_sink)],
     group_registry: Annotated[
@@ -2236,7 +2239,6 @@ def get_month_net_revenue(
             currency=currency,
             target_scope=target_scope,
             channel_ids=channel_ids,
-            session=session,
             platform_session=platform_session,
             revenue_repository=revenue_repository,
             override_repository=override_repository,
@@ -2301,10 +2303,11 @@ def get_month_net_revenue(
 #   components, AND the snapshot org-access index — the channel->company/
 #   sector maps both select the scoped channel set and group the roll-up, so
 #   they must come from the same snapshot as the money they attribute. The
-#   allocation resolver's month-close probe and the org/channel display-NAME
-#   maps ride the TENANT-lane `session` (recorded residual: the close probe
-#   can only steer to the conservative live-fallback path whose money inputs
-#   are in-snapshot, and the name maps are labels, not money). No writes.
+#   allocation resolver's close probe + committed-run selection also read
+#   through the snapshot (a mid-read lock cannot pair a fresh LOCKED probe
+#   with an older in-snapshot run); only the org/channel display-NAME maps
+#   ride the TENANT-lane `session` (recorded residual: labels, not money).
+#   No writes.
 # Standards: The snapshot begins here — NOT in a route dependency — so the
 #   route's permission gates always run first: denial must precede any
 #   transaction begin (pinned by the gap-explanation direct-call tests'
@@ -2367,9 +2370,12 @@ def _load_month_rankings(
         youtube_channel_ids=selection_channel_ids,
         component_kinds=NET_APPLICABLE_COMPONENT_KINDS,
     )
+    # FIX: the close probe inside the resolver reads through the SNAPSHOT
+    # session (see _load_month_net_revenue) — close status, run selection,
+    # and live inputs all come from one MVCC snapshot.
     account_result, allocation_provenance = resolve_month_account_allocation(
         month=month,
-        session=session,
+        session=platform_session,
         deduction_repository=deduction_component_repository,
         revenue_repository=revenue_repository,
         link_repository=link_repository,
@@ -3876,14 +3882,18 @@ def _resolve_smart_alert_tenant_id() -> UUID:
 # Standards: Company/sector membership is ATTRIBUTION — it decides whose money
 #   rolls into the unit's totals — so it must come from the same MVCC snapshot
 #   as the money rows (a channel moved between units mid-request must never be
-#   served under its former unit). Authorization is unchanged: the route's
-#   permission gates already ran at org-unit grain on the TENANT-lane index
-#   before any snapshot began. GROUP selection deliberately keeps the
-#   tenant-resolved set: group authorization is per-member (the covered-subset
-#   check), so a mid-read membership change must not admit a channel the
-#   caller was never checked for. Channel scope is a literal id; global is
-#   None. An empty snapshot membership returns an empty set (empty summary,
-#   not 403) — the same contract as the tenant-side resolver.
+#   served under its former unit). Selection is the INTERSECTION of snapshot
+#   membership with the gate-time authorized set: authorization ran at
+#   org-unit grain on the TENANT-lane index before any snapshot began, and a
+#   channel must belong to the unit in BOTH states to be served — a channel
+#   moved in mid-request is excluded (under a sector grant whose company was
+#   reparented it would be authorized in neither state), and a channel moved
+#   out is excluded by the snapshot side. GROUP selection deliberately keeps
+#   the tenant-resolved set: group authorization is per-member (the
+#   covered-subset check), so a mid-read membership change must not admit a
+#   channel the caller was never checked for. Channel scope is a literal id;
+#   global is None. An empty result returns an empty set (empty summary, not
+#   403) — the same contract as the tenant-side resolver.
 # Blast Radius: Which channels' money feeds scoped net-revenue/rankings
 #   responses. No authorization decision is made here.
 # Connections:
@@ -3898,20 +3908,32 @@ def _org_scope_member_channel_ids(
     authorized_channel_ids: set[str] | None,
     org_index: OrgAccessIndex,
 ) -> set[str] | None:
-    """Derive the selection channel set for a scope from the given org index."""
+    """Derive the selection channel set for a scope from the given org index.
+
+    Org-unit scopes intersect snapshot membership with the gate-time
+    authorized set: a channel is served only when it belongs to the unit in
+    BOTH database states, so a channel moved in mid-request (authorized in
+    neither the gate-time nor a grant-relevant snapshot state — e.g. under a
+    sector grant whose company was reparented) is never selected, and a
+    channel moved out is dropped by the snapshot side.
+    """
     if target_scope.type == ScopeType.SECTOR:
-        return {
+        members = {
             channel_id
             for channel_id, sector_id in org_index.channel_sector.items()
             if sector_id == target_scope.id
         }
-    if target_scope.type == ScopeType.COMPANY:
-        return {
+    elif target_scope.type == ScopeType.COMPANY:
+        members = {
             channel_id
             for channel_id, company_id in org_index.channel_company.items()
             if company_id == target_scope.id
         }
-    return authorized_channel_ids
+    else:
+        return authorized_channel_ids
+    if authorized_channel_ids is None:
+        return members
+    return members & authorized_channel_ids
 
 
 # ============================================================================

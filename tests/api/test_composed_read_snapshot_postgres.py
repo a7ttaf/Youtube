@@ -32,7 +32,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Collection, Iterator
 from datetime import date
 from decimal import Decimal
 from unittest.mock import patch
@@ -50,6 +50,7 @@ from ums_smart_revenue.app import create_app
 from ums_smart_revenue.db.finance_models import (
     AdSensePaymentORM,
     BankReconciliationEntryORM,
+    CommittedAllocationRunORM,
     FinanceMonthCloseORM,
     MonthlyChannelRevenueFactORM,
 )
@@ -67,6 +68,10 @@ from ums_smart_revenue.finance.adsense_payments import (
 from ums_smart_revenue.finance.bank_reconciliation import (
     BankReconciliationEntry,
     SqlAlchemyBankReconciliationRepository,
+)
+from ums_smart_revenue.finance.deduction_ingestion import (
+    DeductionComponent,
+    SqlAlchemyDeductionComponentRepository,
 )
 
 MONTH = "2026-03"
@@ -110,6 +115,9 @@ def _purge_test_rows(engine: sa.Engine) -> None:
             )
         )
         conn.execute(sa.text("DELETE FROM finance_month_close WHERE month = :m"), {"m": MONTH})
+        conn.execute(
+            sa.text("DELETE FROM committed_allocation_runs WHERE month = :m"), {"m": MONTH}
+        )
         conn.execute(sa.text("DELETE FROM adsense_payments WHERE month = :m"), {"m": MONTH})
         conn.execute(
             sa.text("DELETE FROM bank_reconciliation_entries WHERE month = :m"), {"m": MONTH}
@@ -529,3 +537,130 @@ def test_recalculation_dry_run_scope_attribution_rides_the_snapshot(
     assert fired["done"] is True
     assert response.status_code == 200
     assert response.json()["source_summary"]["revenue_fact_count"] == 0
+
+
+def test_net_revenue_selection_stays_within_the_authorized_set(
+    owner_engine: sa.Engine, client: TestClient
+) -> None:
+    """A channel moved INTO the requested company after authorization must not
+    be selected: snapshot membership is intersected with the gate-time set, so
+    a channel covered in neither database state is never served."""
+    _seed_month(owner_engine)
+    with Session(owner_engine) as seeder:
+        seeder.add(
+            OrgUnitORM(
+                id=COMPANY_B_ID,
+                parent_id=SECTOR_ID,
+                type="COMPANY",
+                name="TV Company B",
+                active=True,
+            )
+        )
+        seeder.commit()
+    with owner_engine.begin() as conn:
+        # Gate-time state: the channel belongs to company B, so company A's
+        # authorized member set is empty.
+        conn.execute(
+            sa.text(
+                "UPDATE youtube_channels SET primary_org_unit_id = :company_b "
+                "WHERE youtube_channel_id = :channel"
+            ),
+            {"company_b": str(COMPANY_B_ID), "channel": CHANNEL_ID},
+        )
+    fired = {"done": False}
+
+    def _move_then_begin(session: Session) -> None:
+        # Move the channel INTO company A between the gate-time resolution and
+        # the snapshot begin: snapshot membership alone would now select it.
+        if not fired["done"]:
+            fired["done"] = True
+            with Session(owner_engine) as writer:
+                writer.execute(
+                    sa.text(
+                        "UPDATE youtube_channels SET primary_org_unit_id = :company "
+                        "WHERE youtube_channel_id = :channel"
+                    ),
+                    {"company": str(COMPANY_ID), "channel": CHANNEL_ID},
+                )
+                writer.commit()
+        begin_composed_read_snapshot(session)
+
+    with patch(
+        "ums_smart_revenue.api.revenue.begin_composed_read_snapshot",
+        side_effect=_move_then_begin,
+    ):
+        response = client.get(
+            f"/revenue/months/{MONTH}/net-revenue",
+            params={"scope_type": "company", "scope_id": str(COMPANY_ID)},
+            headers=auth_headers(),
+        )
+
+    assert fired["done"] is True
+    assert response.status_code == 200
+    assert response.json()["channel_count"] == 0
+
+
+def test_net_revenue_close_probe_rides_the_snapshot(
+    owner_engine: sa.Engine, client: TestClient
+) -> None:
+    """A month lock committing after the snapshot begins must not pair a fresh
+    LOCKED probe with an older in-snapshot committed run: the close probe
+    reads through the same snapshot as the run it selects, so the response
+    falls back to live compute instead of mislabeling the stale run."""
+    _seed_month(owner_engine)
+    with Session(owner_engine) as seeder:
+        # An older committed run left behind by a previous lock/unlock cycle;
+        # the month itself is OPEN (no close row).
+        seeder.add(
+            CommittedAllocationRunORM(
+                id=uuid4(),
+                month=MONTH,
+                commit_version=1,
+                allocation_method="gross_revenue_proportional",
+                idempotency_key="snapshot-close-probe-v1",
+                request_fingerprint="snapshot-close-probe-v1",
+                component_count=0,
+                allocated_component_count=0,
+                unallocated_component_count=0,
+                allocated_total_usd=Decimal("0"),
+                unallocated_total_usd=Decimal("0"),
+                net_applicable_total_usd=Decimal("0"),
+                reconciliation_total_usd=Decimal("0"),
+                committed_by=USER_ID,
+                reason="seeded stale run for the close-probe pin",
+            )
+        )
+        seeder.commit()
+    fired = {"done": False}
+    original = SqlAlchemyDeductionComponentRepository.list_month_components
+
+    def _interleaved(
+        self: SqlAlchemyDeductionComponentRepository,
+        *,
+        month: str,
+        youtube_channel_ids: set[str] | None = None,
+        component_kinds: Collection[str] | None = None,
+    ) -> list[DeductionComponent]:
+        # Lands after the loader's snapshot began and before the allocation
+        # resolver runs: a tenant-lane close probe would see this LOCKED while
+        # the platform snapshot still holds only the stale v1 run.
+        if not fired["done"]:
+            fired["done"] = True
+            with Session(owner_engine) as writer:
+                writer.add(FinanceMonthCloseORM(month=MONTH, status="LOCKED", locked_by=USER_ID))
+                writer.commit()
+        return original(
+            self,
+            month=month,
+            youtube_channel_ids=youtube_channel_ids,
+            component_kinds=component_kinds,
+        )
+
+    with patch.object(
+        SqlAlchemyDeductionComponentRepository, "list_month_components", _interleaved
+    ):
+        response = client.get(f"/revenue/months/{MONTH}/net-revenue", headers=auth_headers())
+
+    assert fired["done"] is True
+    assert response.status_code == 200
+    assert response.json()["allocation_source"] == "live_compute"

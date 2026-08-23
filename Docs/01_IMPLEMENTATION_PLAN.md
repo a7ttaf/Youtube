@@ -829,10 +829,14 @@ channel↔account map, and multi-currency FX) stays out per Docs/18.
   net-revenue/rankings/dry-run-recalculate, the rankings roll-up grouping
   maps, and the recalculation `COMPANY_UNMAPPED` readiness map re-resolve
   from a snapshot org-access index, red→green-proven on Postgres against a
-  mid-request company move. Tenant-lane residuals: the audit-gated
-  smart-alerts signals, org/channel display-NAME maps (labels), the
-  allocation resolver's month-close probe, and GROUP membership (per-member
-  authorization). The recalculation WRITE branch and the explain POST stay
+  mid-request company move; org-unit selection additionally intersects with
+  the gate-time authorized set (a channel in the unit in neither state is
+  never served), and the allocation resolver's close probe reads through the
+  snapshot too (a mid-read lock cannot mislabel an older in-snapshot run as
+  the locked allocation). Tenant-lane residuals: the audit-gated
+  smart-alerts signals, org/channel display-NAME maps (labels), and GROUP
+  membership (per-member authorization). The recalculation WRITE branch and
+  the explain POST stay
   READ COMMITTED by the recorded write-path ruling. Per-endpoint wiring is
   pinned in `tests/api/test_composed_read_snapshot_wiring.py` (nine GET
   routes plus the dry-run recalculation POST).
