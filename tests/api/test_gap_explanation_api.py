@@ -473,12 +473,19 @@ def _principal_with_grants(*grants: PermissionGrant) -> UserPrincipal:
 
 
 def _unreached_repositories() -> dict[str, object]:
-    """Dependencies for direct calls that must fail before any data access."""
+    """Dependencies for direct calls that must fail before any data access.
+
+    The platform session is an _UnreachedRepository on purpose: the denial
+    must precede the composed-read snapshot begin as well, so a reordering
+    that starts the transaction before the permission gates trips these
+    tests the same way touching a repository would.
+    """
     return {
         "revenue_repository": _UnreachedRepository(),
         "payment_repository": _UnreachedRepository(),
         "bank_repository": _UnreachedRepository(),
         "close_repository": _UnreachedRepository(),
+        "platform_session": _UnreachedRepository(),
         "audit_sink": InMemoryAuditSink(),
     }
 
