@@ -339,6 +339,10 @@ def test_close_transition_mid_read_refetches_sources_once():
     explanation = _load_month_gap_explanation(
         month="2026-03",
         currency="USD",
+        # SQLite in-memory session: the composed-read snapshot begin the
+        # loader now owns is a no-op off Postgres, keeping this a pure
+        # retry-semantics pin.
+        platform_session=Session(create_engine("sqlite+pysqlite:///:memory:")),
         revenue_repository=revenue_repository,
         payment_repository=payment_repository,
         bank_repository=bank_repository,
