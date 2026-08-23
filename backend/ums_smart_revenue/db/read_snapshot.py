@@ -1,12 +1,3 @@
-"""Composed-read snapshot: one REPEATABLE READ transaction per composed finance read."""
-
-from sqlalchemy.orm import Session
-
-
-class ComposedReadSnapshotError(RuntimeError):
-    """Raised when a composed read cannot start its isolated snapshot transaction."""
-
-
 # ============================================================================
 # Purpose: Begin a composed finance read's request transaction at REPEATABLE
 #   READ so every source read that follows shares ONE MVCC snapshot. This is
@@ -53,6 +44,15 @@ class ComposedReadSnapshotError(RuntimeError):
 #     exempt: its response composes from one facts select).
 #   - File: Docs/12_BACKEND_API_SPEC.md -> the read-consistency contract.
 # ============================================================================
+"""Composed-read snapshot: one REPEATABLE READ transaction per composed finance read."""
+
+from sqlalchemy.orm import Session
+
+
+class ComposedReadSnapshotError(RuntimeError):
+    """Raised when a composed read cannot start its isolated snapshot transaction."""
+
+
 def begin_composed_read_snapshot(session: Session) -> None:
     """Begin the composed read's transaction at REPEATABLE READ (Postgres only)."""
     bind = session.get_bind()

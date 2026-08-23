@@ -657,7 +657,9 @@ request transaction at `REPEATABLE READ` on PostgreSQL before the first
 source fetch (`backend/ums_smart_revenue/db/read_snapshot.py`), so every
 finance source composed into one response (revenue facts, AdSense payments,
 bank entries, manual overrides, deduction components, committed allocations,
-month-close status) is read from ONE MVCC snapshot: a writer
+month-close status, and the smart-alerts missing-fact coverage pair behind
+`CHANNELS_MISSING_REVENUE_FACTS` — not audit-gated, so it reads with the
+facts it is compared against) is read from ONE MVCC snapshot: a writer
 committing mid-read can no longer tear the composed totals, and a month close
 committing mid-read can no longer pair a LOCKED label — or suppress
 `MONTH_NOT_LOCKED` — against pre-lock totals. The snapshot transaction is
@@ -665,17 +667,17 @@ read-plus-append-only (its only writes are the endpoint's own audit rows), so
 it cannot raise serialization failures and never aborts concurrent finance
 writers (REPEATABLE READ deliberately, not SERIALIZABLE). Documented residual:
 the smart-alerts audit-derived signals (`SOURCE_ROWS_SKIPPED`,
-`CONNECTOR_RUNS_FAILED`, `CHANNELS_MISSING_REVENUE_FACTS`) read through the
-tenant-lane session and stay READ COMMITTED relative to that snapshot — their
-laning is an authorization boundary (audit gates + tenant RLS) that a
-consistency preference must not move. The same residual covers the
-tenant-lane reads inside `net-revenue` and `rankings`: the org/channel
-display-name maps (labels, not money) and the month-close status probe that
-steers the allocation resolver — a close committing mid-read can only steer
-it to the conservative live-fallback path, whose money inputs (including the
-committed-run lookup) are read inside the snapshot. `reconciliation-preview`
-deliberately does not begin the snapshot: its whole response composes from
-one facts select, so the statement-level snapshot already suffices.
+`CONNECTOR_RUNS_FAILED`) read through the tenant-lane session and stay READ
+COMMITTED relative to that snapshot — their laning is an authorization
+boundary (audit gates + tenant RLS) that a consistency preference must not
+move. The same residual covers the tenant-lane reads inside `net-revenue`
+and `rankings`: the org/channel display-name maps (labels, not money) and
+the month-close status probe that steers the allocation resolver — a close
+committing mid-read can only steer it to the conservative live-fallback
+path, whose money inputs (including the committed-run lookup) are read
+inside the snapshot. `reconciliation-preview` deliberately does not begin
+the snapshot: its whole response composes from one facts select, so the
+statement-level snapshot already suffices.
 Responses over OPEN months remain living
 data — two consecutive requests may differ — but within one response the money
 numbers always coexisted in the database. On SQLite (test tier) every lane
