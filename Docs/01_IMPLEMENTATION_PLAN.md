@@ -803,6 +803,20 @@ channel↔account map, and multi-currency FX) stays out per Docs/18.
   `No migration/backfill required.` — compute-on-read composition of the two
   existing summaries plus the month-close status; no file under
   `backend/ums_smart_revenue/db/` changes.
+  **Composed-read snapshot follow-up shipped 2026-08-23**
+  (`feat/composed-finance-read-consistency`, the PR #197 codex follow-up,
+  platform ruling): all four composed finance reads (payment-match,
+  bank-reconciliation, smart-alerts, gap-explanation) now begin one
+  REPEATABLE READ snapshot on the platform-lane session before their first
+  source fetch (`backend/ums_smart_revenue/db/read_snapshot.py`), so the
+  money numbers composed into one response always coexisted in the database.
+  The mid-read tear (payment-match totals) and the smart-alerts LOCKED
+  mispairing were demonstrated live on Postgres and pinned red→green in
+  `tests/api/test_composed_read_snapshot_postgres.py`; per-endpoint wiring is
+  pinned in `tests/api/test_composed_read_snapshot_wiring.py`. Smart-alerts'
+  tenant-lane audit signals stay outside the snapshot by ruling
+  (authorization laning wins); Docs/12 carries the contract paragraph.
+  `No migration/backfill required.` — a session-level isolation helper only.
 
 ### Acceptance gate
 

@@ -2602,6 +2602,14 @@ from the two that need design.
    month-grain only (the PAYMENT-grain receipt-to-account bridge is
    repo-proven absent), and whatever the evidence components cannot cover is
    reported as an UNEXPLAINED/PARTIALLY_EXPLAINED residual, not resolved.
+   The codex read-consistency follow-up is RESOLVED
+   (`feat/composed-finance-read-consistency`, 2026-08-23): all four composed
+   finance reads begin one REPEATABLE READ snapshot on the platform-lane
+   session, so mid-read writers can no longer tear composed totals or
+   mispair the close status; the smart-alerts tenant-lane audit signals stay
+   outside the snapshot by ruling (authorization laning wins). Contract:
+   Docs/12 "Composed-read consistency"; proofs:
+   `tests/api/test_composed_read_snapshot_postgres.py`.
 4. ⏳ Bank/transfer/local-currency variance evidence — evidence is now
    surfaced: the gap-explanation bank leg reconciles paid AdSense money
    against bank receipts using the operator-entered transfer-fee and signed

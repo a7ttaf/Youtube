@@ -597,7 +597,10 @@ included read-only; the read path is never close-guarded. The close status
 is read before and after the source fetches: if a close transition commits
 mid-read, the sources are refetched once so the reported close state pairs
 with the totals it actually froze (post-lock sources are frozen by the
-locked-month write guards). The endpoint is
+locked-month write guards). On PostgreSQL every source fetch additionally
+shares one REPEATABLE READ snapshot (see the composed-read consistency
+paragraph below), so a close transition cannot be observed mid-read at all;
+the detect-and-retry remains as the non-Postgres tier's guard. The endpoint is
 month-grain only (the PAYMENT-grain receipt-to-account bridge does not
 exist), performs no FX conversion anywhere (non-USD payment rows are counted
 and warned about, never converted), and `currency` must be `USD` via the
@@ -645,6 +648,29 @@ SQL revenue fact and reports only channel ids plus current/prior gross revenue
 and percent movement. Reads are audited as `REVENUE_VIEWED`, `PAYMENT_VIEWED`, and
 `BANK_RECONCILIATION_VIEWED`. This endpoint does not calculate net revenue or
 allocate bank gaps.
+
+Composed-read consistency (platform ruling, the PR #197 codex follow-up): the
+four composed finance reads — `payment-match`, `bank-reconciliation`,
+`smart-alerts`, and `gap-explanation` — begin their request transaction at
+`REPEATABLE READ` on PostgreSQL before the first source fetch
+(`backend/ums_smart_revenue/db/read_snapshot.py`), so every finance source
+composed into one response (revenue facts, AdSense payments, bank entries,
+manual overrides, month-close status) is read from ONE MVCC snapshot: a writer
+committing mid-read can no longer tear the composed totals, and a month close
+committing mid-read can no longer pair a LOCKED label — or suppress
+`MONTH_NOT_LOCKED` — against pre-lock totals. The snapshot transaction is
+read-plus-append-only (its only writes are the endpoint's own audit rows), so
+it cannot raise serialization failures and never aborts concurrent finance
+writers (REPEATABLE READ deliberately, not SERIALIZABLE). Documented residual:
+the smart-alerts audit-derived signals (`SOURCE_ROWS_SKIPPED`,
+`CONNECTOR_RUNS_FAILED`, `CHANNELS_MISSING_REVENUE_FACTS`) read through the
+tenant-lane session and stay READ COMMITTED relative to that snapshot — their
+laning is an authorization boundary (audit gates + tenant RLS) that a
+consistency preference must not move. Responses over OPEN months remain living
+data — two consecutive requests may differ — but within one response the money
+numbers always coexisted in the database. On SQLite (test tier) every lane
+shares one StaticPool connection, so reads are already transaction-consistent
+and the snapshot helper is a no-op there.
 
 `GET /revenue/months/{month}/net-revenue` is an implemented read-only net
 revenue foundation for `global`, `sector`, `company`, and `channel` scopes. It
