@@ -1010,6 +1010,28 @@ def list_channel_month_revenue_facts(
     }
 
 
+# ============================================================================
+# Purpose: Serve the per-channel multi-source reconciliation preview for one
+#   month — every stored fact for the channel/month compared source-by-source.
+#   Read-only; never mutates finance numbers.
+# Database/ORM: One RevenueFact repository select on the platform-lane
+#   session; appends a REVENUE_VIEWED audit event through the revenue audit
+#   sink. No locks or writes to finance rows.
+# Standards: Two-permission gate — VIEW_REVENUE + VIEW_CONFIDENCE at channel
+#   scope through the org-access index; denial precedes the source read.
+#   Exempt from the composed-read snapshot BY RULING: the whole response
+#   composes from the single facts select, so the statement-level snapshot
+#   already suffices — begin the snapshot before ever adding a second source
+#   read here (the in-route comment repeats this instruction).
+# Blast Radius: Channel-level reconciliation read surface; 404 on unknown
+#   channel/month, 422 on malformed month.
+# Connections:
+#   - File: backend/ums_smart_revenue/finance/reconciliation.py -> the pure
+#     preview builder.
+#   - File: backend/ums_smart_revenue/db/read_snapshot.py -> the snapshot
+#     ruling this single-select read is exempt from.
+#   - File: Docs/12_BACKEND_API_SPEC.md -> reconciliation-preview contract.
+# ============================================================================
 @router.get("/channels/{channel_id}/months/{month}/reconciliation-preview")
 def get_channel_month_reconciliation_preview(
     channel_id: str,
@@ -1061,6 +1083,30 @@ def get_channel_month_reconciliation_preview(
     return preview.to_api()
 
 
+# ============================================================================
+# Purpose: Serve the paginated month reconciliation issue queue — every
+#   authorized channel's facts scanned for cross-source issues, ordered for
+#   finance triage. Read-only; never mutates finance numbers.
+# Database/ORM: Channel-id page + facts reads via the RevenueFact repository
+#   on the platform-lane session; appends a REVENUE_VIEWED audit event through
+#   the revenue audit sink. No locks or writes to finance rows.
+# Standards: VIEW_REVENUE + VIEW_CONFIDENCE, scope-mapped: a caller with no
+#   relevant grant at all is rejected, while a scoped grant that currently
+#   maps to zero channels sees an empty queue (not 403). Both source reads
+#   happen inside one REPEATABLE READ composed-read snapshot on Postgres
+#   (db/read_snapshot.py) begun after the grant checks, so a fact committing
+#   mid-read cannot tear the queue against its own pagination; the channel
+#   authorization itself runs in-memory over the tenant-lane org-access index
+#   and stays outside the snapshot (laning is an authorization boundary).
+# Blast Radius: Finance triage read surface; pagination contract
+#   (limit/offset/next_offset/has_more) feeds the frontend issue queue.
+# Connections:
+#   - File: backend/ums_smart_revenue/finance/reconciliation.py -> the pure
+#     issue-queue builder.
+#   - File: backend/ums_smart_revenue/db/read_snapshot.py -> the composed-read
+#     snapshot begun between the grant checks and the source reads.
+#   - File: Docs/12_BACKEND_API_SPEC.md -> reconciliation-issues contract.
+# ============================================================================
 @router.get("/months/{month}/reconciliation-issues")
 def list_month_reconciliation_issues(
     month: str,
@@ -2804,6 +2850,27 @@ def approve_manual_override(
     return _manual_override_with_audit_event(override, record)
 
 
+# ============================================================================
+# Purpose: Serve the per-channel adjusted-revenue summary for one month —
+#   stored facts combined with approved manual overrides into the adjusted
+#   number the dashboards display. Read-only; never mutates finance numbers.
+# Database/ORM: Facts + overrides reads via the RevenueFact and ManualOverride
+#   repositories on the platform-lane session; appends a REVENUE_VIEWED audit
+#   event through the revenue audit sink. No locks or writes to finance rows.
+# Standards: VIEW_REVENUE at channel scope through the org-access index;
+#   denial precedes any source read. Both source reads happen inside one
+#   REPEATABLE READ composed-read snapshot on Postgres (db/read_snapshot.py)
+#   begun after the gate, so an override approval or fact write committing
+#   mid-read cannot tear the adjusted summary.
+# Blast Radius: Channel-level finance read surface; 404 on unknown
+#   channel/month, 422 on malformed month or override validation.
+# Connections:
+#   - File: backend/ums_smart_revenue/finance/revenue_summary.py -> the
+#     adjusted-summary builder.
+#   - File: backend/ums_smart_revenue/db/read_snapshot.py -> the composed-read
+#     snapshot begun between the gate and the source reads.
+#   - File: Docs/12_BACKEND_API_SPEC.md -> channel-month summary contract.
+# ============================================================================
 @router.get("/channels/{channel_id}/months/{month}/summary")
 def get_channel_month_revenue_summary(
     channel_id: str,
