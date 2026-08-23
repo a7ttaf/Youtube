@@ -4,7 +4,8 @@
 #   gap-explanation, net-revenue, rankings, reconciliation-issues, the
 #   channel-month summary, the reconciliation-preview (its single-select
 #   exemption was disproven in review: the repository read is guard-then-
-#   select, two statements), and the dry-run recalculation preview each call
+#   select, two statements), the deduction-components page (a three-statement
+#   repository read), and the dry-run recalculation preview each call
 #   begin_composed_read_snapshot exactly once before reading. The
 #   recalculation WRITE branch and the explain POST stay READ COMMITTED by
 #   the recorded write-path ruling. The snapshot ruling is platform-wide; a
@@ -55,6 +56,7 @@ COMPOSED_READ_PATHS = [
     "/revenue/months/2026-03/reconciliation-issues",
     f"/revenue/channels/{CHANNEL_ID}/months/2026-03/summary",
     f"/revenue/channels/{CHANNEL_ID}/months/2026-03/reconciliation-preview",
+    "/revenue/months/2026-03/deduction-components",
 ]
 
 

@@ -653,9 +653,11 @@ Composed-read consistency (platform ruling, the PR #197 codex follow-up): the
 composed finance reads — `payment-match`, `bank-reconciliation`,
 `smart-alerts`, `gap-explanation`, `net-revenue`, `rankings`,
 `reconciliation-issues`, the channel-month `summary`,
-`reconciliation-preview`, and the dry-run `POST /revenue/recalculate`
-preview — begin their request transaction at `REPEATABLE READ` on PostgreSQL
-before the first source fetch. The begin
+`reconciliation-preview`, `deduction-components` (its repository page read
+is three statements — count, scope totals, rows — that must not tear
+against each other), and the dry-run `POST /revenue/recalculate` preview —
+begin their request transaction at `REPEATABLE READ` on PostgreSQL before
+the first source fetch. The begin
 lives in each endpoint's extracted data-access loader
 (`backend/ums_smart_revenue/api/revenue.py::_load_*`,
 `backend/ums_smart_revenue/db/read_snapshot.py`), never in the route handler
@@ -671,11 +673,18 @@ committing mid-read can no longer pair a LOCKED label — or suppress
 `MONTH_NOT_LOCKED` — against pre-lock totals. Org-unit ATTRIBUTION also rides
 the snapshot: for company/sector-scoped `net-revenue` and `rankings` the
 member-channel selection — and for `rankings` the channel→company/sector
-roll-up grouping — re-resolves from the snapshot org-access index, so a
-channel moved between org units mid-request is never served or ranked under
-its former unit (group membership deliberately stays on the tenant-resolved
-set: group authorization is per-member, so a mid-read membership change must
-not admit a channel the caller was never checked for). The snapshot
+roll-up grouping — re-resolves from the snapshot org-access index
+intersected with the gate-time authorized set (a channel is served only
+when it belongs to the unit in BOTH states), so a channel moved between org
+units mid-request is never served or ranked under its former unit, and a
+mid-request move-in is never admitted (group membership deliberately stays
+on the tenant-resolved set: group authorization is per-member, so a mid-read
+membership change must not admit a channel the caller was never checked
+for). Grant coverage over org-unit scopes is additionally re-asserted
+DENY-ONLY against the same snapshot index: a sector-granted caller whose
+target company was reparented out of the sector mid-request receives 403
+instead of snapshot-era data under gate-era containment — platform-lane
+data can narrow but never grant access, preserving the laning boundary. The snapshot
 transaction is read-plus-append-only (its only writes are the endpoint's own
 audit rows), so it cannot raise serialization failures and never aborts
 concurrent finance writers (REPEATABLE READ deliberately, not SERIALIZABLE).

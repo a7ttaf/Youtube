@@ -821,7 +821,8 @@ channel↔account map, and multi-currency FX) stays out per Docs/18.
   (`feat/composed-read-snapshot`, follow-up on the ruling): every remaining
   composed revenue read — net-revenue, rankings, reconciliation-issues, the
   channel-month summary, reconciliation-preview (its single-select exemption
-  was disproven in review: the repository read is guard-then-select), and
+  was disproven in review: the repository read is guard-then-select), the
+  deduction-components page (a three-statement repository read), and
   the dry-run `POST /revenue/recalculate` preview — begins the same
   REPEATABLE READ snapshot inside its extracted `_load_*` loader right after
   the route's permission gates (handlers never touch the session). Org
@@ -833,12 +834,14 @@ channel↔account map, and multi-currency FX) stays out per Docs/18.
   the gate-time authorized set (a channel in the unit in neither state is
   never served), and the allocation resolver's close probe reads through the
   snapshot too (a mid-read lock cannot mislabel an older in-snapshot run as
-  the locked allocation). Tenant-lane residuals: the audit-gated
-  smart-alerts signals, org/channel display-NAME maps (labels), and GROUP
-  membership (per-member authorization). The recalculation WRITE branch and
-  the explain POST stay
+  the locked allocation), and grant coverage over org-unit scopes is
+  re-asserted DENY-ONLY on the snapshot index (a reparented target unit
+  403s; platform data can narrow but never grant access). Tenant-lane
+  residuals: the audit-gated smart-alerts signals, org/channel display-NAME
+  maps (labels), and GROUP membership (per-member authorization). The
+  recalculation WRITE branch and the explain POST stay
   READ COMMITTED by the recorded write-path ruling. Per-endpoint wiring is
-  pinned in `tests/api/test_composed_read_snapshot_wiring.py` (nine GET
+  pinned in `tests/api/test_composed_read_snapshot_wiring.py` (ten GET
   routes plus the dry-run recalculation POST).
   `No migration/backfill required.` — reuses the session-level helper.
 

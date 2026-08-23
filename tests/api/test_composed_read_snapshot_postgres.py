@@ -33,7 +33,7 @@
 from __future__ import annotations
 
 from collections.abc import Collection, Iterator
-from datetime import date
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from unittest.mock import patch
 from uuid import UUID, uuid4
@@ -42,11 +42,16 @@ import pytest
 import sqlalchemy as sa
 from alembic import command
 from alembic.config import Config
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
 
 from tests.db._postgres_helpers import require_postgres_url
+from ums_smart_revenue.api.revenue import _load_month_net_revenue
 from ums_smart_revenue.app import create_app
+from ums_smart_revenue.auth.models import PermissionGrant, UserPrincipal
+from ums_smart_revenue.auth.permissions import Permission
+from ums_smart_revenue.auth.scopes import AccessScope
 from ums_smart_revenue.db.finance_models import (
     AdSensePaymentORM,
     BankReconciliationEntryORM,
@@ -69,15 +74,27 @@ from ums_smart_revenue.finance.bank_reconciliation import (
     BankReconciliationEntry,
     SqlAlchemyBankReconciliationRepository,
 )
+from ums_smart_revenue.finance.channel_account_links import (
+    SqlAlchemyChannelAccountLinkRepository,
+)
+from ums_smart_revenue.finance.committed_allocation import (
+    SqlAlchemyCommittedAllocationRepository,
+)
 from ums_smart_revenue.finance.deduction_ingestion import (
     DeductionComponent,
     SqlAlchemyDeductionComponentRepository,
 )
+from ums_smart_revenue.finance.manual_overrides import SqlAlchemyManualOverrideRepository
+from ums_smart_revenue.finance.revenue_facts import SqlAlchemyRevenueFactRepository
+from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
+from ums_smart_revenue.tenancy.context import TENANT_CTX
+from ums_smart_revenue.tenancy.models import Tenant, TenantStatus
 
 MONTH = "2026-03"
 CHANNEL_ID = "channel-snapshot-pg"
 LATE_CHANNEL_ID = "channel-snapshot-pg-late"
 SECTOR_ID = UUID("00000000-0000-0000-0000-00000000d101")
+SECTOR_B_ID = UUID("00000000-0000-0000-0000-00000000d102")
 COMPANY_ID = UUID("00000000-0000-0000-0000-00000000d201")
 COMPANY_B_ID = UUID("00000000-0000-0000-0000-00000000d202")
 CHANNEL_ROW_ID = UUID("00000000-0000-0000-0000-00000000d301")
@@ -133,11 +150,14 @@ def _purge_test_rows(engine: sa.Engine) -> None:
             {"c": CHANNEL_ID, "late": LATE_CHANNEL_ID},
         )
         conn.execute(
-            sa.text("DELETE FROM org_units WHERE id IN (:company, :company_b, :sector)"),
+            sa.text(
+                "DELETE FROM org_units WHERE id IN (:company, :company_b, :sector, :sector_b)"
+            ),
             {
                 "company": str(COMPANY_ID),
                 "company_b": str(COMPANY_B_ID),
                 "sector": str(SECTOR_ID),
+                "sector_b": str(SECTOR_B_ID),
             },
         )
         conn.execute(sa.text("DELETE FROM users WHERE id = :u"), {"u": str(USER_ID)})
@@ -664,3 +684,84 @@ def test_net_revenue_close_probe_rides_the_snapshot(
     assert fired["done"] is True
     assert response.status_code == 200
     assert response.json()["allocation_source"] == "live_compute"
+
+
+def test_scoped_read_refuses_reparented_target_on_the_snapshot(
+    pg_url: str, owner_engine: sa.Engine
+) -> None:
+    """A sector-granted caller whose target company was reparented out of the
+    granted sector before the snapshot must be refused (403), not served
+    snapshot-era finance data under gate-era containment: the loader
+    re-asserts grant coverage against the snapshot index, deny-only."""
+    _seed_month(owner_engine)
+    with Session(owner_engine) as seeder:
+        seeder.add(
+            OrgUnitORM(
+                id=SECTOR_B_ID,
+                parent_id=None,
+                type="SECTOR",
+                name="TV Sector B",
+                active=True,
+            )
+        )
+        seeder.commit()
+    with owner_engine.begin() as conn:
+        # The reparent lands before the loader runs, so the snapshot sees the
+        # company outside the granted sector while the (bypassed) gate-time
+        # state had it inside — the exact epoch mix the re-check refuses.
+        conn.execute(
+            sa.text("UPDATE org_units SET parent_id = :sector_b WHERE id = :company"),
+            {"sector_b": str(SECTOR_B_ID), "company": str(COMPANY_ID)},
+        )
+    user = UserPrincipal(
+        user_id=str(USER_ID),
+        email="snapshot-pg@example.com",
+        direct_permissions=(
+            PermissionGrant(
+                permission=Permission.VIEW_REVENUE,
+                scope=AccessScope.sector(str(SECTOR_ID)),
+            ),
+            PermissionGrant(
+                permission=Permission.VIEW_CONFIDENCE,
+                scope=AccessScope.sector(str(SECTOR_ID)),
+            ),
+        ),
+    )
+    # The direct call bypasses the HTTP middleware, so arm the tenant
+    # contextvar the org-index loader and the lane hooks resolve against.
+    now = datetime(2026, 1, 1, tzinfo=UTC)
+    tenant_token = TENANT_CTX.set(
+        Tenant(
+            id=UUID(UMS_TENANT_ID),
+            slug="ums",
+            display_name="UMS",
+            primary_currency="USD",
+            status=TenantStatus.ACTIVE,
+            onboarding_at=now,
+            created_at=now,
+            updated_at=now,
+        )
+    )
+    platform_session = build_platform_session_factory(pg_url)()
+    try:
+        with pytest.raises(HTTPException) as excinfo:
+            _load_month_net_revenue(
+                month=MONTH,
+                currency="USD",
+                user=user,
+                target_scope=AccessScope.company(str(COMPANY_ID)),
+                channel_ids={CHANNEL_ID},
+                platform_session=platform_session,
+                revenue_repository=SqlAlchemyRevenueFactRepository(platform_session),
+                override_repository=SqlAlchemyManualOverrideRepository(platform_session),
+                deduction_component_repository=SqlAlchemyDeductionComponentRepository(
+                    platform_session
+                ),
+                link_repository=SqlAlchemyChannelAccountLinkRepository(platform_session),
+                committed_repository=SqlAlchemyCommittedAllocationRepository(platform_session),
+            )
+        assert excinfo.value.status_code == 403
+    finally:
+        platform_session.rollback()
+        platform_session.close()
+        TENANT_CTX.reset(tenant_token)
