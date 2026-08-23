@@ -2,10 +2,12 @@
 # Purpose: Postgres-tier proof for the composed-read snapshot ruling — the
 #   platform-lane session really runs REPEATABLE READ (begun before the first
 #   source read, rejected when a transaction is already active, reset at
-#   pool checkin), and the two client-observable hazards of READ COMMITTED
+#   pool checkin), and the client-observable hazards of READ COMMITTED
 #   composition are dead: a writer committing mid-read cannot tear the
-#   payment-match totals, and a month close committing mid-read cannot make
-#   smart-alerts label pre-lock totals as a LOCKED month.
+#   payment-match totals, a month close committing mid-read cannot make
+#   smart-alerts label pre-lock totals as a LOCKED month, and a channel
+#   committing mid-read cannot flip the missing-facts coverage alert against
+#   money alerts built from the pre-commit snapshot.
 # Database/ORM: PostgreSQL only (transaction isolation is the subject);
 #   requires UMS_TEST_DATABASE_URL — require_postgres_url() raises, never
 #   skips, preserving the no-skip policy. Seeds finance rows through the
@@ -56,16 +58,22 @@ from ums_smart_revenue.db.read_snapshot import (
 )
 from ums_smart_revenue.db.security_models import UserORM
 from ums_smart_revenue.db.session import build_platform_session_factory
-from ums_smart_revenue.finance.adsense_payments import SqlAlchemyAdSensePaymentRepository
+from ums_smart_revenue.finance.adsense_payments import (
+    AdSensePaymentEntry,
+    SqlAlchemyAdSensePaymentRepository,
+)
 from ums_smart_revenue.finance.bank_reconciliation import (
+    BankReconciliationEntry,
     SqlAlchemyBankReconciliationRepository,
 )
 
 MONTH = "2026-03"
 CHANNEL_ID = "channel-snapshot-pg"
+LATE_CHANNEL_ID = "channel-snapshot-pg-late"
 SECTOR_ID = UUID("00000000-0000-0000-0000-00000000d101")
 COMPANY_ID = UUID("00000000-0000-0000-0000-00000000d201")
 CHANNEL_ROW_ID = UUID("00000000-0000-0000-0000-00000000d301")
+LATE_CHANNEL_ROW_ID = UUID("00000000-0000-0000-0000-00000000d302")
 USER_ID = UUID("00000000-0000-0000-0000-00000000d401")
 
 _UPGRADED_URLS: set[str] = set()
@@ -109,8 +117,8 @@ def _purge_test_rows(engine: sa.Engine) -> None:
             {"c": CHANNEL_ID},
         )
         conn.execute(
-            sa.text("DELETE FROM youtube_channels WHERE youtube_channel_id = :c"),
-            {"c": CHANNEL_ID},
+            sa.text("DELETE FROM youtube_channels WHERE youtube_channel_id IN (:c, :late)"),
+            {"c": CHANNEL_ID, "late": LATE_CHANNEL_ID},
         )
         conn.execute(
             sa.text("DELETE FROM org_units WHERE id IN (:company, :sector)"),
@@ -302,7 +310,9 @@ def test_payment_match_composes_one_snapshot_under_concurrent_writer(
     fired = {"done": False}
     original = SqlAlchemyAdSensePaymentRepository.list_month_payments
 
-    def _interleaved(self: SqlAlchemyAdSensePaymentRepository, *, month: str):  # noqa: ANN202
+    def _interleaved(
+        self: SqlAlchemyAdSensePaymentRepository, *, month: str
+    ) -> list[AdSensePaymentEntry]:
         if not fired["done"]:
             fired["done"] = True
             with Session(owner_engine) as writer:
@@ -343,7 +353,9 @@ def test_smart_alerts_close_transition_cannot_mislabel_locked(
     fired = {"done": False}
     original = SqlAlchemyBankReconciliationRepository.list_month_entries
 
-    def _interleaved(self: SqlAlchemyBankReconciliationRepository, *, month: str):  # noqa: ANN202
+    def _interleaved(
+        self: SqlAlchemyBankReconciliationRepository, *, month: str
+    ) -> list[BankReconciliationEntry]:
         if not fired["done"]:
             fired["done"] = True
             with Session(owner_engine) as writer:
@@ -359,3 +371,42 @@ def test_smart_alerts_close_transition_cannot_mislabel_locked(
     alerts = {alert["code"]: alert for alert in response.json()["alerts"]}
     assert "MONTH_NOT_LOCKED" in alerts
     assert alerts["MONTH_NOT_LOCKED"]["details"]["close_status"] == "OPEN"
+
+
+def test_smart_alerts_coverage_pairs_with_the_snapshot_facts(
+    owner_engine: sa.Engine, client: TestClient
+) -> None:
+    """An active revenue-required channel committing mid-read must not flip the
+    missing-facts coverage alert: the coverage query is not audit-gated, so it
+    reads inside the same snapshot as the facts it is compared against."""
+    _seed_month(owner_engine)
+    fired = {"done": False}
+    original = SqlAlchemyBankReconciliationRepository.list_month_entries
+
+    def _interleaved(
+        self: SqlAlchemyBankReconciliationRepository, *, month: str
+    ) -> list[BankReconciliationEntry]:
+        if not fired["done"]:
+            fired["done"] = True
+            with Session(owner_engine) as writer:
+                writer.add(
+                    YouTubeChannelORM(
+                        id=LATE_CHANNEL_ROW_ID,
+                        youtube_channel_id=LATE_CHANNEL_ID,
+                        channel_name="Snapshot PG Late",
+                        primary_org_unit_id=COMPANY_ID,
+                        cms_status="INSIDE_CMS",
+                        revenue_required=True,
+                        active=True,
+                    )
+                )
+                writer.commit()
+        return original(self, month=month)
+
+    with patch.object(SqlAlchemyBankReconciliationRepository, "list_month_entries", _interleaved):
+        response = client.get(f"/revenue/months/{MONTH}/smart-alerts", headers=auth_headers())
+
+    assert fired["done"] is True
+    assert response.status_code == 200
+    codes = {alert["code"] for alert in response.json()["alerts"]}
+    assert "CHANNELS_MISSING_REVENUE_FACTS" not in codes

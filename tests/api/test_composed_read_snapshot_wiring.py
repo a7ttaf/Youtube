@@ -60,19 +60,22 @@ def build_client(tmp_path: Path) -> TestClient:
     """Create the app over a seeded throwaway SQLite database."""
     database_url = f"sqlite+pysqlite:///{(tmp_path / f'{uuid4()}.db').as_posix()}"
     engine = create_engine(database_url)
-    OrgBase.metadata.create_all(engine)
-    SecurityBase.metadata.create_all(engine)
-    FinanceBase.metadata.create_all(engine)
-    with Session(engine) as session:
-        session.add(
-            UserORM(
-                id=USER_ID,
-                email="snapshot-wiring@example.com",
-                display_name="Snapshot Wiring User",
+    try:
+        OrgBase.metadata.create_all(engine)
+        SecurityBase.metadata.create_all(engine)
+        FinanceBase.metadata.create_all(engine)
+        with Session(engine) as session:
+            session.add(
+                UserORM(
+                    id=USER_ID,
+                    email="snapshot-wiring@example.com",
+                    display_name="Snapshot Wiring User",
+                )
             )
-        )
-        session.commit()
-    return TestClient(create_app(database_url=database_url))
+            session.commit()
+    finally:
+        engine.dispose()
+    return TestClient(create_app(database_url=database_url, authz_source="headers"))
 
 
 @pytest.mark.parametrize("path", COMPOSED_READ_PATHS)
