@@ -112,6 +112,10 @@ from ums_smart_revenue.finance.explanations import (
     SqlAlchemyNumberExplanationRepository,
     build_channel_month_revenue_explanation,
 )
+from ums_smart_revenue.finance.gap_explanation import (
+    MonthGapExplanation,
+    build_month_gap_explanation,
+)
 from ums_smart_revenue.finance.manual_overrides import (
     ManualOverrideConflictError,
     ManualOverrideLockedMonthError,
@@ -280,6 +284,83 @@ class MonthDeductionComponentsResponse(BaseModel):
     returned_count: int
     scopes: list[DeductionComponentScopeGroup]
     pagination: DeductionComponentsPagination
+    audit_events: list[AuditEventResponse]
+
+
+class GapExplanationConfidenceResponse(BaseModel):
+    """Explain-shape confidence pair carried by gap components and residuals."""
+
+    label: str
+    score: str
+
+
+class GapExplanationComponentResponse(BaseModel):
+    """One evidence-backed component of a gap leg."""
+
+    key: str
+    label: str
+    amount_usd: str
+    evidence_count: int
+    confidence: GapExplanationConfidenceResponse
+
+
+class GapExplanationWarningResponse(BaseModel):
+    """One non-blocking data caveat attached to the gap explanation."""
+
+    code: str
+    message: str
+
+
+class GapPaymentLegResponse(BaseModel):
+    """Payment leg of the composed gap explanation (field order = wire order)."""
+
+    status: str
+    youtube_revenue_total_usd: str
+    adsense_paid_amount_usd: str
+    payment_gap_usd: str | None
+    payment_match_status: str
+    components: list[GapExplanationComponentResponse]
+    unexplained_residual_usd: str | None
+    unexplained_residual_confidence: GapExplanationConfidenceResponse
+    narrative: str
+
+
+class GapBankLegResponse(BaseModel):
+    """Bank leg of the composed gap explanation (field order = wire order)."""
+
+    status: str
+    adsense_paid_amount_usd: str
+    bank_received_amount_usd: str
+    bank_gap_usd: str | None
+    bank_reconciliation_status: str
+    components: list[GapExplanationComponentResponse]
+    unexplained_residual_usd: str | None
+    unexplained_residual_confidence: GapExplanationConfidenceResponse
+    narrative: str
+
+
+class GapMoneyProvenanceEntryResponse(BaseModel):
+    """Provenance entry for one numeric gap-explanation field."""
+
+    source: str
+    formula: str
+    confidence: str
+    export_value: str | None
+
+
+class MonthGapExplanationResponse(BaseModel):
+    """Typed composed month gap-explanation response."""
+
+    month: str
+    currency: str
+    close_status: str
+    status: str
+    tolerance_usd: str
+    payment_leg: GapPaymentLegResponse
+    bank_leg: GapBankLegResponse
+    warnings: list[GapExplanationWarningResponse]
+    money_provenance: dict[str, GapMoneyProvenanceEntryResponse]
+    narrative: str
     audit_events: list[AuditEventResponse]
 
 
@@ -2083,6 +2164,217 @@ def get_month_bank_reconciliation(
         audit_record_to_api(payment_record),
     ]
     return summary_api
+
+
+# One audit entity-type literal for the composed gap-explanation read — the
+# three view events must never drift apart on it.
+_MONTH_GAP_EXPLANATION_ENTITY_TYPE = "month_gap_explanation"
+
+
+# ============================================================================
+# Purpose: Data-access + composition step for the month gap explanation,
+#   extracted out of the route handler (thin-orchestration rule): normalize
+#   the currency, fetch each source exactly once (facts, payments, bank
+#   entries, close status), build both source summaries, and compose the
+#   explanation.
+# Database/ORM: Read-only via the four injected repositories — the same
+#   repositories the payment-match, bank-reconciliation, and smart-alerts
+#   endpoints already read; no writes, no new queries beyond their list/get
+#   methods.
+# Standards: One fetch feeds every builder (no double reads, no drift
+#   between the legs' inputs); source ValidationErrors propagate untouched
+#   for the route's 422 translation; close_status defaults to OPEN when no
+#   close row exists. The close status is read BEFORE and AFTER the source
+#   fetches: under READ COMMITTED a close can commit mid-read, and labeling
+#   pre-lock totals "LOCKED" would misstate a frozen month — on a detected
+#   transition the sources are refetched ONCE (post-lock sources are frozen
+#   by the locked-month write guards, so the retry pairs consistently). A
+#   second transition inside the retry (an unlock racing the read) is
+#   accepted best-effort, the same isolation reality as every sibling
+#   finance read.
+# Blast Radius: Every number the gap-explanation endpoint serves. Read-only
+#   — no audit, no mutation (the route owns the audit triple).
+# Connections:
+#   - File: backend/ums_smart_revenue/finance/gap_explanation.py -> the
+#     composition this loader feeds.
+#   - File: tests/api/test_gap_explanation_api.py -> gate tests prove denial
+#     precedes this loader (fail-if-touched repository stubs).
+# ============================================================================
+def _load_month_gap_explanation(
+    *,
+    month: str,
+    currency: str,
+    revenue_repository: SqlAlchemyRevenueFactRepository,
+    payment_repository: SqlAlchemyAdSensePaymentRepository,
+    bank_repository: SqlAlchemyBankReconciliationRepository,
+    close_repository: SqlAlchemyFinanceMonthCloseRepository,
+) -> MonthGapExplanation:
+    """Fetch the month's sources once and compose the gap explanation."""
+    normalized_currency = normalize_payment_match_currency(currency)
+    close = close_repository.get(month)
+    close_status = close.status if close else "OPEN"
+    for _ in range(2):
+        facts = revenue_repository.list_month_facts(month=month)
+        payments = payment_repository.list_month_payments(month=month)
+        bank_entries = bank_repository.list_month_entries(month=month)
+        close_after = close_repository.get(month)
+        close_after_status = close_after.status if close_after else "OPEN"
+        if close_after_status == close_status:
+            break
+        # A close transition committed mid-read: refetch the sources once so
+        # the reported close state pairs with the totals it actually froze.
+        close_status = close_after_status
+    payment_summary = build_monthly_payment_match_summary(
+        month=month,
+        facts=facts,
+        payments=payments,
+        currency=normalized_currency,
+    )
+    bank_summary = build_month_bank_reconciliation_summary(
+        month=month,
+        payments=payments,
+        bank_entries=bank_entries,
+    )
+    return build_month_gap_explanation(
+        month=month,
+        payment_summary=payment_summary,
+        bank_summary=bank_summary,
+        payments=payments,
+        close_status=close_status,
+    )
+
+
+# ============================================================================
+# Purpose: Serve the composed month gap explanation (Hard Problem #3) — both
+#   legs of youtube_facts -> adsense_paid -> bank_received decomposed as
+#   gap = evidence-backed components + unexplained residual, with provenance,
+#   explain-shape confidence, and deterministic prose.
+# Database/ORM: Read-only over the same repositories the payment-match and
+#   bank-reconciliation endpoints already use, plus the month-close read the
+#   smart-alerts endpoint models; one fetch feeds every builder. No writes.
+# Standards: Permissions are the UNION of both source reads PLUS the global
+#   confidence gate (VIEW_REVENUE + VIEW_CONFIDENCE @ global,
+#   VIEW_FINALIZED_PAYMENTS + VIEW_BANK_RECONCILIATION @ finance_month — the
+#   exact smart-alerts gate set): this response discloses every number both
+#   sources disclose AND confidence labels/scores on every component and
+#   residual, so it must not be readable with less. USD-only
+#   via the shared normalizer; month-grain only; no FX conversion. Triple
+#   audit (REVENUE_VIEWED + PAYMENT_VIEWED + BANK_RECONCILIATION_VIEWED),
+#   the smart-alerts precedent, because all three surfaces' numbers appear;
+#   the three appends land inside ONE AuditSink.transaction() boundary so no
+#   tier can retain a partial triple for a failed response. The wire shape is
+#   validated by MonthGapExplanationResponse (field order = wire order).
+# Blast Radius: New read-only finance surface; payment-match and
+#   bank-reconciliation payloads unchanged. No allocation, no net math,
+#   no month-close writes.
+# Connections:
+#   - File: backend/ums_smart_revenue/finance/gap_explanation.py -> the
+#     builder and the ruled design pointer.
+#   - File: Docs/12_BACKEND_API_SPEC.md -> the endpoint contract.
+#   - File: frontend/src/lib/api/useGapExplanation.ts -> the Command Center
+#     consumer.
+# ============================================================================
+@router.get("/months/{month}/gap-explanation", response_model=MonthGapExplanationResponse)
+def get_month_gap_explanation(
+    month: str,
+    user: Annotated[UserPrincipal, Depends(current_principal_from_headers)],
+    revenue_repository: Annotated[
+        SqlAlchemyRevenueFactRepository,
+        Depends(current_revenue_fact_repository),
+    ],
+    payment_repository: Annotated[
+        SqlAlchemyAdSensePaymentRepository,
+        Depends(current_adsense_payment_repository),
+    ],
+    bank_repository: Annotated[
+        SqlAlchemyBankReconciliationRepository,
+        Depends(current_bank_reconciliation_repository),
+    ],
+    close_repository: Annotated[
+        SqlAlchemyFinanceMonthCloseRepository,
+        Depends(current_finance_month_close_repository),
+    ],
+    audit_sink: Annotated[AuditSink, Depends(current_revenue_audit_sink)],
+    currency: Annotated[str, Query(min_length=1)] = "USD",
+) -> dict[str, object]:
+    """Explain the month's payment and bank gaps as one composed narrative."""
+    global_scope = AccessScope.global_scope()
+    month_scope = AccessScope.finance_month(month)
+    _require_permission(user, Permission.VIEW_REVENUE, global_scope)
+    # Confidence labels, scores, and provenance-confidence tokens appear on
+    # every component and residual, so the platform's confidence gate applies
+    # exactly as it does on smart-alerts (the identical four-gate set).
+    _require_permission(user, Permission.VIEW_CONFIDENCE, global_scope)
+    _require_permission(user, Permission.VIEW_FINALIZED_PAYMENTS, month_scope)
+    _require_permission(user, Permission.VIEW_BANK_RECONCILIATION, month_scope)
+    try:
+        explanation = _load_month_gap_explanation(
+            month=month,
+            currency=currency,
+            revenue_repository=revenue_repository,
+            payment_repository=payment_repository,
+            bank_repository=bank_repository,
+            close_repository=close_repository,
+        )
+    except (
+        AdSensePaymentValidationError,
+        BankReconciliationValidationError,
+        PaymentMatchValidationError,
+        RevenueFactValidationError,
+    ) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=str(exc),
+        ) from exc
+
+    explanation_api = explanation.to_api()
+    # The three records disclose ONE composed read, so they land atomically:
+    # if a later append fails, the sink's transaction boundary retracts the
+    # accepted prefix instead of leaving a partial audit triple describing a
+    # response that was never returned.
+    with audit_sink.transaction():
+        revenue_record = record_audit_event(
+            sink=audit_sink,
+            actor=user,
+            event_type=AuditEventType.REVENUE_VIEWED,
+            entity_type=_MONTH_GAP_EXPLANATION_ENTITY_TYPE,
+            entity_id=month,
+            scope=global_scope,
+            details={
+                "status": explanation.status,
+                "payment_leg_status": explanation.payment_leg.status,
+            },
+        )
+        payment_record = record_audit_event(
+            sink=audit_sink,
+            actor=user,
+            event_type=AuditEventType.PAYMENT_VIEWED,
+            entity_type=_MONTH_GAP_EXPLANATION_ENTITY_TYPE,
+            entity_id=month,
+            scope=month_scope,
+            details={
+                "status": explanation.status,
+                "payment_match_status": explanation.payment_leg.source_status,
+            },
+        )
+        bank_record = record_audit_event(
+            sink=audit_sink,
+            actor=user,
+            event_type=AuditEventType.BANK_RECONCILIATION_VIEWED,
+            entity_type=_MONTH_GAP_EXPLANATION_ENTITY_TYPE,
+            entity_id=month,
+            scope=month_scope,
+            details={
+                "status": explanation.status,
+                "bank_reconciliation_status": explanation.bank_leg.source_status,
+            },
+        )
+    explanation_api["audit_events"] = [
+        audit_record_to_api(revenue_record),
+        audit_record_to_api(payment_record),
+        audit_record_to_api(bank_record),
+    ]
+    return explanation_api
 
 
 @router.post("/channels/{channel_id}/months/{month}/explain")

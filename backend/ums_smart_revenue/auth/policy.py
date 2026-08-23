@@ -270,6 +270,56 @@ def bank_reconciliation_view_granted_any_scope(user: UserPrincipal) -> bool:
     return False
 
 
+# ============================================================================
+# Purpose: Month-resolution render hint for the payment/bank finance views —
+#   report WHERE a view permission is granted (a global flag plus the
+#   explicit finance-month scope ids), so the SPA can decide per SELECTED
+#   month whether a read can possibly succeed instead of firing a
+#   guaranteed-403 fetch off the coarse any-scope boolean.
+# Database/ORM: None — pure evaluation over the loaded principal.
+# Standards: Hint only, never the boundary: the guarded routes still
+#   re-check the requested month. Fail-closed (disabled -> nothing granted).
+#   Only global and finance-month scopes are eligible, exactly like the
+#   any-scope hint helpers above.
+# Blast Radius: Authorization read path only — a render hint; no broadening
+#   (the hint reports strictly what the grants already say).
+# Connections:
+#   - File: backend/ums_smart_revenue/api/session.py -> capability fields.
+#   - File: frontend/src/components/srcc/views/CommandView.tsx -> the
+#     gap-narrative month-aware mount condition.
+# ============================================================================
+def scoped_finance_view_hint(
+    user: UserPrincipal,
+    permission: Permission,
+) -> tuple[bool, tuple[str, ...]]:
+    """(global granted, sorted explicit finance-month ids) for a view permission."""
+    if user.disabled:
+        return False, ()
+
+    global_granted = False
+    months: set[str] = set()
+
+    def _collect(scope: AccessScope) -> None:
+        nonlocal global_granted
+        if scope.type == ScopeType.GLOBAL:
+            global_granted = True
+        elif scope.type == ScopeType.FINANCE_MONTH and scope.id is not None:
+            months.add(scope.id)
+
+    for grant in user.direct_permissions:
+        if grant.active and grant.permission == permission:
+            _collect(grant.scope)
+
+    for assignment in user.role_assignments:
+        if not assignment.active:
+            continue
+        role_permissions = ROLE_PERMISSIONS.get(assignment.role, frozenset())
+        if permission in role_permissions:
+            _collect(assignment.scope)
+
+    return global_granted, tuple(sorted(months))
+
+
 def can_view_channel_analytics(
     user: UserPrincipal,
     channel_id: str,

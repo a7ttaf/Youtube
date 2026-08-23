@@ -2592,17 +2592,23 @@ from the two that need design.
 2. ⏳ System-managed report availability and retention — remaining: raw
    report file ORM + repo (PR #32); ingestion + retention policy not
    built.
-3. ⏳ Payment gap explanation — remaining: gap value + comparison ARE computed
-   (payment_gap_usd via /revenue/months/{month}/payment-match, bank variance
-   via /bank-reconciliation, high-gap smart alerts) and PR #127 now surfaces the
-   AdSense-payment / bank-received / unresolved-gap cards in the Command Center,
-   so the gap is visible to finance rather than API-only; remaining is a
-   dedicated reconciling explanation/narrative pass tying gaps to
-   receipts/fees/currency effects.
-4. ⏳ Bank/transfer/local-currency variance evidence — remaining: bank recon
-   repo (PR #29) is the substrate; variance explanations must reconcile
-   Google/AdSense reported money, bank receipts, transfer fees, and bank-side
-   currency effects without treating public FX rates as official revenue.
+3. ✅ Payment gap explanation — shipped with residuals: the composed
+   `GET /revenue/months/{month}/gap-explanation` endpoint decomposes both
+   chain legs (`youtube_facts -> adsense_paid -> bank_received`) as
+   gap = evidence-backed components + unexplained residual, with statuses,
+   explain-shape confidence, full money provenance, warnings, and
+   deterministic narrative prose, and the Command Center "Gap narrative"
+   panel renders it next to the PR #127 bank cards. Residuals by design:
+   month-grain only (the PAYMENT-grain receipt-to-account bridge is
+   repo-proven absent), and whatever the evidence components cannot cover is
+   reported as an UNEXPLAINED/PARTIALLY_EXPLAINED residual, not resolved.
+4. ⏳ Bank/transfer/local-currency variance evidence — evidence is now
+   surfaced: the gap-explanation bank leg reconciles paid AdSense money
+   against bank receipts using the operator-entered transfer-fee and signed
+   FX-difference evidence (never public FX rates), and the Command Center
+   finally renders `fx_difference_usd`; remaining is finance
+   adoption/validation of the evidence workflow (entering fees/FX per bank
+   row so residuals shrink).
 5. ⏳ Confidence labels that finance trusts — remaining: computation rules
    exist (net-revenue B_RECONCILED/D_ESTIMATED/E_MISSING + explain confidence
    label), PR #69 surfaces the explain confidence label + score in the
