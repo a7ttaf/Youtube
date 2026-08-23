@@ -292,6 +292,33 @@ def test_negative_fx_difference_widens_the_residual_and_stays_signed():
     )
 
 
+def test_zero_evidence_component_reads_low_even_on_an_explained_leg():
+    """A component with no source rows is LOW — badges never contradict provenance.
+
+    An unexplained payment gap with NO in-flight rows still emits the
+    component row (stable wire shape), but its confidence must be LOW and its
+    provenance MISSING_SOURCE, never the leg-derived MEDIUM/HIGH.
+    """
+    explanation = _explain(
+        facts=[_fact(amount="930")],
+        payments=[_payment(amount="900")],
+        bank_entries=[_bank_entry(received="900")],
+    )
+
+    payload = explanation.to_api()
+    component = payload["payment_leg"]["components"][0]
+    assert payload["payment_leg"]["status"] == "UNEXPLAINED"
+    assert component["evidence_count"] == 0
+    assert component["amount_usd"] == "0"
+    assert component["confidence"] == {"label": "LOW", "score": "0"}
+    assert (
+        payload["money_provenance"][
+            "payment_leg.components.non_paid_adsense_payments.amount_usd"
+        ]["confidence"]
+        == "MISSING_SOURCE"
+    )
+
+
 def test_offsetting_components_still_read_partially_explained():
     """Nonzero components that sum to zero are evidence, not UNEXPLAINED.
 

@@ -1091,6 +1091,32 @@ const isRenderableGapExplanation = (
   data: MonthGapExplanation | null,
 ): data is MonthGapExplanation => Boolean(data?.payment_leg && data?.bank_leg);
 
+// Translate gap-explanation fetch failures into safe inline copy for THIS
+// panel (the bankReconciliationErrorCopy idiom): 403s get a role/permission
+// message naming the gap narrative — the capability gate is a coarse hint,
+// so a month-scope-mismatched grant can still 403 here and must read
+// accurately — while other failures keep only the status code.
+const gapNarrativeErrorCopy = (
+  error: ApiError | Error,
+): { title: string; detail: string } => {
+  if (error instanceof ApiError) {
+    if (error.status === 403) {
+      return {
+        title: "No permission",
+        detail: "Your role cannot view the gap narrative for this month.",
+      };
+    }
+    return {
+      title: `Request failed (${error.status})`,
+      detail: "Could not load the gap narrative for this month.",
+    };
+  }
+  return {
+    title: "Network error",
+    detail: "Could not reach the gap explanation service.",
+  };
+};
+
 // ============================================================================
 // Purpose: Convert the composed gap explanation into the two display-ready leg
 //   descriptors (operand chain, component rows, residual). Pure formatting of
@@ -1185,9 +1211,15 @@ const GapNarrativeHeaderBadge = ({
   loading: boolean;
   error: ApiError | Error | null;
 }) => {
-  if (error) return <Badge tone="blue">—</Badge>;
-  if (loading && !data) return <Badge tone="blue">Loading</Badge>;
-  if (!isRenderableGapExplanation(data)) return <Badge tone="amber">Empty</Badge>;
+  if (error) {
+    return <Badge tone="blue">—</Badge>;
+  }
+  if (loading && !data) {
+    return <Badge tone="blue">Loading</Badge>;
+  }
+  if (!isRenderableGapExplanation(data)) {
+    return <Badge tone="amber">Empty</Badge>;
+  }
   return <Badge tone={gapStatusTone(data.status)}>{data.status}</Badge>;
 };
 
@@ -1240,7 +1272,7 @@ const GapNarrativeBody = ({
   error: ApiError | Error | null;
 }) => {
   if (error) {
-    const { title, detail } = describeError(error);
+    const { title, detail } = gapNarrativeErrorCopy(error);
     return (
       <div className="issue-list" role="alert">
         <ItemRow tone="blue" title={title} sub={detail} trailing={<Badge tone="blue">—</Badge>} />
@@ -1279,12 +1311,16 @@ const GapNarrativeBody = ({
   );
 };
 
+// One id literal for the panel heading — shared by both panel variants and
+// their aria-labelledby references so the identifier cannot drift.
+const GAP_NARRATIVE_TITLE_ID = "gapNarrativeTitle";
+
 /** Restricted variant: no fetch, no money — permission copy only. */
 const RestrictedGapNarrativePanel = () => (
-  <section className="panel" aria-labelledby="gapNarrativeTitle" style={{ marginBottom: 16 }}>
+  <section className="panel" aria-labelledby={GAP_NARRATIVE_TITLE_ID} style={{ marginBottom: 16 }}>
     <div className="panel-header">
       <div className="panel-title">
-        <strong id="gapNarrativeTitle">Gap narrative</strong>
+        <strong id={GAP_NARRATIVE_TITLE_ID}>Gap narrative</strong>
         <span>Payment and bank gap decomposition</span>
       </div>
       <Badge tone="red">Restricted</Badge>
@@ -1305,10 +1341,14 @@ const GapNarrativeDataPanel = ({ month }: { month: string }) => {
   const { data, loading, error, reload } = useGapExplanation({ month });
 
   return (
-    <section className="panel" aria-labelledby="gapNarrativeTitle" style={{ marginBottom: 16 }}>
+    <section
+      className="panel"
+      aria-labelledby={GAP_NARRATIVE_TITLE_ID}
+      style={{ marginBottom: 16 }}
+    >
       <div className="panel-header">
         <div className="panel-title">
-          <strong id="gapNarrativeTitle">Gap narrative</strong>
+          <strong id={GAP_NARRATIVE_TITLE_ID}>Gap narrative</strong>
           <span>Payment and bank gap decomposition for {month}</span>
         </div>
         <GapNarrativeHeaderBadge data={data} loading={loading} error={error} />
@@ -2425,11 +2465,15 @@ const CommandView = ({
   const canViewBankReconciliationSummary = canViewPayments && canViewBankReconciliation;
   // The composed gap-explanation endpoint enforces the UNION of the revenue,
   // finalized-payment, and bank-reconciliation reads — mirror it client-side
-  // so a partially-granted session renders the restricted band, not a 403.
-  // The revenue term is the GLOBAL-scope capability, not the scope-aware
-  // canViewFinance hint: the endpoint gates VIEW_REVENUE @ global, and a
-  // company/sector/channel-scoped revenue viewer must not fire a
-  // guaranteed-403 fetch.
+  // so a session missing any grant entirely renders the restricted band and
+  // fires nothing. The revenue term is the GLOBAL-scope capability, not the
+  // scope-aware canViewFinance hint: the endpoint gates VIEW_REVENUE @
+  // global, and a company/sector/channel-scoped revenue viewer must not fire
+  // a guaranteed-403 fetch. The payments/bank terms stay the established
+  // MONTH-AGNOSTIC hints (any-of global/finance-month, the bank-strip
+  // precedent) — the backend re-checks the REQUESTED month, so a grant
+  // scoped to a different month surfaces as this panel's contained
+  // no-permission copy, never as broadened access.
   const canViewGapNarrative =
     canViewRevenueGlobal && canViewPayments && canViewBankReconciliation;
 

@@ -330,23 +330,29 @@ def _build_leg(
         residual=residual,
         tolerance_usd=tolerance_usd,
     )
-    confidence_label, confidence_score = _component_confidence(
-        status=status, residual=residual, tolerance_usd=tolerance_usd
-    )
     residual_confidence_label, residual_confidence_score = _residual_confidence(
         residual=residual, tolerance_usd=tolerance_usd
     )
-    components = tuple(
-        GapExplanationComponent(
-            key=component_key,
-            label=label,
-            amount_usd=_quantize_money(amount),
+    components: list[GapExplanationComponent] = []
+    for component_key, label, amount, evidence_count in component_inputs:
+        # Per-component, not per-leg: a zero-evidence component is LOW even
+        # on an otherwise-explained leg.
+        confidence_label, confidence_score = _component_confidence(
+            status=status,
+            residual=residual,
+            tolerance_usd=tolerance_usd,
             evidence_count=evidence_count,
-            confidence_label=confidence_label,
-            confidence_score=confidence_score,
         )
-        for component_key, label, amount, evidence_count in component_inputs
-    )
+        components.append(
+            GapExplanationComponent(
+                key=component_key,
+                label=label,
+                amount_usd=_quantize_money(amount),
+                evidence_count=evidence_count,
+                confidence_label=confidence_label,
+                confidence_score=confidence_score,
+            )
+        )
     leg = GapExplanationLeg(
         key=key,
         status=status,
@@ -355,7 +361,7 @@ def _build_leg(
         gap_usd=gap_usd,
         source_status_field=source_status_field,
         source_status=source_status,
-        components=components,
+        components=tuple(components),
         unexplained_residual_usd=residual,
         residual_confidence_label=residual_confidence_label,
         residual_confidence_score=residual_confidence_score,
@@ -392,9 +398,20 @@ def _leg_status(
 
 
 def _component_confidence(
-    *, status: str, residual: Decimal | None, tolerance_usd: Decimal
+    *,
+    status: str,
+    residual: Decimal | None,
+    tolerance_usd: Decimal,
+    evidence_count: int,
 ) -> tuple[str, str]:
-    """Confidence for a leg's evidence components, per the plan's table."""
+    """Confidence for ONE evidence component, per the plan's table.
+
+    A component backed by zero source rows is LOW regardless of leg state:
+    "evidence-backed" is earned by rows, and the badge must never contradict
+    the component's own MISSING_SOURCE provenance.
+    """
+    if evidence_count == 0:
+        return _CONFIDENCE_LOW
     if status == "INCOMPLETE":
         return _CONFIDENCE_LOW
     if residual is not None and abs(residual) <= tolerance_usd:

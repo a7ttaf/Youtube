@@ -338,8 +338,13 @@ describe("GapNarrativePanel in CommandView", () => {
     await waitFor(() =>
       expect(screen.getAllByText("UC-DRAMA-01").length).toBeGreaterThan(0),
     );
-    // The panel surfaces the no-permission copy without crashing the view.
+    // The panel surfaces its OWN no-permission copy (never the net-revenue
+    // wording) without crashing the view — a month-scope-mismatched grant
+    // passes the coarse client hint and must land on accurate copy here.
     expect(screen.getAllByText("No permission").length).toBeGreaterThan(0);
+    expect(
+      screen.getByText("Your role cannot view the gap narrative for this month."),
+    ).toBeInTheDocument();
     expect(screen.getByText("Gap narrative")).toBeInTheDocument();
   });
 });

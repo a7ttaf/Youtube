@@ -17,6 +17,7 @@
 
 from datetime import date
 from decimal import Decimal
+from pathlib import Path
 from uuid import UUID, uuid4
 
 import pytest
@@ -65,7 +66,7 @@ def auth_headers(
     return headers
 
 
-def build_database_url(tmp_path) -> str:
+def build_database_url(tmp_path: Path) -> str:
     """Build and return a new SQLite database URL in the provided temporary path."""
     return f"sqlite+pysqlite:///{(tmp_path / f'{uuid4()}.db').as_posix()}"
 
@@ -310,12 +311,14 @@ def test_failed_third_audit_append_retracts_the_whole_triple(tmp_path):
     app = create_app(database_url=database_url)
     app.dependency_overrides[current_revenue_audit_sink] = lambda: failing_sink
 
-    with TestClient(app) as client:
-        with pytest.raises(RuntimeError, match="staged third-append failure"):
-            client.get(
-                "/revenue/months/2026-03/gap-explanation",
-                headers=auth_headers("finance_viewer", "global"),
-            )
+    with (
+        TestClient(app) as client,
+        pytest.raises(RuntimeError, match="staged third-append failure"),
+    ):
+        client.get(
+            "/revenue/months/2026-03/gap-explanation",
+            headers=auth_headers("finance_viewer", "global"),
+        )
 
     # The boundary retracted the accepted prefix: not one record retained.
     assert failing_sink.records == []

@@ -64,6 +64,7 @@ constants (`explanations.py::_NET_CONFIDENCE_TO_EXPLAIN`):
 | Evidence-backed component on a leg whose residual ≤ tolerance | HIGH | 0.95 |
 | Evidence-backed component on a leg with residual beyond tolerance | MEDIUM | 0.80 |
 | Any `unexplained_residual` beyond tolerance; any component on an INCOMPLETE leg | LOW | 0 |
+| Component with ZERO evidence rows, on any leg (amended in-PR: "evidence-backed" is earned per component — the badge must never contradict the component's own MISSING_SOURCE provenance) | LOW | 0 |
 
 Deterministic table, no scoring heuristics. Residual confidence is carried on
 the wire as `unexplained_residual_confidence` on each leg (the review round

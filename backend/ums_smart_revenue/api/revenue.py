@@ -112,7 +112,10 @@ from ums_smart_revenue.finance.explanations import (
     SqlAlchemyNumberExplanationRepository,
     build_channel_month_revenue_explanation,
 )
-from ums_smart_revenue.finance.gap_explanation import build_month_gap_explanation
+from ums_smart_revenue.finance.gap_explanation import (
+    MonthGapExplanation,
+    build_month_gap_explanation,
+)
 from ums_smart_revenue.finance.manual_overrides import (
     ManualOverrideConflictError,
     ManualOverrideLockedMonthError,
@@ -2163,6 +2166,46 @@ def get_month_bank_reconciliation(
     return summary_api
 
 
+def _load_month_gap_explanation(
+    *,
+    month: str,
+    currency: str,
+    revenue_repository: SqlAlchemyRevenueFactRepository,
+    payment_repository: SqlAlchemyAdSensePaymentRepository,
+    bank_repository: SqlAlchemyBankReconciliationRepository,
+    close_repository: SqlAlchemyFinanceMonthCloseRepository,
+) -> MonthGapExplanation:
+    """Fetch the month's sources once and compose the gap explanation.
+
+    The data-access + composition step extracted out of the route handler
+    (thin-orchestration rule): one fetch per source feeds every builder, and
+    the source ValidationErrors propagate for the route's 422 translation.
+    """
+    normalized_currency = normalize_payment_match_currency(currency)
+    facts = revenue_repository.list_month_facts(month=month)
+    payments = payment_repository.list_month_payments(month=month)
+    bank_entries = bank_repository.list_month_entries(month=month)
+    close = close_repository.get(month)
+    payment_summary = build_monthly_payment_match_summary(
+        month=month,
+        facts=facts,
+        payments=payments,
+        currency=normalized_currency,
+    )
+    bank_summary = build_month_bank_reconciliation_summary(
+        month=month,
+        payments=payments,
+        bank_entries=bank_entries,
+    )
+    return build_month_gap_explanation(
+        month=month,
+        payment_summary=payment_summary,
+        bank_summary=bank_summary,
+        payments=payments,
+        close_status=close.status if close else "OPEN",
+    )
+
+
 # ============================================================================
 # Purpose: Serve the composed month gap explanation (Hard Problem #3) — both
 #   legs of youtube_facts -> adsense_paid -> bank_received decomposed as
@@ -2221,28 +2264,13 @@ def get_month_gap_explanation(
     _require_permission(user, Permission.VIEW_FINALIZED_PAYMENTS, month_scope)
     _require_permission(user, Permission.VIEW_BANK_RECONCILIATION, month_scope)
     try:
-        normalized_currency = normalize_payment_match_currency(currency)
-        facts = revenue_repository.list_month_facts(month=month)
-        payments = payment_repository.list_month_payments(month=month)
-        bank_entries = bank_repository.list_month_entries(month=month)
-        close = close_repository.get(month)
-        payment_summary = build_monthly_payment_match_summary(
+        explanation = _load_month_gap_explanation(
             month=month,
-            facts=facts,
-            payments=payments,
-            currency=normalized_currency,
-        )
-        bank_summary = build_month_bank_reconciliation_summary(
-            month=month,
-            payments=payments,
-            bank_entries=bank_entries,
-        )
-        explanation = build_month_gap_explanation(
-            month=month,
-            payment_summary=payment_summary,
-            bank_summary=bank_summary,
-            payments=payments,
-            close_status=close.status if close else "OPEN",
+            currency=currency,
+            revenue_repository=revenue_repository,
+            payment_repository=payment_repository,
+            bank_repository=bank_repository,
+            close_repository=close_repository,
         )
     except (
         AdSensePaymentValidationError,
