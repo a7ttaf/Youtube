@@ -1322,8 +1322,11 @@ const GapNarrativeBody = ({
     return <GapNarrativePendingRows loading={loading} data={data} />;
   }
 
-  // The mount condition (three-way grant) already embeds finance visibility,
-  // so money renders unrestricted here — the bank strip's pattern.
+  // The mount condition (the backend's FOUR-gate set: global revenue +
+  // global confidence + month-satisfying payments and bank grants) already
+  // embeds finance visibility, so money renders unrestricted here — the
+  // bank strip's pattern. Every one of the four gates is load-bearing for
+  // this bypass of financeDisplay redaction.
   const legs = buildGapLegDescriptors(data, true, data.currency);
   return (
     <div className="issue-list" role="list">
@@ -2627,7 +2630,8 @@ const CommandView = ({
       />
 
       {/* gap narrative — REAL data, composed payment+bank gap decomposition,
-          fails independently, no-fetch-when-restricted (three-way grant) */}
+          fails independently, no-fetch-when-restricted (the four-gate set:
+          global revenue + confidence, month-satisfying payments + bank) */}
       <GapNarrativePanel month={month} canViewGapNarrative={canViewGapNarrative} />
 
       {/* smart-alerts / problem panel — REAL data, fails independently */}
