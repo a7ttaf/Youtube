@@ -2,15 +2,15 @@
 # Purpose: Wiring pins proving EVERY composed finance read begins its
 #   composed-read snapshot — payment-match, bank-reconciliation, smart-alerts,
 #   gap-explanation, net-revenue, rankings, reconciliation-issues, the
-#   channel-month summary, and the dry-run recalculation preview each call
-#   begin_composed_read_snapshot exactly once before reading.
-#   reconciliation-preview is exempt by ruling: its response composes from the
-#   single facts select, so the statement-level snapshot already suffices; the
-#   recalculation WRITE branch and the explain POST stay READ COMMITTED by the
-#   recorded write-path ruling. The snapshot ruling is platform-wide; a route
-#   that stops calling the helper silently reverts to torn READ COMMITTED
-#   composition on Postgres, so the presence of the call is pinned per
-#   endpoint.
+#   channel-month summary, the reconciliation-preview (its single-select
+#   exemption was disproven in review: the repository read is guard-then-
+#   select, two statements), and the dry-run recalculation preview each call
+#   begin_composed_read_snapshot exactly once before reading. The
+#   recalculation WRITE branch and the explain POST stay READ COMMITTED by
+#   the recorded write-path ruling. The snapshot ruling is platform-wide; a
+#   route that stops calling the helper silently reverts to torn READ
+#   COMMITTED composition on Postgres, so the presence of the call is pinned
+#   per endpoint.
 # Database/ORM: SQLite-tier TestClient over the real app factory; empty
 #   finance month (the builders tolerate empty sources), so only the schema,
 #   the audit actor row, and one active channel row (the channel-scoped
@@ -54,6 +54,7 @@ COMPOSED_READ_PATHS = [
     "/revenue/months/2026-03/rankings",
     "/revenue/months/2026-03/reconciliation-issues",
     f"/revenue/channels/{CHANNEL_ID}/months/2026-03/summary",
+    f"/revenue/channels/{CHANNEL_ID}/months/2026-03/reconciliation-preview",
 ]
 
 

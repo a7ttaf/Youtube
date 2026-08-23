@@ -652,9 +652,10 @@ allocate bank gaps.
 Composed-read consistency (platform ruling, the PR #197 codex follow-up): the
 composed finance reads — `payment-match`, `bank-reconciliation`,
 `smart-alerts`, `gap-explanation`, `net-revenue`, `rankings`,
-`reconciliation-issues`, the channel-month `summary`, and the dry-run
-`POST /revenue/recalculate` preview — begin their request transaction at
-`REPEATABLE READ` on PostgreSQL before the first source fetch. The begin
+`reconciliation-issues`, the channel-month `summary`,
+`reconciliation-preview`, and the dry-run `POST /revenue/recalculate`
+preview — begin their request transaction at `REPEATABLE READ` on PostgreSQL
+before the first source fetch. The begin
 lives in each endpoint's extracted data-access loader
 (`backend/ums_smart_revenue/api/revenue.py::_load_*`,
 `backend/ums_smart_revenue/db/read_snapshot.py`), never in the route handler
@@ -688,8 +689,10 @@ inside `net-revenue` and `rankings`: the org/channel display-name maps
 allocation resolver — a close committing mid-read can only steer it to the
 conservative live-fallback path, whose money inputs (including the
 committed-run lookup) are read inside the snapshot. `reconciliation-preview`
-deliberately does not begin the snapshot: its whole response composes from
-one facts select, so the statement-level snapshot already suffices. The
+originally carried a single-select exemption; review disproved its premise
+(the repository read is two statements — the active-channel guard, then the
+facts select), so it now begins the snapshot like every other composed read
+and the guard decision provably coexists with the facts it authorizes. The
 `POST /revenue/recalculate` write branch and the explain POST stay READ
 COMMITTED by the recorded write-path ruling: they continue into persistence,
 where REPEATABLE READ upsert conflicts would abort rather than degrade.

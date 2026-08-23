@@ -42,9 +42,9 @@
 #   - File: backend/ums_smart_revenue/api/revenue.py -> the composed-read
 #     loaders (_load_* — not the route handlers, which never touch the
 #     session) that begin this snapshot after their route's permission gates
-#     on all eight composed reads plus the dry-run recalculation preview
-#     (reconciliation-preview is exempt: its response composes from one
-#     facts select).
+#     on every composed revenue read, including the reconciliation-preview
+#     (its single-select exemption was disproven: the repository read is
+#     guard-then-select) and the dry-run recalculation preview.
 #   - File: Docs/12_BACKEND_API_SPEC.md -> the read-consistency contract.
 # ============================================================================
 """Composed-read snapshot: one REPEATABLE READ transaction per composed finance read."""

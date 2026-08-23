@@ -1084,25 +1084,66 @@ def list_channel_month_revenue_facts(
 
 
 # ============================================================================
+# Purpose: Data-access step for the per-channel reconciliation preview,
+#   extracted out of the route handler (thin-orchestration rule): begin the
+#   composed-read snapshot and fetch the channel's facts.
+# Database/ORM: Begins the platform session's REPEATABLE READ composed-read
+#   snapshot (db/read_snapshot.py), then reads via the RevenueFact
+#   repository. No writes.
+# Standards: The snapshot begins here — NOT in a route dependency — so the
+#   route's permission gates always run first: denial must precede any
+#   transaction begin. This endpoint was originally EXEMPT on a single-select
+#   premise, disproven in review (codex): list_channel_month_facts issues TWO
+#   statements — the active-channel guard, then the facts select — so a
+#   channel deactivated between them could pair a stale guard decision with
+#   the facts; under the snapshot the guard state and the facts provably
+#   coexist. Not-found and ValidationErrors propagate untouched for the
+#   route's 404/422 translation.
+# Blast Radius: The preview's guard/facts coherence. Read-only — the route
+#   owns the build and the audit event.
+# Connections:
+#   - File: backend/ums_smart_revenue/finance/revenue_facts.py -> the
+#     two-statement repository read this snapshot makes coherent.
+#   - File: backend/ums_smart_revenue/db/read_snapshot.py -> the snapshot
+#     begun before the first statement.
+# ============================================================================
+def _load_channel_month_reconciliation_preview_facts(
+    *,
+    month: str,
+    channel_id: str,
+    platform_session: Session,
+    repository: SqlAlchemyRevenueFactRepository,
+) -> list[RevenueFactEntry]:
+    """Begin the composed-read snapshot, fetch the channel's facts for the preview."""
+    # FIX: One MVCC snapshot for the active-channel guard and the facts select
+    # inside list_channel_month_facts — the guard decision and the facts it
+    # authorizes can no longer come from different database states
+    # (REPEATABLE READ on Postgres; db/read_snapshot.py holds the ruling).
+    begin_composed_read_snapshot(platform_session)
+    return repository.list_channel_month_facts(month=month, youtube_channel_id=channel_id)
+
+
+# ============================================================================
 # Purpose: Serve the per-channel multi-source reconciliation preview for one
 #   month — every stored fact for the channel/month compared source-by-source.
 #   Read-only; never mutates finance numbers.
-# Database/ORM: One RevenueFact repository select on the platform-lane
+# Database/ORM: One RevenueFact repository read on the platform-lane
 #   session; appends a REVENUE_VIEWED audit event through the revenue audit
 #   sink. No locks or writes to finance rows.
 # Standards: Two-permission gate — VIEW_REVENUE + VIEW_CONFIDENCE at channel
 #   scope through the org-access index; denial precedes the source read.
-#   Exempt from the composed-read snapshot BY RULING: the whole response
-#   composes from the single facts select, so the statement-level snapshot
-#   already suffices — begin the snapshot before ever adding a second source
-#   read here (the in-route comment repeats this instruction).
+#   The read happens inside the REPEATABLE READ composed-read snapshot begun
+#   by _load_channel_month_reconciliation_preview_facts after the gates (the
+#   repository read is two statements — guard, then select — so the
+#   single-select exemption this route once carried was unsound); the handler
+#   itself never touches the session (thin-orchestration rule).
 # Blast Radius: Channel-level reconciliation read surface; 404 on unknown
 #   channel/month, 422 on malformed month.
 # Connections:
 #   - File: backend/ums_smart_revenue/finance/reconciliation.py -> the pure
 #     preview builder.
-#   - File: backend/ums_smart_revenue/db/read_snapshot.py -> the snapshot
-#     ruling this single-select read is exempt from.
+#   - File: backend/ums_smart_revenue/db/read_snapshot.py -> the composed-read
+#     snapshot begun between the gates and the source read.
 #   - File: Docs/12_BACKEND_API_SPEC.md -> reconciliation-preview contract.
 # ============================================================================
 @router.get("/channels/{channel_id}/months/{month}/reconciliation-preview")
@@ -1115,18 +1156,20 @@ def get_channel_month_reconciliation_preview(
         SqlAlchemyRevenueFactRepository,
         Depends(current_revenue_fact_repository),
     ],
+    platform_session: Annotated[Session, Depends(current_platform_db_session)],
     audit_sink: Annotated[AuditSink, Depends(current_revenue_audit_sink)],
 ) -> dict[str, object]:
     """Build and return the multi-source reconciliation preview for a channel and month."""
     target_scope = AccessScope.channel(channel_id)
     _require_permission(user, Permission.VIEW_REVENUE, target_scope, org_index)
     _require_permission(user, Permission.VIEW_CONFIDENCE, target_scope, org_index)
-    # Composed-read snapshot ruling (db/read_snapshot.py): deliberately NOT
-    # begun here — the whole preview composes from the single facts select
-    # below, so the statement-level snapshot already suffices. Begin the
-    # snapshot before adding any second source read to this route.
     try:
-        facts = repository.list_channel_month_facts(month=month, youtube_channel_id=channel_id)
+        facts = _load_channel_month_reconciliation_preview_facts(
+            month=month,
+            channel_id=channel_id,
+            platform_session=platform_session,
+            repository=repository,
+        )
     except RevenueFactNotFoundError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
     except RevenueFactValidationError as exc:
