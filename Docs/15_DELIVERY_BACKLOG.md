@@ -2609,7 +2609,12 @@ from the two that need design.
    mispair the close status; the smart-alerts tenant-lane audit signals stay
    outside the snapshot by ruling (authorization laning wins). Contract:
    Docs/12 "Composed-read consistency"; proofs:
-   `tests/api/test_composed_read_snapshot_postgres.py`.
+   `tests/api/test_composed_read_snapshot_postgres.py`. Extended 2026-08-23
+   (`opus/peaceful-moser-2fb0cc`): net-revenue, rankings,
+   reconciliation-issues, and the channel-month summary begin the same
+   snapshot after their permission gates; reconciliation-preview is exempt
+   (single facts select); eight routes pinned in
+   `tests/api/test_composed_read_snapshot_wiring.py`.
 4. ⏳ Bank/transfer/local-currency variance evidence — evidence is now
    surfaced: the gap-explanation bank leg reconciles paid AdSense money
    against bank receipts using the operator-entered transfer-fee and signed

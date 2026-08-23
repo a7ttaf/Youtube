@@ -48,8 +48,9 @@ class ComposedReadSnapshotError(RuntimeError):
 #     principal-read precedent this mechanism mirrors.
 #   - File: backend/ums_smart_revenue/db/session.py -> the after_begin hook
 #     that re-arms role + tenant context on the snapshot transaction.
-#   - File: backend/ums_smart_revenue/api/revenue.py -> the four composed
-#     finance reads that begin this snapshot.
+#   - File: backend/ums_smart_revenue/api/revenue.py -> the eight composed
+#     finance reads that begin this snapshot (reconciliation-preview is
+#     exempt: its response composes from one facts select).
 #   - File: Docs/12_BACKEND_API_SPEC.md -> the read-consistency contract.
 # ============================================================================
 def begin_composed_read_snapshot(session: Session) -> None:

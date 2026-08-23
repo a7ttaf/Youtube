@@ -817,6 +817,17 @@ channel↔account map, and multi-currency FX) stays out per Docs/18.
   tenant-lane audit signals stay outside the snapshot by ruling
   (authorization laning wins); Docs/12 carries the contract paragraph.
   `No migration/backfill required.` — a session-level isolation helper only.
+  **Composed-read snapshot extension shipped 2026-08-23**
+  (`opus/peaceful-moser-2fb0cc`, follow-up chip on the ruling): the remaining
+  multi-read finance endpoints — net-revenue, rankings,
+  reconciliation-issues, and the channel-month summary — begin the same
+  REPEATABLE READ snapshot right after their permission gates;
+  reconciliation-preview is exempt (its response composes from one facts
+  select). Tenant-lane reads (org/channel name maps, the org-access index,
+  the allocation resolver's month-close probe) stay outside the snapshot by
+  the same laning residual. Per-endpoint wiring is pinned in
+  `tests/api/test_composed_read_snapshot_wiring.py` (eight routes).
+  `No migration/backfill required.` — reuses the session-level helper.
 
 ### Acceptance gate
 

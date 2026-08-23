@@ -1026,6 +1026,10 @@ def get_channel_month_reconciliation_preview(
     target_scope = AccessScope.channel(channel_id)
     _require_permission(user, Permission.VIEW_REVENUE, target_scope, org_index)
     _require_permission(user, Permission.VIEW_CONFIDENCE, target_scope, org_index)
+    # Composed-read snapshot ruling (db/read_snapshot.py): deliberately NOT
+    # begun here — the whole preview composes from the single facts select
+    # below, so the statement-level snapshot already suffices. Begin the
+    # snapshot before adding any second source read to this route.
     try:
         facts = repository.list_channel_month_facts(month=month, youtube_channel_id=channel_id)
     except RevenueFactNotFoundError as exc:
@@ -1066,6 +1070,7 @@ def list_month_reconciliation_issues(
         SqlAlchemyRevenueFactRepository,
         Depends(current_revenue_fact_repository),
     ],
+    platform_session: Annotated[Session, Depends(current_platform_db_session)],
     audit_sink: Annotated[AuditSink, Depends(current_revenue_audit_sink)],
     limit: int = Query(default=100, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
@@ -1079,6 +1084,13 @@ def list_month_reconciliation_issues(
     if not _granted_scopes_for_permission(user, Permission.VIEW_CONFIDENCE):
         _raise_missing_permission(Permission.VIEW_CONFIDENCE)
 
+    # FIX: One MVCC snapshot for the channel-id page and the facts read below —
+    # a fact committing between them can no longer tear the issue queue against
+    # its own pagination (REPEATABLE READ on Postgres; db/read_snapshot.py
+    # holds the ruling). The channel authorization below runs in-memory over
+    # the org-access index (loaded on the TENANT lane) and stays outside the
+    # snapshot: laning is an authorization boundary.
+    begin_composed_read_snapshot(platform_session)
     revenue_channel_ids = _authorized_channel_ids_for_permission(
         user,
         Permission.VIEW_REVENUE,
@@ -1712,6 +1724,7 @@ def get_month_net_revenue(
         Depends(current_committed_allocation_repository),
     ],
     session: Annotated[Session, Depends(current_db_session)],
+    platform_session: Annotated[Session, Depends(current_platform_db_session)],
     audit_sink: Annotated[AuditSink, Depends(current_revenue_audit_sink)],
     group_registry: Annotated[
         ChannelGroupRegistryStore,
@@ -1752,6 +1765,17 @@ def get_month_net_revenue(
     normalized_scope_type = target_scope.type.value
     normalized_scope_id = target_scope.id or "global"
     is_global_scope = target_scope == AccessScope.global_scope()
+    # FIX: One MVCC snapshot for every platform-lane money read below — facts,
+    # overrides, deduction components, and the committed-allocation read or its
+    # live-compute fallback — so a writer committing mid-read can no longer
+    # tear the composed summary (REPEATABLE READ on Postgres;
+    # db/read_snapshot.py holds the ruling). The month-close status probe
+    # inside resolve_month_account_allocation rides the TENANT-lane `session`
+    # and deliberately stays outside the snapshot (laning is an authorization
+    # boundary): a close committing mid-read can only steer the resolver to
+    # its conservative live-fallback path, whose inputs are read inside the
+    # snapshot anyway.
+    begin_composed_read_snapshot(platform_session)
     try:
         normalized_currency = normalize_net_revenue_currency(currency)
         facts = revenue_repository.list_month_facts(
@@ -1886,6 +1910,7 @@ def get_month_rankings(
         Depends(current_committed_allocation_repository),
     ],
     session: Annotated[Session, Depends(current_db_session)],
+    platform_session: Annotated[Session, Depends(current_platform_db_session)],
     audit_sink: Annotated[AuditSink, Depends(current_revenue_audit_sink)],
     group_registry: Annotated[
         ChannelGroupRegistryStore,
@@ -1920,6 +1945,15 @@ def get_month_rankings(
     _require_permission(user, Permission.VIEW_FINALIZED_PAYMENTS, AccessScope.finance_month(month))
     normalized_scope_type = target_scope.type.value
     normalized_scope_id = target_scope.id or "global"
+    # FIX: One MVCC snapshot for every platform-lane money read below — facts,
+    # overrides, deduction components, and the committed-allocation read or its
+    # live-compute fallback — so a writer committing mid-read can no longer
+    # tear the ranked totals (REPEATABLE READ on Postgres; db/read_snapshot.py
+    # holds the ruling). The month-close status probe and the org/channel
+    # display-name maps ride the TENANT-lane `session` and deliberately stay
+    # outside the snapshot: laning is an authorization boundary, and the name
+    # maps are labels, not money.
+    begin_composed_read_snapshot(platform_session)
     try:
         facts = revenue_repository.list_month_facts(
             month=month,
@@ -2728,11 +2762,17 @@ def get_channel_month_revenue_summary(
         SqlAlchemyManualOverrideRepository,
         Depends(current_manual_override_repository),
     ],
+    platform_session: Annotated[Session, Depends(current_platform_db_session)],
     audit_sink: Annotated[AuditSink, Depends(current_revenue_audit_sink)],
 ) -> dict[str, object]:
     """Return the adjusted-revenue summary for a channel and month, including manual overrides."""
     target_scope = AccessScope.channel(channel_id)
     _require_permission(user, Permission.VIEW_REVENUE, target_scope, org_index)
+    # FIX: One MVCC snapshot for both source reads below — an override approval
+    # or a fact write committing between them can no longer tear the adjusted
+    # summary (REPEATABLE READ on Postgres; db/read_snapshot.py holds the
+    # ruling).
+    begin_composed_read_snapshot(platform_session)
     try:
         facts = revenue_repository.list_channel_month_facts(
             month=month,

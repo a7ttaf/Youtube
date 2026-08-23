@@ -1,20 +1,24 @@
 # ============================================================================
 # Purpose: Wiring pins proving EVERY composed finance read begins its
 #   composed-read snapshot — payment-match, bank-reconciliation, smart-alerts,
-#   and gap-explanation each call begin_composed_read_snapshot exactly once
-#   before reading. The snapshot ruling is platform-wide; a route that stops
+#   gap-explanation, net-revenue, rankings, reconciliation-issues, and the
+#   channel-month summary each call begin_composed_read_snapshot exactly once
+#   before reading. reconciliation-preview is exempt by ruling: its response
+#   composes from the single facts select, so the statement-level snapshot
+#   already suffices. The snapshot ruling is platform-wide; a route that stops
 #   calling the helper silently reverts to torn READ COMMITTED composition on
 #   Postgres, so the presence of the call is pinned per endpoint.
 # Database/ORM: SQLite-tier TestClient over the real app factory; empty
-#   finance month (the builders tolerate empty sources), so only the schema
-#   and the audit actor row are seeded.
+#   finance month (the builders tolerate empty sources), so only the schema,
+#   the audit actor row, and one active channel row (the channel-scoped
+#   summary read 404s on unknown channels) are seeded.
 # Standards: The helper is replaced with a counting fake (create=True so the
 #   pin fails on a missing import with a countable zero, not an AttributeError)
 #   — behavior of the real helper is pinned in tests/db/test_read_snapshot.py
 #   and tests/api/test_composed_read_snapshot_postgres.py, not here.
 # Blast Radius: Test-only.
 # Connections:
-#   - File: backend/ums_smart_revenue/api/revenue.py -> the four routes under
+#   - File: backend/ums_smart_revenue/api/revenue.py -> the eight routes under
 #     test.
 #   - File: backend/ums_smart_revenue/db/read_snapshot.py -> the helper whose
 #     call is being counted.
@@ -32,16 +36,21 @@ from sqlalchemy.orm import Session
 
 from ums_smart_revenue.app import create_app
 from ums_smart_revenue.db.finance_models import FinanceBase
-from ums_smart_revenue.db.org_models import OrgBase
+from ums_smart_revenue.db.org_models import OrgBase, YouTubeChannelORM
 from ums_smart_revenue.db.security_models import SecurityBase, UserORM
 
 USER_ID = UUID("00000000-0000-0000-0000-00000000c401")
+CHANNEL_ID = "channel-snapshot-wiring"
 
 COMPOSED_READ_PATHS = [
     "/revenue/months/2026-03/payment-match",
     "/revenue/months/2026-03/bank-reconciliation",
     "/revenue/months/2026-03/smart-alerts",
     "/revenue/months/2026-03/gap-explanation",
+    "/revenue/months/2026-03/net-revenue",
+    "/revenue/months/2026-03/rankings",
+    "/revenue/months/2026-03/reconciliation-issues",
+    f"/revenue/channels/{CHANNEL_ID}/months/2026-03/summary",
 ]
 
 
@@ -64,12 +73,20 @@ def build_client(tmp_path: Path) -> TestClient:
     SecurityBase.metadata.create_all(engine)
     FinanceBase.metadata.create_all(engine)
     with Session(engine) as session:
-        session.add(
-            UserORM(
-                id=USER_ID,
-                email="snapshot-wiring@example.com",
-                display_name="Snapshot Wiring User",
-            )
+        session.add_all(
+            [
+                UserORM(
+                    id=USER_ID,
+                    email="snapshot-wiring@example.com",
+                    display_name="Snapshot Wiring User",
+                ),
+                YouTubeChannelORM(
+                    id=uuid4(),
+                    youtube_channel_id=CHANNEL_ID,
+                    channel_name="Snapshot Wiring Channel",
+                    active=True,
+                ),
+            ]
         )
         session.commit()
     return TestClient(create_app(database_url=database_url))
