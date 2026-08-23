@@ -2620,15 +2620,19 @@ from the two that need design.
    gates; scoped attribution (org-unit selection, rankings grouping,
    recalculation readiness map) re-resolves on the snapshot index
    intersected with the gate-time authorized set, group-scoped selection
-   re-reads the active roster through the registry on the snapshot and
-   intersects it deny-only (group authorization itself stays a gate-time
-   per-member decision), grant coverage over org-unit and channel scopes is
-   re-asserted deny-only on that index (a reparented target unit — or a
-   channel target moved out of its granting unit — 403s; direct channel
-   grants pass on scope identity), and the allocation resolver's close
+   re-reads the group row and active roster through the registry on the
+   snapshot, intersects deny-only, permission-filters surviving members on
+   the snapshot index, and empties for a group archived mid-request (the
+   per-member covered-subset authorization stays gate-time), grant coverage
+   over org-unit and channel scopes is re-asserted deny-only on that index
+   (a reparented target unit — or a channel target moved out of its
+   granting unit — 403s; direct channel grants pass on scope identity) with
+   the same channel re-check inside the per-channel facts/preview/summary
+   loaders, the issue-queue loader intersects its covered sets re-derived
+   on the snapshot index before paging, and the allocation resolver's close
    probe reads through the snapshot too — each red→green-proven against
-   mid-request org moves, a reparent, a roster drop, a channel move, and a
-   mid-request lock.
+   mid-request org moves, reparents, roster drops, channel moves, a group
+   archive, and a mid-request lock.
    Eleven GET routes plus the dry-run recalculation POST are pinned in
    `tests/api/test_composed_read_snapshot_wiring.py`; the recalculation
    write branch and the explain POST stay READ COMMITTED by the recorded

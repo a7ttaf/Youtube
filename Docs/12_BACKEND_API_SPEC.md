@@ -679,19 +679,29 @@ the snapshot org-access index intersected with the gate-time authorized set
 (a channel is served only when it belongs to the unit in BOTH states), so a
 channel moved between org units mid-request is never served or ranked under
 its former unit, and a mid-request move-in is never admitted. GROUP-scoped
-selection re-reads the active member roster through the registry on the
-same snapshot and intersects it with the gate-time authorized set,
-deny-only: a member dropped from the roster mid-request stops feeding the
-rollup, and a member added mid-request was never per-member authorized and
-stays out (group authorization itself — the per-member covered-subset check
-and the group's active flag — remains a gate-time decision). Grant coverage
+selection re-reads the group row and its active member roster through the
+registry on the same snapshot and intersects the roster with the gate-time
+authorized set, deny-only: a member dropped from the roster mid-request
+stops feeding the rollup, a member added mid-request was never per-member
+authorized and stays out, each surviving member is then re-checked against
+the snapshot index (a member whose inherited sector/company containment
+drifted mid-request is dropped; direct channel grants pass on scope
+identity alone), and a group archived or deleted mid-request empties the
+selection — the per-member covered-subset AUTHORIZATION itself remains a
+gate-time decision, the snapshot side can only narrow. Grant coverage
 over org-unit AND channel scopes is additionally re-asserted DENY-ONLY
 against the same snapshot index: a sector-granted caller whose target
 company was reparented out of the sector — or whose channel-scoped target
 was moved out of the granted unit — mid-request receives 403 instead of
 snapshot-era data under gate-era containment, while direct channel grants
-keep passing on scope identity alone; platform-lane data can narrow but
-never grant access, preserving the laning boundary. The snapshot
+keep passing on scope identity alone. The same deny-only channel re-check
+runs inside the per-channel loaders (the channel-month `facts` listing,
+`reconciliation-preview`, and the channel-month `summary`), and the
+`reconciliation-issues` loader re-derives its covered channel sets on the
+snapshot index and intersects them with the gate-time visible set before
+paging, so a channel moved out of the caller's granted unit mid-request is
+dropped from the queue. Platform-lane data can narrow but never grant
+access, preserving the laning boundary. The snapshot
 transaction is read-plus-append-only (its only writes are the endpoint's own
 audit rows), so it cannot raise serialization failures and never aborts
 concurrent finance writers (REPEATABLE READ deliberately, not SERIALIZABLE).

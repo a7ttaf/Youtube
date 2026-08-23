@@ -14,7 +14,10 @@
 #   group rollup (active membership re-reads on the snapshot, deny-only),
 #   and a channel-scoped read admitted by an inherited org grant cannot be
 #   served after the channel moved out of the granted unit (the deny-only
-#   grant re-check covers channel targets).
+#   grant re-check covers channel targets — on the scope-parameterized
+#   loaders, the per-channel facts/summary loaders, the issue-queue
+#   selection, and the group member filter — and the group's active flag
+#   re-reads on the snapshot).
 # Database/ORM: PostgreSQL only (transaction isolation is the subject);
 #   requires UMS_TEST_DATABASE_URL — require_postgres_url() raises, never
 #   skips, preserving the no-skip policy. Seeds finance rows through the
@@ -139,7 +142,8 @@ def _purge_test_rows(engine: sa.Engine) -> None:
                 "DELETE FROM audit_logs WHERE entity_type IN "
                 "('monthly_payment_match', 'monthly_smart_alerts', "
                 "'month_bank_reconciliation', 'month_gap_explanation', "
-                "'monthly_net_revenue_summary', 'revenue_recalculation_preview')"
+                "'monthly_net_revenue_summary', 'revenue_recalculation_preview', "
+                "'monthly_channel_revenue_fact', 'revenue_reconciliation_issue_queue')"
             )
         )
         conn.execute(sa.text("DELETE FROM finance_month_close WHERE month = :m"), {"m": MONTH})
@@ -307,6 +311,64 @@ def auth_headers() -> dict[str, str]:
         "x-scope-type": "global",
         "x-ums-trusted-gateway-token": "pytest-trusted-gateway-token",
     }
+
+
+def sector_auth_headers() -> dict[str, str]:
+    """Finance-viewer headers scoped to the seeded sector (inherited channel access)."""
+    return {
+        **auth_headers(),
+        "x-scope-type": "sector",
+        "x-scope-id": str(SECTOR_ID),
+    }
+
+
+def _seed_sector_b_with_company_b(owner_engine: sa.Engine) -> None:
+    """Seed a second sector holding company B, the move-out target for the pins."""
+    with Session(owner_engine) as seeder:
+        seeder.add_all(
+            [
+                OrgUnitORM(
+                    id=SECTOR_B_ID,
+                    parent_id=None,
+                    type="SECTOR",
+                    name="TV Sector B",
+                    active=True,
+                ),
+                OrgUnitORM(
+                    id=COMPANY_B_ID,
+                    parent_id=SECTOR_B_ID,
+                    type="COMPANY",
+                    name="TV Company B",
+                    active=True,
+                ),
+            ]
+        )
+        seeder.commit()
+
+
+def _move_channel_out_then_begin(owner_engine: sa.Engine, fired: dict[str, bool]):
+    """Build a begin-hook that moves the channel into company B (sector B) first.
+
+    The tenant-lane gates resolved containment at dependency time; committing
+    the move here lands it deterministically between those gates and the
+    snapshot begin — the exact window the deny-only snapshot re-checks close.
+    """
+
+    def _hook(session: Session) -> None:
+        if not fired["done"]:
+            fired["done"] = True
+            with Session(owner_engine) as writer:
+                writer.execute(
+                    sa.text(
+                        "UPDATE youtube_channels SET primary_org_unit_id = :company_b "
+                        "WHERE youtube_channel_id = :channel"
+                    ),
+                    {"company_b": str(COMPANY_B_ID), "channel": CHANNEL_ID},
+                )
+                writer.commit()
+        begin_composed_read_snapshot(session)
+
+    return _hook
 
 
 def test_begin_composed_read_snapshot_runs_repeatable_read(pg_url: str) -> None:
@@ -930,3 +992,217 @@ def test_channel_read_refuses_moved_channel_on_the_snapshot(
         platform_session.rollback()
         platform_session.close()
         TENANT_CTX.reset(tenant_token)
+
+
+def test_channel_facts_listing_refuses_moved_channel_on_the_snapshot(
+    owner_engine: sa.Engine, client: TestClient
+) -> None:
+    """A per-channel facts listing admitted by an inherited sector grant must
+    be refused (403) when the channel moved out of the granted sector between
+    the gate and the snapshot: the shared per-channel loader re-checks the
+    channel target against the snapshot index, deny-only."""
+    _seed_month(owner_engine)
+    _seed_sector_b_with_company_b(owner_engine)
+    fired = {"done": False}
+
+    with patch(
+        "ums_smart_revenue.api.revenue.begin_composed_read_snapshot",
+        side_effect=_move_channel_out_then_begin(owner_engine, fired),
+    ):
+        response = client.get(
+            f"/revenue/channels/{CHANNEL_ID}/months/{MONTH}/facts",
+            headers=sector_auth_headers(),
+        )
+
+    assert fired["done"] is True
+    assert response.status_code == 403
+
+
+def test_reconciliation_issue_queue_selection_rides_the_snapshot(
+    owner_engine: sa.Engine, client: TestClient
+) -> None:
+    """A channel moved out of the caller's granted sector after the visible
+    set was computed but before the snapshot begins must not have its facts
+    paged into the issue queue: the loader recomputes the covered sets on the
+    snapshot index and intersects them with the gate-time set, deny-only."""
+    _seed_month(owner_engine)
+    _seed_sector_b_with_company_b(owner_engine)
+    with Session(owner_engine) as seeder:
+        # A second, disagreeing source so the channel's preview carries issues
+        # (the queue drops issue-free channels).
+        seeder.add(
+            MonthlyChannelRevenueFactORM(
+                id=uuid4(),
+                month=MONTH,
+                youtube_channel_id=CHANNEL_ID,
+                source_kind="YOUTUBE_ANALYTICS",
+                source_report_id="analytics-report-snapshot",
+                gross_revenue_usd=Decimal("700.00"),
+                net_revenue_usd=None,
+                views=250000,
+                watch_time_minutes=Decimal("7200.50"),
+                confidence_score=Decimal("0.9500"),
+                imported_by=USER_ID,
+            )
+        )
+        seeder.commit()
+    fired = {"done": False}
+
+    with patch(
+        "ums_smart_revenue.api.revenue.begin_composed_read_snapshot",
+        side_effect=_move_channel_out_then_begin(owner_engine, fired),
+    ):
+        response = client.get(
+            f"/revenue/months/{MONTH}/reconciliation-issues",
+            headers=sector_auth_headers(),
+        )
+
+    assert fired["done"] is True
+    assert response.status_code == 200
+    body = response.json()
+    assert body["items"] == []
+    assert body["pagination"]["has_more"] is False
+
+
+def test_group_scope_member_containment_rides_the_snapshot(
+    pg_url: str, owner_engine: sa.Engine
+) -> None:
+    """A group member that stays on the roster but moves out of the caller's
+    granted sector between the gate and the snapshot must not keep feeding
+    the group rollup: surviving members are re-checked against the snapshot
+    index (direct channel grants keep passing on scope identity), deny-only.
+
+    Exercised via a direct loader call (the reparent-pin idiom): the HTTP
+    net-revenue route also gates finance-month VIEW_FINALIZED_PAYMENTS, which
+    a single sector-scoped gateway role cannot carry, so the epoch mix is
+    reproduced by committing the move before the loader runs under a
+    sector-granted principal."""
+    _seed_month(owner_engine)
+    _seed_sector_b_with_company_b(owner_engine)
+    with Session(owner_engine) as seeder:
+        seeder.add(
+            ChannelGroupORM(
+                id=GROUP_ID,
+                name="Snapshot Group",
+                group_type="CUSTOM_GROUP",
+                active=True,
+            )
+        )
+        # The member row references (tenant_id, group_id) through a composite
+        # FK with no ORM relationship, so flush the group first.
+        seeder.flush()
+        seeder.add(ChannelGroupMemberORM(group_id=GROUP_ID, channel_id=CHANNEL_ROW_ID))
+        seeder.commit()
+    with owner_engine.begin() as conn:
+        # The move lands before the loader runs, so the snapshot sees the
+        # member under company B in sector B while the (bypassed) gate-time
+        # state had it inside the granted sector — the roster keeps the
+        # member, only its containment drifted.
+        conn.execute(
+            sa.text(
+                "UPDATE youtube_channels SET primary_org_unit_id = :company_b "
+                "WHERE youtube_channel_id = :channel"
+            ),
+            {"company_b": str(COMPANY_B_ID), "channel": CHANNEL_ID},
+        )
+    user = UserPrincipal(
+        user_id=str(USER_ID),
+        email="snapshot-pg@example.com",
+        direct_permissions=(
+            PermissionGrant(
+                permission=Permission.VIEW_REVENUE,
+                scope=AccessScope.sector(str(SECTOR_ID)),
+            ),
+            PermissionGrant(
+                permission=Permission.VIEW_CONFIDENCE,
+                scope=AccessScope.sector(str(SECTOR_ID)),
+            ),
+        ),
+    )
+    # The direct call bypasses the HTTP middleware, so arm the tenant
+    # contextvar the org-index loader and the lane hooks resolve against.
+    now = datetime(2026, 1, 1, tzinfo=UTC)
+    tenant_token = TENANT_CTX.set(
+        Tenant(
+            id=UUID(UMS_TENANT_ID),
+            slug="ums",
+            display_name="UMS",
+            primary_currency="USD",
+            status=TenantStatus.ACTIVE,
+            onboarding_at=now,
+            created_at=now,
+            updated_at=now,
+        )
+    )
+    platform_session = build_platform_session_factory(pg_url)()
+    try:
+        summary, _, _ = _load_month_net_revenue(
+            month=MONTH,
+            currency="USD",
+            user=user,
+            target_scope=AccessScope.group(str(GROUP_ID)),
+            channel_ids={CHANNEL_ID},
+            platform_session=platform_session,
+            revenue_repository=SqlAlchemyRevenueFactRepository(platform_session),
+            override_repository=SqlAlchemyManualOverrideRepository(platform_session),
+            deduction_component_repository=SqlAlchemyDeductionComponentRepository(
+                platform_session
+            ),
+            link_repository=SqlAlchemyChannelAccountLinkRepository(platform_session),
+            committed_repository=SqlAlchemyCommittedAllocationRepository(platform_session),
+        )
+        assert summary.channel_count == 0
+    finally:
+        platform_session.rollback()
+        platform_session.close()
+        TENANT_CTX.reset(tenant_token)
+
+
+def test_group_scope_active_flag_rides_the_snapshot(
+    owner_engine: sa.Engine, client: TestClient
+) -> None:
+    """A group archived after the gate-time active check but before the
+    snapshot begins must not keep serving its roster: the selection re-reads
+    the group row on the snapshot and empties when it is inactive there."""
+    _seed_month(owner_engine)
+    with Session(owner_engine) as seeder:
+        seeder.add(
+            ChannelGroupORM(
+                id=GROUP_ID,
+                name="Snapshot Group",
+                group_type="CUSTOM_GROUP",
+                active=True,
+            )
+        )
+        seeder.flush()
+        seeder.add(ChannelGroupMemberORM(group_id=GROUP_ID, channel_id=CHANNEL_ROW_ID))
+        seeder.commit()
+    fired = {"done": False}
+
+    def _archive_then_begin(session: Session) -> None:
+        # The gate-time resolver saw the group active; committing the archive
+        # here lands it deterministically between that check and the snapshot
+        # begin - the window the snapshot-side active re-read closes.
+        if not fired["done"]:
+            fired["done"] = True
+            with Session(owner_engine) as writer:
+                writer.execute(
+                    sa.text("UPDATE channel_groups SET active = FALSE WHERE id = :g"),
+                    {"g": str(GROUP_ID)},
+                )
+                writer.commit()
+        begin_composed_read_snapshot(session)
+
+    with patch(
+        "ums_smart_revenue.api.revenue.begin_composed_read_snapshot",
+        side_effect=_archive_then_begin,
+    ):
+        response = client.get(
+            f"/revenue/months/{MONTH}/net-revenue",
+            params={"scope_type": "group", "scope_id": str(GROUP_ID)},
+            headers=auth_headers(),
+        )
+
+    assert fired["done"] is True
+    assert response.status_code == 200
+    assert response.json()["channel_count"] == 0

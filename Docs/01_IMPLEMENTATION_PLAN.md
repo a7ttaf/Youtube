@@ -833,17 +833,20 @@ channel↔account map, and multi-currency FX) stays out per Docs/18.
   from a snapshot org-access index, red→green-proven on Postgres against a
   mid-request company move; org-unit selection additionally intersects with
   the gate-time authorized set (a channel in the unit in neither state is
-  never served); GROUP selection re-reads the active roster through the
-  registry on the snapshot and intersects it with the gate-time set,
-  deny-only (a member dropped mid-request stops feeding the rollup — group
-  authorization itself stays a gate-time, per-member decision); the
+  never served); GROUP selection re-reads the group row and active roster
+  through the registry on the snapshot, intersects with the gate-time set,
+  permission-filters each surviving member against the snapshot index, and
+  empties for a group archived mid-request — all deny-only (the per-member
+  covered-subset authorization stays a gate-time decision); the
   allocation resolver's close probe reads through the snapshot too (a
   mid-read lock cannot mislabel an older in-snapshot run as the locked
   allocation); and grant coverage over org-unit AND channel scopes is
   re-asserted DENY-ONLY on the snapshot index (a reparented target unit —
   or a channel target moved out of its granting unit — 403s while direct
   channel grants pass on scope identity; platform data can narrow but never
-  grant access). Tenant-lane residuals: the audit-gated smart-alerts
+  grant access), with the same channel re-check inside the per-channel
+  facts/preview/summary loaders and the issue-queue loader intersecting
+  its covered sets re-derived on the snapshot index before paging. Tenant-lane residuals: the audit-gated smart-alerts
   signals and org/channel display-NAME maps (labels). The recalculation
   WRITE branch and the explain POST stay READ COMMITTED by the recorded
   write-path ruling. Per-endpoint wiring is pinned in
