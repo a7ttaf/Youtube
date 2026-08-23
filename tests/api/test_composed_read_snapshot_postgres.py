@@ -830,28 +830,30 @@ def test_scoped_read_refuses_reparented_target_on_the_snapshot(
             updated_at=now,
         )
     )
-    platform_session = build_platform_session_factory(pg_url)()
     try:
-        with pytest.raises(HTTPException) as excinfo:
-            _load_month_net_revenue(
-                month=MONTH,
-                currency="USD",
-                user=user,
-                target_scope=AccessScope.company(str(COMPANY_ID)),
-                channel_ids={CHANNEL_ID},
-                platform_session=platform_session,
-                revenue_repository=SqlAlchemyRevenueFactRepository(platform_session),
-                override_repository=SqlAlchemyManualOverrideRepository(platform_session),
-                deduction_component_repository=SqlAlchemyDeductionComponentRepository(
-                    platform_session
-                ),
-                link_repository=SqlAlchemyChannelAccountLinkRepository(platform_session),
-                committed_repository=SqlAlchemyCommittedAllocationRepository(platform_session),
-            )
-        assert excinfo.value.status_code == 403
+        platform_session = build_platform_session_factory(pg_url)()
+        try:
+            with pytest.raises(HTTPException) as excinfo:
+                _load_month_net_revenue(
+                    month=MONTH,
+                    currency="USD",
+                    user=user,
+                    target_scope=AccessScope.company(str(COMPANY_ID)),
+                    channel_ids={CHANNEL_ID},
+                    platform_session=platform_session,
+                    revenue_repository=SqlAlchemyRevenueFactRepository(platform_session),
+                    override_repository=SqlAlchemyManualOverrideRepository(platform_session),
+                    deduction_component_repository=SqlAlchemyDeductionComponentRepository(
+                        platform_session
+                    ),
+                    link_repository=SqlAlchemyChannelAccountLinkRepository(platform_session),
+                    committed_repository=SqlAlchemyCommittedAllocationRepository(platform_session),
+                )
+            assert excinfo.value.status_code == 403
+        finally:
+            platform_session.rollback()
+            platform_session.close()
     finally:
-        platform_session.rollback()
-        platform_session.close()
         TENANT_CTX.reset(tenant_token)
 
 
@@ -979,28 +981,30 @@ def test_channel_read_refuses_moved_channel_on_the_snapshot(
             updated_at=now,
         )
     )
-    platform_session = build_platform_session_factory(pg_url)()
     try:
-        with pytest.raises(HTTPException) as excinfo:
-            _load_month_net_revenue(
-                month=MONTH,
-                currency="USD",
-                user=user,
-                target_scope=AccessScope.channel(CHANNEL_ID),
-                channel_ids={CHANNEL_ID},
-                platform_session=platform_session,
-                revenue_repository=SqlAlchemyRevenueFactRepository(platform_session),
-                override_repository=SqlAlchemyManualOverrideRepository(platform_session),
-                deduction_component_repository=SqlAlchemyDeductionComponentRepository(
-                    platform_session
-                ),
-                link_repository=SqlAlchemyChannelAccountLinkRepository(platform_session),
-                committed_repository=SqlAlchemyCommittedAllocationRepository(platform_session),
-            )
-        assert excinfo.value.status_code == 403
+        platform_session = build_platform_session_factory(pg_url)()
+        try:
+            with pytest.raises(HTTPException) as excinfo:
+                _load_month_net_revenue(
+                    month=MONTH,
+                    currency="USD",
+                    user=user,
+                    target_scope=AccessScope.channel(CHANNEL_ID),
+                    channel_ids={CHANNEL_ID},
+                    platform_session=platform_session,
+                    revenue_repository=SqlAlchemyRevenueFactRepository(platform_session),
+                    override_repository=SqlAlchemyManualOverrideRepository(platform_session),
+                    deduction_component_repository=SqlAlchemyDeductionComponentRepository(
+                        platform_session
+                    ),
+                    link_repository=SqlAlchemyChannelAccountLinkRepository(platform_session),
+                    committed_repository=SqlAlchemyCommittedAllocationRepository(platform_session),
+                )
+            assert excinfo.value.status_code == 403
+        finally:
+            platform_session.rollback()
+            platform_session.close()
     finally:
-        platform_session.rollback()
-        platform_session.close()
         TENANT_CTX.reset(tenant_token)
 
 
@@ -1155,27 +1159,29 @@ def test_group_scope_member_containment_rides_the_snapshot(
             updated_at=now,
         )
     )
-    platform_session = build_platform_session_factory(pg_url)()
     try:
-        summary, _, _ = _load_month_net_revenue(
-            month=MONTH,
-            currency="USD",
-            user=user,
-            target_scope=AccessScope.group(str(GROUP_ID)),
-            channel_ids={CHANNEL_ID},
-            platform_session=platform_session,
-            revenue_repository=SqlAlchemyRevenueFactRepository(platform_session),
-            override_repository=SqlAlchemyManualOverrideRepository(platform_session),
-            deduction_component_repository=SqlAlchemyDeductionComponentRepository(
-                platform_session
-            ),
-            link_repository=SqlAlchemyChannelAccountLinkRepository(platform_session),
-            committed_repository=SqlAlchemyCommittedAllocationRepository(platform_session),
-        )
-        assert summary.channel_count == 0
+        platform_session = build_platform_session_factory(pg_url)()
+        try:
+            summary, _, _ = _load_month_net_revenue(
+                month=MONTH,
+                currency="USD",
+                user=user,
+                target_scope=AccessScope.group(str(GROUP_ID)),
+                channel_ids={CHANNEL_ID},
+                platform_session=platform_session,
+                revenue_repository=SqlAlchemyRevenueFactRepository(platform_session),
+                override_repository=SqlAlchemyManualOverrideRepository(platform_session),
+                deduction_component_repository=SqlAlchemyDeductionComponentRepository(
+                    platform_session
+                ),
+                link_repository=SqlAlchemyChannelAccountLinkRepository(platform_session),
+                committed_repository=SqlAlchemyCommittedAllocationRepository(platform_session),
+            )
+            assert summary.channel_count == 0
+        finally:
+            platform_session.rollback()
+            platform_session.close()
     finally:
-        platform_session.rollback()
-        platform_session.close()
         TENANT_CTX.reset(tenant_token)
 
 
@@ -1343,24 +1349,26 @@ def test_finance_export_builder_releases_the_snapshot_before_artifact_work(
             updated_at=now,
         )
     )
-    platform_session = build_platform_session_factory(pg_url)()
     try:
-        summaries = _build_finance_source_summaries_for_export(
-            context=_FinanceExportSourceContext(
-                export_job=export_job,
-                user=user,
-                # The tenant-lane session is only touched for audit-derived
-                # alert reads, disabled here; the platform session stands in.
-                session=platform_session,
-                platform_session=platform_session,
-                org_index=OrgAccessIndex(),
-                group_registry=ChannelGroupRegistry(),
-                include_audit_derived_alerts=False,
-            ),
-        )
-        assert summaries.net_revenue.month == MONTH
-        assert platform_session.in_transaction() is False
+        platform_session = build_platform_session_factory(pg_url)()
+        try:
+            summaries = _build_finance_source_summaries_for_export(
+                context=_FinanceExportSourceContext(
+                    export_job=export_job,
+                    user=user,
+                    # The tenant-lane session is only touched for audit-derived
+                    # alert reads, disabled here; the platform session stands in.
+                    session=platform_session,
+                    platform_session=platform_session,
+                    org_index=OrgAccessIndex(),
+                    group_registry=ChannelGroupRegistry(),
+                    include_audit_derived_alerts=False,
+                ),
+            )
+            assert summaries.net_revenue.month == MONTH
+            assert platform_session.in_transaction() is False
+        finally:
+            platform_session.rollback()
+            platform_session.close()
     finally:
-        platform_session.rollback()
-        platform_session.close()
         TENANT_CTX.reset(tenant_token)
