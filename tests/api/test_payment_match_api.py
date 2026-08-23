@@ -211,6 +211,9 @@ def test_payment_match_maps_adsense_payment_validation_to_422():
             user=user,
             revenue_repository=_EmptyRevenueRepository(),
             payment_repository=_FailingPaymentRepository(),
+            # A real SQLite session: the composed-read snapshot is a no-op on
+            # its dialect, keeping this direct call about the 422 mapping.
+            platform_session=Session(create_engine("sqlite+pysqlite:///:memory:")),
             audit_sink=InMemoryAuditSink(),
             currency="USD",
         )
