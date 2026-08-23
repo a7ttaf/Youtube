@@ -39,8 +39,9 @@
 #     principal-read precedent this mechanism mirrors.
 #   - File: backend/ums_smart_revenue/db/session.py -> the after_begin hook
 #     that re-arms role + tenant context on the snapshot transaction.
-#   - File: backend/ums_smart_revenue/api/revenue.py -> the four composed
-#     finance reads that begin this snapshot.
+#   - File: backend/ums_smart_revenue/api/revenue.py -> the four composed-read
+#     loaders (_load_month_* — not the route handlers, which never touch the
+#     session) that begin this snapshot after their route's permission gates.
 #   - File: Docs/12_BACKEND_API_SPEC.md -> the read-consistency contract.
 # ============================================================================
 """Composed-read snapshot: one REPEATABLE READ transaction per composed finance read."""

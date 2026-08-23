@@ -87,6 +87,7 @@ from ums_smart_revenue.finance.allocation import AllocationLine
 from ums_smart_revenue.finance.bank_reconciliation import (
     BankReconciliationLockedMonthError,
     BankReconciliationValidationError,
+    MonthBankReconciliationSummary,
     SqlAlchemyBankReconciliationRepository,
     build_month_bank_reconciliation_summary,
 )
@@ -134,6 +135,7 @@ from ums_smart_revenue.finance.net_revenue import (
     normalize_net_revenue_currency,
 )
 from ums_smart_revenue.finance.payment_matching import (
+    MonthlyPaymentMatchSummary,
     PaymentMatchValidationError,
     build_monthly_payment_match_summary,
     normalize_payment_match_currency,
@@ -165,6 +167,7 @@ from ums_smart_revenue.finance.smart_alerts import (
     MISSING_FACT_CHANNEL_SAMPLE_LIMIT,
     MonthlySmartAlertAuditSignals,
     MonthlySmartAlertFinanceInputs,
+    MonthlySmartAlertSummary,
     MonthlySmartAlertTrendSignals,
     build_monthly_smart_alert_summary,
 )
@@ -1165,6 +1168,50 @@ def list_month_reconciliation_issues(
 
 
 # ============================================================================
+# Purpose: Data-access + composition step for the monthly payment match,
+#   extracted out of the route handler (thin-orchestration rule): begin the
+#   composed-read snapshot, fetch both sources once, and build the summary.
+# Database/ORM: Begins the platform session's REPEATABLE READ composed-read
+#   snapshot (db/read_snapshot.py), then reads via the RevenueFact and
+#   AdSensePayment repositories. No writes.
+# Standards: The snapshot begins here — NOT in a route dependency — so the
+#   route's permission gates always run first: denial must precede any
+#   transaction begin (pinned by the gap-explanation direct-call tests'
+#   fail-if-touched platform-session stubs). Source ValidationErrors
+#   propagate untouched for the route's 422 translation.
+# Blast Radius: Every number the payment-match endpoint serves. Read-only —
+#   the route owns the audit events.
+# Connections:
+#   - File: backend/ums_smart_revenue/finance/payment_matching.py -> the pure
+#     summary builder and currency normalization.
+#   - File: backend/ums_smart_revenue/db/read_snapshot.py -> the snapshot
+#     begun before the first fetch.
+# ============================================================================
+def _load_month_payment_match(
+    *,
+    month: str,
+    currency: str,
+    platform_session: Session,
+    revenue_repository: SqlAlchemyRevenueFactRepository,
+    payment_repository: SqlAlchemyAdSensePaymentRepository,
+) -> MonthlyPaymentMatchSummary:
+    """Begin the composed-read snapshot, fetch both sources, build the summary."""
+    # FIX: One MVCC snapshot for both source reads below — a payment or fact
+    # committing between them can no longer tear the composed totals
+    # (REPEATABLE READ on Postgres; db/read_snapshot.py holds the ruling).
+    begin_composed_read_snapshot(platform_session)
+    normalized_currency = normalize_payment_match_currency(currency)
+    facts = revenue_repository.list_month_facts(month=month)
+    payments = payment_repository.list_month_payments(month=month)
+    return build_monthly_payment_match_summary(
+        month=month,
+        facts=facts,
+        payments=payments,
+        currency=normalized_currency,
+    )
+
+
+# ============================================================================
 # Purpose: Serve the monthly payment-match summary — YouTube revenue facts
 #   compared against AdSense payments for one month, with the match status
 #   and self-audit trail. Read-only; never mutates finance numbers.
@@ -1174,8 +1221,10 @@ def list_month_reconciliation_issues(
 # Standards: Two-permission gate — VIEW_REVENUE at global scope plus
 #   VIEW_FINALIZED_PAYMENTS at finance-month scope; denial precedes any source
 #   read. Both source reads happen inside one REPEATABLE READ composed-read
-#   snapshot on Postgres (db/read_snapshot.py) begun after the gates, so a
-#   payment or fact committing mid-read cannot tear the composed totals.
+#   snapshot on Postgres (db/read_snapshot.py) begun by
+#   _load_month_payment_match after the gates, so a payment or fact
+#   committing mid-read cannot tear the composed totals; the handler itself
+#   never touches the session (thin-orchestration rule).
 # Blast Radius: Finance dashboard read surface; the payment-match wire
 #   contract feeds the Command Center and the smart-alerts builder reuses the
 #   same summary shape.
@@ -1207,19 +1256,13 @@ def get_month_payment_match(
     payment_scope = AccessScope.finance_month(month)
     _require_permission(user, Permission.VIEW_REVENUE, revenue_scope)
     _require_permission(user, Permission.VIEW_FINALIZED_PAYMENTS, payment_scope)
-    # FIX: One MVCC snapshot for both source reads below — a payment or fact
-    # committing between them can no longer tear the composed totals
-    # (REPEATABLE READ on Postgres; db/read_snapshot.py holds the ruling).
-    begin_composed_read_snapshot(platform_session)
     try:
-        normalized_currency = normalize_payment_match_currency(currency)
-        facts = revenue_repository.list_month_facts(month=month)
-        payments = payment_repository.list_month_payments(month=month)
-        summary = build_monthly_payment_match_summary(
+        summary = _load_month_payment_match(
             month=month,
-            facts=facts,
-            payments=payments,
-            currency=normalized_currency,
+            currency=currency,
+            platform_session=platform_session,
+            revenue_repository=revenue_repository,
+            payment_repository=payment_repository,
         )
     except (
         AdSensePaymentValidationError,
@@ -1265,6 +1308,104 @@ def get_month_payment_match(
 
 
 # ============================================================================
+# Purpose: Data-access + composition step for the monthly smart alerts,
+#   extracted out of the route handler (thin-orchestration rule): begin the
+#   composed-read snapshot, fetch every finance source and the missing-fact
+#   coverage pair once, gather the audit-gated tenant-lane signals, and build
+#   the prioritized alert summary.
+# Database/ORM: Begins the platform session's REPEATABLE READ composed-read
+#   snapshot (db/read_snapshot.py), then reads facts (both months), payments,
+#   bank entries, overrides, close status, and the coverage pair on that
+#   snapshot; the audit-derived signals read through the TENANT-lane
+#   `session` and deliberately stay outside it (their laning is an
+#   authorization boundary). No writes.
+# Standards: The snapshot begins here — NOT in a route dependency — so the
+#   route's permission gates always run first: denial must precede any
+#   transaction begin (pinned by the gap-explanation direct-call tests'
+#   fail-if-touched platform-session stubs). Source ValidationErrors
+#   propagate untouched for the route's 422 translation.
+# Blast Radius: Every alert the smart-alerts endpoint serves. Read-only —
+#   the route owns the audit events.
+# Connections:
+#   - File: backend/ums_smart_revenue/finance/smart_alerts.py -> the pure
+#     alert builder and its input dataclasses.
+#   - File: backend/ums_smart_revenue/db/read_snapshot.py -> the snapshot
+#     begun before the first fetch.
+# ============================================================================
+def _load_month_smart_alerts(
+    *,
+    month: str,
+    session: Session,
+    platform_session: Session,
+    revenue_repository: SqlAlchemyRevenueFactRepository,
+    payment_repository: SqlAlchemyAdSensePaymentRepository,
+    bank_repository: SqlAlchemyBankReconciliationRepository,
+    override_repository: SqlAlchemyManualOverrideRepository,
+    close_repository: SqlAlchemyFinanceMonthCloseRepository,
+    can_view_audit_log: bool,
+    include_sensitive_details: bool,
+) -> tuple[MonthlySmartAlertSummary, MonthlySmartAlertAuditSignals]:
+    """Begin the composed-read snapshot, fetch every source, build the alert summary.
+
+    Returns ``(summary, audit_signals)`` — the route needs the signals again
+    for its AUDIT_LOG_VIEWED self-audit details.
+    """
+    # FIX: One MVCC snapshot for every finance source read below (facts, both
+    # months, payments, bank entries, overrides, close, missing-fact coverage)
+    # — a close committing mid-read can no longer suppress MONTH_NOT_LOCKED
+    # against pre-lock totals, and no writer can tear the cross-source alert
+    # inputs (REPEATABLE READ on Postgres; db/read_snapshot.py holds the
+    # ruling). The coverage query is NOT audit-gated, so it reads through the
+    # platform snapshot like every other finance source; only the audit-derived
+    # signals read through the TENANT-lane `session` and deliberately stay
+    # outside this snapshot: their laning is an authorization boundary.
+    begin_composed_read_snapshot(platform_session)
+    facts = revenue_repository.list_month_facts(month=month)
+    previous_facts = revenue_repository.list_month_facts(month=_previous_month(month))
+    payments = payment_repository.list_month_payments(month=month)
+    bank_entries = bank_repository.list_month_entries(month=month)
+    manual_overrides = override_repository.list_month_overrides(month=month)
+    close = close_repository.get(month)
+    (
+        missing_fact_channel_count,
+        missing_fact_channel_sample,
+    ) = missing_revenue_fact_channel_count_and_sample(platform_session, month=month)
+    audit_signals = _month_smart_alert_audit_signals(
+        session,
+        month=month,
+        missing_fact_channel_count=missing_fact_channel_count,
+        missing_fact_channel_sample=missing_fact_channel_sample,
+        can_view_audit_log=can_view_audit_log,
+        include_sensitive_details=include_sensitive_details,
+    )
+    payment_match = build_monthly_payment_match_summary(
+        month=month,
+        facts=facts,
+        payments=payments,
+    )
+    bank_reconciliation = build_month_bank_reconciliation_summary(
+        month=month,
+        payments=payments,
+        bank_entries=bank_entries,
+    )
+    summary = build_monthly_smart_alert_summary(
+        month=month,
+        finance=MonthlySmartAlertFinanceInputs(
+            payment_match=payment_match,
+            bank_reconciliation=bank_reconciliation,
+            close_status=close.status if close else "OPEN",
+            manual_overrides=manual_overrides,
+        ),
+        audit_signals=audit_signals,
+        trend_signals=MonthlySmartAlertTrendSignals(
+            current_revenue_facts=facts,
+            previous_revenue_facts=previous_facts,
+        ),
+    )
+    return summary, audit_signals
+
+
+# ============================================================================
 # Purpose: Serve the monthly smart-alerts dashboard endpoint. Aggregates
 #   cross-domain finance health signals (payment match, bank reconciliation,
 #   coverage gap, audit-derived skipped source rows, audit-derived failed
@@ -1283,9 +1424,11 @@ def get_month_payment_match(
 #   the count is returned but the breakdown is redacted, mirroring audit.py.
 #   Finance sources — including the non-audit-gated missing-fact coverage
 #   pair — are read inside one REPEATABLE READ composed-read snapshot on
-#   Postgres (db/read_snapshot.py) so the close status and coverage always
-#   pair with the totals of the same snapshot; the tenant-lane audit
-#   signals deliberately stay outside it (authorization laning wins).
+#   Postgres (db/read_snapshot.py), begun by _load_month_smart_alerts after
+#   the gates, so the close status and coverage always pair with the totals
+#   of the same snapshot; the tenant-lane audit signals deliberately stay
+#   outside it (authorization laning wins), and the handler itself never
+#   touches the session (thin-orchestration rule).
 # Blast Radius: Finance dashboard + audit-observability boundary. The audit
 #   gate is the security-relevant change; do not weaken it without an owner
 #   review. No money/ingestion/match/close behavior change.
@@ -1343,44 +1486,18 @@ def get_month_smart_alerts(
     include_sensitive_details = can_view_audit_log and has_permission(
         user, Permission.VIEW_SENSITIVE_AUDIT_PAYLOADS, audit_scope
     )
-    # FIX: One MVCC snapshot for every finance source read below (facts, both
-    # months, payments, bank entries, overrides, close, missing-fact coverage)
-    # — a close committing mid-read can no longer suppress MONTH_NOT_LOCKED
-    # against pre-lock totals, and no writer can tear the cross-source alert
-    # inputs (REPEATABLE READ on Postgres; db/read_snapshot.py holds the
-    # ruling). The coverage query is NOT audit-gated, so it reads through the
-    # platform snapshot like every other finance source; only the audit-derived
-    # signals read through the TENANT-lane `session` and deliberately stay
-    # outside this snapshot: their laning is an authorization boundary.
-    begin_composed_read_snapshot(platform_session)
     try:
-        facts = revenue_repository.list_month_facts(month=month)
-        previous_facts = revenue_repository.list_month_facts(month=_previous_month(month))
-        payments = payment_repository.list_month_payments(month=month)
-        bank_entries = bank_repository.list_month_entries(month=month)
-        manual_overrides = override_repository.list_month_overrides(month=month)
-        close = close_repository.get(month)
-        (
-            missing_fact_channel_count,
-            missing_fact_channel_sample,
-        ) = missing_revenue_fact_channel_count_and_sample(platform_session, month=month)
-        audit_signals = _month_smart_alert_audit_signals(
-            session,
+        summary, audit_signals = _load_month_smart_alerts(
             month=month,
-            missing_fact_channel_count=missing_fact_channel_count,
-            missing_fact_channel_sample=missing_fact_channel_sample,
+            session=session,
+            platform_session=platform_session,
+            revenue_repository=revenue_repository,
+            payment_repository=payment_repository,
+            bank_repository=bank_repository,
+            override_repository=override_repository,
+            close_repository=close_repository,
             can_view_audit_log=can_view_audit_log,
             include_sensitive_details=include_sensitive_details,
-        )
-        payment_match = build_monthly_payment_match_summary(
-            month=month,
-            facts=facts,
-            payments=payments,
-        )
-        bank_reconciliation = build_month_bank_reconciliation_summary(
-            month=month,
-            payments=payments,
-            bank_entries=bank_entries,
         )
     except (
         AdSensePaymentValidationError,
@@ -1394,20 +1511,6 @@ def get_month_smart_alerts(
             detail=str(exc),
         ) from exc
 
-    summary = build_monthly_smart_alert_summary(
-        month=month,
-        finance=MonthlySmartAlertFinanceInputs(
-            payment_match=payment_match,
-            bank_reconciliation=bank_reconciliation,
-            close_status=close.status if close else "OPEN",
-            manual_overrides=manual_overrides,
-        ),
-        audit_signals=audit_signals,
-        trend_signals=MonthlySmartAlertTrendSignals(
-            current_revenue_facts=facts,
-            previous_revenue_facts=previous_facts,
-        ),
-    )
     summary_api = summary.to_api()
     audit_details = {
         "status": summary.status,
@@ -2151,6 +2254,48 @@ def record_month_bank_reconciliation(
 
 
 # ============================================================================
+# Purpose: Data-access + composition step for the monthly bank
+#   reconciliation, extracted out of the route handler (thin-orchestration
+#   rule): begin the composed-read snapshot, fetch both sources once, and
+#   build the summary.
+# Database/ORM: Begins the platform session's REPEATABLE READ composed-read
+#   snapshot (db/read_snapshot.py), then reads via the AdSensePayment and
+#   BankReconciliation repositories. No writes.
+# Standards: The snapshot begins here — NOT in a route dependency — so the
+#   route's permission gates always run first: denial must precede any
+#   transaction begin (pinned by the gap-explanation direct-call tests'
+#   fail-if-touched platform-session stubs). Source ValidationErrors
+#   propagate untouched for the route's 422 translation.
+# Blast Radius: Every number the bank-reconciliation endpoint serves.
+#   Read-only — the route owns the audit events.
+# Connections:
+#   - File: backend/ums_smart_revenue/finance/bank_reconciliation.py -> the
+#     pure summary builder and fee/FX evidence sums.
+#   - File: backend/ums_smart_revenue/db/read_snapshot.py -> the snapshot
+#     begun before the first fetch.
+# ============================================================================
+def _load_month_bank_reconciliation(
+    *,
+    month: str,
+    platform_session: Session,
+    payment_repository: SqlAlchemyAdSensePaymentRepository,
+    bank_repository: SqlAlchemyBankReconciliationRepository,
+) -> MonthBankReconciliationSummary:
+    """Begin the composed-read snapshot, fetch both sources, build the summary."""
+    # FIX: One MVCC snapshot for both source reads below — a payment or bank
+    # entry committing between them can no longer tear the composed summary
+    # (REPEATABLE READ on Postgres; db/read_snapshot.py holds the ruling).
+    begin_composed_read_snapshot(platform_session)
+    payments = payment_repository.list_month_payments(month=month)
+    entries = bank_repository.list_month_entries(month=month)
+    return build_month_bank_reconciliation_summary(
+        month=month,
+        payments=payments,
+        bank_entries=entries,
+    )
+
+
+# ============================================================================
 # Purpose: Serve the monthly bank-reconciliation summary — AdSense payments
 #   compared against recorded bank receipts (fee/FX evidence included) for one
 #   month, with the match status and self-audit trail. Read-only; never
@@ -2162,9 +2307,10 @@ def record_month_bank_reconciliation(
 # Standards: Two-permission gate — VIEW_BANK_RECONCILIATION plus
 #   VIEW_FINALIZED_PAYMENTS, both at finance-month scope; denial precedes any
 #   source read. Both source reads happen inside one REPEATABLE READ
-#   composed-read snapshot on Postgres (db/read_snapshot.py) begun after the
-#   gates, so a payment or bank entry committing mid-read cannot tear the
-#   composed summary.
+#   composed-read snapshot on Postgres (db/read_snapshot.py) begun by
+#   _load_month_bank_reconciliation after the gates, so a payment or bank
+#   entry committing mid-read cannot tear the composed summary; the handler
+#   itself never touches the session (thin-orchestration rule).
 # Blast Radius: Finance dashboard read surface; the bank-reconciliation wire
 #   contract feeds the Command Center and the smart-alerts builder reuses the
 #   same summary shape.
@@ -2194,24 +2340,19 @@ def get_month_bank_reconciliation(
     scope = AccessScope.finance_month(month)
     _require_permission(user, Permission.VIEW_BANK_RECONCILIATION, scope)
     _require_permission(user, Permission.VIEW_FINALIZED_PAYMENTS, scope)
-    # FIX: One MVCC snapshot for both source reads below — a payment or bank
-    # entry committing between them can no longer tear the composed summary
-    # (REPEATABLE READ on Postgres; db/read_snapshot.py holds the ruling).
-    begin_composed_read_snapshot(platform_session)
     try:
-        payments = payment_repository.list_month_payments(month=month)
-        entries = bank_repository.list_month_entries(month=month)
+        summary = _load_month_bank_reconciliation(
+            month=month,
+            platform_session=platform_session,
+            payment_repository=payment_repository,
+            bank_repository=bank_repository,
+        )
     except (AdSensePaymentValidationError, BankReconciliationValidationError) as exc:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail=str(exc),
         ) from exc
 
-    summary = build_month_bank_reconciliation_summary(
-        month=month,
-        payments=payments,
-        bank_entries=entries,
-    )
     summary_api = summary.to_api()
     bank_record = record_audit_event(
         sink=audit_sink,
@@ -2269,11 +2410,13 @@ _MONTH_GAP_EXPLANATION_ENTITY_TYPE = "month_gap_explanation"
 #   pre-lock totals "LOCKED" would misstate a frozen month — on a detected
 #   transition the sources are refetched ONCE (post-lock sources are frozen
 #   by the locked-month write guards, so the retry pairs consistently). On
-#   Postgres the route begins a REPEATABLE READ composed-read snapshot
-#   before calling this loader (db/read_snapshot.py), so every fetch here
-#   shares one MVCC snapshot and no transition can be observed mid-read;
-#   the detect-and-retry remains as the guard for non-Postgres dialects and
-#   for any direct caller that runs the loader without the snapshot.
+#   Postgres this loader begins the REPEATABLE READ composed-read snapshot
+#   itself before its first fetch (db/read_snapshot.py) — NOT in a route
+#   dependency, so the route's permission gates always run first (denial
+#   precedes any transaction begin, pinned by the direct-call tests'
+#   fail-if-touched platform-session stubs) — so every fetch here shares one
+#   MVCC snapshot and no transition can be observed mid-read; the
+#   detect-and-retry remains as the guard for non-Postgres dialects.
 # Blast Radius: Every number the gap-explanation endpoint serves. Read-only
 #   — no audit, no mutation (the route owns the audit triple).
 # Connections:
@@ -2286,12 +2429,18 @@ def _load_month_gap_explanation(
     *,
     month: str,
     currency: str,
+    platform_session: Session,
     revenue_repository: SqlAlchemyRevenueFactRepository,
     payment_repository: SqlAlchemyAdSensePaymentRepository,
     bank_repository: SqlAlchemyBankReconciliationRepository,
     close_repository: SqlAlchemyFinanceMonthCloseRepository,
 ) -> MonthGapExplanation:
-    """Fetch the month's sources once and compose the gap explanation."""
+    """Begin the composed-read snapshot, fetch the sources once, compose the explanation."""
+    # FIX: One MVCC snapshot for every source read below — on Postgres a close
+    # transition can no longer be observed mid-read, so the detect-and-retry
+    # loop becomes the non-Postgres tier's guard (REPEATABLE READ;
+    # db/read_snapshot.py holds the ruling).
+    begin_composed_read_snapshot(platform_session)
     normalized_currency = normalize_payment_match_currency(currency)
     close = close_repository.get(month)
     close_status = close.status if close else "OPEN"
@@ -2390,15 +2539,11 @@ def get_month_gap_explanation(
     _require_permission(user, Permission.VIEW_CONFIDENCE, global_scope)
     _require_permission(user, Permission.VIEW_FINALIZED_PAYMENTS, month_scope)
     _require_permission(user, Permission.VIEW_BANK_RECONCILIATION, month_scope)
-    # FIX: One MVCC snapshot for every source read inside the loader — on
-    # Postgres a close transition can no longer be observed mid-read, so the
-    # loader's detect-and-retry becomes the non-Postgres tier's guard
-    # (REPEATABLE READ; db/read_snapshot.py holds the ruling).
-    begin_composed_read_snapshot(platform_session)
     try:
         explanation = _load_month_gap_explanation(
             month=month,
             currency=currency,
+            platform_session=platform_session,
             revenue_repository=revenue_repository,
             payment_repository=payment_repository,
             bank_repository=bank_repository,
