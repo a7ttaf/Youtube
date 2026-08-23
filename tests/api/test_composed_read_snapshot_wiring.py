@@ -83,7 +83,7 @@ def test_composed_read_begins_exactly_one_snapshot(tmp_path: Path, path: str) ->
     with patch(
         "ums_smart_revenue.api.revenue.begin_composed_read_snapshot",
         create=True,
-        side_effect=lambda session: calls.append(session),
+        side_effect=calls.append,
     ):
         response = client.get(path, headers=auth_headers())
 
