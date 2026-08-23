@@ -1,11 +1,13 @@
 # ============================================================================
 # Purpose: API pins for GET /revenue/months/{month}/gap-explanation — the
-#   three-gate permission union, the USD-only currency gate, the triple
-#   audit, close-status passthrough, and the response-shape golden.
+#   four-gate permission set (the smart-alerts set: revenue + confidence @
+#   global, payments + bank @ finance month), the USD-only currency gate, the
+#   atomic triple audit, close-status passthrough, and the response-shape
+#   golden.
 # Database/ORM: SQLite-tier TestClient tests over the real app factory; the
-#   two gate-isolation tests call the route function directly with hand-built
+#   gate-isolation tests call the route function directly with hand-built
 #   principals (the payment-match 422 idiom) because no seeded role splits
-#   the three view permissions.
+#   these view permissions.
 # Standards: Exact-string assertions on permission denials and wire keys;
 #   audit rows verified in the database, not just the response body.
 # Blast Radius: Test-only.
@@ -411,11 +413,12 @@ def _unreached_repositories() -> dict[str, object]:
     }
 
 
-def test_second_gate_requires_finalized_payments_view():
-    """VIEW_REVENUE alone is refused at the finalized-payments gate.
+def test_second_gate_requires_confidence_view():
+    """VIEW_REVENUE alone is refused at the confidence gate.
 
-    No seeded role holds VIEW_REVENUE without the other two finance views,
-    so the gate is isolated with a direct permission grant.
+    The response carries confidence labels/scores on every component and
+    residual, so the smart-alerts confidence gate applies. No seeded role
+    splits these permissions, so the gate is isolated with direct grants.
     """
     user = _principal_with_grants(
         PermissionGrant(
@@ -433,14 +436,43 @@ def test_second_gate_requires_finalized_payments_view():
         )
 
     assert exc_info.value.status_code == 403
-    assert exc_info.value.detail == ("Missing permission: finance.view_finalized_payments")
+    assert exc_info.value.detail == ("Missing permission: analytics.view_confidence")
 
 
-def test_third_gate_requires_bank_reconciliation_view():
-    """The first two grants together still stop at the bank gate."""
+def test_third_gate_requires_finalized_payments_view():
+    """Revenue + confidence together still stop at the finalized-payments gate."""
     user = _principal_with_grants(
         PermissionGrant(
             permission=Permission.VIEW_REVENUE,
+            scope=AccessScope.global_scope(),
+        ),
+        PermissionGrant(
+            permission=Permission.VIEW_CONFIDENCE,
+            scope=AccessScope.global_scope(),
+        ),
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        get_month_gap_explanation(
+            month="2026-03",
+            user=user,
+            currency="USD",
+            **_unreached_repositories(),
+        )
+
+    assert exc_info.value.status_code == 403
+    assert exc_info.value.detail == ("Missing permission: finance.view_finalized_payments")
+
+
+def test_fourth_gate_requires_bank_reconciliation_view():
+    """The first three grants together still stop at the bank gate."""
+    user = _principal_with_grants(
+        PermissionGrant(
+            permission=Permission.VIEW_REVENUE,
+            scope=AccessScope.global_scope(),
+        ),
+        PermissionGrant(
+            permission=Permission.VIEW_CONFIDENCE,
             scope=AccessScope.global_scope(),
         ),
         PermissionGrant(

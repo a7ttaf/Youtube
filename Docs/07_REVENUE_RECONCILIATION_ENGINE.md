@@ -23,10 +23,14 @@ the official source `net_revenue_usd` (plus approved manual overrides), or —
 only when the source net is missing — from same-month, same-source
 NET-APPLICABLE deduction components. `TRANSFER_FEE`, `FX_VARIANCE`, and
 `UNRESOLVED_PAYMENT_GAP` components are evidence-only
-(`deduction_policy.py`): they are ingested, surfaced, and explained (the
-month gap-explanation bank leg reads them as evidence) but never reduce any
-shipped net figure. The three `allocated_*` terms above therefore describe
-unbuilt PAYMENT-grain allocation, not current arithmetic.
+(`deduction_policy.py`): they are ingested and surfaced but never reduce any
+shipped net figure. (The month gap-explanation bank leg does NOT read those
+deduction components — its fee/FX evidence comes from the operator-entered
+`transfer_fee_usd` / `fx_difference_usd` fields on
+`bank_reconciliation_entries`, summed by the bank-reconciliation builder;
+deduction ingestion or reprocessing does not affect that narrative.) The
+three `allocated_*` terms above therefore describe unbuilt PAYMENT-grain
+allocation, not current arithmetic.
 
 ## Deduction formula
 

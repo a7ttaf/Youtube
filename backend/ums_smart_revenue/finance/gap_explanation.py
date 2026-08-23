@@ -304,6 +304,24 @@ def build_month_gap_explanation(
     )
 
 
+# ============================================================================
+# Purpose: The central leg calculation — decompose one chain leg into
+#   residual (gap - sum of evidence components, 4dp), the five-status
+#   classification, per-component and residual explain-shape confidence, and
+#   the attached deterministic narrative.
+# Database/ORM: None — pure arithmetic over the already-fetched summary
+#   numbers and component inputs; every Decimal stays exact (no float).
+# Standards: The residual keeps its sign; component amounts keep the
+#   evidence's own sign (signed FX). Status semantics: UNEXPLAINED is
+#   reserved for a leg with NO nonzero component (offsetting evidence still
+#   counts); INCOMPLETE whenever the gap is uncomputable. Confidence is
+#   per-component — zero evidence rows read LOW regardless of leg state.
+# Blast Radius: Every number, status, badge, and narrative the
+#   gap-explanation endpoint and Command Center panel show for a leg.
+# Connections:
+#   - File: backend/ums_smart_revenue/api/revenue.py -> route serialization.
+#   - File: tests/finance/test_gap_explanation.py -> the per-status pins.
+# ============================================================================
 def _build_leg(
     *,
     key: str,
@@ -599,10 +617,19 @@ def _leg_provenance(
         entries[f"{leg.key}.{field_name}"] = _provenance_entry(
             source=source, formula=formula, confidence=confidence, export_value=value
         )
+    # An uncomputable gap (an operand source is missing entirely) must say
+    # MISSING_SOURCE, never masquerade as a calculated VARIANCE — the
+    # bank-reconciliation _bank_gap_confidence rule.
+    if leg.gap_usd is None:
+        gap_confidence = "MISSING_SOURCE"
+    elif leg.status == "MATCHED":
+        gap_confidence = "RECONCILED"
+    else:
+        gap_confidence = "VARIANCE"
     entries[f"{leg.key}.{leg.gap_field}"] = _provenance_entry(
         source="composed",
         formula=gap_formula,
-        confidence="RECONCILED" if leg.status == "MATCHED" else "VARIANCE",
+        confidence=gap_confidence,
         export_value=leg.gap_usd,
     )
     for component in leg.components:
@@ -621,10 +648,17 @@ def _leg_provenance(
     residual_label, _ = _residual_confidence(
         residual=leg.unexplained_residual_usd, tolerance_usd=tolerance_usd
     )
+    # Same rule for the residual: a None residual is missing, not a variance.
+    if leg.unexplained_residual_usd is None:
+        residual_confidence = "MISSING_SOURCE"
+    elif residual_label == "HIGH":
+        residual_confidence = "RECONCILED"
+    else:
+        residual_confidence = "VARIANCE"
     entries[f"{leg.key}.unexplained_residual_usd"] = _provenance_entry(
         source="composed",
         formula=f"{leg.gap_field} - sum(component amounts)",
-        confidence="RECONCILED" if residual_label == "HIGH" else "VARIANCE",
+        confidence=residual_confidence,
         export_value=leg.unexplained_residual_usd,
     )
     return entries

@@ -92,8 +92,11 @@ the reconciliation-explanation twin.
 
 `GET /revenue/months/{month}/gap-explanation?currency=USD`
 
-- **Permissions** — the union of both source reads, mirroring the client-side
-  composition the Command Center already does: `VIEW_REVENUE` @ global,
+- **Permissions** — the union of both source reads PLUS the global
+  confidence gate (amended in-PR: the response carries confidence
+  labels/scores on every component and residual, and the platform gates
+  confidence-bearing reads on `VIEW_CONFIDENCE` — this is exactly the
+  smart-alerts gate set): `VIEW_REVENUE` + `VIEW_CONFIDENCE` @ global,
   `VIEW_FINALIZED_PAYMENTS` @ finance_month, `VIEW_BANK_RECONCILIATION` @
   finance_month.
 - **Currency**: `normalize_payment_match_currency` (USD-only hard gate, same
@@ -183,13 +186,18 @@ Command Center panel "Gap narrative" adjacent to the #127 bank cards
 rows with confidence badges (`confidenceDisplay`), residual row, and the month
 narrative line. This finally renders `fx_difference_usd`. New hook
 `useGapExplanation` (the `useBankReconciliation` shape), types in
-`types.ts`, permission-gated client-side by the same three-way composition —
-whose revenue term is the new GLOBAL-scope session capability
-`canViewRevenueGlobal` (`_can(VIEW_REVENUE)` in `session.py`), not the
-scope-aware `canViewRevenue` hint: the endpoint gates VIEW_REVENUE @ global,
-and a company/sector/channel-scoped revenue viewer must see the restricted
-band, not fire a guaranteed-403 fetch. Tests mirror the CommandView test
-idioms.
+`types.ts`, permission-gated client-side by the same composition the
+backend enforces (amended in-PR across the review rounds): the revenue term
+is the GLOBAL-scope session capability `canViewRevenueGlobal`
+(`_can(VIEW_REVENUE)` in `session.py`), the confidence term is
+`canViewConfidence`, and the payments/bank terms are MONTH-RESOLUTION hints
+(`paymentsViewScopes` / `bankReconciliationViewScopes`, a global flag plus
+explicit finance-month ids from `policy.scoped_finance_view_hint`) checked
+against the SELECTED month — so an org-scoped revenue viewer, a
+confidence-less principal, or a grant scoped only to another month all see
+the restricted band instead of firing a guaranteed-403 fetch. The hints
+never broaden: the backend re-checks every gate for the requested month.
+Tests mirror the CommandView test idioms.
 
 ## Docs deltas (same PR)
 

@@ -191,10 +191,17 @@ def test_incomplete_legs_win_the_month_and_carry_low_confidence():
     # The bank leg is fine on its own; the month still reads INCOMPLETE.
     assert payload["bank_leg"]["status"] == "MATCHED"
     assert payload["status"] == "INCOMPLETE"
-    # Zero-fact operand provenance is honest about its missing source.
+    # Zero-fact operand provenance is honest about its missing source, and so
+    # are the uncomputable gap and residual — never a fabricated VARIANCE.
     provenance = payload["money_provenance"]
     assert (
         provenance["payment_leg.youtube_revenue_total_usd"]["confidence"]
+        == "MISSING_SOURCE"
+    )
+    assert provenance["payment_leg.payment_gap_usd"]["confidence"] == "MISSING_SOURCE"
+    assert provenance["payment_leg.payment_gap_usd"]["export_value"] is None
+    assert (
+        provenance["payment_leg.unexplained_residual_usd"]["confidence"]
         == "MISSING_SOURCE"
     )
 

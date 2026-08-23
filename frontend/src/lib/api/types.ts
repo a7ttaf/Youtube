@@ -50,6 +50,15 @@ export type SessionPermissionGrant = {
   scope_id: string | null;
 };
 
+// Where one finance view permission is granted, at month resolution: a global
+// flag plus the explicit finance-month scope ids. A render hint only — the
+// guarded routes re-check the requested month.
+// Source: ScopedFinanceViewHint (session.py).
+export type ScopedFinanceViewHint = {
+  globalScope: boolean;
+  financeMonths: string[];
+};
+
 // Derived global-scope capability booleans the SPA uses to render UI. Every key
 // is camelCase (backend alias generator). These are AUTHORITATIVE — the UI gates
 // every surface on them and never fabricates one the backend did not grant.
@@ -63,6 +72,11 @@ export type SessionCapabilities = {
   canViewConfidence: boolean;
   canViewPayments: boolean;
   canViewBankReconciliation: boolean;
+  // Month-resolution variants of the two booleans above — lets month-bound
+  // surfaces (the gap-narrative panel) restrict per SELECTED month instead
+  // of firing guaranteed-403 fetches.
+  paymentsViewScopes: ScopedFinanceViewHint;
+  bankReconciliationViewScopes: ScopedFinanceViewHint;
   canCloseMonth: boolean;
   canUnlockMonth: boolean;
   canChangeAllocation: boolean;

@@ -2,7 +2,11 @@ import { render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import CommandView from "@/components/srcc/views/CommandView";
-import type { MonthGapExplanation, NetRevenueResponse } from "@/lib/api/types";
+import type {
+  MonthGapExplanation,
+  NetRevenueResponse,
+  ScopedFinanceViewHint,
+} from "@/lib/api/types";
 import { TenantProvider } from "@/contexts/TenantContext";
 
 // ============================================================================
@@ -185,11 +189,16 @@ const routeFetch = (opts: { gapExplanation?: () => Response }) => {
   );
 };
 
+const GLOBAL_SCOPES: ScopedFinanceViewHint = { globalScope: true, financeMonths: [] };
+
 const renderCommandView = (overrides?: {
   canViewFinance?: boolean;
   canViewPayments?: boolean;
   canViewBankReconciliation?: boolean;
   canViewRevenueGlobal?: boolean;
+  canViewConfidence?: boolean;
+  paymentsViewScopes?: ScopedFinanceViewHint;
+  bankReconciliationViewScopes?: ScopedFinanceViewHint;
 }) => {
   return render(
     <TenantProvider initialSlug="ums">
@@ -198,6 +207,11 @@ const renderCommandView = (overrides?: {
         canViewPayments={overrides?.canViewPayments ?? true}
         canViewBankReconciliation={overrides?.canViewBankReconciliation ?? true}
         canViewRevenueGlobal={overrides?.canViewRevenueGlobal ?? true}
+        canViewConfidence={overrides?.canViewConfidence ?? true}
+        paymentsViewScopes={overrides?.paymentsViewScopes ?? GLOBAL_SCOPES}
+        bankReconciliationViewScopes={
+          overrides?.bankReconciliationViewScopes ?? GLOBAL_SCOPES
+        }
       />
     </TenantProvider>,
   );
@@ -283,9 +297,11 @@ describe("GapNarrativePanel in CommandView", () => {
     );
   });
 
-  it("renders the restricted band and fires NO fetch without the three-way grant", async () => {
+  it("renders the restricted band and fires NO fetch without any bank-view grant", async () => {
     routeFetch({});
-    renderCommandView({ canViewBankReconciliation: false });
+    renderCommandView({
+      bankReconciliationViewScopes: { globalScope: false, financeMonths: [] },
+    });
 
     expect(await screen.findByText("Gap narrative restricted")).toBeInTheDocument();
     // Net revenue still renders for the finance-granted viewer.
@@ -297,6 +313,56 @@ describe("GapNarrativePanel in CommandView", () => {
     expect(
       calls.some((call) => String(call[0]).includes("/gap-explanation")),
     ).toBe(false);
+  });
+
+  it("restricts without a confidence grant — the response is confidence-bearing", async () => {
+    routeFetch({});
+    renderCommandView({ canViewConfidence: false });
+
+    expect(await screen.findByText("Gap narrative restricted")).toBeInTheDocument();
+    const calls = (globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls;
+    expect(
+      calls.some((call) => String(call[0]).includes("/gap-explanation")),
+    ).toBe(false);
+  });
+
+  it("restricts when the payments/bank grants cover a different month only", async () => {
+    // Grants scoped to 2026-04 cannot satisfy the selected default month
+    // (2026-03): the month-resolution hints restrict instead of firing the
+    // guaranteed-403 fetch.
+    const otherMonthOnly: ScopedFinanceViewHint = {
+      globalScope: false,
+      financeMonths: ["2026-04"],
+    };
+    routeFetch({});
+    renderCommandView({
+      paymentsViewScopes: otherMonthOnly,
+      bankReconciliationViewScopes: otherMonthOnly,
+    });
+
+    expect(await screen.findByText("Gap narrative restricted")).toBeInTheDocument();
+    const calls = (globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls;
+    expect(
+      calls.some((call) => String(call[0]).includes("/gap-explanation")),
+    ).toBe(false);
+  });
+
+  it("mounts for a month the finance-month-scoped grants explicitly cover", async () => {
+    // The hint path must also ADMIT month-scoped (non-global) grants for the
+    // selected month — restriction is per month, not global-only.
+    const selectedMonthOnly: ScopedFinanceViewHint = {
+      globalScope: false,
+      financeMonths: ["2026-03"],
+    };
+    routeFetch({});
+    renderCommandView({
+      paymentsViewScopes: selectedMonthOnly,
+      bankReconciliationViewScopes: selectedMonthOnly,
+    });
+
+    expect(
+      await screen.findByText("Payment leg · YouTube revenue → AdSense paid"),
+    ).toBeInTheDocument();
   });
 
   it("scoped revenue viewers get the restricted band, not a doomed fetch", async () => {

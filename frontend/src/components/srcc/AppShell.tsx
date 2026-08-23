@@ -1,7 +1,12 @@
 import { type ReactNode, useCallback, useEffect, useRef, useState } from "react";
 
 import { ApiError, useApiClient } from "@/lib/api/client";
-import type { SessionCapabilities, SessionMe, TenantRead } from "@/lib/api/types";
+import type {
+  ScopedFinanceViewHint,
+  SessionCapabilities,
+  SessionMe,
+  TenantRead,
+} from "@/lib/api/types";
 import {
   useSessionBootstrap,
   type SessionBootstrap,
@@ -49,8 +54,12 @@ type AccessPermissions = {
   // Global-scope-only revenue gate for surfaces whose backend boundary is
   // VIEW_REVENUE @ global (the composed gap-explanation read).
   canViewRevenueGlobal: boolean;
+  canViewConfidence: boolean;
   canViewPayments: boolean;
   canViewBankReconciliation: boolean;
+  // Month-resolution grant hints for the two finance views above.
+  paymentsViewScopes: ScopedFinanceViewHint;
+  bankReconciliationViewScopes: ScopedFinanceViewHint;
   canManageRegistry: boolean;
   canManageGroups: boolean;
   canImportChannels: boolean;
@@ -130,8 +139,11 @@ const capabilitiesToPermissions = (
     canViewFinance: capabilities.canViewRevenue,
     canViewRevenue: capabilities.canViewRevenue,
     canViewRevenueGlobal: capabilities.canViewRevenueGlobal,
+    canViewConfidence: capabilities.canViewConfidence,
     canViewPayments: capabilities.canViewPayments,
     canViewBankReconciliation: capabilities.canViewBankReconciliation,
+    paymentsViewScopes: capabilities.paymentsViewScopes,
+    bankReconciliationViewScopes: capabilities.bankReconciliationViewScopes,
     canManageRegistry: capabilities.canManageRegistry,
     canManageGroups: capabilities.canManageGroups,
     // Import CSV render hint: the backend derives this as MANAGE_CHANNELS AND
@@ -670,6 +682,9 @@ const ViewRouter = ({
         canViewPayments={permissions.canViewPayments}
         canViewBankReconciliation={permissions.canViewBankReconciliation}
         canViewRevenueGlobal={permissions.canViewRevenueGlobal}
+        canViewConfidence={permissions.canViewConfidence}
+        paymentsViewScopes={permissions.paymentsViewScopes}
+        bankReconciliationViewScopes={permissions.bankReconciliationViewScopes}
       />
     ),
     registry: () => (

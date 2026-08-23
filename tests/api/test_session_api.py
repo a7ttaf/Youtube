@@ -127,6 +127,12 @@ def test_session_me_header_mode_finance_admin_capabilities(client_headers_mode):
     assert caps["canViewConfidence"] is True
     assert caps["canViewPayments"] is True
     assert caps["canViewBankReconciliation"] is True
+    # Month-resolution hints: a global grant, no explicit month scopes.
+    assert caps["paymentsViewScopes"] == {"globalScope": True, "financeMonths": []}
+    assert caps["bankReconciliationViewScopes"] == {
+        "globalScope": True,
+        "financeMonths": [],
+    }
     assert caps["canCloseMonth"] is True
     assert caps["canUnlockMonth"] is True
     assert caps["canChangeAllocation"] is True
@@ -168,6 +174,16 @@ def test_session_me_header_mode_finance_month_scope_has_bank_capabilities(
     caps = payload["capabilities"]
     assert caps["canViewPayments"] is True
     assert caps["canViewBankReconciliation"] is True
+    # Month-resolution hints name the exact granted month, no global flag —
+    # the gap-narrative panel restricts for any OTHER selected month.
+    assert caps["paymentsViewScopes"] == {
+        "globalScope": False,
+        "financeMonths": ["2026-03"],
+    }
+    assert caps["bankReconciliationViewScopes"] == {
+        "globalScope": False,
+        "financeMonths": ["2026-03"],
+    }
     # Org-data capabilities stay false because finance-month is not a channel,
     # company, sector, or global scope.
     assert caps["canViewRevenue"] is False

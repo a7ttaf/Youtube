@@ -582,8 +582,11 @@ per-leg status (`INCOMPLETE` / `MATCHED` / `FULLY_EXPLAINED` /
 LLM). It composes the existing payment-match and bank-reconciliation builders
 plus the month-close status on one read — no new arithmetic sources, no new
 tables. Because the response discloses every number both source reads
-disclose, it requires the UNION of their gates: global `finance.view_revenue`
-plus `finance.view_finalized_payments` and `finance.view_bank_reconciliation`
+disclose plus confidence labels/scores on every component and residual, it
+requires the UNION of their gates plus the confidence gate — the exact
+smart-alerts gate set: global `finance.view_revenue`, global
+`analytics.view_confidence`, plus `finance.view_finalized_payments` and
+`finance.view_bank_reconciliation`
 for the requested finance-month scope (global grants satisfy the month
 scope), and it audits all three view events (`REVENUE_VIEWED`,
 `PAYMENT_VIEWED`, `BANK_RECONCILIATION_VIEWED`) with

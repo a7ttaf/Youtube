@@ -2214,10 +2214,12 @@ def _load_month_gap_explanation(
 # Database/ORM: Read-only over the same repositories the payment-match and
 #   bank-reconciliation endpoints already use, plus the month-close read the
 #   smart-alerts endpoint models; one fetch feeds every builder. No writes.
-# Standards: Permissions are the UNION of both source reads (VIEW_REVENUE @
-#   global, VIEW_FINALIZED_PAYMENTS + VIEW_BANK_RECONCILIATION @
-#   finance_month) — this response discloses every number both sources
-#   disclose, so it must not be readable with less than both gates. USD-only
+# Standards: Permissions are the UNION of both source reads PLUS the global
+#   confidence gate (VIEW_REVENUE + VIEW_CONFIDENCE @ global,
+#   VIEW_FINALIZED_PAYMENTS + VIEW_BANK_RECONCILIATION @ finance_month — the
+#   exact smart-alerts gate set): this response discloses every number both
+#   sources disclose AND confidence labels/scores on every component and
+#   residual, so it must not be readable with less. USD-only
 #   via the shared normalizer; month-grain only; no FX conversion. Triple
 #   audit (REVENUE_VIEWED + PAYMENT_VIEWED + BANK_RECONCILIATION_VIEWED),
 #   the smart-alerts precedent, because all three surfaces' numbers appear;
@@ -2261,6 +2263,10 @@ def get_month_gap_explanation(
     global_scope = AccessScope.global_scope()
     month_scope = AccessScope.finance_month(month)
     _require_permission(user, Permission.VIEW_REVENUE, global_scope)
+    # Confidence labels, scores, and provenance-confidence tokens appear on
+    # every component and residual, so the platform's confidence gate applies
+    # exactly as it does on smart-alerts (the identical four-gate set).
+    _require_permission(user, Permission.VIEW_CONFIDENCE, global_scope)
     _require_permission(user, Permission.VIEW_FINALIZED_PAYMENTS, month_scope)
     _require_permission(user, Permission.VIEW_BANK_RECONCILIATION, month_scope)
     try:

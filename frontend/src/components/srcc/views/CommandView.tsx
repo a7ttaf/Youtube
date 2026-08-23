@@ -16,6 +16,7 @@ import type {
   RankedEntry,
   RankingMetric,
   RevenueScopeOption,
+  ScopedFinanceViewHint,
   SmartAlert,
   SmartAlertSeverity,
   SmartAlertsSummary,
@@ -1122,6 +1123,13 @@ const gapNarrativeErrorCopy = (
 //   descriptors (operand chain, component rows, residual). Pure formatting of
 //   backend decimal strings — every gap, component sum, and residual is
 //   backend-computed; the browser never derives a finance number.
+// Database/ORM: None (frontend) — formats the gap-explanation payload only.
+// Standards: Money renders via financeDisplay (permission-gated sentinel);
+//   signs pass through untouched; confidence labels come from the API and
+//   are never recomputed; missing/malformed fields degrade to "—" instead of
+//   throwing (the panel's defensive-read contract).
+// Blast Radius: Gap-narrative display only. No mutation, no authorization,
+//   no finance calculation.
 // Connections:
 //   - File: backend/ums_smart_revenue/finance/gap_explanation.py -> the money
 //     and status semantics rendered here.
@@ -1329,7 +1337,10 @@ const RestrictedGapNarrativePanel = () => (
       <ItemRow
         tone="red"
         title="Gap narrative restricted"
-        sub={`Revenue, payment, and bank permissions are required. ${RESTRICTED_FINANCE_VALUE}.`}
+        sub={
+          "Revenue, confidence, payment, and bank permissions for this month " +
+          `are required. ${RESTRICTED_FINANCE_VALUE}.`
+        }
         trailing={<Badge tone="red">Restricted</Badge>}
       />
     </div>
@@ -2378,12 +2389,28 @@ const RankingsPanel = ({
  * Command Center screen: month/scope filters, the real net-revenue status strip
  * and channel table, the smart-alerts panel, and the per-channel explanation.
  */
+// Fail-closed default for the month-resolution grant hints: no global grant,
+// no months — a missing hint can never mount a month-bound finance surface.
+const NO_FINANCE_MONTH_SCOPES: ScopedFinanceViewHint = {
+  globalScope: false,
+  financeMonths: [],
+};
+
+/** True when a month-bound read can possibly succeed for the selected month. */
+const financeMonthHintSatisfies = (
+  hint: ScopedFinanceViewHint,
+  month: string,
+): boolean => hint.globalScope || hint.financeMonths.includes(month);
+
 const CommandView = ({
   canViewFinance,
   canViewAnalytics = false,
   canViewPayments = false,
   canViewBankReconciliation = false,
   canViewRevenueGlobal = false,
+  canViewConfidence = false,
+  paymentsViewScopes = NO_FINANCE_MONTH_SCOPES,
+  bankReconciliationViewScopes = NO_FINANCE_MONTH_SCOPES,
 }: {
   canViewFinance: boolean;
   // Optional so the existing prop contract (canViewFinance-only) stays valid; a
@@ -2399,6 +2426,16 @@ const CommandView = ({
   // cannot certify (a company-scoped revenue viewer holds it too). Missing
   // fails closed.
   canViewRevenueGlobal?: boolean;
+  // Confidence-visibility gate: the gap-explanation response carries
+  // confidence labels/scores on every component and residual, so its backend
+  // boundary also requires global VIEW_CONFIDENCE. Missing fails closed.
+  canViewConfidence?: boolean;
+  // Month-resolution grant hints for the payments/bank views, so the
+  // gap-narrative panel restricts per SELECTED month instead of firing a
+  // guaranteed-403 fetch for a month the grants cannot cover. Missing fails
+  // closed.
+  paymentsViewScopes?: ScopedFinanceViewHint;
+  bankReconciliationViewScopes?: ScopedFinanceViewHint;
 }) => {
   const [month, setMonth] = useState<string>(DEFAULT_MONTH);
   // Stable {scopeType, scopeId} identity instead of a positional index: the
@@ -2463,19 +2500,20 @@ const CommandView = ({
     [selectedChannel],
   );
   const canViewBankReconciliationSummary = canViewPayments && canViewBankReconciliation;
-  // The composed gap-explanation endpoint enforces the UNION of the revenue,
-  // finalized-payment, and bank-reconciliation reads — mirror it client-side
-  // so a session missing any grant entirely renders the restricted band and
-  // fires nothing. The revenue term is the GLOBAL-scope capability, not the
-  // scope-aware canViewFinance hint: the endpoint gates VIEW_REVENUE @
-  // global, and a company/sector/channel-scoped revenue viewer must not fire
-  // a guaranteed-403 fetch. The payments/bank terms stay the established
-  // MONTH-AGNOSTIC hints (any-of global/finance-month, the bank-strip
-  // precedent) — the backend re-checks the REQUESTED month, so a grant
-  // scoped to a different month surfaces as this panel's contained
-  // no-permission copy, never as broadened access.
+  // The composed gap-explanation endpoint enforces the smart-alerts gate set
+  // (VIEW_REVENUE + VIEW_CONFIDENCE @ global, payments + bank @ the
+  // requested finance month) — mirror it client-side so a session that
+  // cannot possibly pass renders the restricted band and fires nothing. The
+  // revenue term is the GLOBAL-scope capability (a company-scoped revenue
+  // viewer must not fire a guaranteed-403 fetch), and the payments/bank
+  // terms are MONTH-RESOLUTION hints checked against the SELECTED month: a
+  // grant scoped only to another month restricts here instead of fetching.
+  // The backend still re-checks every gate — these hints never broaden.
   const canViewGapNarrative =
-    canViewRevenueGlobal && canViewPayments && canViewBankReconciliation;
+    canViewRevenueGlobal &&
+    canViewConfidence &&
+    financeMonthHintSatisfies(paymentsViewScopes, month) &&
+    financeMonthHintSatisfies(bankReconciliationViewScopes, month);
 
   return (
     <>
