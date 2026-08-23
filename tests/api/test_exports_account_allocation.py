@@ -229,6 +229,10 @@ def _finance_source_context(
         export_job=export_job,
         user=user,
         session=session,
+        # SQLite tier: the snapshot begin no-ops and both lanes share one
+        # engine, so the request session serves as the platform session too
+        # (matching the app factory's SQLite wiring).
+        platform_session=session,
         org_index=OrgAccessIndex(),
         group_registry=ChannelGroupRegistry(),
         include_audit_derived_alerts=include_audit_derived_alerts,

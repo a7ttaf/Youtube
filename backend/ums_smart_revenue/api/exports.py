@@ -25,6 +25,7 @@ from sqlalchemy.orm import Session
 from ums_smart_revenue.api.channels import audit_record_to_api, current_audit_sink
 from ums_smart_revenue.api.dependencies import (
     current_db_session,
+    current_platform_db_session,
     current_principal_from_headers,
 )
 from ums_smart_revenue.api.registry_dependencies import sql_group_registry_from_session
@@ -42,6 +43,7 @@ from ums_smart_revenue.auth.permissions import Permission
 from ums_smart_revenue.auth.policy import has_permission
 from ums_smart_revenue.auth.scopes import AccessScope, OrgAccessIndex, ScopeType
 from ums_smart_revenue.auth.seed import ROLE_PERMISSIONS
+from ums_smart_revenue.db.read_snapshot import begin_composed_read_snapshot
 from ums_smart_revenue.finance.account_allocation_read import (
     AllocationProvenance,
     resolve_month_account_allocation,
@@ -169,11 +171,17 @@ class _ExportDownloadArtifact:
 
 @dataclass(frozen=True)
 class _FinanceExportSourceContext:
-    """Dependencies needed to build finance export source summaries."""
+    """Dependencies needed to build finance export source summaries.
+
+    ``session`` is the tenant-lane request session (audit-gated signal reads
+    only); ``platform_session`` carries every finance source read inside the
+    composed-read snapshot the builder begins.
+    """
 
     export_job: ExportJobEntry
     user: UserPrincipal
     session: Session
+    platform_session: Session
     org_index: OrgAccessIndex
     group_registry: ChannelGroupRegistryStore
     include_audit_derived_alerts: bool = True
@@ -467,6 +475,7 @@ def preview_finance_workbook(
     group_registry: Annotated[ChannelGroupRegistryStore, Depends(sql_group_registry_from_session)],
     repository: Annotated[SqlAlchemyExportJobRepository, Depends(current_export_job_repository)],
     session: Annotated[Session, Depends(current_db_session)],
+    platform_session: Annotated[Session, Depends(current_platform_db_session)],
     audit_sink: Annotated[AuditSink, Depends(current_audit_sink)],
 ) -> dict[str, object]:
     """Return a JSON preview of the finance workbook data for a FINANCE_EXCEL export job."""
@@ -492,6 +501,7 @@ def preview_finance_workbook(
                 export_job=export_job,
                 user=user,
                 session=session,
+                platform_session=platform_session,
                 org_index=org_index,
                 group_registry=group_registry,
             ),
@@ -634,6 +644,7 @@ def download_finance_workbook(
         FileSystemExportArtifactStore, Depends(current_export_artifact_store)
     ],
     session: Annotated[Session, Depends(current_db_session)],
+    platform_session: Annotated[Session, Depends(current_platform_db_session)],
     audit_sink: Annotated[AuditSink, Depends(current_audit_sink)],
 ) -> Response:
     """Generate or serve the cached finance workbook XLSX file for a FINANCE_EXCEL export job."""
@@ -667,6 +678,7 @@ def download_finance_workbook(
                     export_job=export_job,
                     user=user,
                     session=session,
+                    platform_session=platform_session,
                     org_index=org_index,
                     group_registry=group_registry,
                     include_audit_derived_alerts=False,
@@ -746,6 +758,7 @@ def download_executive_pdf(
         FileSystemExportArtifactStore, Depends(current_export_artifact_store)
     ],
     session: Annotated[Session, Depends(current_db_session)],
+    platform_session: Annotated[Session, Depends(current_platform_db_session)],
     audit_sink: Annotated[AuditSink, Depends(current_audit_sink)],
 ) -> Response:
     """Generate or serve the cached executive summary PDF for an EXECUTIVE_PDF export job."""
@@ -779,6 +792,7 @@ def download_executive_pdf(
                     export_job=export_job,
                     user=user,
                     session=session,
+                    platform_session=platform_session,
                     org_index=org_index,
                     group_registry=group_registry,
                     include_audit_derived_alerts=False,
@@ -866,6 +880,7 @@ def download_branded_slide_pack(
         FileSystemExportArtifactStore, Depends(current_export_artifact_store)
     ],
     session: Annotated[Session, Depends(current_db_session)],
+    platform_session: Annotated[Session, Depends(current_platform_db_session)],
     audit_sink: Annotated[AuditSink, Depends(current_audit_sink)],
 ) -> Response:
     """Generate or serve the cached branded slide pack PPTX for a BRANDED_SLIDE_PACK export job."""
@@ -899,6 +914,7 @@ def download_branded_slide_pack(
                     export_job=export_job,
                     user=user,
                     session=session,
+                    platform_session=platform_session,
                     org_index=org_index,
                     group_registry=group_registry,
                     include_audit_derived_alerts=False,
@@ -1265,16 +1281,39 @@ def _discard_saved_artifact(
 # ============================================================================
 # Purpose: Build the finance workbook source summaries for preview/download
 #   generation while keeping route handlers out of finance read orchestration.
-# Database/ORM: Reads finance facts, payments, deductions, close state,
-#   account-allocation inputs, channel coverage, and optional audit_logs
-#   connector edges through repositories/read models.
-# Standards: Scoped exports use the frozen channel set; persisted artifacts
-#   suppress caller-specific audit-derived alerts; preview-only audit-derived
-#   alerts require VIEW_AUDIT_LOG and sensitive reason payloads require
-#   VIEW_SENSITIVE_AUDIT_PAYLOADS.
+# Database/ORM: Begins the platform session's REPEATABLE READ composed-read
+#   snapshot (db/read_snapshot.py) and reads finance facts, payments, bank
+#   entries, overrides, deductions, close state, account-allocation inputs,
+#   and channel coverage through repositories on that ONE MVCC snapshot;
+#   optional audit_logs connector edges stay on the tenant-lane request
+#   session. No writes.
+# Standards: Every route calling this builder gates before it runs, so denial
+#   precedes the transaction begin (the platform ruling). The finance sources
+#   feed PERSISTED, downloadable artifacts, so a writer committing mid-build
+#   must not tear the exported totals — the same composed-read hazard class
+#   proven dead on the dashboard reads, but landing in a file finance may
+#   hand onward. The tenant-lane request session cannot host the snapshot
+#   (the job lookup already opened its transaction), which is why the
+#   finance reads ride the so-far-untouched platform session — the same
+#   laning the revenue endpoints' finance repositories use. The snapshot
+#   transaction is RELEASED (rollback — read-only, nothing to persist) as
+#   soon as the last platform-lane read completes: artifact byte generation
+#   and filesystem persistence run after this builder returns and must not
+#   hold the snapshot open (idle-in-transaction timeouts, vacuum pressure);
+#   on a mid-build source error the request teardown rolls the transaction
+#   back instead, and no artifact work follows. Audit-derived
+#   signal reads stay tenant-lane and OUTSIDE the snapshot by the recorded
+#   residual ruling (their laning is an authorization boundary). Scoped
+#   exports use the frozen channel set (deliberately gate-time: post-creation
+#   org edits must not alter previously requested data); persisted artifacts
+#   suppress caller-specific audit-derived alerts; preview-only
+#   audit-derived alerts require VIEW_AUDIT_LOG and sensitive reason
+#   payloads require VIEW_SENSITIVE_AUDIT_PAYLOADS.
 # Blast Radius: Finance export numbers, smart-alert export disclosure, and
 #   audit-derived alert visibility. No finance writes or auth weakening.
 # Connections:
+#   - File: backend/ums_smart_revenue/db/read_snapshot.py -> the snapshot
+#     begun before the first finance source read.
 #   - File: backend/ums_smart_revenue/api/revenue.py -> dashboard smart-alert
 #     data sources mirrored here for export parity.
 #   - File: backend/ums_smart_revenue/auth/audit_log.py -> failed
@@ -1290,8 +1329,18 @@ def _build_finance_source_summaries_for_export(
     export_job = context.export_job
     user = context.user
     session = context.session
+    platform_session = context.platform_session
     org_index = context.org_index
     group_registry = context.group_registry
+    # FIX: One MVCC snapshot for every finance source read below — facts,
+    # previous-month facts, overrides, payments, bank entries, close state,
+    # deduction components, the allocation resolver's close probe, and the
+    # missing-facts coverage pair — so a writer committing mid-build can no
+    # longer tear a persisted export artifact's totals (REPEATABLE READ on
+    # Postgres; db/read_snapshot.py holds the ruling). The audit-derived
+    # signal reads below stay on the tenant-lane `session` by the recorded
+    # residual ruling.
+    begin_composed_read_snapshot(platform_session)
     # ====================================================================
     # Purpose: Resolve the YouTube channel set the export was issued for.
     #   Prefers the snapshot frozen on the export row so post-creation
@@ -1308,7 +1357,7 @@ def _build_finance_source_summaries_for_export(
         org_index=org_index,
         group_registry=group_registry,
     )
-    revenue_repository = SqlAlchemyRevenueFactRepository(session)
+    revenue_repository = SqlAlchemyRevenueFactRepository(platform_session)
     facts = revenue_repository.list_month_facts(
         month=export_job.month,
         youtube_channel_ids=channel_ids,
@@ -1317,26 +1366,28 @@ def _build_finance_source_summaries_for_export(
         month=_previous_month(export_job.month),
         youtube_channel_ids=channel_ids,
     )
-    manual_overrides = SqlAlchemyManualOverrideRepository(session).list_month_overrides(
+    manual_overrides = SqlAlchemyManualOverrideRepository(platform_session).list_month_overrides(
         month=export_job.month,
         youtube_channel_ids=channel_ids,
     )
     payments = []
     bank_entries = []
     if channel_ids is None:
-        payments = SqlAlchemyAdSensePaymentRepository(session).list_month_payments(
+        payments = SqlAlchemyAdSensePaymentRepository(platform_session).list_month_payments(
             month=export_job.month
         )
-        bank_entries = SqlAlchemyBankReconciliationRepository(session).list_month_entries(
+        bank_entries = SqlAlchemyBankReconciliationRepository(platform_session).list_month_entries(
             month=export_job.month
         )
-    close = SqlAlchemyFinanceMonthCloseRepository(session).get(export_job.month)
+    close = SqlAlchemyFinanceMonthCloseRepository(platform_session).get(export_job.month)
     close_status = close.status if close is not None else export_job.month_lock_status
 
     # FIX: Exports must pass the same channel-direct deduction components and
     # account-allocation inputs as the net-revenue API; otherwise scoped export
     # net totals can drift from the API for missing-net channels.
-    deduction_components = SqlAlchemyDeductionComponentRepository(session).list_month_components(
+    deduction_components = SqlAlchemyDeductionComponentRepository(
+        platform_session
+    ).list_month_components(
         month=export_job.month,
         youtube_channel_ids=channel_ids,
         component_kinds=NET_APPLICABLE_COMPONENT_KINDS,
@@ -1355,11 +1406,11 @@ def _build_finance_source_summaries_for_export(
     # ====================================================================
     account_result, account_allocation_provenance = resolve_month_account_allocation(
         month=export_job.month,
-        session=session,
-        deduction_repository=SqlAlchemyDeductionComponentRepository(session),
+        session=platform_session,
+        deduction_repository=SqlAlchemyDeductionComponentRepository(platform_session),
         revenue_repository=revenue_repository,
-        link_repository=SqlAlchemyChannelAccountLinkRepository(session),
-        committed_repository=SqlAlchemyCommittedAllocationRepository(session),
+        link_repository=SqlAlchemyChannelAccountLinkRepository(platform_session),
+        committed_repository=SqlAlchemyCommittedAllocationRepository(platform_session),
     )
     # FIX: the allocation orchestrator resolves month-wide, but a non-global
     # export must only contain its frozen channel set; filter allocation lines
@@ -1399,10 +1450,20 @@ def _build_finance_source_summaries_for_export(
         missing_fact_channel_count,
         missing_fact_channel_sample,
     ) = missing_revenue_fact_channel_count_and_sample(
-        session,
+        platform_session,
         month=export_job.month,
         youtube_channel_ids=channel_ids,
     )
+    # FIX (Qodo #202): the coverage pair above is the LAST platform-lane read,
+    # so release the REPEATABLE READ transaction here instead of holding it
+    # through artifact byte generation and filesystem persistence (the
+    # platform session is request-scoped and would otherwise keep the
+    # snapshot open until teardown - idle-in-transaction timeouts, vacuum
+    # pressure). The transaction is read-only at this point (the routes write
+    # their audit rows AFTER this builder returns), so rollback ends it with
+    # provably nothing to persist - the fail-closed direction if a write ever
+    # sneaks in above.
+    platform_session.rollback()
     # FIX: preview may surface audit-derived connector smart-alert signals,
     # but persisted downloadable bytes must stay permission-invariant. Scoped
     # exports suppress these tenant-wide audit signals until source rows and

@@ -728,6 +728,20 @@ decision provably coexists with the facts it authorizes. The
 `POST /revenue/recalculate` write branch and the explain POST stay READ
 COMMITTED by the recorded write-path ruling: they continue into persistence,
 where REPEATABLE READ upsert conflicts would abort rather than degrade.
+The finance EXPORT builder joins the ruling: the workbook preview and the
+workbook/executive-PDF/slide-pack downloads all compose their finance
+sources (facts, previous-month facts, overrides, payments, bank entries,
+close state, deduction components, the allocation resolver's close probe,
+and the missing-facts coverage pair) through one shared builder that
+begins the same REPEATABLE READ snapshot on the platform session after
+the route's permission gates — a writer committing mid-build can no
+longer tear the totals inside a persisted, downloadable artifact. Its
+audit-derived signal reads (skipped source rows, failed connector runs)
+stay on the tenant-lane request session outside the snapshot by the same
+residual ruling as smart-alerts, and the export's frozen channel set
+remains a gate-time decision BY DESIGN (post-creation org edits must not
+alter previously requested data — the recorded export-determinism rule,
+distinct from the dashboard reads' snapshot-side attribution).
 Responses over OPEN months remain living
 data — two consecutive requests may differ — but within one response the money
 numbers always coexisted in the database. On SQLite (test tier) every lane

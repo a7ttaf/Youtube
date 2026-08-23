@@ -2636,7 +2636,13 @@ from the two that need design.
    Eleven GET routes plus the dry-run recalculation POST are pinned in
    `tests/api/test_composed_read_snapshot_wiring.py`; the recalculation
    write branch and the explain POST stay READ COMMITTED by the recorded
-   write-path ruling.
+   write-path ruling. Extended again 2026-08-23
+   (`feat/export-read-snapshot`): the finance export builder (workbook
+   preview + workbook/PDF/slide-pack downloads) composes its finance
+   sources on the same snapshot via the platform session — a mid-build
+   writer can no longer tear a persisted artifact's totals
+   (red→green-proven); audit-derived signals stay tenant-lane and the
+   frozen channel set stays gate-time by the export-determinism rule.
 4. ⏳ Bank/transfer/local-currency variance evidence — evidence is now
    surfaced: the gap-explanation bank leg reconciles paid AdSense money
    against bank receipts using the operator-entered transfer-fee and signed
