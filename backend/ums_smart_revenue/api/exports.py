@@ -1295,7 +1295,13 @@ def _discard_saved_artifact(
 #   hand onward. The tenant-lane request session cannot host the snapshot
 #   (the job lookup already opened its transaction), which is why the
 #   finance reads ride the so-far-untouched platform session — the same
-#   laning the revenue endpoints' finance repositories use. Audit-derived
+#   laning the revenue endpoints' finance repositories use. The snapshot
+#   transaction is RELEASED (rollback — read-only, nothing to persist) as
+#   soon as the last platform-lane read completes: artifact byte generation
+#   and filesystem persistence run after this builder returns and must not
+#   hold the snapshot open (idle-in-transaction timeouts, vacuum pressure);
+#   on a mid-build source error the request teardown rolls the transaction
+#   back instead, and no artifact work follows. Audit-derived
 #   signal reads stay tenant-lane and OUTSIDE the snapshot by the recorded
 #   residual ruling (their laning is an authorization boundary). Scoped
 #   exports use the frozen channel set (deliberately gate-time: post-creation
@@ -1448,6 +1454,16 @@ def _build_finance_source_summaries_for_export(
         month=export_job.month,
         youtube_channel_ids=channel_ids,
     )
+    # FIX (Qodo #202): the coverage pair above is the LAST platform-lane read,
+    # so release the REPEATABLE READ transaction here instead of holding it
+    # through artifact byte generation and filesystem persistence (the
+    # platform session is request-scoped and would otherwise keep the
+    # snapshot open until teardown - idle-in-transaction timeouts, vacuum
+    # pressure). The transaction is read-only at this point (the routes write
+    # their audit rows AFTER this builder returns), so rollback ends it with
+    # provably nothing to persist - the fail-closed direction if a write ever
+    # sneaks in above.
+    platform_session.rollback()
     # FIX: preview may surface audit-derived connector smart-alert signals,
     # but persisted downloadable bytes must stay permission-invariant. Scoped
     # exports suppress these tenant-wide audit signals until source rows and

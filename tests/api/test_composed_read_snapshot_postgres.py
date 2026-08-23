@@ -55,11 +55,15 @@ from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
 
 from tests.db._postgres_helpers import require_postgres_url
+from ums_smart_revenue.api.exports import (
+    _build_finance_source_summaries_for_export,
+    _FinanceExportSourceContext,
+)
 from ums_smart_revenue.api.revenue import _load_month_net_revenue
 from ums_smart_revenue.app import create_app
 from ums_smart_revenue.auth.models import PermissionGrant, UserPrincipal
 from ums_smart_revenue.auth.permissions import Permission
-from ums_smart_revenue.auth.scopes import AccessScope
+from ums_smart_revenue.auth.scopes import AccessScope, OrgAccessIndex
 from ums_smart_revenue.db.finance_models import (
     AdSensePaymentORM,
     BankReconciliationEntryORM,
@@ -100,6 +104,8 @@ from ums_smart_revenue.finance.deduction_ingestion import (
 )
 from ums_smart_revenue.finance.manual_overrides import SqlAlchemyManualOverrideRepository
 from ums_smart_revenue.finance.revenue_facts import SqlAlchemyRevenueFactRepository
+from ums_smart_revenue.org.channel_groups import ChannelGroupRegistry
+from ums_smart_revenue.reports.exports import ExportJobEntry
 from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
 from ums_smart_revenue.tenancy.context import TENANT_CTX
 from ums_smart_revenue.tenancy.models import Tenant, TenantStatus
@@ -1289,3 +1295,72 @@ def test_finance_export_preview_composes_one_snapshot_under_concurrent_writer(
     payment_match = response.json()["source_summaries"]["payment_match"]
     assert Decimal(payment_match["youtube_revenue_total_usd"]) == Decimal("930.00")
     assert Decimal(payment_match["adsense_paid_amount"]) == Decimal("900.00")
+
+
+def test_finance_export_builder_releases_the_snapshot_before_artifact_work(
+    pg_url: str, owner_engine: sa.Engine
+) -> None:
+    """The builder must end its REPEATABLE READ transaction when the source
+    reads complete: artifact byte generation and filesystem persistence run
+    AFTER it returns and must not hold the snapshot open (idle-in-transaction
+    timeouts, vacuum pressure) - the platform session is request-scoped and
+    would otherwise keep the transaction until teardown."""
+    _seed_month(owner_engine)
+    export_job = ExportJobEntry(
+        id="exp-snapshot-release",
+        export_type="FINANCE_EXCEL",
+        scope_type="global",
+        scope_id=None,
+        month=MONTH,
+        currency="USD",
+        requested_by=str(USER_ID),
+        status="QUEUED",
+        file_url=None,
+        month_lock_status="OPEN",
+        include_confidence_notes=True,
+        include_manual_override_notes=True,
+        created_at=datetime(2026, 4, 1, tzinfo=UTC),
+        completed_at=None,
+        scope_channel_ids=None,
+    )
+    user = UserPrincipal(
+        user_id=str(USER_ID),
+        email="snapshot-pg@example.com",
+        direct_permissions=(),
+    )
+    # The direct call bypasses the HTTP middleware, so arm the tenant
+    # contextvar the finance repositories resolve against.
+    now = datetime(2026, 1, 1, tzinfo=UTC)
+    tenant_token = TENANT_CTX.set(
+        Tenant(
+            id=UUID(UMS_TENANT_ID),
+            slug="ums",
+            display_name="UMS",
+            primary_currency="USD",
+            status=TenantStatus.ACTIVE,
+            onboarding_at=now,
+            created_at=now,
+            updated_at=now,
+        )
+    )
+    platform_session = build_platform_session_factory(pg_url)()
+    try:
+        summaries = _build_finance_source_summaries_for_export(
+            context=_FinanceExportSourceContext(
+                export_job=export_job,
+                user=user,
+                # The tenant-lane session is only touched for audit-derived
+                # alert reads, disabled here; the platform session stands in.
+                session=platform_session,
+                platform_session=platform_session,
+                org_index=OrgAccessIndex(),
+                group_registry=ChannelGroupRegistry(),
+                include_audit_derived_alerts=False,
+            ),
+        )
+        assert summaries.net_revenue.month == MONTH
+        assert platform_session.in_transaction() is False
+    finally:
+        platform_session.rollback()
+        platform_session.close()
+        TENANT_CTX.reset(tenant_token)
