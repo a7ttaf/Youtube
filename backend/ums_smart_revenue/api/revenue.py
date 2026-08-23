@@ -730,12 +730,16 @@ def _commit_recalculation_write(
 #   either way.
 # Standards: The snapshot begins here — NOT in a route dependency — so the
 #   route's permission gates always run first: denial must precede any
-#   transaction begin. Selection channel_ids and the channel_company parity
-#   map stay on the TENANT-lane org index for BOTH branches: the preview
-#   must mirror the commit engine's fail-closed COMPANY_UNMAPPED behavior
-#   from the SAME index (preview/commit parity is load-bearing), so the
-#   snapshot here guards facts-vs-overrides coherence only. Source
-#   ValidationErrors propagate untouched for the route's 422 translation.
+#   transaction begin. On a dry run the org-derived selection AND the
+#   channel_company readiness map re-resolve from the snapshot index — org
+#   attribution is money-adjacent, so a channel moved between org units
+#   mid-request is never previewed under its former scope and
+#   COMPANY_UNMAPPED readiness is judged against the same database state as
+#   the facts. The WRITE branch keeps the TENANT-lane index for both: its
+#   preflight preview must mirror the commit engine's fail-closed
+#   COMPANY_UNMAPPED behavior from the SAME index within the same request
+#   (preview/commit parity is load-bearing there). Source ValidationErrors
+#   propagate untouched for the route's 422 translation.
 # Blast Radius: Every readiness number the recalculation preview serves and
 #   the write branch's pre-flight gate. Read-only — the route owns the
 #   write, the audit event, and the response envelope.
@@ -748,6 +752,7 @@ def _commit_recalculation_write(
 def _load_recalculation_preview(
     *,
     payload: RevenueRecalculationRequest,
+    target_scope: AccessScope,
     channel_ids: set[str] | None,
     org_index: OrgAccessIndex,
     platform_session: Session,
@@ -755,20 +760,33 @@ def _load_recalculation_preview(
     override_repository: SqlAlchemyManualOverrideRepository,
 ) -> RevenueRecalculationPreview:
     """Fetch facts and overrides (dry runs: inside the snapshot), build the preview."""
+    selection_channel_ids = channel_ids
+    channel_company = org_index.channel_company
     if payload.dry_run:
         # FIX: One MVCC snapshot for both source reads below on the dry-run
         # preview — an override or fact committing between them can no longer
-        # tear the readiness decision (REPEATABLE READ on Postgres;
-        # db/read_snapshot.py holds the ruling). The write branch stays READ
-        # COMMITTED by the recorded write-path ruling.
+        # tear the readiness decision — and for the org attribution: the
+        # selection set and the COMPANY_UNMAPPED readiness map re-resolve
+        # from the snapshot index, so a channel moved between org units
+        # mid-request is never previewed under its former scope (REPEATABLE
+        # READ on Postgres; db/read_snapshot.py holds the ruling). The write
+        # branch stays READ COMMITTED on the tenant index by the recorded
+        # write-path ruling (preview/commit parity within one request).
         begin_composed_read_snapshot(platform_session)
+        snapshot_index = load_org_access_index_from_session(platform_session)
+        selection_channel_ids = _org_scope_member_channel_ids(
+            target_scope=target_scope,
+            authorized_channel_ids=channel_ids,
+            org_index=snapshot_index,
+        )
+        channel_company = snapshot_index.channel_company
     facts = revenue_repository.list_month_facts(
         month=payload.month,
-        youtube_channel_ids=channel_ids,
+        youtube_channel_ids=selection_channel_ids,
     )
     overrides = override_repository.list_month_overrides(
         month=payload.month,
-        youtube_channel_ids=channel_ids,
+        youtube_channel_ids=selection_channel_ids,
     )
     return build_recalculation_preview(
         month=payload.month,
@@ -779,13 +797,17 @@ def _load_recalculation_preview(
         dry_run=payload.dry_run,
         facts=facts,
         manual_overrides=overrides,
-        # company_level parity: the preview mirrors the commit engine's
-        # fail-closed COMPANY_UNMAPPED path from the same org index.
-        channel_company=org_index.channel_company,
+        # company_level readiness: the dry run judges COMPANY_UNMAPPED from
+        # the snapshot index; the write branch's preflight mirrors the commit
+        # engine's fail-closed path from the same tenant index it commits
+        # with.
+        channel_company=channel_company,
         # Pass the scoped channel set so verified channels without fact
         # rows are also checked against the company mapping, preventing
         # false READY_FOR_REVIEW before a company_level commit.
-        verified_channel_ids=(frozenset(channel_ids) if channel_ids is not None else None),
+        verified_channel_ids=(
+            frozenset(selection_channel_ids) if selection_channel_ids is not None else None
+        ),
     )
 
 
@@ -899,6 +921,7 @@ def request_revenue_recalculation(
     try:
         preview = _load_recalculation_preview(
             payload=payload,
+            target_scope=target_scope,
             channel_ids=channel_ids,
             org_index=org_index,
             platform_session=platform_session,
@@ -3844,24 +3867,6 @@ def _resolve_smart_alert_tenant_id() -> UUID:
 
 
 # ============================================================================
-# Purpose: Translate a revenue-read scope string into the AccessScope and
-#   channel filter used by the net-revenue, rankings, and recalculation
-#   preview routes.
-# Database/ORM: None directly; the underlying registry and org index are
-#   supplied by the caller and live in the service layer
-#   (resolve_revenue_read_scope).
-# Standards: Route-boundary shim. Pure transport-layer translation: typed
-#   service errors become HTTP errors with the route's primary gate message
-#   so unauthorized probes and unauthorized reads are indistinguishable.
-# Blast Radius: Finance read scope resolution and audit entity identity.
-# Connections:
-#   - File: backend/ums_smart_revenue/finance/revenue_scopes.py ->
-#       resolve_revenue_read_scope owns the actual scope translation and
-#       group registry access.
-#   - File: backend/ums_smart_revenue/org/sql_channel_groups.py -> PostgreSQL
-#       source for channel-group metadata and member channel IDs.
-# ============================================================================
-# ============================================================================
 # Purpose: Re-resolve the org-derived SELECTION channel set for a scoped money
 #   read from a given org-access index — the attribution half of scope
 #   resolution, split from authorization so composed-read loaders can rerun it
@@ -3909,19 +3914,36 @@ def _org_scope_member_channel_ids(
     return authorized_channel_ids
 
 
+# ============================================================================
+# Purpose: Snapshot-side entry point for org-derived selection: load the
+#   org-access index from the composed-read snapshot session and derive the
+#   scope's member channel set from it, lazily — only company/sector scopes
+#   pay the index read.
+# Database/ORM: For company/sector scopes, two read-only selects on the
+#   platform-lane session (org_units + youtube_channels via
+#   load_org_access_index_from_session) INSIDE the caller's already-begun
+#   REPEATABLE READ snapshot; every other scope touches no database and
+#   passes the tenant-resolved set through.
+# Standards: Callers must have begun the composed-read snapshot already —
+#   this helper never begins one. The attribution-vs-authorization contract
+#   lives on _org_scope_member_channel_ids; this wrapper only adds the
+#   snapshot-session index load.
+# Blast Radius: Which channels' money feeds scoped net-revenue responses (the
+#   rankings loader loads the index itself because it also needs the grouping
+#   maps). No authorization decision is made here.
+# Connections:
+#   - File: backend/ums_smart_revenue/org/access_index.py -> the index loader
+#     run on the snapshot session.
+#   - File: backend/ums_smart_revenue/db/read_snapshot.py -> the snapshot the
+#     caller must already hold.
+# ============================================================================
 def _snapshot_selection_channel_ids(
     *,
     target_scope: AccessScope,
     authorized_channel_ids: set[str] | None,
     platform_session: Session,
 ) -> set[str] | None:
-    """Re-resolve company/sector selection on the composed-read snapshot.
-
-    Loads the snapshot org-access index only for the org-unit scopes that
-    need it; every other scope passes the tenant-resolved set through (see
-    _org_scope_member_channel_ids for the attribution-vs-authorization
-    contract). Callers must have begun the composed-read snapshot already.
-    """
+    """Re-resolve company/sector selection on the composed-read snapshot."""
     if target_scope.type not in (ScopeType.SECTOR, ScopeType.COMPANY):
         return authorized_channel_ids
     return _org_scope_member_channel_ids(
@@ -3931,6 +3953,24 @@ def _snapshot_selection_channel_ids(
     )
 
 
+# ============================================================================
+# Purpose: Translate a revenue-read scope string into the AccessScope and
+#   channel filter used by the net-revenue, rankings, and recalculation
+#   preview routes.
+# Database/ORM: None directly; the underlying registry and org index are
+#   supplied by the caller and live in the service layer
+#   (resolve_revenue_read_scope).
+# Standards: Route-boundary shim. Pure transport-layer translation: typed
+#   service errors become HTTP errors with the route's primary gate message
+#   so unauthorized probes and unauthorized reads are indistinguishable.
+# Blast Radius: Finance read scope resolution and audit entity identity.
+# Connections:
+#   - File: backend/ums_smart_revenue/finance/revenue_scopes.py ->
+#       resolve_revenue_read_scope owns the actual scope translation and
+#       group registry access.
+#   - File: backend/ums_smart_revenue/org/sql_channel_groups.py -> PostgreSQL
+#       source for channel-group metadata and member channel IDs.
+# ============================================================================
 def _revenue_read_scope_to_channel_ids(
     *,
     scope_type: str,

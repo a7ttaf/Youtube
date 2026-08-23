@@ -106,7 +106,7 @@ def _purge_test_rows(engine: sa.Engine) -> None:
                 "DELETE FROM audit_logs WHERE entity_type IN "
                 "('monthly_payment_match', 'monthly_smart_alerts', "
                 "'month_bank_reconciliation', 'month_gap_explanation', "
-                "'monthly_net_revenue_summary')"
+                "'monthly_net_revenue_summary', 'revenue_recalculation_preview')"
             )
         )
         conn.execute(sa.text("DELETE FROM finance_month_close WHERE month = :m"), {"m": MONTH})
@@ -472,3 +472,60 @@ def test_net_revenue_company_scope_attribution_rides_the_snapshot(
     assert fired["done"] is True
     assert response.status_code == 200
     assert response.json()["channel_count"] == 0
+
+
+def test_recalculation_dry_run_scope_attribution_rides_the_snapshot(
+    owner_engine: sa.Engine, client: TestClient
+) -> None:
+    """A channel moved to another company after authorization but before the
+    dry-run snapshot begins must not be previewed under its former company:
+    the dry run re-resolves selection and the COMPANY_UNMAPPED readiness map
+    on the same MVCC snapshot as the facts it counts."""
+    _seed_month(owner_engine)
+    with Session(owner_engine) as seeder:
+        seeder.add(
+            OrgUnitORM(
+                id=COMPANY_B_ID,
+                parent_id=SECTOR_ID,
+                type="COMPANY",
+                name="TV Company B",
+                active=True,
+            )
+        )
+        seeder.commit()
+    fired = {"done": False}
+
+    def _move_then_begin(session: Session) -> None:
+        if not fired["done"]:
+            fired["done"] = True
+            with Session(owner_engine) as writer:
+                writer.execute(
+                    sa.text(
+                        "UPDATE youtube_channels SET primary_org_unit_id = :company_b "
+                        "WHERE youtube_channel_id = :channel"
+                    ),
+                    {"company_b": str(COMPANY_B_ID), "channel": CHANNEL_ID},
+                )
+                writer.commit()
+        begin_composed_read_snapshot(session)
+
+    with patch(
+        "ums_smart_revenue.api.revenue.begin_composed_read_snapshot",
+        side_effect=_move_then_begin,
+    ):
+        response = client.post(
+            "/revenue/recalculate",
+            headers={**auth_headers(), "x-role": "finance_admin"},
+            json={
+                "month": MONTH,
+                "allocation_method": "gross_revenue_proportional",
+                "scope_type": "company",
+                "scope_id": str(COMPANY_ID),
+                "dry_run": True,
+                "reason": "attribution snapshot pin",
+            },
+        )
+
+    assert fired["done"] is True
+    assert response.status_code == 200
+    assert response.json()["source_summary"]["revenue_fact_count"] == 0

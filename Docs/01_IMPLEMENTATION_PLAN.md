@@ -818,15 +818,24 @@ channel↔account map, and multi-currency FX) stays out per Docs/18.
   (authorization laning wins); Docs/12 carries the contract paragraph.
   `No migration/backfill required.` — a session-level isolation helper only.
   **Composed-read snapshot extension shipped 2026-08-23**
-  (`opus/peaceful-moser-2fb0cc`, follow-up chip on the ruling): the remaining
-  multi-read finance endpoints — net-revenue, rankings,
-  reconciliation-issues, and the channel-month summary — begin the same
-  REPEATABLE READ snapshot right after their permission gates;
-  reconciliation-preview is exempt (its response composes from one facts
-  select). Tenant-lane reads (org/channel name maps, the org-access index,
-  the allocation resolver's month-close probe) stay outside the snapshot by
-  the same laning residual. Per-endpoint wiring is pinned in
-  `tests/api/test_composed_read_snapshot_wiring.py` (eight routes).
+  (`feat/composed-read-snapshot`, follow-up on the ruling): every remaining
+  composed revenue read — net-revenue, rankings, reconciliation-issues, the
+  channel-month summary, reconciliation-preview (its single-select exemption
+  was disproven in review: the repository read is guard-then-select), and
+  the dry-run `POST /revenue/recalculate` preview — begins the same
+  REPEATABLE READ snapshot inside its extracted `_load_*` loader right after
+  the route's permission gates (handlers never touch the session). Org
+  ATTRIBUTION rides the snapshot too: company/sector member selection for
+  net-revenue/rankings/dry-run-recalculate, the rankings roll-up grouping
+  maps, and the recalculation `COMPANY_UNMAPPED` readiness map re-resolve
+  from a snapshot org-access index, red→green-proven on Postgres against a
+  mid-request company move. Tenant-lane residuals: the audit-gated
+  smart-alerts signals, org/channel display-NAME maps (labels), the
+  allocation resolver's month-close probe, and GROUP membership (per-member
+  authorization). The recalculation WRITE branch and the explain POST stay
+  READ COMMITTED by the recorded write-path ruling. Per-endpoint wiring is
+  pinned in `tests/api/test_composed_read_snapshot_wiring.py` (nine GET
+  routes plus the dry-run recalculation POST).
   `No migration/backfill required.` — reuses the session-level helper.
 
 ### Acceptance gate

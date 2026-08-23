@@ -2610,11 +2610,18 @@ from the two that need design.
    outside the snapshot by ruling (authorization laning wins). Contract:
    Docs/12 "Composed-read consistency"; proofs:
    `tests/api/test_composed_read_snapshot_postgres.py`. Extended 2026-08-23
-   (`opus/peaceful-moser-2fb0cc`): net-revenue, rankings,
-   reconciliation-issues, and the channel-month summary begin the same
-   snapshot after their permission gates; reconciliation-preview is exempt
-   (single facts select); eight routes pinned in
-   `tests/api/test_composed_read_snapshot_wiring.py`.
+   (`feat/composed-read-snapshot`): net-revenue, rankings,
+   reconciliation-issues, the channel-month summary,
+   reconciliation-preview (its single-select exemption was disproven in
+   review — the repository read is guard-then-select), and the dry-run
+   recalculation preview begin the same snapshot inside extracted `_load_*`
+   loaders after their permission gates; org attribution (company/sector
+   selection, rankings grouping, recalculation readiness map) re-resolves on
+   the snapshot index, red→green-proven against a mid-request company move.
+   Nine GET routes plus the dry-run recalculation POST are pinned in
+   `tests/api/test_composed_read_snapshot_wiring.py`; the recalculation
+   write branch and the explain POST stay READ COMMITTED by the recorded
+   write-path ruling.
 4. ⏳ Bank/transfer/local-currency variance evidence — evidence is now
    surfaced: the gap-explanation bank leg reconciles paid AdSense money
    against bank receipts using the operator-entered transfer-fee and signed
