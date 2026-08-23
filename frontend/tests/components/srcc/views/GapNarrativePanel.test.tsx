@@ -238,8 +238,20 @@ describe("GapNarrativePanel in CommandView", () => {
     expect(screen.getAllByText("HIGH").length).toBeGreaterThan(0);
     expect(screen.getAllByText("MEDIUM").length).toBeGreaterThan(0);
     expect(screen.getAllByText("LOW").length).toBeGreaterThan(0);
-    // One residual row per leg.
+    // One residual row per leg, each carrying the leg's own narrative — on an
+    // INCOMPLETE leg that sentence is the only place naming the missing source.
     expect(screen.getAllByText("Unexplained residual")).toHaveLength(2);
+    expect(
+      screen.getByText(GAP_EXPLANATION_BODY.payment_leg.narrative),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(GAP_EXPLANATION_BODY.bank_leg.narrative),
+    ).toBeInTheDocument();
+    // The panel is labeled holding-wide: the endpoint aggregates all scopes
+    // and must not read as following the view's scope selector.
+    expect(
+      screen.getByText("Holding-wide payment and bank gaps for 2026-03 (all scopes)"),
+    ).toBeInTheDocument();
     // Month narrative line plus the read-only close badge.
     expect(
       screen.getByText("2026-03: payment leg FULLY_EXPLAINED, bank leg PARTIALLY_EXPLAINED."),

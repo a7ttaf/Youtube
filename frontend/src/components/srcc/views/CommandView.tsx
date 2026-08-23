@@ -1068,6 +1068,11 @@ type GapLegDescriptor = {
   components: GapComponentRow[];
   residualDisplay: string;
   residualConfidenceLabel: string;
+  // The leg's API-provided deterministic narrative. Load-bearing on an
+  // INCOMPLETE leg: it names WHICH operand source is missing — the design
+  // deliberately emits no duplicate incompleteness warning because this
+  // sentence carries the reason.
+  narrative: string;
 };
 
 // Element-level defensive read: a malformed payload can pass the container
@@ -1162,6 +1167,7 @@ const buildGapLegDescriptors = (
       components: buildGapComponentRows(payment.components, money),
       residualDisplay: money(payment.unexplained_residual_usd),
       residualConfidenceLabel: payment.unexplained_residual_confidence?.label ?? "—",
+      narrative: typeof payment.narrative === "string" ? payment.narrative : "",
     },
     {
       id: "bank-leg",
@@ -1173,6 +1179,7 @@ const buildGapLegDescriptors = (
       components: buildGapComponentRows(bank.components, money),
       residualDisplay: money(bank.unexplained_residual_usd),
       residualConfidenceLabel: bank.unexplained_residual_confidence?.label ?? "—",
+      narrative: typeof bank.narrative === "string" ? bank.narrative : "",
     },
   ];
 };
@@ -1205,7 +1212,9 @@ const GapLegRows = ({ leg }: { leg: GapLegDescriptor }) => (
     <ItemRow
       tone={gapStatusTone(leg.status)}
       title="Unexplained residual"
-      sub="Gap remaining after the evidence components"
+      // The leg's own narrative, not generic copy: on an INCOMPLETE leg this
+      // sentence is the ONLY place naming which operand source is missing.
+      sub={leg.narrative}
       trailing={
         <>
           <span className="money finance-data">{leg.residualDisplay}</span>
@@ -1338,7 +1347,7 @@ const RestrictedGapNarrativePanel = () => (
     <div className="panel-header">
       <div className="panel-title">
         <strong id={GAP_NARRATIVE_TITLE_ID}>Gap narrative</strong>
-        <span>Payment and bank gap decomposition</span>
+        <span>Holding-wide payment and bank gap decomposition</span>
       </div>
       <Badge tone="red">Restricted</Badge>
     </div>
@@ -1369,7 +1378,11 @@ const GapNarrativeDataPanel = ({ month }: { month: string }) => {
       <div className="panel-header">
         <div className="panel-title">
           <strong id={GAP_NARRATIVE_TITLE_ID}>Gap narrative</strong>
-          <span>Payment and bank gap decomposition for {month}</span>
+          {/* Holding-wide by contract: the composed endpoint aggregates ALL
+              tenant facts/payments/bank entries — it does NOT follow the
+              view's company/sector scope selector, and the label must say
+              so next to scope-following panels. */}
+          <span>Holding-wide payment and bank gaps for {month} (all scopes)</span>
         </div>
         <GapNarrativeHeaderBadge data={data} loading={loading} error={error} />
         <button

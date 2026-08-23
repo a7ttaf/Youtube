@@ -183,8 +183,12 @@ bank entries).
 
 Command Center panel "Gap narrative" adjacent to the #127 bank cards
 (`CommandView.tsx`): the two legs as compact rows (operands → gap), component
-rows with confidence badges (`confidenceDisplay`), residual row, and the month
-narrative line. This finally renders `fx_difference_usd`. New hook
+rows with confidence badges (`confidenceDisplay`), a residual row carrying
+the LEG's own narrative (amended in-PR: on an INCOMPLETE leg that sentence
+is the only place naming the missing source — the warnings amendment leans
+on it, so the panel must render it), and the month narrative line. The panel
+is labeled HOLDING-WIDE (amended in-PR): the endpoint aggregates all scopes
+and must not read as following the view's company/sector scope selector. This finally renders `fx_difference_usd`. New hook
 `useGapExplanation` (the `useBankReconciliation` shape), types in
 `types.ts`, permission-gated client-side by the same composition the
 backend enforces (amended in-PR across the review rounds): the revenue term
