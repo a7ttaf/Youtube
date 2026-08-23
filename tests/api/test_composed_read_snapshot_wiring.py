@@ -2,10 +2,11 @@
 # Purpose: Wiring pins proving EVERY composed finance read begins its
 #   composed-read snapshot — payment-match, bank-reconciliation, smart-alerts,
 #   gap-explanation, net-revenue, rankings, reconciliation-issues, the
-#   channel-month summary, the reconciliation-preview (its single-select
-#   exemption was disproven in review: the repository read is guard-then-
-#   select, two statements), the deduction-components page (a three-statement
-#   repository read), and the dry-run recalculation preview each call
+#   channel-month summary, the channel-month facts listing and the
+#   reconciliation-preview (both ride the same guard-then-select repository
+#   read — two statements, so the single-select exemption was disproven in
+#   review), the deduction-components page (a three-statement repository
+#   read), and the dry-run recalculation preview each call
 #   begin_composed_read_snapshot exactly once before reading. The
 #   recalculation WRITE branch and the explain POST stay READ COMMITTED by
 #   the recorded write-path ruling. The snapshot ruling is platform-wide; a
@@ -22,8 +23,8 @@
 #   and tests/api/test_composed_read_snapshot_postgres.py, not here.
 # Blast Radius: Test-only.
 # Connections:
-#   - File: backend/ums_smart_revenue/api/revenue.py -> the eight routes under
-#     test.
+#   - File: backend/ums_smart_revenue/api/revenue.py -> the twelve wired
+#     reads under test (eleven GETs and the dry-run recalculation POST).
 #   - File: backend/ums_smart_revenue/db/read_snapshot.py -> the helper whose
 #     call is being counted.
 # ============================================================================
@@ -55,6 +56,7 @@ COMPOSED_READ_PATHS = [
     "/revenue/months/2026-03/rankings",
     "/revenue/months/2026-03/reconciliation-issues",
     f"/revenue/channels/{CHANNEL_ID}/months/2026-03/summary",
+    f"/revenue/channels/{CHANNEL_ID}/months/2026-03/facts",
     f"/revenue/channels/{CHANNEL_ID}/months/2026-03/reconciliation-preview",
     "/revenue/months/2026-03/deduction-components",
 ]

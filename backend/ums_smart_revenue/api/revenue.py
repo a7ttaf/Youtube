@@ -179,6 +179,7 @@ from ums_smart_revenue.finance.smart_alerts import (
 from ums_smart_revenue.org.access_index import load_org_access_index_from_session
 from ums_smart_revenue.org.channel_groups import ChannelGroupRegistryStore
 from ums_smart_revenue.org.org_units_read import SqlAlchemyOrgUnitReader
+from ums_smart_revenue.org.sql_channel_groups import SqlAlchemyChannelGroupRegistry
 from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
 from ums_smart_revenue.tenancy.context import get_current_tenant
 
@@ -731,14 +732,17 @@ def _commit_recalculation_write(
 #   either way.
 # Standards: The snapshot begins here — NOT in a route dependency — so the
 #   route's permission gates always run first: denial must precede any
-#   transaction begin. On a dry run the org-derived selection AND the
-#   channel_company readiness map re-resolve from the snapshot index — org
-#   attribution is money-adjacent, so a channel moved between org units
-#   mid-request is never previewed under its former scope and
-#   COMPANY_UNMAPPED readiness is judged against the same database state as
-#   the facts. The WRITE branch keeps the TENANT-lane index for both: its
-#   preflight preview must mirror the commit engine's fail-closed
-#   COMPANY_UNMAPPED behavior from the SAME index within the same request
+#   transaction begin. On a dry run the scoped selection (org units via the
+#   snapshot index, groups via the registry roster —
+#   _snapshot_selection_channel_ids) AND the channel_company readiness map
+#   re-resolve on the snapshot — attribution is money-adjacent, so a channel
+#   moved between org units or dropped from a group roster mid-request is
+#   never previewed under its former scope and COMPANY_UNMAPPED readiness is
+#   judged against the same database state as the facts; the deny-only grant
+#   re-check covers org-unit and channel targets. The WRITE branch keeps the
+#   TENANT-lane index for both: its preflight preview must mirror the commit
+#   engine's fail-closed COMPANY_UNMAPPED behavior from the SAME index
+#   within the same request
 #   (preview/commit parity is load-bearing there). Source ValidationErrors
 #   propagate untouched for the route's 422 translation.
 # Blast Radius: Every readiness number the recalculation preview serves and
@@ -777,7 +781,8 @@ def _load_recalculation_preview(
         begin_composed_read_snapshot(platform_session)
         snapshot_index = load_org_access_index_from_session(platform_session)
         # Deny-only: a sector-granted caller whose target unit was reparented
-        # out of the grant between the gate and the snapshot must not preview
+        # out of the grant — or whose target channel was moved out of the
+        # granted unit — between the gate and the snapshot must not preview
         # snapshot-era finance data under gate-era containment.
         _require_snapshot_org_scope_access(
             user,
@@ -785,9 +790,10 @@ def _load_recalculation_preview(
             target_scope=target_scope,
             org_index=snapshot_index,
         )
-        selection_channel_ids = _org_scope_member_channel_ids(
+        selection_channel_ids = _snapshot_selection_channel_ids(
             target_scope=target_scope,
             authorized_channel_ids=channel_ids,
+            platform_session=platform_session,
             org_index=snapshot_index,
         )
         channel_company = snapshot_index.channel_company
@@ -1076,6 +1082,29 @@ def import_revenue_fact(
     return _with_audit_event(fact, record)
 
 
+# ============================================================================
+# Purpose: List every stored revenue fact for one channel and month — the
+#   raw multi-source rows the reconciliation preview compares. Read-only.
+# Database/ORM: One RevenueFact repository read on the platform-lane session;
+#   appends a REVENUE_VIEWED audit event through the revenue audit sink. No
+#   locks or writes to finance rows.
+# Standards: Single VIEW_REVENUE gate at channel scope through the org-access
+#   index; denial precedes the source read. The read happens inside the
+#   REPEATABLE READ composed-read snapshot begun by _load_channel_month_facts
+#   after the gate (the repository read is two statements — the
+#   active-channel guard, then the facts select — the same guard-then-select
+#   shape whose single-select exemption was disproven on the
+#   reconciliation-preview route); the handler itself never touches the
+#   session (thin-orchestration rule).
+# Blast Radius: Channel-level facts read surface; 404 on unknown
+#   channel/month, 422 on malformed month.
+# Connections:
+#   - File: backend/ums_smart_revenue/finance/revenue_facts.py -> the
+#     two-statement repository read under the snapshot.
+#   - File: backend/ums_smart_revenue/db/read_snapshot.py -> the composed-read
+#     snapshot begun between the gate and the source read.
+#   - File: Docs/12_BACKEND_API_SPEC.md -> channel facts listing contract.
+# ============================================================================
 @router.get("/channels/{channel_id}/months/{month}/facts")
 def list_channel_month_revenue_facts(
     channel_id: str,
@@ -1086,13 +1115,19 @@ def list_channel_month_revenue_facts(
         SqlAlchemyRevenueFactRepository,
         Depends(current_revenue_fact_repository),
     ],
+    platform_session: Annotated[Session, Depends(current_platform_db_session)],
     audit_sink: Annotated[AuditSink, Depends(current_revenue_audit_sink)],
 ) -> dict[str, object]:
     """Return all revenue facts recorded for a channel in a given month."""
     target_scope = AccessScope.channel(channel_id)
     _require_permission(user, Permission.VIEW_REVENUE, target_scope, org_index)
     try:
-        facts = repository.list_channel_month_facts(month=month, youtube_channel_id=channel_id)
+        facts = _load_channel_month_facts(
+            month=month,
+            channel_id=channel_id,
+            platform_session=platform_session,
+            repository=repository,
+        )
     except RevenueFactNotFoundError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
     except RevenueFactValidationError as exc:
@@ -1119,37 +1154,38 @@ def list_channel_month_revenue_facts(
 
 
 # ============================================================================
-# Purpose: Data-access step for the per-channel reconciliation preview,
-#   extracted out of the route handler (thin-orchestration rule): begin the
-#   composed-read snapshot and fetch the channel's facts.
+# Purpose: Data-access step shared by the per-channel facts listing and the
+#   reconciliation preview, extracted out of the route handlers
+#   (thin-orchestration rule): begin the composed-read snapshot and fetch the
+#   channel's facts.
 # Database/ORM: Begins the platform session's REPEATABLE READ composed-read
 #   snapshot (db/read_snapshot.py), then reads via the RevenueFact
 #   repository. No writes.
-# Standards: The snapshot begins here — NOT in a route dependency — so the
+# Standards: The snapshot begins here — NOT in a route dependency — so each
 #   route's permission gates always run first: denial must precede any
-#   transaction begin. This endpoint was originally EXEMPT on a single-select
-#   premise, disproven in review (codex): list_channel_month_facts issues TWO
-#   statements — the active-channel guard, then the facts select — so a
-#   channel deactivated between them could pair a stale guard decision with
-#   the facts; under the snapshot the guard state and the facts provably
+#   transaction begin. These endpoints were originally EXEMPT on a
+#   single-select premise, disproven in review (codex): list_channel_month_facts
+#   issues TWO statements — the active-channel guard, then the facts select —
+#   so a channel deactivated between them could pair a stale guard decision
+#   with the facts; under the snapshot the guard state and the facts provably
 #   coexist. Not-found and ValidationErrors propagate untouched for the
-#   route's 404/422 translation.
-# Blast Radius: The preview's guard/facts coherence. Read-only — the route
-#   owns the build and the audit event.
+#   routes' 404/422 translation.
+# Blast Radius: The guard/facts coherence of both per-channel reads.
+#   Read-only — each route owns its build and audit event.
 # Connections:
 #   - File: backend/ums_smart_revenue/finance/revenue_facts.py -> the
 #     two-statement repository read this snapshot makes coherent.
 #   - File: backend/ums_smart_revenue/db/read_snapshot.py -> the snapshot
 #     begun before the first statement.
 # ============================================================================
-def _load_channel_month_reconciliation_preview_facts(
+def _load_channel_month_facts(
     *,
     month: str,
     channel_id: str,
     platform_session: Session,
     repository: SqlAlchemyRevenueFactRepository,
 ) -> list[RevenueFactEntry]:
-    """Begin the composed-read snapshot, fetch the channel's facts for the preview."""
+    """Begin the composed-read snapshot, fetch the channel's month facts."""
     # FIX: One MVCC snapshot for the active-channel guard and the facts select
     # inside list_channel_month_facts — the guard decision and the facts it
     # authorizes can no longer come from different database states
@@ -1168,10 +1204,10 @@ def _load_channel_month_reconciliation_preview_facts(
 # Standards: Two-permission gate — VIEW_REVENUE + VIEW_CONFIDENCE at channel
 #   scope through the org-access index; denial precedes the source read.
 #   The read happens inside the REPEATABLE READ composed-read snapshot begun
-#   by _load_channel_month_reconciliation_preview_facts after the gates (the
-#   repository read is two statements — guard, then select — so the
-#   single-select exemption this route once carried was unsound); the handler
-#   itself never touches the session (thin-orchestration rule).
+#   by _load_channel_month_facts after the gates (the repository read is two
+#   statements — guard, then select — so the single-select exemption this
+#   route once carried was unsound); the handler itself never touches the
+#   session (thin-orchestration rule).
 # Blast Radius: Channel-level reconciliation read surface; 404 on unknown
 #   channel/month, 422 on malformed month.
 # Connections:
@@ -1199,7 +1235,7 @@ def get_channel_month_reconciliation_preview(
     _require_permission(user, Permission.VIEW_REVENUE, target_scope, org_index)
     _require_permission(user, Permission.VIEW_CONFIDENCE, target_scope, org_index)
     try:
-        facts = _load_channel_month_reconciliation_preview_facts(
+        facts = _load_channel_month_facts(
             month=month,
             channel_id=channel_id,
             platform_session=platform_session,
@@ -2128,22 +2164,24 @@ def list_authorized_revenue_scopes(
 # Database/ORM: Begins the platform session's REPEATABLE READ composed-read
 #   snapshot (db/read_snapshot.py), then reads facts, overrides, deduction
 #   components, the allocation resolver's close probe + committed-run
-#   selection, and — for company/sector scopes — the snapshot org-access
-#   index that selects the member channels: every input comes from ONE MVCC
-#   snapshot, so a lock committing mid-read cannot pair a fresh LOCKED probe
-#   with an older in-snapshot committed run. No writes.
+#   selection, and — for org-unit and channel scopes — the snapshot
+#   org-access index (grant re-check + member selection), with GROUP
+#   membership re-read via the registry on the same snapshot: every input
+#   comes from ONE MVCC snapshot, so a lock committing mid-read cannot pair
+#   a fresh LOCKED probe with an older in-snapshot committed run. No writes.
 # Standards: The snapshot begins here — NOT in a route dependency — so the
 #   route's permission gates always run first: denial must precede any
 #   transaction begin (pinned by the gap-explanation direct-call tests'
-#   fail-if-touched platform-session stubs). Company/sector member selection
-#   is ATTRIBUTION, so it re-resolves on the snapshot index intersected with
-#   the gate-time set (_org_scope_member_channel_ids) — a channel moved
-#   between org units mid-request is never served under its former unit —
-#   and grant coverage is re-asserted deny-only against the same snapshot
-#   index (_require_snapshot_org_scope_access) so a reparented target unit
-#   403s instead of serving snapshot-era data under gate-era containment.
-#   Source ValidationErrors propagate untouched for the route's 422
-#   translation.
+#   fail-if-touched platform-session stubs). Scoped member selection is
+#   ATTRIBUTION, so it re-resolves on the snapshot intersected with the
+#   gate-time set (_snapshot_selection_channel_ids: org units via the index,
+#   groups via the registry roster) — a channel moved between org units or
+#   dropped from the roster mid-request is never served under its former
+#   scope — and grant coverage is re-asserted deny-only against the same
+#   snapshot index (_require_snapshot_org_scope_access) so a reparented
+#   target unit, or a channel target moved out of its granting unit, 403s
+#   instead of serving snapshot-era data under gate-era containment. Source
+#   ValidationErrors propagate untouched for the route's 422 translation.
 # Blast Radius: Every number the net-revenue endpoint serves. Read-only —
 #   the route owns the audit events.
 # Connections:
@@ -2179,11 +2217,12 @@ def _load_month_net_revenue(
     # (REPEATABLE READ on Postgres; db/read_snapshot.py holds the ruling).
     begin_composed_read_snapshot(platform_session)
     normalized_currency = normalize_net_revenue_currency(currency)
-    selection_channel_ids = channel_ids
-    if target_scope.type in (ScopeType.SECTOR, ScopeType.COMPANY):
+    snapshot_org_index: OrgAccessIndex | None = None
+    if target_scope.type in _SNAPSHOT_GRANT_RECHECK_SCOPES:
         snapshot_org_index = load_org_access_index_from_session(platform_session)
         # Deny-only: a sector-granted caller whose target unit was reparented
-        # out of the grant between the gate and the snapshot must not receive
+        # out of the grant — or whose target channel was moved out of the
+        # granted unit — between the gate and the snapshot must not receive
         # snapshot-era finance data under gate-era containment.
         _require_snapshot_org_scope_access(
             user,
@@ -2191,11 +2230,12 @@ def _load_month_net_revenue(
             target_scope=target_scope,
             org_index=snapshot_org_index,
         )
-        selection_channel_ids = _org_scope_member_channel_ids(
-            target_scope=target_scope,
-            authorized_channel_ids=channel_ids,
-            org_index=snapshot_org_index,
-        )
+    selection_channel_ids = _snapshot_selection_channel_ids(
+        target_scope=target_scope,
+        authorized_channel_ids=channel_ids,
+        platform_session=platform_session,
+        org_index=snapshot_org_index,
+    )
     is_global_scope = target_scope == AccessScope.global_scope()
     facts = revenue_repository.list_month_facts(
         month=month,
@@ -2399,10 +2439,12 @@ def get_month_net_revenue(
 # Standards: The snapshot begins here — NOT in a route dependency — so the
 #   route's permission gates always run first: denial must precede any
 #   transaction begin (pinned by the gap-explanation direct-call tests'
-#   fail-if-touched platform-session stubs). Org-unit membership is
-#   ATTRIBUTION, not authorization — a channel moved between org units
-#   mid-request is never ranked under its former unit. Source
-#   ValidationErrors propagate untouched for the route's 422 translation.
+#   fail-if-touched platform-session stubs). Scoped membership is
+#   ATTRIBUTION, not authorization — a channel moved between org units or
+#   dropped from a group roster mid-request is never ranked under its former
+#   scope (_snapshot_selection_channel_ids), and the deny-only grant
+#   re-check covers org-unit and channel targets. Source ValidationErrors
+#   propagate untouched for the route's 422 translation.
 # Blast Radius: Every ranked number the rankings endpoint serves. Read-only —
 #   the route owns the audit events.
 # Connections:
@@ -2442,17 +2484,19 @@ def _load_month_rankings(
     begin_composed_read_snapshot(platform_session)
     snapshot_org_index = load_org_access_index_from_session(platform_session)
     # Deny-only: a sector-granted caller whose target unit was reparented out
-    # of the grant between the gate and the snapshot must not receive
-    # snapshot-era finance data under gate-era containment.
+    # of the grant — or whose target channel was moved out of the granted
+    # unit — between the gate and the snapshot must not receive snapshot-era
+    # finance data under gate-era containment.
     _require_snapshot_org_scope_access(
         user,
         permissions=(Permission.VIEW_REVENUE, Permission.VIEW_CONFIDENCE),
         target_scope=target_scope,
         org_index=snapshot_org_index,
     )
-    selection_channel_ids = _org_scope_member_channel_ids(
+    selection_channel_ids = _snapshot_selection_channel_ids(
         target_scope=target_scope,
         authorized_channel_ids=channel_ids,
+        platform_session=platform_session,
         org_index=snapshot_org_index,
     )
     facts = revenue_repository.list_month_facts(
@@ -3971,10 +4015,18 @@ def _resolve_smart_alert_tenant_id() -> UUID:
     return UUID(UMS_TENANT_ID)
 
 
+# Scopes whose grant coverage can drift with org edits between the gate and
+# the snapshot: org units (reparenting) and channels (a channel moved between
+# units under an inherited grant). The composed-read loaders load the snapshot
+# index and run the deny-only re-check exactly for these; global cannot drift
+# and GROUP authorization is per-member at gate time.
+_SNAPSHOT_GRANT_RECHECK_SCOPES = (ScopeType.SECTOR, ScopeType.COMPANY, ScopeType.CHANNEL)
+
+
 # ============================================================================
-# Purpose: Fail-closed re-check of an org-unit scope's grant coverage against
-#   the SNAPSHOT org-access index — deny-only, run by composed-read loaders
-#   after they load the snapshot index for attribution.
+# Purpose: Fail-closed re-check of an org-unit or channel scope's grant
+#   coverage against the SNAPSHOT org-access index — deny-only, run by
+#   composed-read loaders after they load the snapshot index.
 # Database/ORM: None; pure has_permission evaluation over the caller's grants
 #   and the passed (snapshot) index. The index itself was read inside the
 #   caller's composed-read snapshot.
@@ -3982,13 +4034,17 @@ def _resolve_smart_alert_tenant_id() -> UUID:
 #   admitted the request before any snapshot began (that laning is the
 #   authorization boundary and platform-lane data must never GRANT access);
 #   this re-check can only narrow — a sector-granted caller whose target
-#   company was reparented out of the sector between the gate and the
-#   snapshot is refused, so the response never serves snapshot-era finance
-#   data under gate-era containment. The 403 carries the same
-#   missing-permission message as the gate, keeping unauthorized probes and
-#   unauthorized reads indistinguishable. Non-org scopes are untouched:
-#   global/channel containment cannot drift with org edits, and GROUP reads
-#   stay entirely on tenant-resolved authorization.
+#   company was reparented out of the sector, or whose target CHANNEL was
+#   moved out of the granted unit, between the gate and the snapshot is
+#   refused, so the response never serves snapshot-era finance data under
+#   gate-era containment. Direct channel grants keep passing on scope
+#   identity alone (has_permission needs no index for a same-scope match);
+#   only inherited sector/company containment re-evaluates. The 403 carries
+#   the same missing-permission message as the gate, keeping unauthorized
+#   probes and unauthorized reads indistinguishable. Global targets cannot
+#   drift with org edits, and GROUP authorization stays per-member at gate
+#   time — its membership SELECTION is snapshot-intersected separately by
+#   _snapshot_selection_channel_ids.
 # Blast Radius: Scoped composed reads only; can only turn a would-have-served
 #   response into a 403, never the reverse.
 # Connections:
@@ -4004,8 +4060,8 @@ def _require_snapshot_org_scope_access(
     target_scope: AccessScope,
     org_index: OrgAccessIndex,
 ) -> None:
-    """Re-assert org-unit scope coverage on the snapshot index (deny-only)."""
-    if target_scope.type not in (ScopeType.SECTOR, ScopeType.COMPANY):
+    """Re-assert org-unit/channel scope coverage on the snapshot index (deny-only)."""
+    if target_scope.type not in _SNAPSHOT_GRANT_RECHECK_SCOPES:
         return
     for permission in permissions:
         _require_permission(user, permission, target_scope, org_index)
@@ -4027,12 +4083,12 @@ def _require_snapshot_org_scope_access(
 #   channel must belong to the unit in BOTH states to be served — a channel
 #   moved in mid-request is excluded (under a sector grant whose company was
 #   reparented it would be authorized in neither state), and a channel moved
-#   out is excluded by the snapshot side. GROUP selection deliberately keeps
-#   the tenant-resolved set: group authorization is per-member (the
-#   covered-subset check), so a mid-read membership change must not admit a
-#   channel the caller was never checked for. Channel scope is a literal id;
-#   global is None. An empty result returns an empty set (empty summary, not
-#   403) — the same contract as the tenant-side resolver.
+#   out is excluded by the snapshot side. This function is INDEX-ONLY: GROUP
+#   membership needs the registry, so its snapshot-side re-read lives in
+#   _snapshot_selection_channel_ids, which delegates the org-unit branches
+#   here. Channel scope is a literal id; global is None. An empty result
+#   returns an empty set (empty summary, not 403) — the same contract as the
+#   tenant-side resolver.
 # Blast Radius: Which channels' money feeds scoped net-revenue/rankings
 #   responses. No authorization decision is made here.
 # Connections:
@@ -4073,6 +4129,73 @@ def _org_scope_member_channel_ids(
     if authorized_channel_ids is None:
         return members
     return members & authorized_channel_ids
+
+
+# ============================================================================
+# Purpose: Re-resolve the SELECTION channel set for a scoped composed read on
+#   the caller's snapshot session — one entry point covering every scope
+#   type, so the loaders derive attribution from the same MVCC snapshot as
+#   the money rows it selects.
+# Database/ORM: Org-unit scopes derive from the passed snapshot index
+#   (loading it from the snapshot session if the caller had no other need for
+#   it); GROUP scope re-reads active membership via
+#   SqlAlchemyChannelGroupRegistry on the snapshot session. Read-only.
+# Standards: DENY-ONLY throughout: every branch INTERSECTS snapshot
+#   membership with the gate-time authorized set, so platform-lane data can
+#   only narrow the selection, never admit a channel the tenant-lane gates
+#   did not cover — org-unit branches via _org_scope_member_channel_ids
+#   (both-states rule), GROUP via the registry's active-member re-read (a
+#   member dropped from the roster mid-request stops feeding the rollup; a
+#   member added mid-request was never per-member authorized and stays out).
+#   A group deleted mid-request yields an empty selection (empty summary,
+#   not 403 — the resolver's 403 is a GATE decision and already ran); the
+#   group's own ACTIVE flag stays a gate-time decision for the same reason.
+#   Channel scope passes the literal gate-time set through (its containment
+#   is re-checked by _require_snapshot_org_scope_access, not narrowed here);
+#   global is None.
+# Blast Radius: Which channels' money feeds scoped net-revenue, rankings,
+#   and dry-run recalculation responses. No authorization decision is made
+#   here.
+# Connections:
+#   - File: backend/ums_smart_revenue/org/sql_channel_groups.py ->
+#     get_active_member_channels, the same roster read the gate-time
+#     resolver used on the tenant lane.
+#   - File: backend/ums_smart_revenue/finance/revenue_scopes.py -> the
+#     tenant-side resolver whose selection semantics every branch mirrors.
+# ============================================================================
+def _snapshot_selection_channel_ids(
+    *,
+    target_scope: AccessScope,
+    authorized_channel_ids: set[str] | None,
+    platform_session: Session,
+    org_index: OrgAccessIndex | None,
+) -> set[str] | None:
+    """Derive the scoped selection set on the snapshot session (deny-only).
+
+    ``org_index`` is the snapshot org-access index when the caller already
+    loaded one for the grant re-check; org-unit scopes load it from the
+    snapshot session otherwise.
+    """
+    if target_scope.type in (ScopeType.SECTOR, ScopeType.COMPANY):
+        index = org_index
+        if index is None:
+            index = load_org_access_index_from_session(platform_session)
+        return _org_scope_member_channel_ids(
+            target_scope=target_scope,
+            authorized_channel_ids=authorized_channel_ids,
+            org_index=index,
+        )
+    if target_scope.type == ScopeType.GROUP:
+        snapshot_members = set(
+            SqlAlchemyChannelGroupRegistry(platform_session).get_active_member_channels(
+                target_scope.id or ""
+            )
+            or ()
+        )
+        if authorized_channel_ids is None:
+            return snapshot_members
+        return snapshot_members & authorized_channel_ids
+    return authorized_channel_ids
 
 
 # ============================================================================

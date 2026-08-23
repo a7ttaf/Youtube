@@ -2611,20 +2611,25 @@ from the two that need design.
    Docs/12 "Composed-read consistency"; proofs:
    `tests/api/test_composed_read_snapshot_postgres.py`. Extended 2026-08-23
    (`feat/composed-read-snapshot`): net-revenue, rankings,
-   reconciliation-issues, the channel-month summary,
-   reconciliation-preview (its single-select exemption was disproven in
-   review — the repository read is guard-then-select), the
-   deduction-components page (a three-statement repository read), and the
-   dry-run recalculation preview begin the same snapshot inside extracted
-   `_load_*` loaders after their permission gates; org attribution
-   (company/sector selection, rankings grouping, recalculation readiness
-   map) re-resolves on the snapshot index intersected with the gate-time
-   authorized set, grant coverage over org-unit scopes is re-asserted
-   deny-only on that index (a reparented target unit 403s), and the
-   allocation resolver's close probe reads through the snapshot too — each
-   red→green-proven against mid-request org moves, a reparent, and a
+   reconciliation-issues, the channel-month summary, the channel-month
+   facts listing and reconciliation-preview (both ride the same
+   guard-then-select repository read, whose single-select exemption was
+   disproven in review), the deduction-components page (a three-statement
+   repository read), and the dry-run recalculation preview begin the same
+   snapshot inside extracted `_load_*` loaders after their permission
+   gates; scoped attribution (org-unit selection, rankings grouping,
+   recalculation readiness map) re-resolves on the snapshot index
+   intersected with the gate-time authorized set, group-scoped selection
+   re-reads the active roster through the registry on the snapshot and
+   intersects it deny-only (group authorization itself stays a gate-time
+   per-member decision), grant coverage over org-unit and channel scopes is
+   re-asserted deny-only on that index (a reparented target unit — or a
+   channel target moved out of its granting unit — 403s; direct channel
+   grants pass on scope identity), and the allocation resolver's close
+   probe reads through the snapshot too — each red→green-proven against
+   mid-request org moves, a reparent, a roster drop, a channel move, and a
    mid-request lock.
-   Ten GET routes plus the dry-run recalculation POST are pinned in
+   Eleven GET routes plus the dry-run recalculation POST are pinned in
    `tests/api/test_composed_read_snapshot_wiring.py`; the recalculation
    write branch and the explain POST stay READ COMMITTED by the recorded
    write-path ruling.

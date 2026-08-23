@@ -7,9 +7,14 @@
 #   payment-match totals, a month close committing mid-read cannot make
 #   smart-alerts label pre-lock totals as a LOCKED month, a channel
 #   committing mid-read cannot flip the missing-facts coverage alert against
-#   money alerts built from the pre-commit snapshot, and a channel moved
+#   money alerts built from the pre-commit snapshot, a channel moved
 #   between companies mid-request cannot have its revenue attributed to its
-#   former company (the org-derived selection re-resolves in-snapshot).
+#   former company (the org-derived selection re-resolves in-snapshot), a
+#   channel dropped from a group roster mid-request cannot keep feeding the
+#   group rollup (active membership re-reads on the snapshot, deny-only),
+#   and a channel-scoped read admitted by an inherited org grant cannot be
+#   served after the channel moved out of the granted unit (the deny-only
+#   grant re-check covers channel targets).
 # Database/ORM: PostgreSQL only (transaction isolation is the subject);
 #   requires UMS_TEST_DATABASE_URL — require_postgres_url() raises, never
 #   skips, preserving the no-skip policy. Seeds finance rows through the
@@ -59,7 +64,12 @@ from ums_smart_revenue.db.finance_models import (
     FinanceMonthCloseORM,
     MonthlyChannelRevenueFactORM,
 )
-from ums_smart_revenue.db.org_models import OrgUnitORM, YouTubeChannelORM
+from ums_smart_revenue.db.org_models import (
+    ChannelGroupMemberORM,
+    ChannelGroupORM,
+    OrgUnitORM,
+    YouTubeChannelORM,
+)
 from ums_smart_revenue.db.read_snapshot import (
     ComposedReadSnapshotError,
     begin_composed_read_snapshot,
@@ -100,6 +110,7 @@ COMPANY_B_ID = UUID("00000000-0000-0000-0000-00000000d202")
 CHANNEL_ROW_ID = UUID("00000000-0000-0000-0000-00000000d301")
 LATE_CHANNEL_ROW_ID = UUID("00000000-0000-0000-0000-00000000d302")
 USER_ID = UUID("00000000-0000-0000-0000-00000000d401")
+GROUP_ID = UUID("00000000-0000-0000-0000-00000000d501")
 
 _UPGRADED_URLS: set[str] = set()
 
@@ -145,6 +156,11 @@ def _purge_test_rows(engine: sa.Engine) -> None:
             ),
             {"c": CHANNEL_ID},
         )
+        conn.execute(
+            sa.text("DELETE FROM channel_group_members WHERE group_id = :g"),
+            {"g": str(GROUP_ID)},
+        )
+        conn.execute(sa.text("DELETE FROM channel_groups WHERE id = :g"), {"g": str(GROUP_ID)})
         conn.execute(
             sa.text("DELETE FROM youtube_channels WHERE youtube_channel_id IN (:c, :late)"),
             {"c": CHANNEL_ID, "late": LATE_CHANNEL_ID},
@@ -750,6 +766,155 @@ def test_scoped_read_refuses_reparented_target_on_the_snapshot(
                 currency="USD",
                 user=user,
                 target_scope=AccessScope.company(str(COMPANY_ID)),
+                channel_ids={CHANNEL_ID},
+                platform_session=platform_session,
+                revenue_repository=SqlAlchemyRevenueFactRepository(platform_session),
+                override_repository=SqlAlchemyManualOverrideRepository(platform_session),
+                deduction_component_repository=SqlAlchemyDeductionComponentRepository(
+                    platform_session
+                ),
+                link_repository=SqlAlchemyChannelAccountLinkRepository(platform_session),
+                committed_repository=SqlAlchemyCommittedAllocationRepository(platform_session),
+            )
+        assert excinfo.value.status_code == 403
+    finally:
+        platform_session.rollback()
+        platform_session.close()
+        TENANT_CTX.reset(tenant_token)
+
+
+def test_net_revenue_group_scope_membership_rides_the_snapshot(
+    owner_engine: sa.Engine, client: TestClient
+) -> None:
+    """A channel dropped from the requested group after authorization but
+    before the snapshot begins must not keep feeding the group rollup: active
+    membership re-reads on the same MVCC snapshot as the money rows it selects
+    and is intersected with the gate-time authorized set, deny-only."""
+    _seed_month(owner_engine)
+    with Session(owner_engine) as seeder:
+        seeder.add(
+            ChannelGroupORM(
+                id=GROUP_ID,
+                name="Snapshot Group",
+                group_type="CUSTOM_GROUP",
+                active=True,
+            )
+        )
+        # The member row references (tenant_id, group_id) through a composite
+        # FK with no ORM relationship, so flush the group first.
+        seeder.flush()
+        seeder.add(ChannelGroupMemberORM(group_id=GROUP_ID, channel_id=CHANNEL_ROW_ID))
+        seeder.commit()
+    fired = {"done": False}
+
+    def _drop_member_then_begin(session: Session) -> None:
+        # The tenant-lane group registry resolved the roster at gate time;
+        # committing the membership delete here lands it deterministically
+        # between that resolution and the snapshot begin — the exact window
+        # the snapshot-side membership re-read closes.
+        if not fired["done"]:
+            fired["done"] = True
+            with Session(owner_engine) as writer:
+                writer.execute(
+                    sa.text("DELETE FROM channel_group_members WHERE group_id = :g"),
+                    {"g": str(GROUP_ID)},
+                )
+                writer.commit()
+        begin_composed_read_snapshot(session)
+
+    with patch(
+        "ums_smart_revenue.api.revenue.begin_composed_read_snapshot",
+        side_effect=_drop_member_then_begin,
+    ):
+        response = client.get(
+            f"/revenue/months/{MONTH}/net-revenue",
+            params={"scope_type": "group", "scope_id": str(GROUP_ID)},
+            headers=auth_headers(),
+        )
+
+    assert fired["done"] is True
+    assert response.status_code == 200
+    assert response.json()["channel_count"] == 0
+
+
+def test_channel_read_refuses_moved_channel_on_the_snapshot(
+    pg_url: str, owner_engine: sa.Engine
+) -> None:
+    """A channel-scoped caller admitted by an inherited sector grant whose
+    channel moved out of the granted sector before the snapshot must be
+    refused (403), not served snapshot-era finance data under gate-era
+    containment: the deny-only grant re-check covers channel targets, while
+    direct channel grants keep passing on scope identity alone."""
+    _seed_month(owner_engine)
+    with Session(owner_engine) as seeder:
+        seeder.add_all(
+            [
+                OrgUnitORM(
+                    id=SECTOR_B_ID,
+                    parent_id=None,
+                    type="SECTOR",
+                    name="TV Sector B",
+                    active=True,
+                ),
+                OrgUnitORM(
+                    id=COMPANY_B_ID,
+                    parent_id=SECTOR_B_ID,
+                    type="COMPANY",
+                    name="TV Company B",
+                    active=True,
+                ),
+            ]
+        )
+        seeder.commit()
+    with owner_engine.begin() as conn:
+        # The move lands before the loader runs, so the snapshot sees the
+        # channel under company B in sector B while the (bypassed) gate-time
+        # state had it inside the granted sector — the same epoch mix the
+        # reparented-target pin refuses, now on a CHANNEL target.
+        conn.execute(
+            sa.text(
+                "UPDATE youtube_channels SET primary_org_unit_id = :company_b "
+                "WHERE youtube_channel_id = :channel"
+            ),
+            {"company_b": str(COMPANY_B_ID), "channel": CHANNEL_ID},
+        )
+    user = UserPrincipal(
+        user_id=str(USER_ID),
+        email="snapshot-pg@example.com",
+        direct_permissions=(
+            PermissionGrant(
+                permission=Permission.VIEW_REVENUE,
+                scope=AccessScope.sector(str(SECTOR_ID)),
+            ),
+            PermissionGrant(
+                permission=Permission.VIEW_CONFIDENCE,
+                scope=AccessScope.sector(str(SECTOR_ID)),
+            ),
+        ),
+    )
+    # The direct call bypasses the HTTP middleware, so arm the tenant
+    # contextvar the org-index loader and the lane hooks resolve against.
+    now = datetime(2026, 1, 1, tzinfo=UTC)
+    tenant_token = TENANT_CTX.set(
+        Tenant(
+            id=UUID(UMS_TENANT_ID),
+            slug="ums",
+            display_name="UMS",
+            primary_currency="USD",
+            status=TenantStatus.ACTIVE,
+            onboarding_at=now,
+            created_at=now,
+            updated_at=now,
+        )
+    )
+    platform_session = build_platform_session_factory(pg_url)()
+    try:
+        with pytest.raises(HTTPException) as excinfo:
+            _load_month_net_revenue(
+                month=MONTH,
+                currency="USD",
+                user=user,
+                target_scope=AccessScope.channel(CHANNEL_ID),
                 channel_ids={CHANNEL_ID},
                 platform_session=platform_session,
                 revenue_repository=SqlAlchemyRevenueFactRepository(platform_session),
