@@ -65,7 +65,7 @@ MONTH_VALUE_PATTERN = re.compile(r"^\d{4}-\d{2}$")
 #   tenant.
 # Blast Radius: Tenant selection for every smart-alert/export signal read;
 #   a change here re-scopes which tenant's finance data those surfaces see.
-# Connections:
+# Connections: the tenancy context read and the export consumer below.
 #   - File: backend/ums_smart_revenue/tenancy/context.py ->
 #     get_current_tenant, the request-scoped tenant binding read here.
 #   - File: backend/ums_smart_revenue/api/exports.py -> stamps the resolved
@@ -89,7 +89,7 @@ def resolve_smart_alert_tenant_id() -> UUID:
 #   so callers can use them directly as fact-month keys.
 # Blast Radius: Trend-signal month selection for smart alerts and exports;
 #   no finance mutation.
-# Connections:
+# Connections: the two trend-signal consumers and the typed error below.
 #   - File: backend/ums_smart_revenue/api/revenue.py -> previous-month fact
 #     listing for the smart-alerts trend signal.
 #   - File: backend/ums_smart_revenue/api/exports.py -> the export builder's
