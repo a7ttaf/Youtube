@@ -33,6 +33,7 @@ from ums_smart_revenue.auth.roles import RoleKey
 from ums_smart_revenue.auth.scopes import AccessScope, ScopeType
 from ums_smart_revenue.config.settings import load_app_settings
 from ums_smart_revenue.db.session import SessionFactory
+from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
 from ums_smart_revenue.tenancy.context import (
     TenantContextMissing,
     require_current_tenant,
@@ -288,3 +289,30 @@ def _require_trusted_gateway_token(provided_token: str | None) -> None:
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid trusted gateway token",
         )
+
+
+# ============================================================================
+# Purpose: Resolve a trusted tenant UUID from an already-authenticated
+#   principal, falling back CLOSED to the bootstrap UMS tenant on a missing
+#   or malformed tenant id (a bad header must not raise a bare ValueError
+#   or grant a different tenant).
+# Database/ORM: None; parses the principal's tenant_id string only.
+# Standards: Shared by the connector and channel route modules — previously
+#   two byte-identical private copies kept in step by comment (the
+#   connectors -> channels import cycle that forced the replication was
+#   removed by the api-layering follow-up). Fail-closed fallback is the
+#   recorded contract; both callers depend on it.
+# Blast Radius: Tenant attribution for connector-credential and channel
+#   content-owner routes.
+# Connections:
+#   - File: backend/ums_smart_revenue/api/connectors.py -> credential-route
+#     tenant attribution (previous owner of the original copy).
+#   - File: backend/ums_smart_revenue/api/channels.py -> content-owner
+#     write-path tenant attribution.
+# ============================================================================
+def resolve_tenant_uuid(user: UserPrincipal) -> UUID:
+    """Resolve a trusted tenant UUID from the principal headers, falling back closed."""
+    try:
+        return UUID(user.tenant_id) if user.tenant_id else UUID(UMS_TENANT_ID)
+    except ValueError:
+        return UUID(UMS_TENANT_ID)

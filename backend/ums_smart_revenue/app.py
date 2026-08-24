@@ -289,7 +289,10 @@ def _wire_connector_background_workers(
 #   and audit-sink routing -- moved verbatim, no behavior change.
 # Connections:
 #   - File: backend/ums_smart_revenue/api/dependencies.py -> override targets.
-#   - File: backend/ums_smart_revenue/api/channels.py -> registry/sink factories.
+#   - File: backend/ums_smart_revenue/api/dependencies_audit.py -> the
+#     audit-sink factories swapped in here.
+#   - File: backend/ums_smart_revenue/api/registry_dependencies.py -> the
+#     channel/group registry factories swapped in here.
 # ============================================================================
 def _configure_database_dependencies(
     fastapi_app: FastAPI,

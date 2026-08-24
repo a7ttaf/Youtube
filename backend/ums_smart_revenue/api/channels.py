@@ -21,7 +21,6 @@ import hashlib
 import json
 from collections.abc import Callable
 from typing import Annotated
-from uuid import UUID
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
 from google.oauth2.credentials import Credentials
@@ -31,6 +30,7 @@ from sqlalchemy.orm import Session
 from ums_smart_revenue.api.dependencies import (
     current_db_session,
     current_principal_from_headers,
+    resolve_tenant_uuid,
 )
 from ums_smart_revenue.api.dependencies_audit import (
     audit_record_to_api,
@@ -100,7 +100,6 @@ from ums_smart_revenue.org.channel_registry import (
     ChannelRegistryValidationError,
     ChannelRevenueRequirementLockedMonthError,
 )
-from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
 
 router = APIRouter(prefix="/channels", tags=["channels"])
 
@@ -718,7 +717,7 @@ def import_channels(
         cms_status=cms_status,
         # The RESOLVED tenant, not a client-supplied echo: an approval obtained
         # in one tenant must not be spendable in another.
-        tenant_id=str(_resolve_tenant_uuid(user)),
+        tenant_id=str(resolve_tenant_uuid(user)),
     )
 
     if dry_run:
@@ -1204,21 +1203,6 @@ def current_groups_client_factory() -> Callable[[Credentials], YouTubeGroupsClie
     return default_groups_client_factory
 
 
-def _resolve_tenant_uuid(user: UserPrincipal) -> UUID:
-    """Resolve a trusted tenant UUID from the principal headers, falling back closed.
-
-    Replicated from ``api/connectors.py``, which owns the original: that module
-    imports THIS one at load time (audit_record_to_api / current_audit_sink), so
-    importing the helper back from it is a circular import that fails at
-    startup. Keep the two copies in step — both must fall back to the bootstrap
-    tenant instead of letting a malformed header raise a bare ValueError.
-    """
-    try:
-        return UUID(user.tenant_id) if user.tenant_id else UUID(UMS_TENANT_ID)
-    except ValueError:
-        return UUID(UMS_TENANT_ID)
-
-
 # ============================================================================
 # Purpose: Mirror a YouTube CMS content owner's groups into channel_groups —
 #   titles, membership (adds AND removals), deactivation of vanished groups,
@@ -1281,7 +1265,7 @@ def sync_channel_groups(
     try:
         result = run_group_sync(
             session,
-            tenant_id=_resolve_tenant_uuid(user),
+            tenant_id=resolve_tenant_uuid(user),
             content_owner_id=content_owner_id,
             registry=registry,
             groups=groups,

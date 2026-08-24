@@ -36,7 +36,11 @@ from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import event, select
 from sqlalchemy.orm import Session
 
-from ums_smart_revenue.api.dependencies import current_db_session, current_principal_from_headers
+from ums_smart_revenue.api.dependencies import (
+    current_db_session,
+    current_principal_from_headers,
+    resolve_tenant_uuid,
+)
 from ums_smart_revenue.api.dependencies_audit import audit_record_to_api, current_audit_sink
 from ums_smart_revenue.auth.audit import AuditEventType
 from ums_smart_revenue.auth.audit_service import AuditSink, record_audit_event
@@ -80,7 +84,6 @@ from ums_smart_revenue.connectors.runs.repository import (
     validate_report_month,
 )
 from ums_smart_revenue.db.security_models import UserORM
-from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
 
 if TYPE_CHECKING:
     from ums_smart_revenue.connectors.runs.executor import (
@@ -153,14 +156,6 @@ def current_connector_repository(
 #   - File: backend/ums_smart_revenue/tenancy/constants.py -> UMS_TENANT_ID.
 #   - File: backend/ums_smart_revenue/connectors/runs/repository.py -> tenant-scoped read.
 # ============================================================================
-def _resolve_tenant_uuid(user: UserPrincipal) -> UUID:
-    """Resolve a trusted tenant UUID from the principal headers, falling back closed."""
-    try:
-        return UUID(user.tenant_id) if user.tenant_id else UUID(UMS_TENANT_ID)
-    except ValueError:
-        return UUID(UMS_TENANT_ID)
-
-
 @router.get("/credentials")
 def list_connector_credentials(
     user: Annotated[UserPrincipal, Depends(current_principal_from_headers)],
@@ -324,7 +319,7 @@ def list_connector_runs(
             resolved_connector_keys = allowed_connector_ids
         page = list_runs(
             session,
-            tenant_id=_resolve_tenant_uuid(user),
+            tenant_id=resolve_tenant_uuid(user),
             connector_key=resolved_connector_key,
             connector_keys=resolved_connector_keys,
             account_id=account_id,
@@ -386,7 +381,7 @@ def list_connector_credential_health(
     # ========================================================================
     allowed_connector_ids = connector_health_connector_ids(user)
     _require_connector_health(allowed_connector_ids)
-    tenant_repository = repository.for_tenant(_resolve_tenant_uuid(user))
+    tenant_repository = repository.for_tenant(resolve_tenant_uuid(user))
 
     try:
         page = tenant_repository.list_credentials(
@@ -730,7 +725,7 @@ def request_connector_job(
     payload = payload_or_rejection
 
     settings = load_app_settings()
-    tenant_id = _resolve_tenant_uuid(user)
+    tenant_id = resolve_tenant_uuid(user)
     executor = getattr(request.app.state, "connector_job_executor", None)
     preflight_rejection = _connector_job_preflight_rejection(
         audit_sink=audit_sink,
@@ -867,7 +862,7 @@ def test_connector_connection(
     try:
         resolve_connector_credentials(
             session=session,
-            tenant_id=_resolve_tenant_uuid(user),
+            tenant_id=resolve_tenant_uuid(user),
             connector_key=connector_key,
             account_id=account_id,
         )
