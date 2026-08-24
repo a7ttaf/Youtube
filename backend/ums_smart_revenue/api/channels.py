@@ -21,7 +21,6 @@ import hashlib
 import json
 from collections.abc import Callable
 from typing import Annotated
-from uuid import UUID
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
 from google.oauth2.credentials import Credentials
@@ -30,16 +29,22 @@ from sqlalchemy.orm import Session
 
 from ums_smart_revenue.api.dependencies import (
     current_db_session,
-    current_platform_db_session,
     current_principal_from_headers,
+    resolve_tenant_uuid,
+)
+from ums_smart_revenue.api.dependencies_audit import (
+    audit_record_to_api,
+    current_atomic_audit_sink,
+    current_audit_sink,
 )
 from ums_smart_revenue.api.dependencies_finance import current_org_access_index
-from ums_smart_revenue.api.registry_dependencies import sql_group_registry_from_session
+from ums_smart_revenue.api.registry_dependencies import (
+    current_channel_registry,
+    sql_group_registry_from_session,
+)
 from ums_smart_revenue.auth.audit import AuditEventType
 from ums_smart_revenue.auth.audit_service import (
-    AuditRecord,
     AuditSink,
-    InMemoryAuditSink,
     record_audit_event,
 )
 from ums_smart_revenue.auth.models import UserPrincipal
@@ -47,7 +52,6 @@ from ums_smart_revenue.auth.permissions import Permission
 from ums_smart_revenue.auth.policy import has_permission
 from ums_smart_revenue.auth.scopes import AccessScope, OrgAccessIndex, ScopeType
 from ums_smart_revenue.auth.seed import ROLE_PERMISSIONS
-from ums_smart_revenue.auth.sql_audit_sink import PlatformLaneAuditSink, SqlAlchemyAuditSink
 from ums_smart_revenue.connectors.google.errors import (
     CredentialNotFoundError,
     GoogleConnectorError,
@@ -90,21 +94,15 @@ from ums_smart_revenue.org.channel_issues import (
 )
 from ums_smart_revenue.org.channel_registry import (
     ChannelMappingLockedMonthError,
-    ChannelRegistry,
     ChannelRegistryConflictError,
     ChannelRegistryEntry,
     ChannelRegistryStore,
     ChannelRegistryValidationError,
     ChannelRevenueRequirementLockedMonthError,
-    bootstrap_channel_registry,
 )
-from ums_smart_revenue.org.sql_channel_registry import SqlAlchemyChannelRegistry
-from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
 
 router = APIRouter(prefix="/channels", tags=["channels"])
 
-_CHANNEL_REGISTRY = bootstrap_channel_registry()
-_AUDIT_SINK = InMemoryAuditSink()
 _OFFICIAL_REVENUE_SOURCE_STATUSES = frozenset({"OFFICIAL_CMS_REVENUE", "OFFICIAL_MANUAL_IMPORT"})
 
 MAX_IMPORT_BYTES = 2 * 1024 * 1024
@@ -117,6 +115,8 @@ IMPORTABLE_CMS_STATUSES = frozenset({"INSIDE_CMS", "OUTSIDE_CMS", "UNKNOWN"})
 
 
 class ChannelCreateRequest(BaseModel):
+    """Request body for POST /channels — create one channel registry entry."""
+
     youtube_channel_id: str = Field(min_length=1)
     channel_name: str = Field(min_length=1)
     primary_company_id: str = Field(min_length=1)
@@ -126,26 +126,33 @@ class ChannelCreateRequest(BaseModel):
 
     @field_validator("youtube_channel_id", "channel_name", "primary_company_id", mode="before")
     @classmethod
-    def strip_required_strings(cls, value):
+    def strip_required_strings(cls, value: object) -> object:
+        """Strip the required string fields via the shared strip/blank-reject rule."""
         return _strip_required_string(value)
 
     @field_validator("content_owner_id", mode="before")
     @classmethod
-    def strip_optional_content_owner(cls, value):
+    def strip_optional_content_owner(cls, value: object) -> object:
+        """Strip the optional content owner field via the shared strip/blank-reject rule."""
         return _strip_optional_string(value)
 
 
 class ChannelMappingRequest(BaseModel):
+    """Request body for PATCH .../mapping — re-parent a channel to a new company."""
+
     primary_company_id: str = Field(min_length=1)
     reason: str = Field(min_length=1)
 
     @field_validator("primary_company_id", "reason", mode="before")
     @classmethod
-    def strip_required_strings(cls, value):
+    def strip_required_strings(cls, value: object) -> object:
+        """Strip the required string fields via the shared strip/blank-reject rule."""
         return _strip_required_string(value)
 
 
 class ContentOwnerUpdateRequest(BaseModel):
+    """Request body for PATCH .../content-owner — set or clear a channel's CMS owner."""
+
     # content_owner_id is required-to-be-present but nullable: sending null
     # clears the CMS content owner; a present-but-blank string is rejected.
     content_owner_id: str | None
@@ -153,12 +160,14 @@ class ContentOwnerUpdateRequest(BaseModel):
 
     @field_validator("content_owner_id", mode="before")
     @classmethod
-    def strip_optional_content_owner(cls, value):
+    def strip_optional_content_owner(cls, value: object) -> object:
+        """Strip the optional content owner field via the shared strip/blank-reject rule."""
         return _strip_optional_string(value)
 
     @field_validator("reason", mode="before")
     @classmethod
-    def strip_required_strings(cls, value):
+    def strip_required_strings(cls, value: object) -> object:
+        """Strip the required reason field via the shared strip/blank-reject rule."""
         return _strip_required_string(value)
 
 
@@ -311,7 +320,8 @@ class GroupSyncResult(BaseModel):
     groups: list[GroupSyncGroupResult]
 
 
-def _strip_required_string(value):
+def _strip_required_string(value: object) -> object:
+    """Strip a required string value; reject it if blank after stripping."""
     if isinstance(value, str):
         stripped = value.strip()
         if not stripped:
@@ -320,7 +330,8 @@ def _strip_required_string(value):
     return value
 
 
-def _strip_optional_string(value: str | None) -> str | None:
+def _strip_optional_string(value: object) -> object:
+    """Strip an optional string value; None passes through, blank-after-strip is rejected."""
     # None stays None (field unset); a present string is stripped and a
     # blank-after-strip value is rejected rather than silently coerced to null.
     if value is None:
@@ -333,74 +344,13 @@ def _strip_optional_string(value: str | None) -> str | None:
     return value
 
 
-def current_channel_registry() -> ChannelRegistry:
-    return _CHANNEL_REGISTRY
-
-
-def sql_channel_registry_from_session(
-    session: Annotated[Session, Depends(current_db_session)],
-) -> SqlAlchemyChannelRegistry:
-    return SqlAlchemyChannelRegistry(session)
-
-
-def current_audit_sink() -> InMemoryAuditSink:
-    return _AUDIT_SINK
-
-
-def sql_audit_sink_from_session(
-    session: Annotated[Session, Depends(current_platform_db_session)],
-) -> SqlAlchemyAuditSink:
-    return SqlAlchemyAuditSink(session)
-
-
-def current_atomic_audit_sink(
-    sink: Annotated[AuditSink, Depends(current_audit_sink)],
-) -> AuditSink:
-    """Audit sink for all-or-nothing routes; passes through until SQL wiring overrides it.
-
-    create_app overrides this with sql_atomic_audit_sink_from_session so the
-    route's audit rows join the tenant transaction (all-or-nothing with the
-    domain writes) instead of committing on the independent platform session.
-    Depending on current_audit_sink keeps the in-memory test wiring working:
-    an override of that dependency still reaches every route wired here.
-    """
-    return sink
-
-
-def sql_atomic_audit_sink_from_session(
-    session: Annotated[Session, Depends(current_db_session)],
-) -> PlatformLaneAuditSink:
-    """Bind an all-or-nothing route's audit writes to the request's tenant session.
-
-    The bulk import and the CMS group sync both promise all-or-nothing
-    semantics. The app-wide audit sink runs on the independently committed
-    platform session, which FastAPI tears down (and commits) BEFORE the tenant
-    session; a tenant commit failure would then leave audit rows permanently
-    claiming work that never happened. PlatformLaneAuditSink writes audit_logs
-    inside the SAME transaction as the domain writes, elevating per append
-    because audit_logs is platform-only writable.
-    """
-    return PlatformLaneAuditSink(session)
-
-
-def audit_record_to_api(record: AuditRecord) -> dict[str, object]:
-    return {
-        "event_type": record.event_type,
-        "entity_type": record.entity_type,
-        "entity_id": record.entity_id,
-        "scope_type": record.scope_type,
-        "scope_id": record.scope_id,
-        "reason": record.reason,
-        "sensitive": record.sensitive,
-    }
-
-
 @router.get("")
 def list_channels(
     user: Annotated[UserPrincipal, Depends(current_principal_from_headers)],
     registry: Annotated[ChannelRegistryStore, Depends(current_channel_registry)],
     org_index: Annotated[OrgAccessIndex, Depends(current_org_access_index)],
 ) -> list[dict[str, object]]:
+    """List every channel the caller is authorized to view for analytics."""
     _require_analytics_view_permission(user)
     return [
         channel.to_api()
@@ -418,6 +368,7 @@ def list_outside_cms_channels(
     registry: Annotated[ChannelRegistryStore, Depends(current_channel_registry)],
     org_index: Annotated[OrgAccessIndex, Depends(current_org_access_index)],
 ) -> dict[str, object]:
+    """List outside-CMS channels the caller can view, with a revenue-required summary."""
     _require_analytics_view_permission(user)
     channels = [
         channel
@@ -448,6 +399,7 @@ def list_channel_issues(
     group_registry: Annotated[ChannelGroupRegistryStore, Depends(sql_group_registry_from_session)],
     org_index: Annotated[OrgAccessIndex, Depends(current_org_access_index)],
 ) -> dict[str, object]:
+    """List registry health issues across the caller's visible channels and groups."""
     _require_analytics_view_permission(user)
     issues = build_channel_registry_issues(
         channels=_visible_channels_for_analytics(
@@ -465,6 +417,7 @@ def list_channel_issues(
 
 
 def _require_analytics_view_permission(user: UserPrincipal) -> None:
+    """Raise 403 unless the user holds VIEW_ANALYTICS in some scope."""
     # Explicit 403 instead of returning a silent empty result: analytics
     # consumers without VIEW_ANALYTICS should fail authorization, not see
     # an empty channel feed that could be mistaken for "no channels exist".
@@ -481,6 +434,7 @@ def _visible_channels_for_analytics(
     registry: ChannelRegistryStore,
     org_index: OrgAccessIndex,
 ) -> list[ChannelRegistryEntry]:
+    """Return the channels the user may view for analytics, filtered by scope."""
     authorized_channel_ids = _authorized_channel_ids_for_analytics(user, org_index)
     if authorized_channel_ids is None:
         return registry.list_channels()
@@ -502,6 +456,7 @@ def _visible_channels_for_analytics(
 
 
 def _outside_cms_channel_to_api(channel: ChannelRegistryEntry) -> dict[str, object]:
+    """Render one outside-CMS channel plus its missing-revenue flag and recommendation."""
     missing_official_revenue = (
         channel.revenue_required
         and channel.revenue_source_status not in _OFFICIAL_REVENUE_SOURCE_STATUSES
@@ -529,6 +484,7 @@ def _recommended_outside_cms_action(
     revenue_source_status: str,
     missing_official_revenue: bool,
 ) -> str:
+    """Recommend the next operator action for an outside-CMS channel's revenue state."""
     if not revenue_required or revenue_source_status == "PERFORMANCE_ONLY":
         return "Confirm performance-only classification."
     if missing_official_revenue:
@@ -541,6 +497,7 @@ def _recommended_outside_cms_action(
 def _authorized_channel_ids_for_analytics(
     user: UserPrincipal, org_index: OrgAccessIndex
 ) -> set[str] | None:
+    """Return the channel ids the user's VIEW_ANALYTICS scopes authorize, or None for global."""
     if user.disabled:
         return set()
 
@@ -566,6 +523,7 @@ def _authorized_channel_ids_for_analytics(
 
 
 def _direct_scopes_for_permission(user: UserPrincipal, permission: Permission) -> list[AccessScope]:
+    """Return the user's active direct-grant scopes for one permission."""
     return [
         grant.scope
         for grant in user.direct_permissions
@@ -574,6 +532,7 @@ def _direct_scopes_for_permission(user: UserPrincipal, permission: Permission) -
 
 
 def _role_scopes_for_permission(user: UserPrincipal, permission: Permission) -> list[AccessScope]:
+    """Return the scopes the user's active roles grant for one permission."""
     return [
         assignment.scope
         for assignment in user.role_assignments
@@ -584,6 +543,7 @@ def _role_scopes_for_permission(user: UserPrincipal, permission: Permission) -> 
 def _granted_scopes_for_permission(
     user: UserPrincipal, permission: Permission
 ) -> tuple[AccessScope, ...]:
+    """Return every scope — direct and role-granted — that grants the user one permission."""
     return tuple(
         _direct_scopes_for_permission(user, permission)
         + _role_scopes_for_permission(user, permission)
@@ -598,6 +558,7 @@ def create_channel(
     org_index: Annotated[OrgAccessIndex, Depends(current_org_access_index)],
     audit_sink: Annotated[AuditSink, Depends(current_audit_sink)],
 ) -> dict[str, object]:
+    """Create one channel registry entry and record a CHANNEL_CREATED audit event."""
     target_scope = AccessScope.company(payload.primary_company_id)
     if not has_permission(user, Permission.MANAGE_CHANNELS, target_scope, org_index):
         raise HTTPException(
@@ -756,7 +717,7 @@ def import_channels(
         cms_status=cms_status,
         # The RESOLVED tenant, not a client-supplied echo: an approval obtained
         # in one tenant must not be spendable in another.
-        tenant_id=str(_resolve_tenant_uuid(user)),
+        tenant_id=str(resolve_tenant_uuid(user)),
     )
 
     if dry_run:
@@ -1242,21 +1203,6 @@ def current_groups_client_factory() -> Callable[[Credentials], YouTubeGroupsClie
     return default_groups_client_factory
 
 
-def _resolve_tenant_uuid(user: UserPrincipal) -> UUID:
-    """Resolve a trusted tenant UUID from the principal headers, falling back closed.
-
-    Replicated from ``api/connectors.py``, which owns the original: that module
-    imports THIS one at load time (audit_record_to_api / current_audit_sink), so
-    importing the helper back from it is a circular import that fails at
-    startup. Keep the two copies in step — both must fall back to the bootstrap
-    tenant instead of letting a malformed header raise a bare ValueError.
-    """
-    try:
-        return UUID(user.tenant_id) if user.tenant_id else UUID(UMS_TENANT_ID)
-    except ValueError:
-        return UUID(UMS_TENANT_ID)
-
-
 # ============================================================================
 # Purpose: Mirror a YouTube CMS content owner's groups into channel_groups —
 #   titles, membership (adds AND removals), deactivation of vanished groups,
@@ -1319,7 +1265,7 @@ def sync_channel_groups(
     try:
         result = run_group_sync(
             session,
-            tenant_id=_resolve_tenant_uuid(user),
+            tenant_id=resolve_tenant_uuid(user),
             content_owner_id=content_owner_id,
             registry=registry,
             groups=groups,
@@ -1485,6 +1431,7 @@ def update_channel_mapping(
     org_index: Annotated[OrgAccessIndex, Depends(current_org_access_index)],
     audit_sink: Annotated[AuditSink, Depends(current_audit_sink)],
 ) -> dict[str, object]:
+    """Re-parent a channel to a new company, recording CHANNEL_UPDATED unless it's a no-op."""
     current_scope = AccessScope.channel(youtube_channel_id)
     target_scope = AccessScope.company(payload.primary_company_id)
     can_manage_current = has_permission(
@@ -1582,6 +1529,7 @@ def update_channel_content_owner(
     org_index: Annotated[OrgAccessIndex, Depends(current_org_access_index)],
     audit_sink: Annotated[AuditSink, Depends(current_audit_sink)],
 ) -> dict[str, object]:
+    """Set or clear a channel's CMS content owner, recording CHANNEL_UPDATED unless it's a no-op."""
     # Setting the CMS content owner is channel ingestion configuration, gated on
     # MANAGE_CHANNELS (not the org-re-parenting MANAGE_ORG_MAPPING). Authorize
     # before the existence check so a missing channel never leaks via a 404.

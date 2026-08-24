@@ -7,16 +7,16 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.orm import Session
 
-from ums_smart_revenue.api.channels import audit_record_to_api, current_audit_sink
+from ums_smart_revenue.api.authz import require_permission
 from ums_smart_revenue.api.dependencies import (
     current_db_session,
     current_principal_from_headers,
 )
+from ums_smart_revenue.api.dependencies_audit import audit_record_to_api, current_audit_sink
 from ums_smart_revenue.auth.audit import AuditEventType
 from ums_smart_revenue.auth.audit_service import AuditSink, record_audit_event
 from ums_smart_revenue.auth.models import UserPrincipal
 from ums_smart_revenue.auth.permissions import Permission
-from ums_smart_revenue.auth.policy import has_permission
 from ums_smart_revenue.auth.scopes import AccessScope
 from ums_smart_revenue.connectors.google.adsense_management_client import (
     _validated_account_id,
@@ -142,7 +142,7 @@ def sync_adsense_payments(
 ) -> dict[str, object]:
     """Sync a manually supplied AdSense payment batch after permission checks."""
     connector_scope = AccessScope.connector(payload.connector_key)
-    _require_permission(user, Permission.RUN_CONNECTOR_JOBS, connector_scope)
+    require_permission(user, Permission.RUN_CONNECTOR_JOBS, connector_scope)
     if payload.connector_key != "adsense":
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
@@ -229,7 +229,7 @@ def list_adsense_payments(
         if normalized_month is not None
         else AccessScope.global_scope()
     )
-    _require_permission(user, Permission.VIEW_FINALIZED_PAYMENTS, scope)
+    require_permission(user, Permission.VIEW_FINALIZED_PAYMENTS, scope)
     month = normalized_month
     try:
         page = repository.list_payments(month=month, limit=limit, offset=offset)
@@ -295,7 +295,7 @@ def get_adsense_payment_status(
             detail="month must use YYYY-MM with a calendar month from 01 to 12",
         )
     scope = AccessScope.finance_month(normalized_month)
-    _require_permission(user, Permission.VIEW_FINALIZED_PAYMENTS, scope)
+    require_permission(user, Permission.VIEW_FINALIZED_PAYMENTS, scope)
     try:
         payments = repository.list_month_payments(month=normalized_month)
     except AdSensePaymentValidationError as exc:
@@ -321,19 +321,6 @@ def get_adsense_payment_status(
     result = summary.to_api()
     result["audit_event"] = audit_record_to_api(record)
     return result
-
-
-def _require_permission(
-    user: UserPrincipal,
-    permission: Permission,
-    scope: AccessScope,
-) -> None:
-    """Raise HTTP 403 when the user lacks the required scoped permission."""
-    if not has_permission(user, permission, scope):
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail=f"Missing permission: {permission.value}",
-        )
 
 
 def _strip_required_string(value):

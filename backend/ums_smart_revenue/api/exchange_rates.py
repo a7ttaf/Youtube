@@ -2,22 +2,22 @@ import hashlib
 import re
 from datetime import date
 from decimal import Decimal
-from typing import Annotated
+from typing import Annotated, overload
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field, field_validator, model_validator
 from sqlalchemy.orm import Session
 
-from ums_smart_revenue.api.channels import audit_record_to_api, current_audit_sink
+from ums_smart_revenue.api.authz import require_permission
 from ums_smart_revenue.api.dependencies import (
     current_db_session,
     current_principal_from_headers,
 )
+from ums_smart_revenue.api.dependencies_audit import audit_record_to_api, current_audit_sink
 from ums_smart_revenue.auth.audit import AuditEventType
 from ums_smart_revenue.auth.audit_service import AuditSink, record_audit_event
 from ums_smart_revenue.auth.models import UserPrincipal
 from ums_smart_revenue.auth.permissions import Permission
-from ums_smart_revenue.auth.policy import has_permission
 from ums_smart_revenue.auth.scopes import AccessScope
 from ums_smart_revenue.finance.exchange_rates import (
     MAX_EXCHANGE_RATE_BATCH_SIZE,
@@ -31,7 +31,16 @@ router = APIRouter(prefix="/exchange-rates", tags=["exchange-rates"])
 CURRENCY_CODE_PATTERN = re.compile(r"^[A-Z]{3}$")
 
 
-def _normalize_currency_code(value):
+@overload
+def _normalize_currency_code(value: str) -> str: ...
+
+
+@overload
+def _normalize_currency_code(value: object) -> object: ...
+
+
+def _normalize_currency_code(value: object) -> object:
+    """Upper-case and validate a 3-letter ISO 4217 code; non-strings pass through."""
     if isinstance(value, str):
         normalized = value.strip().upper()
         if not CURRENCY_CODE_PATTERN.fullmatch(normalized):
@@ -41,6 +50,8 @@ def _normalize_currency_code(value):
 
 
 class ExchangeRateRequest(BaseModel):
+    """One currency pair's exchange rate on a given date, as submitted for sync."""
+
     rate_date: date
     base_currency: str = Field(min_length=1)
     quote_currency: str = Field(min_length=1)
@@ -49,17 +60,21 @@ class ExchangeRateRequest(BaseModel):
 
     @field_validator("base_currency", "quote_currency", mode="before")
     @classmethod
-    def strip_required_strings(cls, value):
+    def strip_required_strings(cls, value: object) -> object:
+        """Strip whitespace from base_currency/quote_currency and normalize to ISO codes."""
         return _normalize_currency_code(_strip_required_string(value))
 
     @model_validator(mode="after")
-    def check_currency_pair_distinct(self):
+    def check_currency_pair_distinct(self) -> "ExchangeRateRequest":
+        """Reject a request whose base_currency and quote_currency are identical."""
         if self.base_currency == self.quote_currency:
             raise ValueError("base_currency and quote_currency must differ")
         return self
 
 
 class ExchangeRateSyncRequest(BaseModel):
+    """A provider's batch of exchange rates to sync, with the reason for the write."""
+
     provider_key: str = Field(min_length=1)
     source_report_id: str | None = None
     reason: str = Field(min_length=1)
@@ -70,12 +85,14 @@ class ExchangeRateSyncRequest(BaseModel):
 
     @field_validator("provider_key", "reason", mode="before")
     @classmethod
-    def strip_required_strings(cls, value):
+    def strip_required_strings(cls, value: object) -> object:
+        """Strip whitespace from provider_key/reason, rejecting blank values."""
         return _strip_required_string(value)
 
     @field_validator("source_report_id", mode="before")
     @classmethod
-    def strip_optional_string(cls, value):
+    def strip_optional_string(cls, value: object) -> object:
+        """Strip source_report_id, normalizing a blank or absent value to None."""
         if value is None:
             return None
         if isinstance(value, str):
@@ -87,6 +104,7 @@ class ExchangeRateSyncRequest(BaseModel):
 def current_exchange_rate_repository(
     session: Annotated[Session, Depends(current_db_session)],
 ) -> SqlAlchemyExchangeRateRepository:
+    """Build a SQL-backed exchange rate repository bound to the request's session."""
     return SqlAlchemyExchangeRateRepository(session)
 
 
@@ -100,8 +118,9 @@ def sync_exchange_rates(
     ],
     audit_sink: Annotated[AuditSink, Depends(current_audit_sink)],
 ) -> dict[str, object]:
+    """Sync a provider's batch of exchange rates and record an audit event for the write."""
     connector_scope = AccessScope.connector(payload.provider_key)
-    _require_permission(user, Permission.RUN_CONNECTOR_JOBS, connector_scope)
+    require_permission(user, Permission.RUN_CONNECTOR_JOBS, connector_scope)
     try:
         entries = repository.sync_rates(
             rates=[
@@ -185,7 +204,8 @@ def get_latest_exchange_rate(
     as_of_date: date,
     provider_key: str | None = None,
 ) -> dict[str, object]:
-    _require_permission(user, Permission.VIEW_REVENUE, AccessScope.global_scope())
+    """Look up the latest exchange rate for a currency pair as of a date and audit the read."""
+    require_permission(user, Permission.VIEW_REVENUE, AccessScope.global_scope())
     try:
         normalized_base = _normalize_currency_code(base_currency)
         normalized_quote = _normalize_currency_code(quote_currency)
@@ -236,19 +256,8 @@ def get_latest_exchange_rate(
     return response
 
 
-def _require_permission(
-    user: UserPrincipal,
-    permission: Permission,
-    scope: AccessScope,
-) -> None:
-    if not has_permission(user, permission, scope):
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail=f"Missing permission: {permission.value}",
-        )
-
-
-def _strip_required_string(value):
+def _strip_required_string(value: object) -> object:
+    """Strip a required string value, rejecting blank results; non-strings pass through."""
     if isinstance(value, str):
         stripped = value.strip()
         if not stripped:

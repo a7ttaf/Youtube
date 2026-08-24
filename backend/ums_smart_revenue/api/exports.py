@@ -12,7 +12,6 @@
 #   - File: backend/ums_smart_revenue/reports/artifact_storage.py -> Artifact IO.
 # ============================================================================
 import logging
-import re
 from dataclasses import dataclass
 from typing import Annotated
 from uuid import UUID
@@ -22,19 +21,15 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.orm import Session
 
-from ums_smart_revenue.api.channels import audit_record_to_api, current_audit_sink
+from ums_smart_revenue.api.authz import raise_missing_permission, require_permission
 from ums_smart_revenue.api.dependencies import (
     current_db_session,
     current_platform_db_session,
     current_principal_from_headers,
 )
+from ums_smart_revenue.api.dependencies_audit import audit_record_to_api, current_audit_sink
+from ums_smart_revenue.api.dependencies_finance import current_org_access_index
 from ums_smart_revenue.api.registry_dependencies import sql_group_registry_from_session
-from ums_smart_revenue.api.revenue import (
-    _resolve_smart_alert_tenant_id,
-    current_org_access_index,
-    missing_revenue_fact_channel_count_and_sample,
-    skipped_source_row_count_and_reasons,
-)
 from ums_smart_revenue.auth.audit import AuditEventType
 from ums_smart_revenue.auth.audit_log import SqlAlchemyAuditLogRepository
 from ums_smart_revenue.auth.audit_service import AuditRecord, AuditSink, record_audit_event
@@ -90,6 +85,12 @@ from ums_smart_revenue.finance.revenue_facts import (
     RevenueFactValidationError,
     SqlAlchemyRevenueFactRepository,
 )
+from ums_smart_revenue.finance.smart_alert_signals import (
+    missing_revenue_fact_channel_count_and_sample,
+    previous_month,
+    resolve_smart_alert_tenant_id,
+    skipped_source_row_count_and_reasons,
+)
 from ums_smart_revenue.finance.smart_alerts import (
     MonthlySmartAlertAuditSignals,
     MonthlySmartAlertFinanceInputs,
@@ -135,7 +136,6 @@ from ums_smart_revenue.reports.finance_workbook import (
 from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
 
 router = APIRouter(prefix="/exports", tags=["exports"])
-EXPORT_MONTH_PATTERN = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
 logger = logging.getLogger(__name__)
 MAX_AUTHORIZED_EXPORT_JOB_SCAN_PAGES = 10
 _ANALYTICS_SUMMARY_CSV_TYPE = "ANALYTICS_SUMMARY_CSV"
@@ -263,7 +263,7 @@ def request_export(
             raise ExportJobValidationError(f"Unknown export_type: {payload.export_type}")
         required_export_permission = _audit_permission_for_export_type(payload.export_type)
         if not _has_permission_assignment(user, required_export_permission):
-            _raise_missing_permission(required_export_permission)
+            raise_missing_permission(required_export_permission)
         analytics_csv_lookup_denial_permission: Permission | None = None
         if payload.export_type == _ANALYTICS_SUMMARY_CSV_TYPE:
             analytics_csv_lookup_denial_permission = (
@@ -376,7 +376,7 @@ def list_exports(
 ) -> dict[str, object]:
     """Return a paginated list of export jobs the caller is authorized to access."""
     if not _has_any_export_permission(user):
-        _raise_missing_permission(Permission.EXPORT_ANALYTICS_REPORT)
+        raise_missing_permission(Permission.EXPORT_ANALYTICS_REPORT)
     try:
         items, has_more = _list_authorized_export_jobs(
             repository=repository,
@@ -412,7 +412,7 @@ def get_export(
 ) -> dict[str, object]:
     """Retrieve a single export job by ID and emit a scoped access audit event."""
     if not _has_any_export_permission(user):
-        _raise_missing_permission(Permission.EXPORT_ANALYTICS_REPORT)
+        raise_missing_permission(Permission.EXPORT_ANALYTICS_REPORT)
     try:
         export_job = repository.get_job(export_id, requested_by=user.user_id)
     except ExportJobNotFoundError as exc:
@@ -480,7 +480,7 @@ def preview_finance_workbook(
 ) -> dict[str, object]:
     """Return a JSON preview of the finance workbook data for a FINANCE_EXCEL export job."""
     if not _has_any_export_permission(user):
-        _raise_missing_permission(Permission.EXPORT_ANALYTICS_REPORT)
+        raise_missing_permission(Permission.EXPORT_ANALYTICS_REPORT)
     try:
         export_job = repository.get_job(export_id, requested_by=user.user_id)
         _require_finance_export_artifact_permissions(
@@ -577,7 +577,7 @@ def download_analytics_summary_csv(
 ) -> Response:
     """Generate or serve the cached analytics summary CSV for an analytics export job."""
     if not _has_any_export_permission(user):
-        _raise_missing_permission(Permission.EXPORT_ANALYTICS_REPORT)
+        raise_missing_permission(Permission.EXPORT_ANALYTICS_REPORT)
     try:
         export_job = repository.get_job(export_id, requested_by=user.user_id)
         resolved_channel_ids = _resolved_export_channel_ids(
@@ -649,7 +649,7 @@ def download_finance_workbook(
 ) -> Response:
     """Generate or serve the cached finance workbook XLSX file for a FINANCE_EXCEL export job."""
     if not _has_any_export_permission(user):
-        _raise_missing_permission(Permission.EXPORT_ANALYTICS_REPORT)
+        raise_missing_permission(Permission.EXPORT_ANALYTICS_REPORT)
     try:
         export_job = repository.get_job(export_id, requested_by=user.user_id)
         _require_finance_export_artifact_permissions(
@@ -763,7 +763,7 @@ def download_executive_pdf(
 ) -> Response:
     """Generate or serve the cached executive summary PDF for an EXECUTIVE_PDF export job."""
     if not _has_any_export_permission(user):
-        _raise_missing_permission(Permission.EXPORT_ANALYTICS_REPORT)
+        raise_missing_permission(Permission.EXPORT_ANALYTICS_REPORT)
     try:
         export_job = repository.get_job(export_id, requested_by=user.user_id)
         _require_finance_export_artifact_permissions(
@@ -885,7 +885,7 @@ def download_branded_slide_pack(
 ) -> Response:
     """Generate or serve the cached branded slide pack PPTX for a BRANDED_SLIDE_PACK export job."""
     if not _has_any_export_permission(user):
-        _raise_missing_permission(Permission.EXPORT_ANALYTICS_REPORT)
+        raise_missing_permission(Permission.EXPORT_ANALYTICS_REPORT)
     try:
         export_job = repository.get_job(export_id, requested_by=user.user_id)
         _require_finance_export_artifact_permissions(
@@ -1363,7 +1363,7 @@ def _build_finance_source_summaries_for_export(
         youtube_channel_ids=channel_ids,
     )
     previous_facts = revenue_repository.list_month_facts(
-        month=_previous_month(export_job.month),
+        month=previous_month(export_job.month),
         youtube_channel_ids=channel_ids,
     )
     manual_overrides = SqlAlchemyManualOverrideRepository(platform_session).list_month_overrides(
@@ -1490,7 +1490,7 @@ def _build_finance_source_summaries_for_export(
         )
         failed_connector_runs = SqlAlchemyAuditLogRepository(
             session,
-            tenant_id=_resolve_smart_alert_tenant_id(),
+            tenant_id=resolve_smart_alert_tenant_id(),
         ).connector_run_failure_summary(
             month=export_job.month,
         )
@@ -1951,8 +1951,8 @@ def _require_export_scope_permissions(
             raise ExportJobValidationError("scoped exports require at least one channel")
         for channel_id in scope_channel_ids:
             channel_scope = AccessScope.channel(channel_id)
-            _require_permission(user, export_permission, channel_scope, org_index)
-            _require_permission(user, view_permission, channel_scope, org_index)
+            require_permission(user, export_permission, channel_scope, org_index)
+            require_permission(user, view_permission, channel_scope, org_index)
         return
 
     if scope_type == "group":
@@ -1965,13 +1965,13 @@ def _require_export_scope_permissions(
             raise ExportJobValidationError("group exports require at least one channel")
         for channel_id in group.channel_ids:
             channel_scope = AccessScope.channel(channel_id)
-            _require_permission(user, export_permission, channel_scope, org_index)
-            _require_permission(user, view_permission, channel_scope, org_index)
+            require_permission(user, export_permission, channel_scope, org_index)
+            require_permission(user, view_permission, channel_scope, org_index)
         return
 
     target_scope = _access_scope_from_export_scope(scope_type, scope_id)
-    _require_permission(user, export_permission, target_scope, org_index)
-    _require_permission(user, view_permission, target_scope, org_index)
+    require_permission(user, export_permission, target_scope, org_index)
+    require_permission(user, view_permission, target_scope, org_index)
 
 
 # ============================================================================
@@ -2048,6 +2048,7 @@ def _has_export_scope_permissions(
     scope_id: str | None,
     org_index: OrgAccessIndex,
 ) -> bool:
+    """Return whether user holds every permission in `permissions` for the export scope."""
     target_scope = _access_scope_from_export_scope(scope_type, scope_id)
     return all(
         has_permission(user, permission, target_scope, org_index) for permission in permissions
@@ -2080,7 +2081,7 @@ def _require_export_scope_view_permission(
         if not scope_channel_ids:
             raise ExportJobValidationError("scoped exports require at least one channel")
         for channel_id in scope_channel_ids:
-            _require_permission(user, view_permission, AccessScope.channel(channel_id), org_index)
+            require_permission(user, view_permission, AccessScope.channel(channel_id), org_index)
         return
 
     if scope_type == "group":
@@ -2092,11 +2093,11 @@ def _require_export_scope_view_permission(
         if not group.channel_ids:
             raise ExportJobValidationError("group exports require at least one channel")
         for channel_id in group.channel_ids:
-            _require_permission(user, view_permission, AccessScope.channel(channel_id), org_index)
+            require_permission(user, view_permission, AccessScope.channel(channel_id), org_index)
         return
 
     target_scope = _access_scope_from_export_scope(scope_type, scope_id)
-    _require_permission(user, view_permission, target_scope, org_index)
+    require_permission(user, view_permission, target_scope, org_index)
 
 
 def _require_finance_export_artifact_permissions(
@@ -2121,13 +2122,13 @@ def _require_finance_export_artifact_permissions(
         scope_channel_ids=scope_channel_ids,
     )
     month_scope = AccessScope.finance_month(month)
-    _require_permission(
+    require_permission(
         user,
         Permission.VIEW_FINALIZED_PAYMENTS,
         month_scope,
         org_index,
     )
-    _require_permission(
+    require_permission(
         user,
         Permission.VIEW_BANK_RECONCILIATION,
         month_scope,
@@ -2193,13 +2194,13 @@ def _resolve_export_scope_snapshot(
         )
     except KeyError:
         if denial_permission is not None:
-            _raise_missing_permission(denial_permission)
+            raise_missing_permission(denial_permission)
         raise
     snapshot_tuple = _channel_snapshot_tuple(snapshot)
     if denial_permission is not None and snapshot_tuple is not None and not snapshot_tuple:
         # FIX: Known-but-empty org scopes should not reveal existence to a
         # caller missing the requested analytics CSV permission scope.
-        _raise_missing_permission(denial_permission)
+        raise_missing_permission(denial_permission)
     return snapshot_tuple
 
 
@@ -2294,7 +2295,7 @@ def _require_analytics_csv_permissions_before_scope_lookup(
         if not _has_permission_assignment(user, permission):
             # FIX: Deny missing export/analytics/revenue grants before resolving
             # scoped membership, so scope existence cannot be probed through 404s.
-            _raise_missing_permission(permission)
+            raise_missing_permission(permission)
         if lookup_denial_permission is None and not _has_csv_lookup_permission(
             user=user,
             permission=permission,
@@ -2389,25 +2390,6 @@ def _access_scope_from_export_scope(scope_type: str, scope_id: str | None) -> Ac
     if scope_type == "group":
         return AccessScope.group(scope_id)
     raise ExportJobValidationError(f"Unknown export scope_type: {scope_type}")
-
-
-def _require_permission(
-    user: UserPrincipal,
-    permission: Permission,
-    scope: AccessScope,
-    org_index: OrgAccessIndex,
-) -> None:
-    """Raise 403 if the user does not hold the given permission on the given scope."""
-    if not has_permission(user, permission, scope, org_index):
-        _raise_missing_permission(permission)
-
-
-def _raise_missing_permission(permission: Permission) -> None:
-    """Raise an HTTP 403 with a message identifying the missing permission."""
-    raise HTTPException(
-        status_code=status.HTTP_403_FORBIDDEN,
-        detail=f"Missing permission: {permission.value}",
-    )
 
 
 def _has_any_export_permission(user: UserPrincipal) -> bool:
@@ -2519,25 +2501,3 @@ def _can_access_export_job(
     except (ExportJobValidationError, HTTPException, KeyError):
         return False
     return True
-
-
-def _previous_month(month: str) -> str:
-    """Return the YYYY-MM string for the calendar month immediately before the given month."""
-    if not EXPORT_MONTH_PATTERN.fullmatch(month):
-        raise RevenueFactValidationError(
-            f"export month must use YYYY-MM with a calendar month from 01 to 12: {month!r}"
-        )
-    year_value, month_value = month.split("-", maxsplit=1)
-    year = int(year_value)
-    month_number = int(month_value)
-    if year == 0 or month_number < 1 or month_number > 12:
-        raise RevenueFactValidationError(
-            f"export month must use YYYY-MM with a calendar month from 01 to 12: {month!r}"
-        )
-    if month_number == 1:
-        if year == 1:
-            raise RevenueFactValidationError(
-                f"export month must use YYYY-MM with a calendar month from 01 to 12: {month!r}"
-            )
-        return f"{year - 1:04d}-12"
-    return f"{year:04d}-{month_number - 1:02d}"

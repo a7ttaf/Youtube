@@ -1,6 +1,6 @@
 from fastapi.testclient import TestClient
 
-from ums_smart_revenue.api.revenue import current_org_access_index
+from ums_smart_revenue.api.dependencies_finance import current_org_access_index
 from ums_smart_revenue.app import create_app
 from ums_smart_revenue.org.bootstrap_registry import (
     BOOTSTRAP_COMPANY_TV_ID,
@@ -9,12 +9,14 @@ from ums_smart_revenue.org.bootstrap_registry import (
 
 
 def create_bootstrap_app():
+    """Create an application wired with the bootstrap org access index for testing."""
     app = create_app()
     app.dependency_overrides[current_org_access_index] = lambda: BOOTSTRAP_ORG_INDEX
     return app
 
 
 def auth_headers(role: str, scope_type: str, scope_id: str | None = None) -> dict[str, str]:
+    """Build trusted-gateway auth headers for a test client given role and scope."""
     headers = {
         "x-user-id": "user-1",
         "x-user-email": "user@example.com",
@@ -28,6 +30,7 @@ def auth_headers(role: str, scope_type: str, scope_id: str | None = None) -> dic
 
 
 def test_guarded_revenue_route_rejects_assistant_without_finance_access():
+    """A role without finance.view_revenue is rejected with 403."""
     client = TestClient(create_bootstrap_app())
 
     response = client.get(
@@ -40,6 +43,7 @@ def test_guarded_revenue_route_rejects_assistant_without_finance_access():
 
 
 def test_guarded_revenue_route_allows_scoped_finance_viewer():
+    """A finance viewer scoped to the channel's company is authorized."""
     client = TestClient(create_bootstrap_app())
 
     response = client.get(
@@ -56,6 +60,7 @@ def test_guarded_revenue_route_allows_scoped_finance_viewer():
 
 
 def test_guarded_revenue_route_rejects_finance_viewer_outside_scope():
+    """A finance viewer scoped to a different company is rejected with 403."""
     client = TestClient(create_bootstrap_app())
 
     response = client.get(
@@ -68,6 +73,7 @@ def test_guarded_revenue_route_rejects_finance_viewer_outside_scope():
 
 
 def test_guarded_route_requires_auth_headers():
+    """A request with no auth headers at all is rejected with 401."""
     client = TestClient(create_bootstrap_app())
 
     response = client.get("/revenue/channels/channel-tv-a/authorization-check")
@@ -77,6 +83,7 @@ def test_guarded_route_requires_auth_headers():
 
 
 def test_guarded_route_rejects_untrusted_identity_headers():
+    """A request missing the trusted gateway token is rejected with 401."""
     client = TestClient(create_bootstrap_app())
 
     headers = auth_headers("super_owner", "global")
@@ -88,6 +95,7 @@ def test_guarded_route_rejects_untrusted_identity_headers():
 
 
 def test_guarded_route_rejects_non_global_scope_without_id():
+    """A non-global scope type with no scope_id is rejected with 400."""
     client = TestClient(create_bootstrap_app())
 
     response = client.get(

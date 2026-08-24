@@ -1,6 +1,6 @@
 """Tenant-scoped audit log read models and SQL repository."""
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast
@@ -16,6 +16,10 @@ from ums_smart_revenue.db.security_models import AuditLogORM
 from ums_smart_revenue.tenancy.ids import resolve_repository_tenant_id
 
 MAX_AUDIT_LOG_PAGE_SIZE = 100
+# Server-side fetch batch for the streamed connector-run details read: the
+# caller usually stops at the newest relevant row, so one small batch is the
+# common case while a pathological month still streams without materializing.
+_CONNECTOR_RUN_DETAILS_BATCH_SIZE = 20
 _CONNECTOR_TERMINAL_LIFECYCLES = frozenset({"FINISHED", "PROJECTION_FAILED"})
 _ADSENSE_ACCOUNT_RESOURCE_PREFIX = "accounts/"
 _ADSENSE_ACCOUNT_ID_RESERVED_CHARS = frozenset("/?#%")
@@ -89,13 +93,9 @@ class ConnectorRunFailureSummary:
 class AuditLogError(ValueError):
     """Base error for audit log read validation failures."""
 
-    pass
-
 
 class AuditLogValidationError(AuditLogError):
     """Raised when audit log query parameters fail validation."""
-
-    pass
 
 
 class SqlAlchemyAuditLogRepository:
@@ -300,6 +300,54 @@ class SqlAlchemyAuditLogRepository:
             count=sum(status_counts.values()),
             by_status=dict(sorted(status_counts.items())),
         )
+
+    def connector_run_details_for_finance_month(self, month: str) -> Iterator[object]:
+        """Stream CONNECTOR_JOB_RUN audit detail payloads for one finance month, newest first.
+
+        Ordered by created_at DESC then id DESC so the first yielded row is
+        the newest connector-run edge. Rows stream in small server-side
+        batches, so a caller that stops at the first relevant row never
+        transfers or materializes the month's full re-run history.
+        Repository owns the audit-log SQL; interpreting the JSON lifecycle
+        payloads (e.g. ROWS_SKIPPED supersession) stays with the caller.
+        """
+        # ====================================================================
+        # Purpose: Stream the CONNECTOR_JOB_RUN audit detail payloads for one
+        #   finance month, newest edge first, so the smart-alert signal
+        #   service can interpret the latest connector-run lifecycle without
+        #   loading a month's full re-run history.
+        # Database/ORM: Read-only SELECT on AuditLogORM / audit_logs; filters
+        #   tenant, CONNECTOR_JOB_RUN event type, FINANCE_MONTH scope, and
+        #   the requested month; ordered created_at DESC, id DESC; streamed
+        #   via yield_per so an early caller break bounds rows fetched and
+        #   deserialized. No locks, no writes.
+        # Standards: Repository owns the audit-log SQL; callers own auth
+        #   gates and the JSON lifecycle interpretation (a newer clean edge
+        #   supersedes older ROWS_SKIPPED history at the caller). The result
+        #   is closed on early exit via the finally block.
+        # Blast Radius: Finance dashboard/export read model only. No audit
+        #   writes, authorization, or finance mutation.
+        # Connections:
+        #   - File: backend/ums_smart_revenue/finance/smart_alert_signals.py
+        #     -> skipped_source_row_count_and_reasons interprets these rows.
+        #   - File: backend/ums_smart_revenue/connectors/runs/normalization.py
+        #     -> emits the ROWS_SKIPPED edges read here.
+        # ====================================================================
+        result = self._session.scalars(
+            select(AuditLogORM.details)
+            .where(
+                AuditLogORM.tenant_id == self._tenant_id,
+                AuditLogORM.event_type == AuditEventType.CONNECTOR_JOB_RUN.value,
+                AuditLogORM.scope_type == ScopeType.FINANCE_MONTH.value,
+                AuditLogORM.scope_id == month,
+            )
+            .order_by(AuditLogORM.created_at.desc(), AuditLogORM.id.desc())
+            .execution_options(yield_per=_CONNECTOR_RUN_DETAILS_BATCH_SIZE)
+        )
+        try:
+            yield from result
+        finally:
+            result.close()
 
     @staticmethod
     def _to_entry(row: AuditLogORM) -> AuditLogEntry:

@@ -15,14 +15,14 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.orm import Session
 
-from ums_smart_revenue.api.channels import audit_record_to_api
+from ums_smart_revenue.api.authz import require_permission
 from ums_smart_revenue.api.dependencies import (
     current_platform_db_session,
     current_principal_from_headers,
 )
-from ums_smart_revenue.api.dependencies_finance import current_org_access_index
-from ums_smart_revenue.api.revenue import (
-    _require_permission,
+from ums_smart_revenue.api.dependencies_audit import audit_record_to_api
+from ums_smart_revenue.api.dependencies_finance import (
+    current_org_access_index,
     current_revenue_audit_sink,
 )
 from ums_smart_revenue.auth.audit import AuditEventType
@@ -140,15 +140,15 @@ def reconcile_month(
     #   - File: Docs/superpowers/plans/2026-06-09-track-f-smart-reconciliation.md
     # ========================================================================
     _require_valid_month(month)
-    _require_permission(user, Permission.CHANGE_ALLOCATION_RULE, AccessScope.finance_month(month))
-    _require_permission(user, Permission.VIEW_REVENUE, AccessScope.global_scope())
-    _require_permission(user, Permission.VIEW_FINALIZED_PAYMENTS, AccessScope.finance_month(month))
-    _require_permission(
+    require_permission(user, Permission.CHANGE_ALLOCATION_RULE, AccessScope.finance_month(month))
+    require_permission(user, Permission.VIEW_REVENUE, AccessScope.global_scope())
+    require_permission(user, Permission.VIEW_FINALIZED_PAYMENTS, AccessScope.finance_month(month))
+    require_permission(
         user,
         Permission.VIEW_BANK_RECONCILIATION,
         AccessScope.finance_month(month),
     )
-    _require_permission(user, Permission.VIEW_CONFIDENCE, AccessScope.global_scope())
+    require_permission(user, Permission.VIEW_CONFIDENCE, AccessScope.global_scope())
     service = ReconciliationWorkflowService(session, audit_sink=audit_sink)
     try:
         result = service.run(month=month, actor=user, reason=payload.reason)
@@ -187,10 +187,10 @@ def get_channel_month_reconciliation(
     # ========================================================================
     _require_valid_month(month)
     target_scope = AccessScope.channel(channel_id)
-    _require_permission(user, Permission.VIEW_REVENUE, target_scope, org_index)
-    _require_permission(user, Permission.VIEW_CONFIDENCE, target_scope, org_index)
-    _require_permission(user, Permission.VIEW_FINALIZED_PAYMENTS, AccessScope.finance_month(month))
-    _require_permission(
+    require_permission(user, Permission.VIEW_REVENUE, target_scope, org_index)
+    require_permission(user, Permission.VIEW_CONFIDENCE, target_scope, org_index)
+    require_permission(user, Permission.VIEW_FINALIZED_PAYMENTS, AccessScope.finance_month(month))
+    require_permission(
         user,
         Permission.VIEW_BANK_RECONCILIATION,
         AccessScope.finance_month(month),

@@ -28,17 +28,17 @@
 # ============================================================================
 """Channel-group listing, mutation, membership, and owner-stamp HTTP routes."""
 
-from typing import Annotated
+from typing import Annotated, cast
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field, field_validator
 
-from ums_smart_revenue.api.channels import (
+from ums_smart_revenue.api.dependencies import current_principal_from_headers
+from ums_smart_revenue.api.dependencies_audit import (
     audit_record_to_api,
     current_atomic_audit_sink,
     current_audit_sink,
 )
-from ums_smart_revenue.api.dependencies import current_principal_from_headers
 from ums_smart_revenue.api.dependencies_finance import current_org_access_index
 from ums_smart_revenue.api.registry_dependencies import (
     sql_group_registry_from_session,
@@ -75,6 +75,8 @@ GROUP_TYPES = frozenset(
 
 
 class GroupCreateRequest(BaseModel):
+    """Request body for POST /groups — create one channel group."""
+
     name: str = Field(min_length=1)
     group_type: str = Field(min_length=1)
     channel_ids: list[str] = Field(default_factory=list)
@@ -82,32 +84,38 @@ class GroupCreateRequest(BaseModel):
 
     @field_validator("name", "group_type", "reason", mode="before")
     @classmethod
-    def strip_required_fields(cls, value):
+    def strip_required_fields(cls, value: object) -> object:
+        """Strip the required string fields via the shared strip/blank-reject rule."""
         return _strip_required_string(value)
 
     @field_validator("channel_ids", mode="before")
     @classmethod
-    def strip_channel_ids(cls, value):
+    def strip_channel_ids(cls, value: object) -> object:
+        """Strip each string member of the channel_ids list; pass through otherwise."""
         if isinstance(value, list):
             return [_strip_required_string(v) if isinstance(v, str) else v for v in value]
         return value
 
 
 class GroupUpdateRequest(BaseModel):
+    """Request body for PATCH /groups/{group_id} — rename and/or (de)activate a group."""
+
     name: str | None = Field(default=None, min_length=1)
     active: bool | None = None
     reason: str = Field(min_length=1)
 
     @field_validator("name", mode="before")
     @classmethod
-    def strip_name(cls, value):
+    def strip_name(cls, value: object) -> object:
+        """Strip the name field if present; None passes through unchanged."""
         if value is None:
             return None
         return _strip_required_string(value)
 
     @field_validator("reason", mode="before")
     @classmethod
-    def strip_reason(cls, value):
+    def strip_reason(cls, value: object) -> object:
+        """Strip the required reason field via the shared strip/blank-reject rule."""
         return _strip_required_string(value)
 
 
@@ -166,19 +174,23 @@ class ClearContentOwnerResponse(BaseModel):
 
 
 class GroupMembersRequest(BaseModel):
+    """Request body for POST /groups/{group_id}/members — add channels to a group."""
+
     channel_ids: list[str] = Field(min_length=1)
     reason: str = Field(min_length=1)
 
     @field_validator("channel_ids", mode="before")
     @classmethod
-    def strip_channel_ids(cls, value):
+    def strip_channel_ids(cls, value: object) -> object:
+        """Strip each string member of the channel_ids list; pass through otherwise."""
         if isinstance(value, list):
             return [_strip_required_string(v) if isinstance(v, str) else v for v in value]
         return value
 
     @field_validator("reason", mode="before")
     @classmethod
-    def strip_reason(cls, value):
+    def strip_reason(cls, value: object) -> object:
+        """Strip the required reason field via the shared strip/blank-reject rule."""
         return _strip_required_string(value)
 
 
@@ -188,6 +200,7 @@ def list_groups(
     registry: Annotated[ChannelGroupRegistryStore, Depends(sql_group_registry_from_session)],
     org_index: Annotated[OrgAccessIndex, Depends(current_org_access_index)],
 ) -> list[dict[str, object]]:
+    """List every channel group the caller is authorized to view."""
     # FIX (Gitar review #122 #fail-open): use list_groups_full so
     # _can_view_group authorizes over the complete member set. list_groups
     # now returns the active-only set (used by the revenue scope selector
@@ -210,6 +223,7 @@ def create_group(
     org_index: Annotated[OrgAccessIndex, Depends(current_org_access_index)],
     audit_sink: Annotated[AuditSink, Depends(current_audit_sink)],
 ) -> dict[str, object]:
+    """Create one channel group and record a GROUP_UPDATED audit event."""
     _validate_group_type(payload.group_type)
     _require_manage_group_channels(
         user=user,
@@ -251,6 +265,7 @@ def update_group(
     org_index: Annotated[OrgAccessIndex, Depends(current_org_access_index)],
     audit_sink: Annotated[AuditSink, Depends(current_audit_sink)],
 ) -> dict[str, object]:
+    """Rename and/or (de)activate a group, recording a GROUP_UPDATED audit event."""
     group = _require_manageable_group(
         registry=registry,
         group_id=group_id,
@@ -288,6 +303,7 @@ def add_group_members(
     org_index: Annotated[OrgAccessIndex, Depends(current_org_access_index)],
     audit_sink: Annotated[AuditSink, Depends(current_audit_sink)],
 ) -> dict[str, object]:
+    """Add channels to a group, recording a GROUP_UPDATED audit event."""
     group = _require_manageable_group(
         registry=registry,
         group_id=group_id,
@@ -331,6 +347,7 @@ def remove_group_member(
     org_index: Annotated[OrgAccessIndex, Depends(current_org_access_index)],
     audit_sink: Annotated[AuditSink, Depends(current_audit_sink)],
 ) -> dict[str, object]:
+    """Remove one channel from a group, recording a GROUP_UPDATED audit event."""
     group = _require_manageable_group(
         registry=registry,
         group_id=group_id,
@@ -445,6 +462,7 @@ def clear_group_content_owner(
 
 
 def _validate_group_type(group_type: str) -> None:
+    """Raise 422 if group_type is not one of the known GROUP_TYPES."""
     if group_type not in GROUP_TYPES:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
@@ -452,7 +470,8 @@ def _validate_group_type(group_type: str) -> None:
         )
 
 
-def _strip_required_string(value):
+def _strip_required_string(value: object) -> object:
+    """Strip a required string value; reject it if blank after stripping."""
     if isinstance(value, str):
         stripped = value.strip()
         if not stripped:
@@ -462,8 +481,11 @@ def _strip_required_string(value):
 
 
 def _normalize_query_reason(reason: str) -> str:
+    """Strip a query-parameter reason and reject blank or NUL-containing input."""
     try:
-        normalized = _strip_required_string(reason)
+        # reason is already str, so _strip_required_string's isinstance(str)
+        # branch is the one that runs; cast reflects that back for mypy.
+        normalized = cast(str, _strip_required_string(reason))
     except ValueError as exc:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
@@ -484,6 +506,7 @@ def _normalize_query_reason(reason: str) -> str:
 
 
 def _registry_not_found(exc: KeyError) -> HTTPException:
+    """Translate a store KeyError into a 404 HTTPException with its detail."""
     detail = str(exc.args[0]) if exc.args else "Registry resource not found"
     return HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=detail)
 
@@ -494,6 +517,7 @@ def _can_view_group(
     group: ChannelGroupEntry,
     org_index: OrgAccessIndex,
 ) -> bool:
+    """Return whether the user may view this group (empty groups need global scope)."""
     if not group.channel_ids:
         return has_permission(
             user,
@@ -518,6 +542,7 @@ def _require_manage_group_channels(
     channel_ids: list[str],
     org_index: OrgAccessIndex,
 ) -> None:
+    """Raise 403 unless the user may manage every one of the given channels."""
     if _can_manage_group_channels(
         user=user,
         channel_ids=channel_ids,
@@ -536,6 +561,7 @@ def _can_manage_group_channels(
     channel_ids: list[str],
     org_index: OrgAccessIndex,
 ) -> bool:
+    """Return whether the user may manage MANAGE_GROUPS over every given channel."""
     unique_channel_ids = list(dict.fromkeys(channel_ids))
     return (
         has_permission(
@@ -565,6 +591,7 @@ def _require_manageable_group(
     org_index: OrgAccessIndex,
     prospective_channel_ids: list[str] | None = None,
 ) -> ChannelGroupEntry:
+    """Return the group if it exists and the user may manage it, else 404."""
     group = registry.get_group(group_id)
     if group is None:
         raise HTTPException(
@@ -611,7 +638,8 @@ def _audit_group_change(
     group: ChannelGroupEntry,
     reason: str,
     action: str,
-):
+) -> AuditRecord:
+    """Record a GROUP_UPDATED audit event for one group mutation and return it."""
     return record_audit_event(
         sink=audit_sink,
         actor=user,

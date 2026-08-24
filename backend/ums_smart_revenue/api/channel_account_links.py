@@ -19,11 +19,12 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.orm import Session
 
-from ums_smart_revenue.api.channels import audit_record_to_api, current_audit_sink
+from ums_smart_revenue.api.authz import require_permission
 from ums_smart_revenue.api.dependencies import (
     current_db_session,
     current_principal_from_headers,
 )
+from ums_smart_revenue.api.dependencies_audit import audit_record_to_api, current_audit_sink
 from ums_smart_revenue.auth.audit import AuditEventType
 from ums_smart_revenue.auth.audit_service import AuditSink, record_audit_event
 from ums_smart_revenue.auth.models import UserPrincipal
@@ -62,15 +63,6 @@ class AccountOwnerLinksListResponse(BaseModel):
     audit_events: list[dict[str, object]]
 
 
-def _require_permission(user: UserPrincipal, permission: Permission, scope: AccessScope) -> None:
-    """Raise HTTP 403 if the principal lacks the permission for the scope."""
-    if not has_permission(user, permission, scope):
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail=f"Missing permission: {permission.value}",
-        )
-
-
 def _iter_months(start: str, end: str) -> list[str]:
     """Return each YYYY-MM month from start to end inclusive (assumes start <= end)."""
     year, month = int(start[:4]), int(start[5:7])
@@ -88,7 +80,7 @@ def _iter_months(start: str, end: str) -> list[str]:
 # Purpose: Authorize a verify/reject decision over the link's FULL effective
 #   month range, not just its start month, before the money-gating transition.
 # Database/ORM: None (pure authorization predicate).
-# Standards: fail-closed; HTTP 403 via _require_permission; route-boundary authz.
+# Standards: fail-closed; HTTP 403 via require_permission; route-boundary authz.
 # Blast Radius: Authorization (tightens; never broadens). No finance/audit write.
 # Connections:
 #   - File: backend/ums_smart_revenue/auth/policy.py -> has_permission scope match.
@@ -112,7 +104,7 @@ def _require_allocation_permission_for_range(
     authorizes a non-global caller without at least one explicit month check).
     """
     if end is None:
-        _require_permission(user, Permission.CHANGE_ALLOCATION_RULE, AccessScope.global_scope())
+        require_permission(user, Permission.CHANGE_ALLOCATION_RULE, AccessScope.global_scope())
         return
     # FIX (PR #57 N10): a CHANGE_ALLOCATION_RULE grant at global scope authorizes
     # every finance month (OrgAccessIndex.contains returns True for a GLOBAL
@@ -124,7 +116,7 @@ def _require_allocation_permission_for_range(
     if has_permission(user, Permission.CHANGE_ALLOCATION_RULE, AccessScope.global_scope()):
         return
     for month in _iter_months(start, end) or [start]:
-        _require_permission(
+        require_permission(
             user, Permission.CHANGE_ALLOCATION_RULE, AccessScope.finance_month(month)
         )
 
@@ -155,8 +147,8 @@ def list_channel_account_links(
 ) -> AccountOwnerLinksListResponse:
     """List account↔owner links for operator review (global-scoped)."""
     global_scope = AccessScope.global_scope()
-    _require_permission(user, Permission.VIEW_REVENUE, global_scope)
-    _require_permission(user, Permission.VIEW_FINALIZED_PAYMENTS, global_scope)
+    require_permission(user, Permission.VIEW_REVENUE, global_scope)
+    require_permission(user, Permission.VIEW_FINALIZED_PAYMENTS, global_scope)
     try:
         page = repository.list_account_owner_links(
             status=status_filter,
@@ -282,7 +274,7 @@ def propose_channel_account_link(
     audit_sink: Annotated[AuditSink, Depends(current_audit_sink)],
 ) -> AccountOwnerLinkMutationResponse:
     """Propose an UNVERIFIED account↔owner link (operator-asserted)."""
-    _require_permission(user, Permission.MANAGE_ORG_MAPPING, AccessScope.global_scope())
+    require_permission(user, Permission.MANAGE_ORG_MAPPING, AccessScope.global_scope())
     try:
         link = repository.propose_account_owner_link(
             adsense_account_id=payload.adsense_account_id,
@@ -345,7 +337,7 @@ def _decide_link(
     is checked on EVERY finance month in the link's effective range (not just the
     start month) so a month-scoped caller cannot approve a multi-month mapping.
     """
-    _require_permission(user, Permission.MANAGE_ORG_MAPPING, AccessScope.global_scope())
+    require_permission(user, Permission.MANAGE_ORG_MAPPING, AccessScope.global_scope())
     try:
         existing = repository.get_account_owner_link(link_id)
     except ChannelAccountLinkNotFoundError as exc:

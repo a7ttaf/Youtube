@@ -25,14 +25,14 @@ from collections.abc import Callable
 
 from fastapi.testclient import TestClient
 
-from ums_smart_revenue.api.channels import (
-    _plan_fingerprint,
-    current_audit_sink,
-    current_channel_registry,
-)
+from ums_smart_revenue.api.channels import _plan_fingerprint
 from ums_smart_revenue.api.dependencies import current_principal_from_headers
-from ums_smart_revenue.api.registry_dependencies import sql_group_registry_from_session
-from ums_smart_revenue.api.revenue import current_org_access_index
+from ums_smart_revenue.api.dependencies_audit import current_audit_sink
+from ums_smart_revenue.api.dependencies_finance import current_org_access_index
+from ums_smart_revenue.api.registry_dependencies import (
+    current_channel_registry,
+    sql_group_registry_from_session,
+)
 from ums_smart_revenue.app import create_app
 from ums_smart_revenue.auth.audit_service import AuditRecord, InMemoryAuditSink
 from ums_smart_revenue.auth.models import PermissionGrant, UserPrincipal
@@ -832,6 +832,7 @@ class _GroupAppearsAtWriteBoundary(ChannelGroupRegistry):
     """
 
     def __init__(self, *, cms_group_id: str, content_owner_id: str) -> None:
+        """Remember the group key/owner to race into existence and reset the flag."""
         super().__init__()
         self._race_key = cms_group_id
         self._race_owner = content_owner_id
@@ -906,6 +907,7 @@ class _ChannelDriftsAtWriteBoundary(ChannelRegistry):
     """
 
     def __init__(self, entries: list[ChannelRegistryEntry], *, drift_to: str) -> None:
+        """Remember the rename target and reset the one-shot drift flag."""
         super().__init__(entries)
         self._drift_to = drift_to
         self._drifted = False
@@ -968,6 +970,7 @@ class _ChannelArchivedAtWriteBoundary(ChannelRegistry):
     """
 
     def __init__(self, entries: list[ChannelRegistryEntry]) -> None:
+        """Reset the one-shot archive flag."""
         super().__init__(entries)
         self._archived = False
 
@@ -1179,6 +1182,7 @@ class _RevenueFlagDriftsAtWriteBoundary(ChannelRegistry):
     """
 
     def __init__(self, entries: list[ChannelRegistryEntry]) -> None:
+        """Reset the one-shot drift flag."""
         super().__init__(entries)
         self._drifted = False
 
@@ -1213,7 +1217,7 @@ class _RevenueFlagDriftsAtWriteBoundary(ChannelRegistry):
 
 
 def test_plan_bound_apply_refuses_drift_in_a_field_the_preview_showed_unchanged():
-    """ "No change to revenue_required" is a reviewed claim too (review #184).
+    """The claim "no change to revenue_required" is reviewed too (review #184).
 
     The preview here promises exactly one effect — the rename — and implicitly
     promises the other three fields stay put. A writer who turns
@@ -1428,6 +1432,7 @@ def test_planned_update_that_became_a_noop_is_not_audited():
         """Planning sees the OLD name; the write boundary sees current state."""
 
         def list_channels_by_ids(self, wanted, *, include_inactive=False):
+            """Report each wanted channel under its stale (pre-write) name."""
             return [
                 dataclasses.replace(entry, channel_name="Old Name")
                 for entry in super().list_channels_by_ids(wanted, include_inactive=include_inactive)
@@ -1610,6 +1615,7 @@ class _SourceStatusDriftsAtWriteBoundary(ChannelRegistry):
     """
 
     def __init__(self, entries: list[ChannelRegistryEntry], *, drift_to: str) -> None:
+        """Remember the target classification and reset the one-shot drift flag."""
         super().__init__(entries)
         self._drift_to = drift_to
         self._drifted = False
@@ -1811,6 +1817,7 @@ class _CountingGroupStore(ChannelGroupRegistry):
     """
 
     def __init__(self) -> None:
+        """Zero out the locked-lookup, member-add, and batch-size counters."""
         super().__init__()
         self.locked_lookups = 0
         self.member_adds = 0
@@ -1957,6 +1964,7 @@ class _ArchivingDuringApplyGroups(ChannelGroupRegistry):
     """
 
     def get_group_by_cms_id(self, cms_group_id, *, for_update=False):
+        """Report the group ACTIVE to planning reads, archived to the locked write read."""
         group = super().get_group_by_cms_id(cms_group_id, for_update=for_update)
         if group is not None and for_update:
             return dataclasses.replace(group, active=False)
@@ -2008,6 +2016,7 @@ class _UnstampingDuringApplyGroups(ChannelGroupRegistry):
     """
 
     def get_group_by_cms_id(self, cms_group_id, *, for_update=False):
+        """Report the group STAMPED to planning reads, owner-cleared to the locked write read."""
         group = super().get_group_by_cms_id(cms_group_id, for_update=for_update)
         if group is not None and for_update:
             return dataclasses.replace(group, content_owner_id=None)
@@ -2061,6 +2070,7 @@ class _ConcurrentlyCreatedRegistry(ChannelRegistry):
     """Simulate a channel created by another writer between plan and apply."""
 
     def create_channel(self, **kwargs):
+        """Simulate a concurrent writer already having created this channel."""
         raise ChannelRegistryConflictError(
             f"Channel already exists: {kwargs['youtube_channel_id']}"
         )
@@ -2081,6 +2091,7 @@ class _GroupRaceLosingGroups(ChannelGroupRegistry):
     """Simulate losing the cms_group_id INSERT race to a concurrent import."""
 
     def create_group(self, **kwargs):
+        """Simulate a concurrent import already having inserted this cms_group_id."""
         raise ChannelGroupConflictError(
             f"channel group already exists for cms_group_id: {kwargs['cms_group_id']}"
         )

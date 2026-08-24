@@ -29,14 +29,6 @@ from ums_smart_revenue.api.channel_account_links import (
     router as channel_account_links_router,
 )
 from ums_smart_revenue.api.channels import (
-    current_atomic_audit_sink,
-    current_audit_sink,
-    current_channel_registry,
-    sql_atomic_audit_sink_from_session,
-    sql_audit_sink_from_session,
-    sql_channel_registry_from_session,
-)
-from ums_smart_revenue.api.channels import (
     router as channels_router,
 )
 from ums_smart_revenue.api.connectors import router as connectors_router
@@ -48,6 +40,16 @@ from ums_smart_revenue.api.dependencies import (
     current_principal_from_headers,
     current_trusted_gateway_identity,
 )
+from ums_smart_revenue.api.dependencies_audit import (
+    current_atomic_audit_sink,
+    current_audit_sink,
+    sql_atomic_audit_sink_from_session,
+    sql_audit_sink_from_session,
+)
+from ums_smart_revenue.api.dependencies_finance import (
+    current_revenue_audit_sink,
+    sql_revenue_audit_sink_from_session,
+)
 from ums_smart_revenue.api.exchange_rates import router as exchange_rates_router
 from ums_smart_revenue.api.export_templates import router as export_templates_router
 from ums_smart_revenue.api.exports import router as exports_router
@@ -58,14 +60,12 @@ from ums_smart_revenue.api.groups import (
 from ums_smart_revenue.api.org_units import router as org_units_router
 from ums_smart_revenue.api.reconciliation import router as reconciliation_router
 from ums_smart_revenue.api.registry_dependencies import (
+    current_channel_registry,
     current_group_registry,
+    sql_channel_registry_from_session,
     sql_group_registry_from_session,
 )
 from ums_smart_revenue.api.reports import router as reports_router
-from ums_smart_revenue.api.revenue import (
-    current_revenue_audit_sink,
-    sql_revenue_audit_sink_from_session,
-)
 from ums_smart_revenue.api.revenue import router as revenue_router
 from ums_smart_revenue.api.security import router as security_router
 from ums_smart_revenue.api.session import router as session_router
@@ -289,7 +289,10 @@ def _wire_connector_background_workers(
 #   and audit-sink routing -- moved verbatim, no behavior change.
 # Connections:
 #   - File: backend/ums_smart_revenue/api/dependencies.py -> override targets.
-#   - File: backend/ums_smart_revenue/api/channels.py -> registry/sink factories.
+#   - File: backend/ums_smart_revenue/api/dependencies_audit.py -> the
+#     audit-sink factories swapped in here.
+#   - File: backend/ums_smart_revenue/api/registry_dependencies.py -> the
+#     channel/group registry factories swapped in here.
 # ============================================================================
 def _configure_database_dependencies(
     fastapi_app: FastAPI,
