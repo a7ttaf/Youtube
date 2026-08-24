@@ -22,7 +22,7 @@ def test_backend_dependencies_are_pinned_to_checked_latest_stable_versions():
     expected_dependencies = {
         "fastapi==0.141.1",
         "pydantic==2.13.4",
-        "uvicorn[standard]==0.52.3",
+        "uvicorn[standard]==0.52.4",
         "sqlalchemy==2.0.52",
         "alembic==1.19.1",
         "psycopg[binary]==3.3.4",
@@ -32,7 +32,7 @@ def test_backend_dependencies_are_pinned_to_checked_latest_stable_versions():
         "celery==5.6.3",
         "redis==8.1.0",
         "openpyxl==3.1.5",
-        "reportlab==5.0.0",
+        "reportlab==5.0.1",
         "python-pptx==1.0.2",
         "google-cloud-secret-manager==2.30.0",
         "google-cloud-storage==3.13.1",
@@ -61,7 +61,7 @@ def test_stack_version_baseline_records_runtime_and_frontend_targets():
     assert STACK_VERSION_BASELINE["backend"]["alembic"] == "1.19.1"
     assert STACK_VERSION_BASELINE["backend"]["psycopg"] == "3.3.4"
     assert STACK_VERSION_BASELINE["backend"]["openpyxl"] == "3.1.5"
-    assert STACK_VERSION_BASELINE["backend"]["reportlab"] == "5.0.0"
+    assert STACK_VERSION_BASELINE["backend"]["reportlab"] == "5.0.1"
     assert STACK_VERSION_BASELINE["backend"]["python_pptx"] == "1.0.2"
     assert STACK_VERSION_BASELINE["backend"]["google_cloud_secret_manager"] == "2.30.0"
     assert STACK_VERSION_BASELINE["backend"]["google_cloud_storage"] == "3.13.1"
