@@ -55,6 +55,22 @@ from ums_smart_revenue.tenancy.context import get_current_tenant
 MONTH_VALUE_PATTERN = re.compile(r"^\d{4}-\d{2}$")
 
 
+# ============================================================================
+# Purpose: Resolve which tenant's data the smart-alert signal reads select —
+#   the request tenant when one is bound, else the bootstrap UMS tenant.
+# Database/ORM: None; reads the tenancy contextvar only.
+# Standards: Mirrors the finance repositories' tenant fallback exactly, and
+#   the signal readers pass the resolved id EXPLICITLY to the repository
+#   constructors so signal reads and repository reads cannot diverge on
+#   tenant.
+# Blast Radius: Tenant selection for every smart-alert/export signal read;
+#   a change here re-scopes which tenant's finance data those surfaces see.
+# Connections:
+#   - File: backend/ums_smart_revenue/tenancy/context.py ->
+#     get_current_tenant, the request-scoped tenant binding read here.
+#   - File: backend/ums_smart_revenue/api/exports.py -> stamps the resolved
+#     tenant id into export artifacts for parity with the dashboard.
+# ============================================================================
 def resolve_smart_alert_tenant_id() -> UUID:
     """Resolve the request tenant id, mirroring the finance repositories."""
     current_tenant = get_current_tenant()
@@ -63,6 +79,24 @@ def resolve_smart_alert_tenant_id() -> UUID:
     return UUID(UMS_TENANT_ID)
 
 
+# ============================================================================
+# Purpose: Derive the prior YYYY-MM finance month feeding the dashboard and
+#   export trend signals (previous-month fact comparisons).
+# Database/ORM: None; pure string/calendar arithmetic.
+# Standards: Validates shape then range, raising RevenueFactValidationError
+#   (translated to 4xx at the route boundary) for malformed months and for
+#   the no-predecessor edges (year 0000, month 0001-01); zero-pads results
+#   so callers can use them directly as fact-month keys.
+# Blast Radius: Trend-signal month selection for smart alerts and exports;
+#   no finance mutation.
+# Connections:
+#   - File: backend/ums_smart_revenue/api/revenue.py -> previous-month fact
+#     listing for the smart-alerts trend signal.
+#   - File: backend/ums_smart_revenue/api/exports.py -> the export builder's
+#     previous-month comparison reads.
+#   - File: backend/ums_smart_revenue/finance/revenue_facts.py ->
+#     RevenueFactValidationError, the typed error raised here.
+# ============================================================================
 def previous_month(month: str) -> str:
     """Return the YYYY-MM string for the calendar month immediately preceding the given month.
 
