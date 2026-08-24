@@ -472,6 +472,86 @@ question they answer. Severities are the **post-refutation** ones.
 
 ---
 
+## Round 3 — "the buttons don't work and it's a mockup"
+
+Reported from hands-on use, then traced to root cause. All three observations are
+correct, and they have three *different* causes — one of which is a one-line fix.
+
+### Why no button works: the shipped dev identity has 2 of 28 permissions
+
+The buttons are **not** unwired. Of 43 `<button>` elements across the UI, **39 carry
+a handler**; the 4 that don't are the global chrome controls already recorded as
+dead. They fail at the API, not in the DOM.
+
+`frontend/vite.config.ts` injects a fixed dev identity, and its default role is
+`assistant_analyst`:
+
+```
+["X-Role", "VITE_DEV_GATEWAY_ROLE", "assistant_analyst"],
+```
+
+`auth/seed.py` grants that role exactly two permissions — `VIEW_ANALYTICS` and
+`VIEW_CONFIDENCE` — out of 28 defined. It is the second-weakest role in the system;
+only `AUDIT_VIEWER` has fewer. For comparison: `FINANCE_ADMIN` has 15,
+`CORPORATE_ADMIN` 12, `DATA_STEWARD` 5.
+
+So out of the box every write action (import, sync, run connector, lock month,
+export, manage users) is denied, and so is every read gated on `VIEW_REVENUE`,
+`VIEW_FINALIZED_PAYMENTS`, or `VIEW_RAW_FILES`. **The product is being demonstrated
+by its most restricted role.**
+
+**Fix:** set `VITE_DEV_GATEWAY_ROLE` in `frontend/.env` to a role that can actually
+operate — `finance_admin` for the finance surface, `corporate_admin` for setup. One
+line, no code change. This should be the first thing any beta runbook says, and its
+absence from the README is arguably the single highest-impact documentation gap in
+this audit.
+
+### Why the data looks fake: because some of it is
+
+Two independent sources of fabricated numbers:
+
+1. **`lib/mock/data.ts`** — 277 lines, 31 exported datasets, imported by 12 of 13 UI
+   modules. What is still rendered from it:
+   - `AppShell` — `NAV_GROUPS`, `VIEW_COPY`, `WORKFLOW_STEPS`: the navigation, the
+     view descriptions, and the workflow stepper. **The application chrome itself is
+     mock.**
+   - `CommandView` (the landing screen) — `CLOSE_STEPS`, `EXPORT_READINESS`,
+     `ISSUES`.
+   - `RegistryView` — `REGISTRY_SUMMARY`, `REGISTRY_CONTROLS`;
+     `CloseView` — `RECON_NOTES`; `ExportsView` — `EXPORTS_GUARDRAILS`.
+
+   Good news in the same measurement: `ConnectorsView`, `GroupsView`,
+   `GroupsSyncFlow`, `RegistryImportFlow`, `TraceView`, and all three Audit modules
+   import **zero** mock symbols and run entirely on API hooks. And roughly nine mock
+   datasets (`CHANNELS`, `KPIS`, `CLOSE_SUMMARY`, `CONNECTOR_HEALTH`,
+   `CONNECTOR_JOBS`, `EXPORTS_ROWS`, `REGISTRY_ROWS`, `TRACE_*`) are now dead code —
+   real data replaced them. The migration is genuinely most of the way done; what
+   remains is concentrated in the chrome and the summary tiles, which is exactly the
+   part a visitor sees first.
+
+2. **`scripts/seed_demo_month.py`** — writes a complete fabricated finance month:
+   org units, channels, revenue facts, and a committed allocation snapshot. It also
+   ships `--demo-lock-bypass`, which flips a month to locked **writing no audit event
+   and bypassing the production readiness gate** (its own docstring says so). If that
+   was ever run against the working database, the money in it is invented.
+
+### Why it feels like a landing page
+
+Compounding: there is no router (one URL, views held in component state), the chrome
+and the first screen are mock, only four hardcoded months exist, and the role you are
+given cannot exercise the parts that *are* real. Each finding alone is modest; stacked,
+they produce exactly the reported impression — **a polished landing page over a real
+engine you are not allowed to reach.**
+
+### Also worth knowing: compose has never run on this PC
+
+`docker volume ls` shows **no** `ums-smart-revenue` volumes — the compose stack has
+never been started here. Everything observed so far has been the dev-server path
+(`bun run dev` + local Postgres), which is a different configuration from the one this
+audit's blockers describe.
+
+---
+
 ## Round 2 — claims the adversarial pass killed
 
 Recorded so they are not re-raised. Each was a confident round-2 finding that did
