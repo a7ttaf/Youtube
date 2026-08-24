@@ -867,6 +867,46 @@ channel↔account map, and multi-currency FX) stays out per Docs/18.
   the recorded residual ruling, and the frozen channel set stays gate-time
   by the export-determinism rule. Pinned in the snapshot wiring + Postgres
   modules. `No migration/backfill required.`
+  **API-layering refactor shipped 2026-08-24** (`refactor/api-layering`):
+  `api/revenue.py`'s cross-imported internals moved to canonical homes — the
+  smart-alert signal reads (missing-fact coverage pair, skipped-row reasons,
+  month math, tenant resolution) to
+  `backend/ums_smart_revenue/finance/smart_alert_signals.py` (which
+  delegates its SQL to
+  `SqlAlchemyRevenueFactRepository.missing_required_fact_channel_count_and_sample`
+  and `SqlAlchemyAuditLogRepository.connector_run_details_for_finance_month`
+  per the repository-layer rule), the shared permission gates to
+  `backend/ums_smart_revenue/api/authz.py`, and the revenue audit-sink
+  providers to `api/dependencies_finance.py` — so no module imports
+  `api/revenue.py`'s internals any more. `api/revenue.py` itself switched
+  to the shared gate, and nine sibling route modules
+  (reconciliation, exports, adsense, allocation, audit,
+  channel_account_links, exchange_rates, finance_close, reports) dropped
+  their behavior-identical private `_require_permission` /
+  `_raise_missing_permission` copies for it, and exports'
+  local `_previous_month`/`EXPORT_MONTH_PATTERN` folded into the shared
+  `previous_month` (same acceptance set; only the unit-level error string
+  changed). No route, permission, or response behavior change; no
+  compatibility shims — every caller renamed. Non-goals: the remaining
+  cross-route imports stay — the `api.channels` audit helpers
+  (`audit_record_to_api`, `current_audit_sink`) that 13 modules share, and
+  `api/revenue.py`'s deferred import from `api.allocation` (including the
+  private `_run_to_api`); `users.py`'s `_require_permission_grant_policy`
+  (a grant-policy check, not a scoped-access gate) also deliberately stays
+  local. Tests: full backend suite green on a fresh Postgres 18 container
+  (2907 passed, 0 failed — the −1 vs the 2908 baseline is one removed
+  duplicate `previous_month` unit test whose coverage lives in
+  `test_smart_alerts_api`), plus ruff/format/mypy; no failures. Risks: the
+  22-file rename surface — mitigated by no-shim renames (a missed caller
+  fails at import, not at runtime) and a repo-wide residual grep; the only
+  observable delta is the unit-level `previous_month` error string.
+  Rollback: `git revert` of the branch commits restores the pre-refactor
+  layout; no data or schema involved. Next: extract the shared
+  `api.channels` audit helpers to a neutral home the same way, and
+  re-evaluate `api/revenue.py`'s deferred `api.allocation` import — the
+  cycle leg its comment cites (`api.channels` importing `api.revenue`) no
+  longer exists, so it is an un-deferral candidate (verify import order
+  first). `No migration/backfill required.`
 
 ### Acceptance gate
 

@@ -9,8 +9,8 @@ from ums_smart_revenue.api.channels import (
     current_channel_registry,
     sql_channel_registry_from_session,
 )
+from ums_smart_revenue.api.dependencies_finance import current_org_access_index
 from ums_smart_revenue.api.registry_dependencies import sql_group_registry_from_session
-from ums_smart_revenue.api.revenue import current_org_access_index
 from ums_smart_revenue.app import create_app
 from ums_smart_revenue.auth.audit_service import InMemoryAuditSink
 from ums_smart_revenue.db.finance_models import (
@@ -109,7 +109,8 @@ class ScopedListRegistry:
 
 def create_bootstrap_app():
     """Create an application with bootstrap channel registry and
-    org access index overrides for testing."""
+    org access index overrides for testing.
+    """
     app = create_app()
     registry = bootstrap_channel_registry()
     app.dependency_overrides[current_channel_registry] = lambda: registry
@@ -119,7 +120,8 @@ def create_bootstrap_app():
 
 def auth_headers(role: str, scope_type: str, scope_id: str | None = None) -> dict[str, str]:
     """Generate authentication headers for a test client given
-    role, scope type, and optional scope ID."""
+    role, scope type, and optional scope ID.
+    """
     headers = {
         "x-user-id": "user-1",
         "x-user-email": "user@example.com",
@@ -163,7 +165,8 @@ def test_company_channel_listing_uses_scoped_registry_query():
 
 def test_company_manager_reads_scoped_outside_cms_monitor():
     """Test that a company manager can read channels with
-    OUTSIDE_CMS status using scoped registry."""
+    OUTSIDE_CMS status using scoped registry.
+    """
     app = create_bootstrap_app()
     app.dependency_overrides[current_channel_registry] = lambda: ChannelRegistry(
         [
@@ -803,7 +806,8 @@ def test_content_owner_audit_tags_manage_channels_permission():
     """The CHANNEL_UPDATED audit for a content-owner change must be tagged with
     registry.manage_channels (the permission that authorized the write), not the
     registry.manage_org_mapping default on the CHANNEL_UPDATED definition —
-    otherwise permission-based audit filtering misattributes the write."""
+    otherwise permission-based audit filtering misattributes the write.
+    """
     app = create_bootstrap_app()
     audit_sink = InMemoryAuditSink()
     app.dependency_overrides[current_audit_sink] = lambda: audit_sink
@@ -920,9 +924,11 @@ class ValidationFailingContentOwnerRegistry:
 
     @staticmethod
     def list_channels() -> list[ChannelRegistryEntry]:
+        """Return an empty channel list; this stub only exercises the update path."""
         return []
 
     def get_channel(self, youtube_channel_id: str) -> ChannelRegistryEntry | None:
+        """Return a stub channel entry carrying the currently stubbed owner id."""
         return ChannelRegistryEntry(
             youtube_channel_id=youtube_channel_id,
             channel_name="TV A",
@@ -938,12 +944,14 @@ class ValidationFailingContentOwnerRegistry:
         youtube_channel_id: str,
         content_owner_id: str | None,  # noqa: ARG001
     ) -> ChannelRegistryEntry:
+        """Simulate a flush() IntegrityError translated to ChannelRegistryValidationError."""
         raise ChannelRegistryValidationError("simulated flush integrity failure")
 
 
 def test_content_owner_update_translates_registry_validation_error_to_422():
     """A ChannelRegistryValidationError from update_content_owner must surface as
-    HTTP 422 (matching create_channel/update_mapping), not an unhandled 500."""
+    HTTP 422 (matching create_channel/update_mapping), not an unhandled 500.
+    """
     app = create_bootstrap_app()
     # Pass the class directly (FastAPI instantiates it), matching the file's
     # existing ScopedListRegistry override style and avoiding a needless lambda.

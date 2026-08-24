@@ -4,6 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.orm import Session
 
+from ums_smart_revenue.api.authz import raise_missing_permission, require_permission
 from ums_smart_revenue.api.channels import audit_record_to_api, current_audit_sink
 from ums_smart_revenue.api.dependencies import (
     current_db_session,
@@ -29,6 +30,8 @@ router = APIRouter(prefix="/reports", tags=["reports"])
 
 
 class RawReportFileRegisterRequest(BaseModel):
+    """Request body for registering a newly downloaded raw report file."""
+
     source: str = Field(min_length=1)
     report_type: str = Field(min_length=1)
     report_month: str = Field(min_length=1)
@@ -48,7 +51,8 @@ class RawReportFileRegisterRequest(BaseModel):
         mode="before",
     )
     @classmethod
-    def strip_required_strings(cls, value):
+    def strip_required_strings(cls, value: object) -> object:
+        """Strip whitespace from the required string fields, rejecting blank values."""
         if isinstance(value, str):
             stripped = value.strip()
             if not stripped:
@@ -58,11 +62,14 @@ class RawReportFileRegisterRequest(BaseModel):
 
 
 class RawReportFilePurgeRequest(BaseModel):
+    """Request body for purging a raw report file's stored contents."""
+
     reason: str = Field(min_length=1)
 
     @field_validator("reason", mode="before")
     @classmethod
-    def strip_reason(cls, value):
+    def strip_reason(cls, value: object) -> object:
+        """Strip whitespace from reason, rejecting a blank value."""
         if isinstance(value, str):
             stripped = value.strip()
             if not stripped:
@@ -74,6 +81,7 @@ class RawReportFilePurgeRequest(BaseModel):
 def current_raw_report_file_repository(
     session: Annotated[Session, Depends(current_db_session)],
 ) -> SqlAlchemyRawReportFileRepository:
+    """Build a SQL-backed raw report file repository bound to the request's session."""
     return SqlAlchemyRawReportFileRepository(session)
 
 
@@ -86,8 +94,9 @@ def register_raw_report_file(
     ],
     audit_sink: Annotated[AuditSink, Depends(current_audit_sink)],
 ) -> dict[str, object]:
+    """Register a downloaded raw report file's metadata and audit the write."""
     connector_scope = AccessScope.connector(payload.source)
-    _require_permission(user, Permission.RUN_CONNECTOR_JOBS, connector_scope)
+    require_permission(user, Permission.RUN_CONNECTOR_JOBS, connector_scope)
     try:
         raw_file = repository.register_file(
             source=payload.source,
@@ -139,8 +148,9 @@ def list_raw_report_files(
     limit: Annotated[int, Query(ge=1, le=MAX_RAW_REPORT_FILE_PAGE_SIZE)] = 50,
     offset: Annotated[int, Query(ge=0)] = 0,
 ) -> dict[str, object]:
+    """List raw report files, optionally filtered by source/type/month, and audit the read."""
     scope = AccessScope.connector(source) if source else AccessScope.global_scope()
-    _require_permission(user, Permission.VIEW_RAW_FILES, scope)
+    require_permission(user, Permission.VIEW_RAW_FILES, scope)
     try:
         page = repository.list_files(
             source=source,
@@ -183,8 +193,9 @@ def get_raw_report_file(
     ],
     audit_sink: Annotated[AuditSink, Depends(current_audit_sink)],
 ) -> dict[str, object]:
+    """Fetch one raw report file by id and audit the read."""
     if not _has_any_permission_scope(user, Permission.VIEW_RAW_FILES):
-        _raise_missing_permission(Permission.VIEW_RAW_FILES)
+        raise_missing_permission(Permission.VIEW_RAW_FILES)
 
     try:
         raw_file = repository.get_file(raw_file_id)
@@ -247,10 +258,11 @@ def purge_raw_report_file(
     ],
     audit_sink: Annotated[AuditSink, Depends(current_audit_sink)],
 ) -> dict[str, object]:
+    """Purge a raw report file's stored contents (metadata retained) and audit the write."""
     # Boundary check first: deny without revealing existence to unauthorized
     # callers; the connector-scoped check below uses the resolved source.
     if not _has_any_permission_scope(user, Permission.MANAGE_CONNECTORS):
-        _raise_missing_permission(Permission.MANAGE_CONNECTORS)
+        raise_missing_permission(Permission.MANAGE_CONNECTORS)
 
     try:
         raw_file = repository.get_file(raw_file_id)
@@ -310,19 +322,8 @@ def purge_raw_report_file(
     return response
 
 
-def _require_permission(user: UserPrincipal, permission: Permission, scope: AccessScope) -> None:
-    if not has_permission(user, permission, scope):
-        _raise_missing_permission(permission)
-
-
-def _raise_missing_permission(permission: Permission) -> None:
-    raise HTTPException(
-        status_code=status.HTTP_403_FORBIDDEN,
-        detail=f"Missing permission: {permission.value}",
-    )
-
-
 def _has_any_permission_scope(user: UserPrincipal, permission: Permission) -> bool:
+    """Return whether user holds the given permission on any scope, direct or via role."""
     if user.disabled:
         return False
     for grant in user.direct_permissions:

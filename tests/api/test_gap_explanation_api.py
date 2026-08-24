@@ -292,6 +292,7 @@ class _CountingEmptyRepository:
         self.calls = 0
 
     def _count(self) -> list[object]:
+        """Record one fetch call and return an empty result."""
         self.calls += 1
         return []
 
@@ -366,6 +367,7 @@ class _ThirdAppendFailsSink(InMemoryAuditSink):
         self._appends = 0
 
     def append(self, record) -> None:  # noqa: ANN001 - protocol shape
+        """Append normally except on the third call, which raises instead."""
         self._appends += 1
         if self._appends == 3:
             raise RuntimeError("staged third-append failure")
@@ -379,7 +381,7 @@ def test_failed_third_audit_append_retracts_the_whole_triple(tmp_path):
     append must retract the first two via the sink's transaction boundary —
     no partial audit triple may describe a response that was never returned.
     """
-    from ums_smart_revenue.api.revenue import current_revenue_audit_sink
+    from ums_smart_revenue.api.dependencies_finance import current_revenue_audit_sink
 
     database_url = build_database_url(tmp_path)
     seed_database(database_url)

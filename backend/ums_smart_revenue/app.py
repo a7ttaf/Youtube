@@ -48,6 +48,10 @@ from ums_smart_revenue.api.dependencies import (
     current_principal_from_headers,
     current_trusted_gateway_identity,
 )
+from ums_smart_revenue.api.dependencies_finance import (
+    current_revenue_audit_sink,
+    sql_revenue_audit_sink_from_session,
+)
 from ums_smart_revenue.api.exchange_rates import router as exchange_rates_router
 from ums_smart_revenue.api.export_templates import router as export_templates_router
 from ums_smart_revenue.api.exports import router as exports_router
@@ -62,10 +66,6 @@ from ums_smart_revenue.api.registry_dependencies import (
     sql_group_registry_from_session,
 )
 from ums_smart_revenue.api.reports import router as reports_router
-from ums_smart_revenue.api.revenue import (
-    current_revenue_audit_sink,
-    sql_revenue_audit_sink_from_session,
-)
 from ums_smart_revenue.api.revenue import router as revenue_router
 from ums_smart_revenue.api.security import router as security_router
 from ums_smart_revenue.api.session import router as session_router
