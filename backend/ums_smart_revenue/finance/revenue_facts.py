@@ -7,7 +7,7 @@ from enum import StrEnum
 from typing import Any, cast
 from uuid import UUID, uuid4
 
-from sqlalchemy import delete, select
+from sqlalchemy import Integer, delete, literal_column, select
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.orm import Session
 
@@ -278,6 +278,59 @@ class SqlAlchemyRevenueFactRepository:
             statement = statement.limit(limit)
 
         return list(self._session.scalars(statement).all())
+
+    def missing_required_fact_channel_count_and_sample(
+        self,
+        *,
+        month: str,
+        sample_limit: int,
+        youtube_channel_ids: set[str] | None = None,
+    ) -> tuple[int, list[str]]:
+        """Return (count, bounded sample) of active revenue-required channels with no fact.
+
+        `count` is the total matching channels; `sample` is a sorted list of at
+        most `sample_limit` channel ids. The two values are read by two
+        independent queries so a large factless set never materializes a full
+        id list on the application side. When `youtube_channel_ids` is provided
+        (non-None), the read is scoped to those channels; when omitted (None),
+        the read is tenant-global. Mirrors
+        month_close_readiness._missing_required_revenue_fact_count's predicate
+        shape exactly (active AND revenue_required AND fact.id IS NULL).
+        """
+        join_predicates = (
+            (MonthlyChannelRevenueFactORM.tenant_id == YouTubeChannelORM.tenant_id)
+            & (
+                MonthlyChannelRevenueFactORM.youtube_channel_id
+                == YouTubeChannelORM.youtube_channel_id
+            )
+            & (MonthlyChannelRevenueFactORM.tenant_id == self._tenant_id)
+            & (MonthlyChannelRevenueFactORM.month == month),
+        )
+        where_predicates = [
+            YouTubeChannelORM.tenant_id == self._tenant_id,
+            YouTubeChannelORM.active.is_(True),
+            YouTubeChannelORM.revenue_required.is_(True),
+            MonthlyChannelRevenueFactORM.id.is_(None),
+        ]
+        if youtube_channel_ids is not None:
+            where_predicates.append(YouTubeChannelORM.youtube_channel_id.in_(youtube_channel_ids))
+        count_statement = (
+            select(literal_column("COUNT(*)", type_=Integer()))
+            .select_from(YouTubeChannelORM)
+            .outerjoin(MonthlyChannelRevenueFactORM, *join_predicates)
+            .where(*where_predicates)
+        )
+        sample_statement = (
+            select(YouTubeChannelORM.youtube_channel_id)
+            .select_from(YouTubeChannelORM)
+            .outerjoin(MonthlyChannelRevenueFactORM, *join_predicates)
+            .where(*where_predicates)
+            .order_by(YouTubeChannelORM.youtube_channel_id)
+            .limit(sample_limit)
+        )
+        count_value = int(self._session.execute(count_statement).scalar_one())
+        sample_ids = list(self._session.scalars(sample_statement).all())
+        return count_value, sample_ids
 
     def _require_month_open(self, month: str) -> None:
         """Ensure the given month is open for revenue fact imports, raising an

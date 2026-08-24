@@ -301,6 +301,27 @@ class SqlAlchemyAuditLogRepository:
             by_status=dict(sorted(status_counts.items())),
         )
 
+    def connector_run_details_for_finance_month(self, month: str) -> list[object]:
+        """Return CONNECTOR_JOB_RUN audit detail payloads for one finance month, newest first.
+
+        Ordered by created_at DESC then id DESC so the first row is the newest
+        connector-run edge. Repository owns the audit-log SQL; interpreting the
+        JSON lifecycle payloads (e.g. ROWS_SKIPPED supersession) stays with the
+        caller.
+        """
+        return list(
+            self._session.scalars(
+                select(AuditLogORM.details)
+                .where(
+                    AuditLogORM.tenant_id == self._tenant_id,
+                    AuditLogORM.event_type == AuditEventType.CONNECTOR_JOB_RUN.value,
+                    AuditLogORM.scope_type == ScopeType.FINANCE_MONTH.value,
+                    AuditLogORM.scope_id == month,
+                )
+                .order_by(AuditLogORM.created_at.desc(), AuditLogORM.id.desc())
+            ).all()
+        )
+
     @staticmethod
     def _to_entry(row: AuditLogORM) -> AuditLogEntry:
         """Convert a SQLAlchemy row into the API-facing immutable entry."""
