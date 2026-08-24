@@ -1279,7 +1279,8 @@ def test_non_uuid_gateway_actor_can_create_and_list_exports(tmp_path):
 
 def test_export_list_scan_limit_marks_has_more_and_logs_metric(caplog):
     """Test pagination behavior of export listing, ensuring
-    has_more is marked and metrics are logged."""
+    has_more is marked and metrics are logged.
+    """
     created_at = datetime(2026, 4, 30, 10, 0, tzinfo=UTC)
 
     class PagedRepository:
@@ -1529,7 +1530,8 @@ def test_group_export_requires_access_to_every_member_channel(tmp_path):
 
 def test_export_request_rejects_non_usd_currency_until_exchange_rates_exist(tmp_path):
     """Verify that export requests with non-USD currency are
-    rejected until exchange rate support is available."""
+    rejected until exchange rate support is available.
+    """
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -1697,7 +1699,8 @@ def test_export_list_applies_current_scope_and_type_permissions(tmp_path):
 
 def test_export_operator_can_get_own_export_job(tmp_path):
     """Test that an export operator can retrieve their own export
-    job and that audit logs are recorded properly."""
+    job and that audit logs are recorded properly.
+    """
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))

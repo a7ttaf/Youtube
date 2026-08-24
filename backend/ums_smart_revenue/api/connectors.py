@@ -193,7 +193,8 @@ class ContentOwnerEntry(BaseModel):
 
 class ContentOwnersResponse(BaseModel):
     """Least-privilege picker payload — a declared model so the disclosed field
-    set cannot drift silently (mirrors the groups.py response-model rule)."""
+    set cannot drift silently (mirrors the groups.py response-model rule).
+    """
 
     items: list[ContentOwnerEntry]
 
