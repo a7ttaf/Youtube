@@ -23,9 +23,11 @@
 #   - File: backend/ums_smart_revenue/app.py -> the app factory's
 #     dependency overrides that swap in the SQL-backed sinks.
 #   - Consumers: the route modules that previously imported these from
-#     api.channels (channels, groups, revenue, exports, reconciliation,
-#     adsense, allocation, audit, channel_account_links, connectors,
-#     exchange_rates, export_templates, finance_close, reports, users).
+#     api.channels (channels, groups, exports, reconciliation, adsense,
+#     allocation, audit, channel_account_links, connectors, exchange_rates,
+#     export_templates, finance_close, reports, users). api/revenue.py is
+#     NOT one of them — its sink providers live in dependencies_finance and
+#     it keeps its own response serialization.
 # ============================================================================
 """Shared audit-sink dependency providers and the audit-record API serializer."""
 

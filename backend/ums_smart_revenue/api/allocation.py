@@ -191,6 +191,26 @@ def commit_request_fingerprint(
     return hashlib.blake2b(payload.encode(), digest_size=16).hexdigest()
 
 
+# ============================================================================
+# Purpose: Serialize one committed-allocation run header into the shared API
+#   response shape (identity, method, actor/time, and the allocation summary
+#   counts and totals).
+# Database/ORM: Reads an already-loaded CommittedAllocationRunORM row; no
+#   queries.
+# Standards: Monetary totals go through decimal_to_api (Decimals as strings,
+#   never floats) and UUIDs/timestamps are stringified — the recorded
+#   financial-representation contract for every response embedding a
+#   committed run.
+# Blast Radius: The committed-run fragment of the allocation commit/read
+#   responses AND revenue's recalculation commit response; a field change
+#   here changes both surfaces at once.
+# Connections:
+#   - File: backend/ums_smart_revenue/api/revenue.py -> the recalculation
+#     commit response embeds the same fragment (the un-deferred import).
+#   - File: backend/ums_smart_revenue/finance/committed_allocation.py ->
+#     the ORM row shape serialized here.
+#   - File: Docs/12_BACKEND_API_SPEC.md -> committed-run response contract.
+# ============================================================================
 def run_to_api(run: CommittedAllocationRunORM) -> dict[str, object]:
     """Serialize a committed run header (Decimals as strings)."""
     return {
