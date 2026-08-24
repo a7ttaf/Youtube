@@ -372,7 +372,8 @@ def _require_manage_export_templates(user: UserPrincipal, template_id: str | Non
 # Blast Radius: Audit trail for export-template configuration changes.
 # Connections:
 #   - File: backend/ums_smart_revenue/auth/audit_service.py -> Audit writer.
-#   - File: backend/ums_smart_revenue/api/channels.py -> Audit API serializer.
+#   - File: backend/ums_smart_revenue/api/dependencies_audit.py -> Audit API
+#     serializer.
 # ============================================================================
 def _template_response_with_audit(
     *,
