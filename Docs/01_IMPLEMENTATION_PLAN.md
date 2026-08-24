@@ -1202,7 +1202,22 @@ and the reconciled-net content (Phase 4 allocation/tax) feeding report bodies.
   (PR #8) plus the `CHANNELS_MISSING_REVENUE_FACTS` per-channel coverage check
   (PR #98, active+revenue_required channels with no monthly fact); broader
   quality checks not built.
-- ⏳ Backup/export retention — remaining: not started.
+- ⏳ Backup/export retention — remaining: not started. **Audited 2026-08-24 and
+  raised to a beta BLOCKER** (`Docs/20_DEPLOYMENT_READINESS_AUDIT.md`, B3): no
+  `pg_dump` script exists anywhere in the repo, while `docker-compose.yml:7`
+  documents `docker compose down -v` as an ordinary teardown — that deletes the
+  `postgres-data` volume and every revenue fact in it. Must be fixed before real
+  CMS data is ingested. Export artifacts are separately at risk (B4): they default
+  to the container temp dir with no volume mounted.
+- ⏳ Deployment readiness for a first beta — **audited 2026-08-24, see
+  `Docs/20_DEPLOYMENT_READINESS_AUDIT.md`.** Verdict: the application is
+  feature-ready, the deployment is not. Five blockers, none requiring redesign:
+  no authentication front door (the app takes identity from gateway headers and
+  the compose stack ships no gateway), the default `headers` authz mode lets a
+  caller assert their own role, no database backup, ephemeral artifact storage,
+  and no non-dev path to serve the browser app. Two viable beta shapes are
+  documented there; real revenue can be ingested without any Google/GCP
+  dependency via the first-class `MANUAL_UPLOAD` import path.
 - ⏳ Google credential token monitoring — remaining: credentials repo (PRs #33, #34) +
   four `api_connector_credentials` refresh-telemetry columns (last-attempt,
   token-expiry, last-status, last-error-class) stamped at the
