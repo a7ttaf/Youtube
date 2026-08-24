@@ -96,6 +96,26 @@ def previous_month(month: str) -> str:
     return f"{year:04d}-{month_number - 1:02d}"
 
 
+# ============================================================================
+# Purpose: Serve the missing-facts coverage pair (total count + bounded
+#   sample) that the smart-alert builder and the finance exports compose.
+# Database/ORM: Delegated — SqlAlchemyRevenueFactRepository
+#   .missing_required_fact_channel_count_and_sample owns the read-only LEFT
+#   JOIN of YouTubeChannelORM x MonthlyChannelRevenueFactORM.
+# Standards: Tenant-scoped via resolve_smart_alert_tenant_id passed
+#   explicitly to the repository; the sample is bounded by
+#   MISSING_FACT_CHANNEL_SAMPLE_LIMIT so a bad ingestion month cannot turn
+#   the alert endpoint into an unbounded scan/transfer. Callers gate
+#   permissions BEFORE calling and choose the session lane (the routes pass
+#   the platform snapshot session per the composed-read rulings).
+# Blast Radius: Smart-alert and export signal values only; no finance
+#   mutation, no auth, no audit writes.
+# Connections:
+#   - File: backend/ums_smart_revenue/finance/revenue_facts.py -> the
+#     repository method owning the SQL.
+#   - File: backend/ums_smart_revenue/finance/smart_alerts.py -> consumes
+#     (count, sample) for the coverage alert details.
+# ============================================================================
 def missing_revenue_fact_channel_count_and_sample(
     session: Session,
     *,
@@ -123,6 +143,29 @@ def missing_revenue_fact_channel_count_and_sample(
     )
 
 
+# ============================================================================
+# Purpose: Derive the smart-alert source-row skip signal for one finance
+#   month from the newest relevant connector-run audit edge only.
+# Database/ORM: Delegated — SqlAlchemyAuditLogRepository
+#   .connector_run_details_for_finance_month owns the newest-first
+#   CONNECTOR_JOB_RUN details SELECT; read-only.
+# Standards: Tenant-scoped via resolve_smart_alert_tenant_id passed
+#   explicitly to the repository. The JSON lifecycle interpretation happens
+#   here (portable across SQLite tests and PostgreSQL): a newer clean edge
+#   clears older ROWS_SKIPPED history, malformed or zero-count rows are
+#   tolerated, and the reason breakdown is redacted unless the caller holds
+#   VIEW_SENSITIVE_AUDIT_PAYLOADS. Callers gate VIEW_AUDIT_LOG first and
+#   keep this read on the tenant lane per the recorded laning residual.
+# Blast Radius: Finance dashboard/export read surface only; no finance
+#   mutation, no auth, no audit writes.
+# Connections:
+#   - File: backend/ums_smart_revenue/auth/audit_log.py -> the repository
+#     method owning the SQL.
+#   - File: backend/ums_smart_revenue/connectors/runs/normalization.py ->
+#     emits the ROWS_SKIPPED edges interpreted here.
+#   - File: backend/ums_smart_revenue/finance/smart_alerts.py -> consumes
+#     the aggregate as SOURCE_ROWS_SKIPPED.
+# ============================================================================
 def skipped_source_row_count_and_reasons(
     session: Session,
     *,
