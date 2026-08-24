@@ -33,8 +33,12 @@ CURRENCY_CODE_PATTERN = re.compile(r"^[A-Z]{3}$")
 
 @overload
 def _normalize_currency_code(value: str) -> str: ...
+
+
 @overload
 def _normalize_currency_code(value: object) -> object: ...
+
+
 def _normalize_currency_code(value: object) -> object:
     """Upper-case and validate a 3-letter ISO 4217 code; non-strings pass through."""
     if isinstance(value, str):
