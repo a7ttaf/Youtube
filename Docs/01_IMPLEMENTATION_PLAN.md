@@ -878,11 +878,12 @@ channel↔account map, and multi-currency FX) stays out per Docs/18.
   per the repository-layer rule), the shared permission gates to
   `backend/ums_smart_revenue/api/authz.py`, and the revenue audit-sink
   providers to `api/dependencies_finance.py` — so no module imports
-  `api/revenue.py`'s internals any more. Nine route modules
+  `api/revenue.py`'s internals any more. `api/revenue.py` itself switched
+  to the shared gate, and nine sibling route modules
   (reconciliation, exports, adsense, allocation, audit,
   channel_account_links, exchange_rates, finance_close, reports) dropped
   their behavior-identical private `_require_permission` /
-  `_raise_missing_permission` copies for the shared gate, and exports'
+  `_raise_missing_permission` copies for it, and exports'
   local `_previous_month`/`EXPORT_MONTH_PATTERN` folded into the shared
   `previous_month` (same acceptance set; only the unit-level error string
   changed). No route, permission, or response behavior change; no

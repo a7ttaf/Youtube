@@ -44,7 +44,7 @@ class FinanceCloseReasonRequest(BaseModel):
 
     @field_validator("reason", mode="before")
     @classmethod
-    def strip_reason(cls, value):
+    def strip_reason(cls, value: object) -> object:
         """Strip whitespace from reason, rejecting a blank value."""
         return _strip_required_string(value)
 
@@ -58,7 +58,7 @@ class AllocationRuleRequest(BaseModel):
 
     @field_validator("allocation_method", "reason", mode="before")
     @classmethod
-    def strip_required_fields(cls, value):
+    def strip_required_fields(cls, value: object) -> object:
         """Strip whitespace from allocation_method/reason, rejecting blank values."""
         return _strip_required_string(value)
 
@@ -77,7 +77,7 @@ def current_finance_close_readiness_service(
     return SqlAlchemyFinanceCloseReadinessService(session)
 
 
-def _strip_required_string(value):
+def _strip_required_string(value: object) -> object:
     """Strip a required string value, rejecting blank results; non-strings pass through."""
     if isinstance(value, str):
         stripped = value.strip()

@@ -2,7 +2,7 @@ import hashlib
 import re
 from datetime import date
 from decimal import Decimal
-from typing import Annotated
+from typing import Annotated, overload
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -31,7 +31,11 @@ router = APIRouter(prefix="/exchange-rates", tags=["exchange-rates"])
 CURRENCY_CODE_PATTERN = re.compile(r"^[A-Z]{3}$")
 
 
-def _normalize_currency_code(value):
+@overload
+def _normalize_currency_code(value: str) -> str: ...
+@overload
+def _normalize_currency_code(value: object) -> object: ...
+def _normalize_currency_code(value: object) -> object:
     """Upper-case and validate a 3-letter ISO 4217 code; non-strings pass through."""
     if isinstance(value, str):
         normalized = value.strip().upper()
@@ -52,12 +56,12 @@ class ExchangeRateRequest(BaseModel):
 
     @field_validator("base_currency", "quote_currency", mode="before")
     @classmethod
-    def strip_required_strings(cls, value):
+    def strip_required_strings(cls, value: object) -> object:
         """Strip whitespace from base_currency/quote_currency and normalize to ISO codes."""
         return _normalize_currency_code(_strip_required_string(value))
 
     @model_validator(mode="after")
-    def check_currency_pair_distinct(self):
+    def check_currency_pair_distinct(self) -> "ExchangeRateRequest":
         """Reject a request whose base_currency and quote_currency are identical."""
         if self.base_currency == self.quote_currency:
             raise ValueError("base_currency and quote_currency must differ")
@@ -77,13 +81,13 @@ class ExchangeRateSyncRequest(BaseModel):
 
     @field_validator("provider_key", "reason", mode="before")
     @classmethod
-    def strip_required_strings(cls, value):
+    def strip_required_strings(cls, value: object) -> object:
         """Strip whitespace from provider_key/reason, rejecting blank values."""
         return _strip_required_string(value)
 
     @field_validator("source_report_id", mode="before")
     @classmethod
-    def strip_optional_string(cls, value):
+    def strip_optional_string(cls, value: object) -> object:
         """Strip source_report_id, normalizing a blank or absent value to None."""
         if value is None:
             return None
@@ -248,7 +252,7 @@ def get_latest_exchange_rate(
     return response
 
 
-def _strip_required_string(value):
+def _strip_required_string(value: object) -> object:
     """Strip a required string value, rejecting blank results; non-strings pass through."""
     if isinstance(value, str):
         stripped = value.strip()

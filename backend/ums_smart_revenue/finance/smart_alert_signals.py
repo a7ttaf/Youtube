@@ -148,7 +148,8 @@ def missing_revenue_fact_channel_count_and_sample(
 #   month from the newest relevant connector-run audit edge only.
 # Database/ORM: Delegated — SqlAlchemyAuditLogRepository
 #   .connector_run_details_for_finance_month owns the newest-first
-#   CONNECTOR_JOB_RUN details SELECT; read-only.
+#   CONNECTOR_JOB_RUN details SELECT, streamed in small batches; read-only.
+#   The early break below bounds what a month's re-run history transfers.
 # Standards: Tenant-scoped via resolve_smart_alert_tenant_id passed
 #   explicitly to the repository. The JSON lifecycle interpretation happens
 #   here (portable across SQLite tests and PostgreSQL): a newer clean edge

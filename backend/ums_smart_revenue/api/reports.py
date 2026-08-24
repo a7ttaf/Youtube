@@ -51,7 +51,7 @@ class RawReportFileRegisterRequest(BaseModel):
         mode="before",
     )
     @classmethod
-    def strip_required_strings(cls, value):
+    def strip_required_strings(cls, value: object) -> object:
         """Strip whitespace from the required string fields, rejecting blank values."""
         if isinstance(value, str):
             stripped = value.strip()
@@ -68,7 +68,7 @@ class RawReportFilePurgeRequest(BaseModel):
 
     @field_validator("reason", mode="before")
     @classmethod
-    def strip_reason(cls, value):
+    def strip_reason(cls, value: object) -> object:
         """Strip whitespace from reason, rejecting a blank value."""
         if isinstance(value, str):
             stripped = value.strip()
