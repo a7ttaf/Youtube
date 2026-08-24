@@ -8,7 +8,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
-from ums_smart_revenue.api.channels import current_audit_sink
+from ums_smart_revenue.api.dependencies_audit import current_audit_sink
 from ums_smart_revenue.app import create_app
 from ums_smart_revenue.auth.audit_service import InMemoryAuditSink
 from ums_smart_revenue.db.security_models import AuditLogORM, SecurityBase, UserORM

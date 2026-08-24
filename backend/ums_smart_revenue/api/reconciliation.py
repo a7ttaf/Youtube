@@ -16,11 +16,11 @@ from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.orm import Session
 
 from ums_smart_revenue.api.authz import require_permission
-from ums_smart_revenue.api.channels import audit_record_to_api
 from ums_smart_revenue.api.dependencies import (
     current_platform_db_session,
     current_principal_from_headers,
 )
+from ums_smart_revenue.api.dependencies_audit import audit_record_to_api
 from ums_smart_revenue.api.dependencies_finance import (
     current_org_access_index,
     current_revenue_audit_sink,

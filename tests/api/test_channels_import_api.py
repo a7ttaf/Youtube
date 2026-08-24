@@ -25,14 +25,14 @@ from collections.abc import Callable
 
 from fastapi.testclient import TestClient
 
-from ums_smart_revenue.api.channels import (
-    _plan_fingerprint,
-    current_audit_sink,
-    current_channel_registry,
-)
+from ums_smart_revenue.api.channels import _plan_fingerprint
 from ums_smart_revenue.api.dependencies import current_principal_from_headers
+from ums_smart_revenue.api.dependencies_audit import current_audit_sink
 from ums_smart_revenue.api.dependencies_finance import current_org_access_index
-from ums_smart_revenue.api.registry_dependencies import sql_group_registry_from_session
+from ums_smart_revenue.api.registry_dependencies import (
+    current_channel_registry,
+    sql_group_registry_from_session,
+)
 from ums_smart_revenue.app import create_app
 from ums_smart_revenue.auth.audit_service import AuditRecord, InMemoryAuditSink
 from ums_smart_revenue.auth.models import PermissionGrant, UserPrincipal
@@ -832,6 +832,7 @@ class _GroupAppearsAtWriteBoundary(ChannelGroupRegistry):
     """
 
     def __init__(self, *, cms_group_id: str, content_owner_id: str) -> None:
+        """Remember the group key/owner to race into existence and reset the flag."""
         super().__init__()
         self._race_key = cms_group_id
         self._race_owner = content_owner_id
@@ -906,6 +907,7 @@ class _ChannelDriftsAtWriteBoundary(ChannelRegistry):
     """
 
     def __init__(self, entries: list[ChannelRegistryEntry], *, drift_to: str) -> None:
+        """Remember the rename target and reset the one-shot drift flag."""
         super().__init__(entries)
         self._drift_to = drift_to
         self._drifted = False
@@ -968,6 +970,7 @@ class _ChannelArchivedAtWriteBoundary(ChannelRegistry):
     """
 
     def __init__(self, entries: list[ChannelRegistryEntry]) -> None:
+        """Reset the one-shot archive flag."""
         super().__init__(entries)
         self._archived = False
 
@@ -1179,6 +1182,7 @@ class _RevenueFlagDriftsAtWriteBoundary(ChannelRegistry):
     """
 
     def __init__(self, entries: list[ChannelRegistryEntry]) -> None:
+        """Reset the one-shot drift flag."""
         super().__init__(entries)
         self._drifted = False
 
@@ -1611,6 +1615,7 @@ class _SourceStatusDriftsAtWriteBoundary(ChannelRegistry):
     """
 
     def __init__(self, entries: list[ChannelRegistryEntry], *, drift_to: str) -> None:
+        """Remember the target classification and reset the one-shot drift flag."""
         super().__init__(entries)
         self._drift_to = drift_to
         self._drifted = False
@@ -1812,6 +1817,7 @@ class _CountingGroupStore(ChannelGroupRegistry):
     """
 
     def __init__(self) -> None:
+        """Zero out the locked-lookup, member-add, and batch-size counters."""
         super().__init__()
         self.locked_lookups = 0
         self.member_adds = 0

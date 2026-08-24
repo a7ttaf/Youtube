@@ -29,14 +29,6 @@ from ums_smart_revenue.api.channel_account_links import (
     router as channel_account_links_router,
 )
 from ums_smart_revenue.api.channels import (
-    current_atomic_audit_sink,
-    current_audit_sink,
-    current_channel_registry,
-    sql_atomic_audit_sink_from_session,
-    sql_audit_sink_from_session,
-    sql_channel_registry_from_session,
-)
-from ums_smart_revenue.api.channels import (
     router as channels_router,
 )
 from ums_smart_revenue.api.connectors import router as connectors_router
@@ -47,6 +39,12 @@ from ums_smart_revenue.api.dependencies import (
     current_principal_from_database,
     current_principal_from_headers,
     current_trusted_gateway_identity,
+)
+from ums_smart_revenue.api.dependencies_audit import (
+    current_atomic_audit_sink,
+    current_audit_sink,
+    sql_atomic_audit_sink_from_session,
+    sql_audit_sink_from_session,
 )
 from ums_smart_revenue.api.dependencies_finance import (
     current_revenue_audit_sink,
@@ -62,7 +60,9 @@ from ums_smart_revenue.api.groups import (
 from ums_smart_revenue.api.org_units import router as org_units_router
 from ums_smart_revenue.api.reconciliation import router as reconciliation_router
 from ums_smart_revenue.api.registry_dependencies import (
+    current_channel_registry,
     current_group_registry,
+    sql_channel_registry_from_session,
     sql_group_registry_from_session,
 )
 from ums_smart_revenue.api.reports import router as reports_router

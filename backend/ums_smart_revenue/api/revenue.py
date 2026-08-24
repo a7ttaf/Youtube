@@ -41,6 +41,11 @@ from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from ums_smart_revenue.api.allocation import (
+    commit_request_fingerprint,
+    emit_allocation_committed_audit,
+    run_to_api,
+)
 from ums_smart_revenue.api.authz import raise_missing_permission, require_permission
 from ums_smart_revenue.api.dependencies import (
     current_db_session,
@@ -652,15 +657,6 @@ def _commit_recalculation_write(
     response: Response,
 ) -> dict[str, object]:
     """Commit the recalculation snapshot and return the write-response fragment."""
-    # Deferred import: api.allocation imports from api.channels imports from
-    # api.revenue, so a top-level import in api.revenue would form a cycle.
-    # All three helpers are stable — no logic drift across endpoints.
-    from ums_smart_revenue.api.allocation import (
-        _run_to_api,
-        commit_request_fingerprint,
-        emit_allocation_committed_audit,
-    )
-
     fingerprint = commit_request_fingerprint(
         allocation_method=normalized_method,
         reason=payload.reason,
@@ -700,7 +696,7 @@ def _commit_recalculation_write(
     response.status_code = status.HTTP_201_CREATED if outcome.created else status.HTTP_200_OK
     return {
         "write_status": write_status,
-        "committed_run": _run_to_api(outcome.run),
+        "committed_run": run_to_api(outcome.run),
         "commit_audit_event": commit_audit_event,
     }
 

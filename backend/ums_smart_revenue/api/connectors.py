@@ -36,8 +36,8 @@ from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import event, select
 from sqlalchemy.orm import Session
 
-from ums_smart_revenue.api.channels import audit_record_to_api, current_audit_sink
 from ums_smart_revenue.api.dependencies import current_db_session, current_principal_from_headers
+from ums_smart_revenue.api.dependencies_audit import audit_record_to_api, current_audit_sink
 from ums_smart_revenue.auth.audit import AuditEventType
 from ums_smart_revenue.auth.audit_service import AuditSink, record_audit_event
 from ums_smart_revenue.auth.models import UserPrincipal
@@ -1256,6 +1256,7 @@ def _make_after_commit_handler(executor: ConnectorJobExecutor, reservation: _Slo
     """
 
     def _after_commit(_session: Session) -> None:
+        """Activate the reservation, auditing a failure if activation raises."""
         try:
             executor.activate(reservation)
         except Exception as exc:  # noqa: BLE001 — best-effort, never raise
@@ -1286,6 +1287,7 @@ def _make_after_rollback_handler(executor: ConnectorJobExecutor, reservation: _S
     """Return a hook that drops the reservation when the session rolls back."""
 
     def _after_rollback(_session: Session) -> None:
+        """Cancel the reservation so its slot is released."""
         executor.cancel_reservation(reservation)
 
     return _after_rollback

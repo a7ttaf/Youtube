@@ -20,8 +20,8 @@ from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, func, select
 from sqlalchemy.orm import Session
 
-from ums_smart_revenue.api.channels import current_audit_sink
 from ums_smart_revenue.api.dependencies import current_principal_from_headers
+from ums_smart_revenue.api.dependencies_audit import current_audit_sink
 from ums_smart_revenue.api.exports import (
     _list_authorized_export_jobs,
     current_export_artifact_store,
@@ -1286,6 +1286,7 @@ def test_export_list_scan_limit_marks_has_more_and_logs_metric(caplog):
         """Provides paginated retrieval of export jobs via the list_jobs method."""
 
         def __init__(self) -> None:
+            """Track the offsets each list_jobs call requests."""
             self.offsets: list[int] = []
 
         def list_jobs(
@@ -2170,7 +2171,8 @@ def test_analytics_summary_csv_terminal_job_rejects_before_source_row_read(
         )
         session.commit()
 
-    def fail_build(*_args, **_kwargs):
+    def fail_build(*_args: object, **_kwargs: object) -> None:
+        """Fail the test if the source-row export builder is ever called."""
         raise AssertionError("terminal CSV jobs must not build source-row exports")
 
     monkeypatch.setattr(
