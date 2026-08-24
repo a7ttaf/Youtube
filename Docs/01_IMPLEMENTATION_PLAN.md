@@ -1209,9 +1209,24 @@ and the reconciled-net content (Phase 4 allocation/tax) feeding report bodies.
   `postgres-data` volume and every revenue fact in it. Must be fixed before real
   CMS data is ingested. Export artifacts are separately at risk (B4): they default
   to the container temp dir with no volume mounted.
-- ⏳ Deployment readiness for a first beta — **audited 2026-08-24, see
-  `Docs/20_DEPLOYMENT_READINESS_AUDIT.md`.** Verdict: the application is
-  feature-ready, the deployment is not. Five blockers, none requiring redesign:
+- 🔴 **Analytics revenue currency is fabricated as USD** — found in the 2026-08-24
+  deep audit (`Docs/20_DEPLOYMENT_READINESS_AUDIT.md`).
+  `connectors/google_source_parsers/youtube_analytics.py:119-126` returns `"USD"`
+  when the request carries no `currency` key, and the Analytics client never sets
+  one — so the branch is unconditional and Google's actual reported currency is
+  never observed. This tenant's content owner reports natively in **EGP**, so live
+  connector ingest would record EGP amounts as USD. Breaks
+  `Docs/05_CONNECTORS_YOUTUBE_ADSENSE.md:99-100` and
+  `Docs/18_MULTI_CURRENCY_ENGINE.md:181-182`. **Must be fixed before any live
+  connector ingest**; the manual-import beta path is unaffected.
+- ⏳ Deployment readiness for a first beta — **audited 2026-08-24 in two rounds, see
+  `Docs/20_DEPLOYMENT_READINESS_AUDIT.md`.** Round 1 verdict: the application is
+  feature-ready, the deployment is not. Round 2 (deep audit: host lifecycle,
+  frontend, observability, performance, data correctness, failure modes) overturned
+  that — the currency defect above outweighs every deployment gap. Also found: no
+  logging configuration exists at all (every `logger.*` call is discarded), the
+  frontend is a single page with no router, and a connector job killed mid-run
+  409-blocks its month for six hours. Five blockers, none requiring redesign:
   no authentication front door (the app takes identity from gateway headers and
   the compose stack ships no gateway), the default `headers` authz mode lets a
   caller assert their own role, no database backup, ephemeral artifact storage,
