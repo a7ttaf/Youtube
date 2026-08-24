@@ -1,64 +1,108 @@
 # 20 — Deployment Readiness Audit (First Beta, Single PC)
 
-**Audited:** 2026-08-24, at `main` = `d8418cea2`, in two rounds.
+**Audited:** 2026-08-24 – 2026-08-25, at `main` = `d8418cea2`, in four rounds.
 **Target deployment:** first beta on one Windows PC via `docker compose`, **bound to
 localhost only**, operator-run, with **real** YouTube CMS revenue data.
 **Method:** read-only code audit. Every finding carries `file:line` evidence, and
 **every round was re-checked by an independent adversarial pass** whose job was to
-refute it. Those passes reversed or downgraded findings in both rounds; the
+refute it. Those passes reversed or downgraded findings in every round; the
 corrections are recorded rather than quietly dropped.
 
 - **Round 1 — deployment surface:** auth, secrets, data lifecycle, bootstrap, config.
 - **Round 2 — deep audit:** PC/host lifecycle, frontend completeness, observability,
   performance at scale, **data correctness**, and failure modes.
+- **Round 3 — hands-on:** the operator's own report that no button worked, the data
+  looked fake, and the app read as a landing-page mockup. All three traced to cause.
+- **Round 4 — implementation scoping:** every finding costed against the code before
+  planning. **This round retracted Round 2's headline CRITICAL** and corrected four
+  other published claims.
 
 > **Scope note.** This audit answers one question: *what stands between the current
 > `main` and a first beta on this PC?* Round 1 was about **running** it. Round 2
 > asked the harder question — *if it runs, are the numbers right, and would anyone
-> notice if they weren't?* — and the answer changed the verdict.
+> notice if they weren't?*
+>
+> **Read the Round 4 corrections before acting on any Round 2 finding.** Costing the
+> fixes turned out to be the most effective adversarial pass of the four: an
+> estimate forces you to name the exact line you would change, and two findings did
+> not survive that.
+
+**The plan built from this audit is [`21_BETA_IMPLEMENTATION_PLAN.md`](21_BETA_IMPLEMENTATION_PLAN.md).**
 
 ---
 
 ## Verdict
 
-**Round 1 concluded "feature-ready, deployment not ready." Round 2 overturns that.**
-There is a correctness defect on the live revenue path that matters more than every
-deployment gap combined, and it is specific to this tenant's data:
+**Round 1 concluded "feature-ready, deployment not ready." That verdict stands.**
+Round 2 published a CRITICAL correctness finding on top of it; Round 4 scoping
+**retracted that finding as wrong**. See the retraction immediately below — it is
+kept in place rather than deleted, because it was acted on and circulated.
 
-### 🔴 The single most important finding: revenue currency is fabricated
+### ✅ RETRACTED — "revenue currency is fabricated" was incorrect
 
-`connectors/google_source_parsers/youtube_analytics.py:119-126`:
+**What Round 2 claimed:** that `_analytics_currency`
+(`connectors/google_source_parsers/youtube_analytics.py:119-126`) stamps `USD` on
+revenue the content owner actually earns in EGP, corrupting the unit on every live
+Analytics row.
 
-```python
-def _analytics_currency(request: dict[str, object]) -> str:
-    """Return the requested currency, defaulting omitted Analytics currency to USD."""
-    if "currency" not in request:
-        return "USD"
-```
+**Why that is wrong.** `currency` on the YouTube Analytics `reports.query` endpoint
+is a **request parameter that selects the output currency**, not a field describing
+what the account natively earns. Omit it and Google *returns* USD; send `EGP` and
+Google *converts server-side and returns* EGP. Three independent pieces of evidence
+in this repo:
 
-The currency is read from **our own outgoing request**, never from Google's
-response — and `connectors/google/youtube_analytics_client.py` contains **zero**
-occurrences of `currency`, so the request never carries one. The branch is therefore
-unconditional: **every YouTube Analytics revenue row is stamped `USD`.**
+1. **Google's response carries no currency field at all.** The recorded fixture
+   `tests/connectors/_fixtures/youtube_analytics/sample_query_response_2026_04.json`
+   has top-level keys `query_request`, `kind`, `columnHeaders`, `rows`. Its only
+   `"currency": "USD"` lives inside `query_request` — *our own echoed request*.
+   `columnHeaders` entries carry `name`/`columnType`/`dataType` and nothing else.
+   "Read the currency Google returned" is therefore not a thing the code could do.
+2. **The repo's own test documents the default.**
+   `tests/connectors/google_source_parsers/test_youtube_analytics_parser.py`,
+   `test_missing_currency_defaults_to_usd`: *"`currency` is an optional
+   reports.query request parameter; the YouTube Analytics API defaults financial
+   metrics to USD when it is omitted."*
+3. **The live smoke figures are USD-shaped.** The 2026-06-22 live run returned
+   ≈$79,057.76 across 25 channels. EGP would be roughly 47× larger.
 
-This is not theoretical for this deployment. The content owner's YouTube Analytics
-revenue is reported **natively in EGP**. Under the current code those EGP amounts are
-recorded as USD — the number is preserved, the unit is wrong, and nothing downstream
-can detect it because the currency was never observed in the first place.
+So the label matches what Google actually sent. **No data is mis-denominated, and
+nothing needs re-ingesting or migrating.**
 
-It also breaks two written contracts:
-`Docs/05_CONNECTORS_YOUTUBE_ADSENSE.md:99-100` (*"the connector must preserve
-Google's reported currency … it must not convert the amount"*) and
-`Docs/18_MULTI_CURRENCY_ENGINE.md:181-182` (*"still store the currency returned by
-Google"*).
+**Root cause of the error:** a note reading "currency=EGP is native" was read as
+"this account reports EGP by default." It actually meant the *parameter* is accepted
+for this content owner. Round 2's adversarial pass did not catch it because it
+attacked the CSV half of the claim and left the Analytics half standing.
 
-**This must be fixed before any live connector ingest.** It does not block a beta
-that uses the manual import path (H5), where the operator supplies the figures.
+### 🟡 What is actually true, at the right severity
 
-> The adversarial pass tried hardest to refute exactly this finding and could not:
-> the CSV-parser half of the original claim *was* overstated (that path does read a
-> real currency header and fails closed), which makes the Analytics half stand out
-> as the genuine defect rather than a blanket accusation.
+**D1 — MEDIUM: the USD label is assumed, not asserted.** The outgoing request never
+sends `currency`, so the correct label depends on an undocumented Google default
+holding forever. `Docs/05:99-100` and `Docs/18:181-182` both ask for the currency to
+be explicit. Fix: send `"currency": "USD"` in `_build_query_request`
+(`youtube_analytics_client.py:108-115`). **Byte-identical downstream** — the parser
+returns `"USD"` either way, so `source_row_key` hashes are unchanged. ~2h.
+
+**D1b — same class, second site.** `connectors/runs/orchestrator.py:205-210` maps
+`content_owner_estimated_revenue_a1 → "USD"` when a Reporting bulk CSV has no
+currency column (applied at `:2756-2758`), failing closed only for report types
+*absent* from that dict. Round 2's adversarial pass cleared the CSV path as
+"fails closed" — that was half right. The default is documented in its own comment
+and is consistent with Google's Reporting schema, so this is an assumption to make
+explicit, **not** a fabrication.
+
+**D2 — the real commercial gap: UMS cannot represent EGP at all.** There is no
+currency column on the finance path and ~2,154 `*_usd` identifiers; USD-only is a
+*designed, test-locked* property, not an oversight. If settlement and banking are in
+EGP, that gap is real — and it is **3–6 weeks**, not a bug fix.
+
+**D3 — it is a recorded open decision, not an accident.**
+`Docs/16_OPEN_DECISIONS.md:70-71` has never been answered. The one question that
+sizes everything above: *"USD facts, with the EGP bank settlement explained as FX
+variance — acceptable for the beta, yes or no?"* The code has assumed "yes" since
+PR #42 without anyone saying so.
+
+**None of D1/D1b/D2 blocks the recommended beta**, which uses manual import (H5) and
+never calls Google.
 
 ### The deployment verdict (Round 1) still holds
 
@@ -304,24 +348,26 @@ These were checked and found correct — no action needed:
 ### Path A — Single-operator beta, manual import (recommended first step)
 The only user is the operator, on this PC, at `127.0.0.1`. No gateway is built; the
 Vite dev server injects the fixed operator identity. **Revenue enters by manual
-import, not by connector** — which sidesteps the currency defect entirely, because
-the operator supplies the figures rather than Google's unread currency.
+import, not by connector** — so Google is never called and the currency questions
+(D1/D2) do not arise: the operator supplies the figures directly.
 
 Required before real data: **B3** (backups), **B4** (artifact volume — note the
-permanent-503 consequence), and the **logging fix** (one `basicConfig` call, without
-which nothing is diagnosable). B1/B2 are *accepted risks* documented in the runbook
-rather than fixed, justified solely by the localhost binding.
+permanent-503 consequence), and the **logging fix** (one `basicConfig` call, so that
+INFO-level connector progress is recorded and what already prints can be placed in
+time). B1/B2 are *accepted risks* documented in the runbook rather than fixed,
+justified solely by the localhost binding.
 
 Also needed: compose `.env` template, the `security_seed.sql` step (H1), a first-user
 recipe (H3), a reboot runbook (nothing restarts itself), and a written note that a
 connector-only month cannot be locked.
 
 ### Path A+ — Path A plus live connector ingest
-**Blocked on the currency fix.** Everything in Path A, plus: repair
-`_analytics_currency` to record the currency Google actually returned, decide what
-happens to non-USD amounts in the pipeline (today they are variously skipped, which
-overstates net), add the connector-job startup sweep, and pass the worker env vars
-through compose.
+*No longer blocked on a correctness defect* (see the retraction). Everything in
+Path A, plus: make the requested currency explicit (D1/D1b — ~3h, a downstream
+no-op), answer the open decision in `Docs/16:70-71` about USD facts vs EGP
+settlement, decide what happens to non-USD amounts in the pipeline (today they are
+variously skipped, which overstates net), add the connector-job startup sweep, and
+pass the worker env vars through compose.
 
 ### Path B — Multi-user beta
 Everything in Path A, **plus** a real authenticating front door: an OAuth2 proxy
@@ -365,8 +411,12 @@ question they answer. Severities are the **post-refutation** ones.
 - **MEDIUM — month gross and month net are summed over different channel sets**
   (`finance/net_revenue.py`), so the two headline figures need not describe the same
   population.
-- **MEDIUM — non-USD tax/deduction rows are silently skipped**
+- **MEDIUM — non-USD tax/deduction rows are skipped**
   (`finance/deduction_components.py:108-110`), which **overstates** net.
+  *Round 4 correction: not "silently."* The skip is counted, returned, audited
+  (`deduction_ingestion.py:604,611`) and printed by the CLI
+  (`scripts/run_deduction_ingestion.py:196,204`). It is invisible in the API and UI
+  only — still worth surfacing, but for a narrower reason than first stated.
 - **MEDIUM — the currency selector is inert, and offers currencies the pipeline
   rejects.** `AppShell.tsx:629-633` renders USD/EGP/AED with an uncontrolled
   `defaultValue` and no `onChange`, in a pipeline that skips non-USD source rows and
@@ -382,11 +432,20 @@ question they answer. Severities are the **post-refutation** ones.
 
 ### Would anyone notice a problem?
 
-- **HIGH — there is no logging configuration at all.** No `logging.basicConfig`, no
-  handler, no dictConfig anywhere in the backend — so **every `logger.*` call in the
-  application is discarded before it is written.** All the careful exception handling
-  writes to a logger with no handler. This is the highest-value single fix in the
-  audit: one `basicConfig` call turns the whole codebase's diagnostics on.
+- **MEDIUM — there is no logging configuration** (downgraded from HIGH in Round 4).
+  There is genuinely no `basicConfig`, no `dictConfig`, and no handler anywhere in
+  the backend, against 11 module loggers. But the original claim that **"every
+  `logger.*` call is discarded"** was wrong: Python's `logging.lastResort` handler
+  emits `WARNING` and above to stderr with no configuration at all. The accurate
+  statement is:
+  - `logger.warning` / `.error` / `.exception` **do** reach the container log,
+    tracebacks included — but with **no timestamp, no logger name, no level**.
+  - `logger.info` / `.debug` are discarded, which is where connector-run progress,
+    tenant resolution, and the export lifecycle live.
+
+  Still worth fixing early and still cheap, but the reason is "a connector run that
+  half-worked leaves no trace, and nothing that *does* print can be placed in time"
+  — not "nothing is diagnosable."
 - **MEDIUM — a connector run can report success while the month's facts were never
   rewritten**, and the only evidence is one of those dropped INFO lines.
 - **MEDIUM — nothing reports whether the background workers are running**, and a
@@ -500,11 +559,33 @@ export, manage users) is denied, and so is every read gated on `VIEW_REVENUE`,
 `VIEW_FINALIZED_PAYMENTS`, or `VIEW_RAW_FILES`. **The product is being demonstrated
 by its most restricted role.**
 
-**Fix:** set `VITE_DEV_GATEWAY_ROLE` in `frontend/.env` to a role that can actually
-operate — `finance_admin` for the finance surface, `corporate_admin` for setup. One
-line, no code change. This should be the first thing any beta runbook says, and its
-absence from the README is arguably the single highest-impact documentation gap in
-this audit.
+**Fix:** set `VITE_DEV_GATEWAY_ROLE` to a role that can actually operate —
+`finance_admin` for the finance surface, `corporate_admin` for setup. One line, no
+code change. This should be the first thing any beta runbook says, and its absence
+from the README is arguably the single highest-impact documentation gap here.
+
+> **Correction (Round 4).** An earlier revision of this section said to put that
+> line in `frontend/.env`. **That file is not read.** `vite.config.ts:41-51` pins
+> `envDir` to the **repo root** and calls `loadEnv(mode, REPO_ROOT, "")`
+> (`:93`, `:151`) — and the comment at `:38` records that resolving to
+> `frontend/.env` was a past bug, deliberately fixed. The variable belongs in the
+> **repo-root `.env`**, which does not currently exist on this machine. Following
+> the original instruction would have silently changed nothing.
+
+### A second reason parts of the Registry look broken: `/org-units` is not proxied
+
+`RegistryView` calls `useOrgUnits()` unconditionally on mount
+(`RegistryView.tsx:1216` → `GET /org-units`), but `TENANT_SCOPED_ROUTES`
+(`vite.config.ts:13-32`) lists `/tenants`, `/session`, `/revenue`, `/finance-close`,
+`/exports`, `/connectors`, `/adsense`, `/channels`, `/groups`, `/audit` — **no
+`/org-units`, no `/users`**. Since the beta UI *is* the Vite dev server (B5), that
+request never reaches the backend; Vite's SPA fallback answers it.
+
+`RegistryView` degrades gracefully (`orgUnitState.data ?? []`, showing raw ids
+instead of names), so it is not a crash — but the Company and Sector columns will
+never resolve to names, and it reads as a backend bug. **Fix: one line** in that
+array. Not verified by running; reasoned from `client.ts:247-249` and Vite's
+SPA-fallback behaviour.
 
 ### Why the data looks fake: because some of it is
 
@@ -602,6 +683,48 @@ have misled:
 3. **"Six hard stops in first-run" — corrected to three** (`org_units`, the browser
    app, and the Google secret backend); two of the rest were documentation
    failures, not missing mechanisms.
+
+---
+
+## Round 4 — corrections found while costing the fixes
+
+The costing pass produced five corrections. Two invalidate published findings; one
+invalidates published *advice*; two are new findings the earlier rounds missed.
+
+1. **🔴 RETRACTED — "revenue currency is fabricated."** The Round 2 headline was
+   wrong. `currency` is a `reports.query` **request** parameter selecting the output
+   currency; Google's response carries no currency field; omitting it returns USD.
+   Full reasoning and evidence in the Verdict. Severity drops from CRITICAL/blocker
+   to MEDIUM (D1: make the default explicit, ~2h, downstream no-op), plus a separate
+   **feature gap** (D2: UMS cannot represent EGP at all, 3–6 weeks) and an
+   **unmade decision** (D3: `Docs/16:70-71`).
+2. **"Every `logger.*` call is discarded" — corrected.** `logging.lastResort` emits
+   `WARNING`+ to stderr with no configuration. `WARNING`/`ERROR`/`EXCEPTION` already
+   print with tracebacks, just without timestamps; `INFO`/`DEBUG` are lost.
+   Downgraded HIGH → MEDIUM, and the fix's justification changed.
+3. **The Round 3 fix instruction was wrong.** "Set `VITE_DEV_GATEWAY_ROLE` in
+   `frontend/.env`" — that file is not read. `envDir` is pinned to the repo root
+   (`vite.config.ts:41-51,93,151`), and `:38` records that as a deliberate past fix.
+   Following the original instruction would have changed nothing. The correct file is
+   the repo-root `.env`, which does not exist on this machine.
+4. **NEW — `/org-units` is not in the dev proxy** (`vite.config.ts:13-32`), while
+   `RegistryView` calls it on mount. Company/Sector names will never resolve in the
+   beta. One line.
+5. **NEW — a second, untested delete path.** A full `run_deduction_ingestion.py` run
+   (no `--source`) deletes the reconciliation workflow's components for that month
+   (`deduction_ingestion.py:586` → `:269-284`). No test covers it.
+
+Two further items worth carrying, found while costing but not defects in the audit:
+
+- **`pg_dump` does not dump roles.** A restore into a fresh container fails on the
+  RLS policies referencing `app_tenant`/`app_platform`
+  (`20260608_0001_tenant_rls_enforcement.py:92-113`). Without an accompanying
+  `pg_dumpall --roles-only`, backups look fine and are **unrestorable** — the worst
+  possible failure shape for B3.
+- **A test asserts a capability that does not exist.**
+  `test_export_preview_api.py:632` promises the operator "can rehydrate the artifact
+  out of band"; the artifact store has exactly one writer (`api/exports.py:245`).
+  Fix the docstring or build the mechanism.
 
 ---
 

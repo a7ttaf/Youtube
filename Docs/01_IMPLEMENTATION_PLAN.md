@@ -1209,24 +1209,48 @@ and the reconciled-net content (Phase 4 allocation/tax) feeding report bodies.
   `postgres-data` volume and every revenue fact in it. Must be fixed before real
   CMS data is ingested. Export artifacts are separately at risk (B4): they default
   to the container temp dir with no volume mounted.
-- 🔴 **Analytics revenue currency is fabricated as USD** — found in the 2026-08-24
-  deep audit (`Docs/20_DEPLOYMENT_READINESS_AUDIT.md`).
-  `connectors/google_source_parsers/youtube_analytics.py:119-126` returns `"USD"`
-  when the request carries no `currency` key, and the Analytics client never sets
-  one — so the branch is unconditional and Google's actual reported currency is
-  never observed. This tenant's content owner reports natively in **EGP**, so live
-  connector ingest would record EGP amounts as USD. Breaks
-  `Docs/05_CONNECTORS_YOUTUBE_ADSENSE.md:99-100` and
-  `Docs/18_MULTI_CURRENCY_ENGINE.md:181-182`. **Must be fixed before any live
-  connector ingest**; the manual-import beta path is unaffected.
-- ⏳ Deployment readiness for a first beta — **audited 2026-08-24 in two rounds, see
-  `Docs/20_DEPLOYMENT_READINESS_AUDIT.md`.** Round 1 verdict: the application is
-  feature-ready, the deployment is not. Round 2 (deep audit: host lifecycle,
-  frontend, observability, performance, data correctness, failure modes) overturned
-  that — the currency defect above outweighs every deployment gap. Also found: no
-  logging configuration exists at all (every `logger.*` call is discarded), the
-  frontend is a single page with no router, and a connector job killed mid-run
-  409-blocks its month for six hours. Five blockers, none requiring redesign:
+- ✅ **RETRACTED 2026-08-25 — "Analytics revenue currency is fabricated as USD."**
+  This entry previously carried a 🔴 blocker claiming live ingest would record EGP
+  amounts as USD. **That was wrong.** `currency` on YouTube Analytics `reports.query`
+  is a *request* parameter selecting the output currency, not a description of what
+  the account natively earns: omit it and Google returns USD; send `EGP` and Google
+  converts server-side. Google's response carries **no currency field at all** — the
+  recorded fixture `sample_query_response_2026_04.json` has its only
+  `"currency": "USD"` inside the echoed `query_request` — so "record the currency
+  Google returned" was never something the code could do. The repo's own
+  `test_missing_currency_defaults_to_usd` documents the API default, and the
+  2026-06-22 live smoke returned USD-shaped figures (~$79k across 25 channels; EGP
+  would be ~47x larger). **No data is mis-denominated and nothing needs re-ingesting.**
+  What remains, at the correct severity:
+  - ⏳ **MEDIUM — make the requested currency explicit.** Send `"currency": "USD"` in
+    `_build_query_request` (`connectors/google/youtube_analytics_client.py:108-115`)
+    so the label is asserted rather than inherited from an undocumented default, as
+    `Docs/05_CONNECTORS_YOUTUBE_ADSENSE.md:99-100` and
+    `Docs/18_MULTI_CURRENCY_ENGINE.md:181-182` ask. **Byte-identical downstream** —
+    `source_row_key` hashes are unchanged, so no re-ingest and no migration. ~2h.
+    Same class, second site: the Reporting CSV default at
+    `connectors/runs/orchestrator.py:205-210`.
+  - ⏳ **FEATURE GAP — UMS cannot represent EGP at all.** No currency column on the
+    finance path, ~2,154 `*_usd` identifiers, USD-only *test-locked* by
+    `tests/finance/test_finance_no_fx_dependency.py:40-53`. 3–6 weeks, gated on the
+    open decision below. This is a feature, not a bug.
+  - ⏳ **DECISION — `Docs/16_OPEN_DECISIONS.md:70-71` is still unanswered:** are USD
+    facts acceptable with the EGP bank settlement explained as FX variance? The code
+    has assumed "yes" since PR #42 without anyone saying so.
+- ⏳ Deployment readiness for a first beta — **audited 2026-08-24/25 in four rounds,
+  see `Docs/20_DEPLOYMENT_READINESS_AUDIT.md`; the costed plan is
+  `Docs/21_BETA_IMPLEMENTATION_PLAN.md` (38–55 hours to a runnable beta).**
+  Verdict: the application is feature-ready, the deployment is not. Round 2 briefly
+  overturned that on the currency finding; **Round 4 retracted it** (see the entry
+  above), restoring the Round 1 verdict. Also found: no logging configuration exists
+  (corrected — `logging.lastResort` does emit WARNING+ to stderr, so warnings and
+  tracebacks print without timestamps while all INFO/DEBUG is lost), the frontend is
+  a single page with no router, and a connector job killed mid-run 409-blocks its
+  month for six hours. Round 3 traced "no buttons work / it looks like a mockup" to
+  three causes, the largest being that the dev proxy ships `assistant_analyst` —
+  **2 of 28 permissions** (`frontend/vite.config.ts:69`, `auth/seed.py`) — so the
+  product has been demoed through its second-most-restricted role. Five blockers,
+  none requiring redesign:
   no authentication front door (the app takes identity from gateway headers and
   the compose stack ships no gateway), the default `headers` authz mode lets a
   caller assert their own role, no database backup, ephemeral artifact storage,
