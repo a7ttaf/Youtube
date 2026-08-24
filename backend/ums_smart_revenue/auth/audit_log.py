@@ -89,13 +89,9 @@ class ConnectorRunFailureSummary:
 class AuditLogError(ValueError):
     """Base error for audit log read validation failures."""
 
-    pass
-
 
 class AuditLogValidationError(AuditLogError):
     """Raised when audit log query parameters fail validation."""
-
-    pass
 
 
 class SqlAlchemyAuditLogRepository:
@@ -309,6 +305,25 @@ class SqlAlchemyAuditLogRepository:
         JSON lifecycle payloads (e.g. ROWS_SKIPPED supersession) stays with the
         caller.
         """
+        # ====================================================================
+        # Purpose: Read every CONNECTOR_JOB_RUN audit detail payload for one
+        #   finance month, newest edge first, so the smart-alert signal
+        #   service can interpret the latest connector-run lifecycle.
+        # Database/ORM: Read-only SELECT on AuditLogORM / audit_logs; filters
+        #   tenant, CONNECTOR_JOB_RUN event type, FINANCE_MONTH scope, and
+        #   the requested month; ordered created_at DESC, id DESC. No locks,
+        #   no writes.
+        # Standards: Repository owns the audit-log SQL; callers own auth
+        #   gates and the JSON lifecycle interpretation (a newer clean edge
+        #   supersedes older ROWS_SKIPPED history at the caller).
+        # Blast Radius: Finance dashboard/export read model only. No audit
+        #   writes, authorization, or finance mutation.
+        # Connections:
+        #   - File: backend/ums_smart_revenue/finance/smart_alert_signals.py
+        #     -> skipped_source_row_count_and_reasons interprets these rows.
+        #   - File: backend/ums_smart_revenue/connectors/runs/normalization.py
+        #     -> emits the ROWS_SKIPPED edges read here.
+        # ====================================================================
         return list(
             self._session.scalars(
                 select(AuditLogORM.details)

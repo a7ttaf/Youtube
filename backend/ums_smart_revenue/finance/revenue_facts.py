@@ -297,6 +297,26 @@ class SqlAlchemyRevenueFactRepository:
         month_close_readiness._missing_required_revenue_fact_count's predicate
         shape exactly (active AND revenue_required AND fact.id IS NULL).
         """
+        # ====================================================================
+        # Purpose: Read the active, revenue-required channels that have no
+        #   revenue fact for the month — total COUNT plus an ordered sample
+        #   capped at sample_limit, so a bad ingestion month cannot turn the
+        #   alert endpoint into an unbounded scan/transfer.
+        # Database/ORM: Read-only LEFT JOIN of YouTubeChannelORM x
+        #   MonthlyChannelRevenueFactORM (no FOR UPDATE), tenant-scoped. The
+        #   count is a server-side COUNT(*); the sample is a separate ordered
+        #   LIMIT query.
+        # Standards: Repository owns the coverage SQL; callers own auth gates
+        #   and the sample_limit policy. Mirrors month_close_readiness.
+        #   _missing_required_revenue_fact_count's predicate shape exactly.
+        # Blast Radius: Smart-alert and export signal read model only. No
+        #   finance mutation, authorization, or audit writes.
+        # Connections:
+        #   - File: backend/ums_smart_revenue/finance/smart_alert_signals.py
+        #     -> missing_revenue_fact_channel_count_and_sample delegates here.
+        #   - File: backend/ums_smart_revenue/finance/month_close_readiness.py
+        #     -> shared predicate shape (count there; count + sample here).
+        # ====================================================================
         join_predicates = (
             (MonthlyChannelRevenueFactORM.tenant_id == YouTubeChannelORM.tenant_id)
             & (
