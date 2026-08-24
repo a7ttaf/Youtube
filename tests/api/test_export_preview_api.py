@@ -235,7 +235,8 @@ def seed_database(
 
 def test_finance_admin_previews_finance_workbook_with_sensitive_audit(tmp_path):
     """Test that finance admins can preview the finance workbook
-    and that the audit logs include sensitive events."""
+    and that the audit logs include sensitive events.
+    """
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -282,7 +283,8 @@ def test_finance_admin_previews_finance_workbook_with_sensitive_audit(tmp_path):
 
 def test_scoped_finance_workbook_omits_month_wide_cash_without_attribution(tmp_path):
     """Test that scoped finance workbook previews omit month-wide
-    cash without attribution for company scope."""
+    cash without attribution for company scope.
+    """
     database_url = build_database_url(tmp_path)
     seed_database(database_url, scope_type="company")
     client = TestClient(create_app(database_url=database_url))
@@ -315,7 +317,8 @@ def test_scoped_finance_workbook_omits_month_wide_cash_without_attribution(tmp_p
 
 def test_finance_export_preview_includes_revenue_trend_alerts(tmp_path):
     """Test that finance export preview includes revenue trend
-    anomaly alerts when previous month data is present."""
+    anomaly alerts when previous month data is present.
+    """
     database_url = build_database_url(tmp_path)
     seed_database(database_url, include_previous_fact=True)
     client = TestClient(create_app(database_url=database_url))
@@ -337,7 +340,8 @@ def test_finance_export_preview_includes_revenue_trend_alerts(tmp_path):
 
 def test_artifact_metadata_audit_details_marks_incomplete_metadata():
     """Test that artifact metadata audit details correctly
-    identify and mark incomplete metadata fields."""
+    identify and mark incomplete metadata fields.
+    """
     details = _artifact_metadata_audit_details(
         SimpleNamespace(
             file_url="file-store://exports/export-id/finance.xlsx",
@@ -361,7 +365,8 @@ def test_artifact_metadata_audit_details_marks_incomplete_metadata():
 
 def test_group_scoped_finance_workbook_records_channel_revenue_audit(tmp_path):
     """Test that group-scoped finance workbook preview records
-    channel revenue audit events for group scope."""
+    channel revenue audit events for group scope.
+    """
     database_url = build_database_url(tmp_path)
     seed_database(database_url, scope_type="group", include_group=True)
     client = TestClient(
@@ -485,7 +490,8 @@ def test_finance_workbook_preview_rejects_analytics_export_job(tmp_path):
 
 def test_finance_admin_downloads_generated_finance_workbook_with_audit(tmp_path):
     """Verify that finance admins can download generated finance
-    workbooks and that audit events are recorded."""
+    workbooks and that audit events are recorded.
+    """
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -905,7 +911,8 @@ def test_persisted_artifact_bytes_win_after_terminal_race(
 
 def test_export_operator_cannot_download_finance_workbook(tmp_path):
     """Test that export operator cannot download a finance workbook
-    and receives a 403 error with no audit events."""
+    and receives a 403 error with no audit events.
+    """
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -929,7 +936,8 @@ def test_finance_admin_downloads_generated_executive_pdf_with_audit(
     monkeypatch,
 ):
     """Test that finance admin can download generated executive
-    PDF, triggers audit events, and verifies PDF content."""
+    PDF, triggers audit events, and verifies PDF content.
+    """
     artifact_dir = tmp_path / "export-artifacts"
     monkeypatch.setenv("UMS_EXPORT_ARTIFACT_DIR", str(artifact_dir))
     database_url = build_database_url(tmp_path)
@@ -974,7 +982,8 @@ def test_finance_admin_downloads_generated_executive_pdf_with_audit(
 
 def test_export_operator_cannot_download_executive_pdf(tmp_path):
     """Test that export operator cannot download an executive PDF
-    and receives a 403 error with no audit events."""
+    and receives a 403 error with no audit events.
+    """
     database_url = build_database_url(tmp_path)
     seed_database(database_url, export_type="EXECUTIVE_PDF")
     client = TestClient(create_app(database_url=database_url))

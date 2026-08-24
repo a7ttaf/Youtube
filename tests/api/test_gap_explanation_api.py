@@ -292,6 +292,7 @@ class _CountingEmptyRepository:
         self.calls = 0
 
     def _count(self) -> list[object]:
+        """Record one fetch call and return an empty result."""
         self.calls += 1
         return []
 
@@ -366,6 +367,7 @@ class _ThirdAppendFailsSink(InMemoryAuditSink):
         self._appends = 0
 
     def append(self, record) -> None:  # noqa: ANN001 - protocol shape
+        """Append normally except on the third call, which raises instead."""
         self._appends += 1
         if self._appends == 3:
             raise RuntimeError("staged third-append failure")

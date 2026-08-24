@@ -32,6 +32,7 @@ CURRENCY_CODE_PATTERN = re.compile(r"^[A-Z]{3}$")
 
 
 def _normalize_currency_code(value):
+    """Upper-case and validate a 3-letter ISO 4217 code; non-strings pass through."""
     if isinstance(value, str):
         normalized = value.strip().upper()
         if not CURRENCY_CODE_PATTERN.fullmatch(normalized):
@@ -41,6 +42,8 @@ def _normalize_currency_code(value):
 
 
 class ExchangeRateRequest(BaseModel):
+    """One currency pair's exchange rate on a given date, as submitted for sync."""
+
     rate_date: date
     base_currency: str = Field(min_length=1)
     quote_currency: str = Field(min_length=1)
@@ -50,16 +53,20 @@ class ExchangeRateRequest(BaseModel):
     @field_validator("base_currency", "quote_currency", mode="before")
     @classmethod
     def strip_required_strings(cls, value):
+        """Strip whitespace from base_currency/quote_currency and normalize to ISO codes."""
         return _normalize_currency_code(_strip_required_string(value))
 
     @model_validator(mode="after")
     def check_currency_pair_distinct(self):
+        """Reject a request whose base_currency and quote_currency are identical."""
         if self.base_currency == self.quote_currency:
             raise ValueError("base_currency and quote_currency must differ")
         return self
 
 
 class ExchangeRateSyncRequest(BaseModel):
+    """A provider's batch of exchange rates to sync, with the reason for the write."""
+
     provider_key: str = Field(min_length=1)
     source_report_id: str | None = None
     reason: str = Field(min_length=1)
@@ -71,11 +78,13 @@ class ExchangeRateSyncRequest(BaseModel):
     @field_validator("provider_key", "reason", mode="before")
     @classmethod
     def strip_required_strings(cls, value):
+        """Strip whitespace from provider_key/reason, rejecting blank values."""
         return _strip_required_string(value)
 
     @field_validator("source_report_id", mode="before")
     @classmethod
     def strip_optional_string(cls, value):
+        """Strip source_report_id, normalizing a blank or absent value to None."""
         if value is None:
             return None
         if isinstance(value, str):
@@ -87,6 +96,7 @@ class ExchangeRateSyncRequest(BaseModel):
 def current_exchange_rate_repository(
     session: Annotated[Session, Depends(current_db_session)],
 ) -> SqlAlchemyExchangeRateRepository:
+    """Build a SQL-backed exchange rate repository bound to the request's session."""
     return SqlAlchemyExchangeRateRepository(session)
 
 
@@ -100,6 +110,7 @@ def sync_exchange_rates(
     ],
     audit_sink: Annotated[AuditSink, Depends(current_audit_sink)],
 ) -> dict[str, object]:
+    """Sync a provider's batch of exchange rates and record an audit event for the write."""
     connector_scope = AccessScope.connector(payload.provider_key)
     require_permission(user, Permission.RUN_CONNECTOR_JOBS, connector_scope)
     try:
@@ -185,6 +196,7 @@ def get_latest_exchange_rate(
     as_of_date: date,
     provider_key: str | None = None,
 ) -> dict[str, object]:
+    """Look up the latest exchange rate for a currency pair as of a date and audit the read."""
     require_permission(user, Permission.VIEW_REVENUE, AccessScope.global_scope())
     try:
         normalized_base = _normalize_currency_code(base_currency)
@@ -237,6 +249,7 @@ def get_latest_exchange_rate(
 
 
 def _strip_required_string(value):
+    """Strip a required string value, rejecting blank results; non-strings pass through."""
     if isinstance(value, str):
         stripped = value.strip()
         if not stripped:

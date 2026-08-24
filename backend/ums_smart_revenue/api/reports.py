@@ -30,6 +30,8 @@ router = APIRouter(prefix="/reports", tags=["reports"])
 
 
 class RawReportFileRegisterRequest(BaseModel):
+    """Request body for registering a newly downloaded raw report file."""
+
     source: str = Field(min_length=1)
     report_type: str = Field(min_length=1)
     report_month: str = Field(min_length=1)
@@ -50,6 +52,7 @@ class RawReportFileRegisterRequest(BaseModel):
     )
     @classmethod
     def strip_required_strings(cls, value):
+        """Strip whitespace from the required string fields, rejecting blank values."""
         if isinstance(value, str):
             stripped = value.strip()
             if not stripped:
@@ -59,11 +62,14 @@ class RawReportFileRegisterRequest(BaseModel):
 
 
 class RawReportFilePurgeRequest(BaseModel):
+    """Request body for purging a raw report file's stored contents."""
+
     reason: str = Field(min_length=1)
 
     @field_validator("reason", mode="before")
     @classmethod
     def strip_reason(cls, value):
+        """Strip whitespace from reason, rejecting a blank value."""
         if isinstance(value, str):
             stripped = value.strip()
             if not stripped:
@@ -75,6 +81,7 @@ class RawReportFilePurgeRequest(BaseModel):
 def current_raw_report_file_repository(
     session: Annotated[Session, Depends(current_db_session)],
 ) -> SqlAlchemyRawReportFileRepository:
+    """Build a SQL-backed raw report file repository bound to the request's session."""
     return SqlAlchemyRawReportFileRepository(session)
 
 
@@ -87,6 +94,7 @@ def register_raw_report_file(
     ],
     audit_sink: Annotated[AuditSink, Depends(current_audit_sink)],
 ) -> dict[str, object]:
+    """Register a downloaded raw report file's metadata and audit the write."""
     connector_scope = AccessScope.connector(payload.source)
     require_permission(user, Permission.RUN_CONNECTOR_JOBS, connector_scope)
     try:
@@ -140,6 +148,7 @@ def list_raw_report_files(
     limit: Annotated[int, Query(ge=1, le=MAX_RAW_REPORT_FILE_PAGE_SIZE)] = 50,
     offset: Annotated[int, Query(ge=0)] = 0,
 ) -> dict[str, object]:
+    """List raw report files, optionally filtered by source/type/month, and audit the read."""
     scope = AccessScope.connector(source) if source else AccessScope.global_scope()
     require_permission(user, Permission.VIEW_RAW_FILES, scope)
     try:
@@ -184,6 +193,7 @@ def get_raw_report_file(
     ],
     audit_sink: Annotated[AuditSink, Depends(current_audit_sink)],
 ) -> dict[str, object]:
+    """Fetch one raw report file by id and audit the read."""
     if not _has_any_permission_scope(user, Permission.VIEW_RAW_FILES):
         raise_missing_permission(Permission.VIEW_RAW_FILES)
 
@@ -248,6 +258,7 @@ def purge_raw_report_file(
     ],
     audit_sink: Annotated[AuditSink, Depends(current_audit_sink)],
 ) -> dict[str, object]:
+    """Purge a raw report file's stored contents (metadata retained) and audit the write."""
     # Boundary check first: deny without revealing existence to unauthorized
     # callers; the connector-scoped check below uses the resolved source.
     if not _has_any_permission_scope(user, Permission.MANAGE_CONNECTORS):
@@ -312,6 +323,7 @@ def purge_raw_report_file(
 
 
 def _has_any_permission_scope(user: UserPrincipal, permission: Permission) -> bool:
+    """Return whether user holds the given permission on any scope, direct or via role."""
     if user.disabled:
         return False
     for grant in user.direct_permissions:

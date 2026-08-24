@@ -1213,7 +1213,7 @@ class _RevenueFlagDriftsAtWriteBoundary(ChannelRegistry):
 
 
 def test_plan_bound_apply_refuses_drift_in_a_field_the_preview_showed_unchanged():
-    """ "No change to revenue_required" is a reviewed claim too (review #184).
+    """The claim "no change to revenue_required" is reviewed too (review #184).
 
     The preview here promises exactly one effect — the rename — and implicitly
     promises the other three fields stay put. A writer who turns
@@ -1428,6 +1428,7 @@ def test_planned_update_that_became_a_noop_is_not_audited():
         """Planning sees the OLD name; the write boundary sees current state."""
 
         def list_channels_by_ids(self, wanted, *, include_inactive=False):
+            """Report each wanted channel under its stale (pre-write) name."""
             return [
                 dataclasses.replace(entry, channel_name="Old Name")
                 for entry in super().list_channels_by_ids(wanted, include_inactive=include_inactive)
@@ -1957,6 +1958,7 @@ class _ArchivingDuringApplyGroups(ChannelGroupRegistry):
     """
 
     def get_group_by_cms_id(self, cms_group_id, *, for_update=False):
+        """Report the group ACTIVE to planning reads, archived to the locked write read."""
         group = super().get_group_by_cms_id(cms_group_id, for_update=for_update)
         if group is not None and for_update:
             return dataclasses.replace(group, active=False)
@@ -2008,6 +2010,7 @@ class _UnstampingDuringApplyGroups(ChannelGroupRegistry):
     """
 
     def get_group_by_cms_id(self, cms_group_id, *, for_update=False):
+        """Report the group STAMPED to planning reads, owner-cleared to the locked write read."""
         group = super().get_group_by_cms_id(cms_group_id, for_update=for_update)
         if group is not None and for_update:
             return dataclasses.replace(group, content_owner_id=None)
@@ -2061,6 +2064,7 @@ class _ConcurrentlyCreatedRegistry(ChannelRegistry):
     """Simulate a channel created by another writer between plan and apply."""
 
     def create_channel(self, **kwargs):
+        """Simulate a concurrent writer already having created this channel."""
         raise ChannelRegistryConflictError(
             f"Channel already exists: {kwargs['youtube_channel_id']}"
         )
@@ -2081,6 +2085,7 @@ class _GroupRaceLosingGroups(ChannelGroupRegistry):
     """Simulate losing the cms_group_id INSERT race to a concurrent import."""
 
     def create_group(self, **kwargs):
+        """Simulate a concurrent import already having inserted this cms_group_id."""
         raise ChannelGroupConflictError(
             f"channel group already exists for cms_group_id: {kwargs['cms_group_id']}"
         )

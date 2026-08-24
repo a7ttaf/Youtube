@@ -2048,6 +2048,7 @@ def _has_export_scope_permissions(
     scope_id: str | None,
     org_index: OrgAccessIndex,
 ) -> bool:
+    """Return whether user holds every permission in `permissions` for the export scope."""
     target_scope = _access_scope_from_export_scope(scope_type, scope_id)
     return all(
         has_permission(user, permission, target_scope, org_index) for permission in permissions

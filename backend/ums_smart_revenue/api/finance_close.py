@@ -38,15 +38,20 @@ _BROADER_REVENUE_READ_SCOPE_TYPES = frozenset({"global", "sector", "company", "c
 
 
 class FinanceCloseReasonRequest(BaseModel):
+    """A reason-only request body for lock/unlock finance-close actions."""
+
     reason: str = Field(min_length=1)
 
     @field_validator("reason", mode="before")
     @classmethod
     def strip_reason(cls, value):
+        """Strip whitespace from reason, rejecting a blank value."""
         return _strip_required_string(value)
 
 
 class AllocationRuleRequest(BaseModel):
+    """Request body for recording a finance month's allocation rule."""
+
     allocation_method: str = Field(min_length=1)
     rule_payload: dict[str, object] = Field(default_factory=dict)
     reason: str = Field(min_length=1)
@@ -54,22 +59,26 @@ class AllocationRuleRequest(BaseModel):
     @field_validator("allocation_method", "reason", mode="before")
     @classmethod
     def strip_required_fields(cls, value):
+        """Strip whitespace from allocation_method/reason, rejecting blank values."""
         return _strip_required_string(value)
 
 
 def current_finance_month_close_repository(
     session: Annotated[Session, Depends(current_platform_db_session)],
 ) -> SqlAlchemyFinanceMonthCloseRepository:
+    """Build a SQL-backed finance month close repository on the platform session."""
     return SqlAlchemyFinanceMonthCloseRepository(session)
 
 
 def current_finance_close_readiness_service(
     session: Annotated[Session, Depends(current_db_session)],
 ) -> SqlAlchemyFinanceCloseReadinessService:
+    """Build a SQL-backed finance close readiness service bound to the request's session."""
     return SqlAlchemyFinanceCloseReadinessService(session)
 
 
 def _strip_required_string(value):
+    """Strip a required string value, rejecting blank results; non-strings pass through."""
     if isinstance(value, str):
         stripped = value.strip()
         if not stripped:
@@ -87,6 +96,7 @@ def get_finance_month_close(
     ],
     audit_sink: Annotated[AuditSink, Depends(current_audit_sink)],
 ) -> dict[str, object]:
+    """Fetch a finance month's close record, auditing the read."""
     _validate_month(month)
     scope = AccessScope.finance_month(month)
     _require_finance_close_read_permission(user, month)
@@ -118,6 +128,7 @@ def get_finance_close_readiness(
     ],
     audit_sink: Annotated[AuditSink, Depends(current_audit_sink)],
 ) -> dict[str, object]:
+    """Check whether a finance month is ready to lock, auditing the read."""
     _validate_month(month)
     scope = AccessScope.finance_month(month)
     require_permission(user, Permission.LOCK_FINANCE_MONTH, scope)
@@ -149,6 +160,7 @@ def lock_finance_month(
     ],
     audit_sink: Annotated[AuditSink, Depends(current_audit_sink)],
 ) -> dict[str, object]:
+    """Lock a finance month against further changes and audit the write."""
     _validate_month(month)
     scope = AccessScope.finance_month(month)
     require_permission(user, Permission.LOCK_FINANCE_MONTH, scope)
@@ -186,6 +198,7 @@ def unlock_finance_month(
     ],
     audit_sink: Annotated[AuditSink, Depends(current_audit_sink)],
 ) -> dict[str, object]:
+    """Unlock a previously locked finance month and audit the write."""
     _validate_month(month)
     scope = AccessScope.finance_month(month)
     require_permission(user, Permission.UNLOCK_FINANCE_MONTH, scope)
@@ -232,6 +245,7 @@ def record_allocation_rule(
     ],
     audit_sink: Annotated[AuditSink, Depends(current_audit_sink)],
 ) -> dict[str, object]:
+    """Record a finance month's allocation-rule metadata and audit the write."""
     _validate_month(month)
     scope = AccessScope.finance_month(month)
     require_permission(user, Permission.CHANGE_ALLOCATION_RULE, scope)
@@ -268,6 +282,7 @@ def record_allocation_rule(
 
 
 def _require_finance_close_read_permission(user: UserPrincipal, month: str) -> None:
+    """Raise unless user holds VIEW_REVENUE for the given month or a broader scope."""
     if user.disabled:
         raise_missing_permission(Permission.VIEW_REVENUE)
     for grant in user.direct_permissions:
@@ -286,6 +301,7 @@ def _require_finance_close_read_permission(user: UserPrincipal, month: str) -> N
 
 
 def _scope_authorizes_month_close_read(scope: AccessScope, month: str) -> bool:
+    """Return whether a granted scope authorizes reading the given finance month."""
     # finance-month grants only authorize the exact month they were granted for;
     # broader scopes (global/sector/company/channel) authorize any month read.
     scope_type = scope.type.value
@@ -295,6 +311,7 @@ def _scope_authorizes_month_close_read(scope: AccessScope, month: str) -> bool:
 
 
 def _validate_month(month: str) -> None:
+    """Raise a 422 unless month is YYYY-MM with a calendar month from 01 to 12."""
     if not MONTH_PATTERN.fullmatch(month):
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
@@ -303,6 +320,7 @@ def _validate_month(month: str) -> None:
 
 
 def _validate_actor_user_id(user_id: str) -> None:
+    """Raise a 400 unless user_id parses as a UUID."""
     try:
         UUID(user_id)
     except ValueError as exc:
@@ -321,6 +339,7 @@ def _audit_finance_close(
     reason: str,
     details: dict[str, object],
 ):
+    """Record an audit event scoped to the given finance month close."""
     return record_audit_event(
         sink=audit_sink,
         actor=user,
@@ -334,6 +353,7 @@ def _audit_finance_close(
 
 
 def _with_audit_event(close: FinanceMonthCloseEntry, record) -> dict[str, object]:
+    """Render a finance month close as an API response with its audit event attached."""
     response = close.to_api()
     response["audit_event"] = audit_record_to_api(record)
     return response
