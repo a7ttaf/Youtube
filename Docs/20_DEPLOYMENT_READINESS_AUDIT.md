@@ -543,12 +543,25 @@ given cannot exercise the parts that *are* real. Each finding alone is modest; s
 they produce exactly the reported impression — **a polished landing page over a real
 engine you are not allowed to reach.**
 
-### Also worth knowing: compose has never run on this PC
+### Where these observations came from, and why it matters
 
-`docker volume ls` shows **no** `ums-smart-revenue` volumes — the compose stack has
-never been started here. Everything observed so far has been the dev-server path
-(`bun run dev` + local Postgres), which is a different configuration from the one this
-audit's blockers describe.
+The hands-on session that produced them ran on the operator's **Mac**, not on the
+target PC. On the PC, `docker volume ls` shows no `ums-smart-revenue` volumes — the
+compose stack has never been started on the machine this audit targets.
+
+That split matters when reading the rest of this document:
+
+- **Platform-independent findings still apply exactly.** The role/permission cause of
+  the dead buttons, the mock chrome and panels, the missing router, the hardcoded
+  months, and every data-correctness finding are code-level. They reproduce anywhere.
+- **The host-lifecycle findings are Windows/PC-specific and are NOT what was
+  observed.** Docker Desktop starting at user login rather than boot, the WSL2 bind
+  mount, and the reboot-recovery gap describe the *target* environment, and remain
+  unverified on real hardware — nobody has yet run the compose stack on the PC at all.
+
+**Consequence for planning:** the first beta would be the first time this stack runs
+on its target machine. The runbook work in Path A is therefore not just documentation
+— it is the first real rehearsal, and it should be treated as one.
 
 ---
 
