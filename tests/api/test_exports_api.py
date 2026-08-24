@@ -20,8 +20,8 @@ from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, func, select
 from sqlalchemy.orm import Session
 
-from ums_smart_revenue.api.channels import current_audit_sink
 from ums_smart_revenue.api.dependencies import current_principal_from_headers
+from ums_smart_revenue.api.dependencies_audit import current_audit_sink
 from ums_smart_revenue.api.exports import (
     _list_authorized_export_jobs,
     current_export_artifact_store,
@@ -1279,13 +1279,15 @@ def test_non_uuid_gateway_actor_can_create_and_list_exports(tmp_path):
 
 def test_export_list_scan_limit_marks_has_more_and_logs_metric(caplog):
     """Test pagination behavior of export listing, ensuring
-    has_more is marked and metrics are logged."""
+    has_more is marked and metrics are logged.
+    """
     created_at = datetime(2026, 4, 30, 10, 0, tzinfo=UTC)
 
     class PagedRepository:
         """Provides paginated retrieval of export jobs via the list_jobs method."""
 
         def __init__(self) -> None:
+            """Track the offsets each list_jobs call requests."""
             self.offsets: list[int] = []
 
         def list_jobs(
@@ -1528,7 +1530,8 @@ def test_group_export_requires_access_to_every_member_channel(tmp_path):
 
 def test_export_request_rejects_non_usd_currency_until_exchange_rates_exist(tmp_path):
     """Verify that export requests with non-USD currency are
-    rejected until exchange rate support is available."""
+    rejected until exchange rate support is available.
+    """
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -1696,7 +1699,8 @@ def test_export_list_applies_current_scope_and_type_permissions(tmp_path):
 
 def test_export_operator_can_get_own_export_job(tmp_path):
     """Test that an export operator can retrieve their own export
-    job and that audit logs are recorded properly."""
+    job and that audit logs are recorded properly.
+    """
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -2170,7 +2174,8 @@ def test_analytics_summary_csv_terminal_job_rejects_before_source_row_read(
         )
         session.commit()
 
-    def fail_build(*_args, **_kwargs):
+    def fail_build(*_args: object, **_kwargs: object) -> None:
+        """Fail the test if the source-row export builder is ever called."""
         raise AssertionError("terminal CSV jobs must not build source-row exports")
 
     monkeypatch.setattr(

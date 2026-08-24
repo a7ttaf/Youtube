@@ -907,6 +907,31 @@ channel↔account map, and multi-currency FX) stays out per Docs/18.
   cycle leg its comment cites (`api.channels` importing `api.revenue`) no
   longer exists, so it is an un-deferral candidate (verify import order
   first). `No migration/backfill required.`
+  **API-layering follow-up shipped 2026-08-24** (`refactor/api-layering-2`,
+  stacked on the refactor above): the two recorded next-steps executed.
+  `api/channels.py`'s shared providers moved to canonical homes — the
+  audit-sink quartet (`current_audit_sink`, `sql_audit_sink_from_session`,
+  `current_atomic_audit_sink`, `sql_atomic_audit_sink_from_session`, with
+  the all-or-nothing tenant-lane docstrings preserved verbatim) and the
+  `audit_record_to_api` serializer to NEW `api/dependencies_audit.py`; the
+  channel-registry providers (`current_channel_registry`,
+  `sql_channel_registry_from_session`) to `api/registry_dependencies.py`
+  beside the group-registry providers — so the fifteen modules that
+  imported them from `api.channels` (thirteen route modules, the app
+  factory, and channels' own routes) now depend on provider modules, and
+  `api/channels.py` is pure routes. `api/revenue.py`'s deferred
+  `api.allocation` import is now a top-level import (the cycle its comment
+  cited is gone; `_run_to_api` published as the typed `run_to_api`).
+  Non-goals: `tests` keep importing channels' route-internal test hooks
+  (`_plan_fingerprint`, `current_groups_client_factory`) — test-only,
+  in-layer; no route/permission/response behavior change anywhere.
+  Tests: full backend suite green on a fresh Postgres 18 container plus
+  ruff/format/mypy; no failures. Risks: import-order sensitivity of the
+  un-deferral — mitigated by the module import graph (allocation imports
+  no revenue names) and the full-suite app-factory coverage. Rollback:
+  `git revert`; no data or schema involved. Next: none recorded — the
+  layering debt register from the refactor above is now empty.
+  `No migration/backfill required.`
 
 ### Acceptance gate
 

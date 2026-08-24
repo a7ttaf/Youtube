@@ -9,11 +9,11 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from ums_smart_revenue.api.authz import require_permission
-from ums_smart_revenue.api.channels import audit_record_to_api, current_audit_sink
 from ums_smart_revenue.api.dependencies import (
     current_db_session,
     current_principal_from_headers,
 )
+from ums_smart_revenue.api.dependencies_audit import audit_record_to_api, current_audit_sink
 from ums_smart_revenue.auth.audit import AuditEventType
 from ums_smart_revenue.auth.audit_log import (
     MAX_AUDIT_LOG_PAGE_SIZE,

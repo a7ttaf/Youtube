@@ -27,17 +27,17 @@ from unittest.mock import MagicMock, patch
 import pytest
 from fastapi.testclient import TestClient
 
-from ums_smart_revenue.api.channels import (
-    current_audit_sink,
-    current_channel_registry,
-    current_groups_client_factory,
-)
+from ums_smart_revenue.api.channels import current_groups_client_factory
 from ums_smart_revenue.api.dependencies import (
     current_db_session,
     current_principal_from_headers,
 )
+from ums_smart_revenue.api.dependencies_audit import current_audit_sink
 from ums_smart_revenue.api.dependencies_finance import current_org_access_index
-from ums_smart_revenue.api.registry_dependencies import sql_group_registry_from_session
+from ums_smart_revenue.api.registry_dependencies import (
+    current_channel_registry,
+    sql_group_registry_from_session,
+)
 from ums_smart_revenue.app import create_app
 from ums_smart_revenue.auth.audit_service import AuditRecord, InMemoryAuditSink
 from ums_smart_revenue.auth.models import PermissionGrant, UserPrincipal

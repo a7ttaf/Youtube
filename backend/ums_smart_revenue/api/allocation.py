@@ -18,11 +18,11 @@ from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.orm import Session
 
 from ums_smart_revenue.api.authz import require_permission
-from ums_smart_revenue.api.channels import audit_record_to_api, current_audit_sink
 from ums_smart_revenue.api.dependencies import (
     current_db_session,
     current_principal_from_headers,
 )
+from ums_smart_revenue.api.dependencies_audit import audit_record_to_api, current_audit_sink
 from ums_smart_revenue.api.dependencies_finance import (
     current_channel_account_link_repository,
     current_committed_allocation_repository,
@@ -35,6 +35,7 @@ from ums_smart_revenue.auth.audit_service import AuditSink, record_audit_event
 from ums_smart_revenue.auth.models import UserPrincipal
 from ums_smart_revenue.auth.permissions import Permission
 from ums_smart_revenue.auth.scopes import AccessScope, OrgAccessIndex
+from ums_smart_revenue.db.finance_models import CommittedAllocationRunORM
 from ums_smart_revenue.finance.account_allocation_read import (
     allocation_provenance_to_api,
     resolve_month_account_allocation,
@@ -190,7 +191,27 @@ def commit_request_fingerprint(
     return hashlib.blake2b(payload.encode(), digest_size=16).hexdigest()
 
 
-def _run_to_api(run) -> dict[str, object]:  # noqa: ANN001
+# ============================================================================
+# Purpose: Serialize one committed-allocation run header into the shared API
+#   response shape (identity, method, actor/time, and the allocation summary
+#   counts and totals).
+# Database/ORM: Reads an already-loaded CommittedAllocationRunORM row; no
+#   queries.
+# Standards: Monetary totals go through decimal_to_api (Decimals as strings,
+#   never floats) and UUIDs/timestamps are stringified — the recorded
+#   financial-representation contract for every response embedding a
+#   committed run.
+# Blast Radius: The committed-run fragment of the allocation commit/read
+#   responses AND revenue's recalculation commit response; a field change
+#   here changes both surfaces at once.
+# Connections:
+#   - File: backend/ums_smart_revenue/api/revenue.py -> the recalculation
+#     commit response embeds the same fragment (the un-deferred import).
+#   - File: backend/ums_smart_revenue/finance/committed_allocation.py ->
+#     the ORM row shape serialized here.
+#   - File: Docs/12_BACKEND_API_SPEC.md -> committed-run response contract.
+# ============================================================================
+def run_to_api(run: CommittedAllocationRunORM) -> dict[str, object]:
     """Serialize a committed run header (Decimals as strings)."""
     return {
         "run_id": str(run.id),
@@ -578,7 +599,7 @@ def commit_account_allocations(
     response.status_code = status.HTTP_201_CREATED if outcome.created else status.HTTP_200_OK
 
     return CommitAllocationResponse(
-        run=_run_to_api(outcome.run),
+        run=run_to_api(outcome.run),
         allocations=[
             {
                 "adsense_account_id": ln.adsense_account_id,

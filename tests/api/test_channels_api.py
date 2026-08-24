@@ -4,13 +4,13 @@ from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
-from ums_smart_revenue.api.channels import (
-    current_audit_sink,
+from ums_smart_revenue.api.dependencies_audit import current_audit_sink
+from ums_smart_revenue.api.dependencies_finance import current_org_access_index
+from ums_smart_revenue.api.registry_dependencies import (
     current_channel_registry,
     sql_channel_registry_from_session,
+    sql_group_registry_from_session,
 )
-from ums_smart_revenue.api.dependencies_finance import current_org_access_index
-from ums_smart_revenue.api.registry_dependencies import sql_group_registry_from_session
 from ums_smart_revenue.app import create_app
 from ums_smart_revenue.auth.audit_service import InMemoryAuditSink
 from ums_smart_revenue.db.finance_models import (
@@ -920,6 +920,7 @@ class ValidationFailingContentOwnerRegistry:
     """
 
     def __init__(self) -> None:
+        """Initialize the stubbed content owner to None."""
         self._owner: str | None = None
 
     @staticmethod
