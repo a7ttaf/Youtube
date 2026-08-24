@@ -158,8 +158,9 @@ Manager project reachable from this PC. **This does not block the beta** — see
 > being used. Treat the memory claim as unverified-by-code.
 
 ### H5 — Real revenue can be ingested with no Google dependency (this is the beta path)
-`POST /revenue/facts` accepts `connector_key: "manual-upload"` with
-`source_kind: "MANUAL_UPLOAD"` (`api/revenue.py:197-206,1016`) — no credential row,
+`POST /revenue/facts` accepts a `connector_key` of `manual-upload` (or
+`manual_upload`) with `source_kind` `MANUAL_UPLOAD`
+(`api/revenue.py:197-206,1016`) — no credential row,
 no resolver, no Google call. `MANUAL_UPLOAD` is fully wired downstream, not a stub:
 reconciliation source priority (`finance/reconciliation.py:13`), explanation label
 (`finance/reconciliation_explanation.py:27`), TAX deduction policy
