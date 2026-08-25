@@ -55,8 +55,11 @@ Three things are worth saying plainly before the table:
    *(Correction: this plan and the audit both published "2 of 28". The `Permission`
    enum has **26** members — `auth/permissions.py:5-31`, counted mechanically. The
    argument is unaffected; the denominator was wrong.)*
-3. **The most expensive item in the audit is not on this plan at all.** EGP support
-   is 3–6 weeks and is deliberately deferred — see [Decision D3](#the-one-decision-only-you-can-make).
+3. ~~The most expensive item in the audit is not on this plan at all.~~ **Superseded
+   2026-08-25: the operator decided the main currency is EGP**, so the EGP program is
+   now ON the plan — 66–111h to the minimum EGP beta, 81–136h full — and it gates the
+   beta unless the USD-interim path is explicitly chosen. See
+   [the EGP program](#the-egp-program--main-currency-is-egp-decided-2026-08-25).
 
 > **A fourth thing, added after the first day of execution.** The estimate above was
 > built from four rounds of reading. The first hour of *running* produced a blocker
@@ -610,25 +613,133 @@ re-request workaround, and a note that a connector-only month cannot be locked a
 
 ## The one decision only you can make
 
-Everything about currency hangs on one question that has been open since PR #42 and is
-recorded, unanswered, at `Docs/16_OPEN_DECISIONS.md:70-71`:
+> **DECIDED 2026-08-25: the answer is NO — the main currency is EGP.** USD facts with
+> the EGP bank settlement explained as FX variance are not acceptable. This closes
+> `Docs/16_OPEN_DECISIONS.md:70-75` (open since PR #42) and supersedes this section's
+> earlier "if yes: nothing changes" branch. The program that follows from the "no"
+> branch is [the EGP program](#the-egp-program--main-currency-is-egp-decided-2026-08-25)
+> below, scoped against the code and adversarially refuted on 2026-08-25.
 
-> **Are USD facts acceptable for the beta, with the EGP bank settlement explained as FX
-> variance — yes or no?**
+> ⚠️ **The standing prohibition is unchanged — no UMS-side conversion, ever.** No
+> `$1 × 47.5`. `tests/finance/test_finance_no_fx_dependency.py:40-53` AST-walks
+> `finance/` and fails the suite if anything touches the exchange-rate table. The only
+> EGP source is Google's own server-side conversion (`currency=EGP`), and the
+> acceptance baseline is the operator's own workbook (below). The operator's words are
+> the rule: *"i dont need to make it USD × 47.5, i need pure number."*
 
-**If yes** (recommended for the beta): nothing changes. The pipeline is internally
-consistent and the numbers are real. Do P2.2 when convenient.
+---
 
-**If no:** that is the EGP program — 3–6 weeks, ~2,154 `*_usd` identifiers, and a
-USD-only design that is *test-locked* by
-`tests/finance/test_finance_no_fx_dependency.py:40-53`. It should be its own milestone
-after the beta proves the rest works.
+## The EGP program — main currency is EGP (decided 2026-08-25)
 
-> ⚠️ **Do not let anyone "shortcut" this through `currency_exchange_rates`.** It looks
-> like a 2-hour win and will be rejected by an existing guard test, four documents, and
-> one closed decision. The sanctioned route to EGP is Google's own server-side
-> conversion (`currency=EGP`), never a UMS-derived rate. Your own words are the reason
-> it was closed: *"i dont need to make it USD × 47.5, i need pure number."*
+Scoped against the tree, then adversarially refuted; the refuters' corrections are
+**already applied** to the numbers below (the scoping's own headline arithmetic was
+wrong, its flip-site inventory had gaps, and its PR slicing could not land green as
+written — all repaired here rather than shipped).
+
+### Headline
+
+**Minimum EGP beta (manual import, EGP end to end): 66–111h. Full program incl. live
+connector: 81–136h (10–17 focused days).** The minimum EGP beta **now gates the beta**
+unless decision D1 below picks the USD-interim path.
+
+That is materially below the standing "3–6 weeks ≈ 120–240h" estimate, for two verified
+reasons — and one of them decays:
+
+1. **There is no data to migrate.** No `ums` volumes exist on the target PC, the compose
+   stack has never started there, the CLI dry-run persists nothing, and the Docs/20
+   retraction already established nothing is mis-denominated. Every USD monetary value
+   in the project lives in fixtures and tests. **The USD→EGP "migration" is a rename of
+   empty tables — and every week of live USD operation after a beta would rebuild the
+   migration cost this program currently does not have. The cheapest moment is now.**
+2. **The frontend display layer is already currency-parameterized.** `formatMoney`
+   takes a `currency` option and renders non-USD as `"1,234.56 EGP"`
+   (`frontend/src/components/srcc/shared.tsx:35-58,85-101`); `CommandView` already
+   threads a currency read from the API (`CommandView.tsx:2530`). The frontend cost is
+   fallback literals and dead controls, not a rendering rewrite.
+
+### Two traps found by this scoping — read before Phase 1
+
+- **The beta's own mode bypasses the tenant row.** In trusted-header mode (the beta's
+  configuration) every request's tenant is `_bootstrap_tenant()` with **hardcoded**
+  `primary_currency="USD"` (`app.py:497`, bound at `:456`). Flipping the `tenants` row
+  to EGP changes *nothing* in headers mode until that constructor honours the stored
+  row. Phase 1 starts here.
+- **One stored string identifier embeds the currency**:
+  `REVENUE_RECONCILIATION_METRIC = "revenue_reconciliation_usd"`
+  (`finance/explanations.py:34`, consumed at `api/reconciliation.py:175`) — a
+  persisted metric key, not just a column name.
+
+### What actually has to flip — the gate inventory
+
+The program is essentially the ordered flipping of this list (full details in the
+scoping record):
+
+| Class | Count | Examples |
+| --- | --- | --- |
+| DB CHECK constraints pinning `'USD'` | 3 | `export_jobs` (`db/report_models.py:207,276`), `number_explanations` (`db/explanation_models.py:45,96`), `deduction_components` (`db/finance_models.py:661-662`) |
+| Backend hard-fail gates (raise on non-USD) | 8 | `finance/net_revenue.py:130-137`, `finance/payment_matching.py:242`, `finance/recalculation.py:227`, `reports/exports.py:812-816`, the four report generators |
+| Skip-and-count gates | ~6 | normalizer `NON_USD_CURRENCY` skip (`google_source_normalizer.py:239-257`), deduction mapping (`deduction_components.py:108-110`), bank-reconciliation USD filter |
+| Missing currency columns | — | `monthly_channel_revenue_facts` has five `*_usd` money columns and **no currency column** (`db/finance_models.py:127-131`); same shape on adjustments and allocation tables |
+| Refuter-found flip sites the scoping missed | 4+ | the `api/revenue.py` request defaults, the `reconciliation_explanation.py` writer, two scripts — **the inventory is good but was not complete; Phase 2's first task is closing it** |
+
+The `*_usd` census, recounted and refuter-reproduced: **2,618 occurrences in code+tests
+(71 unique identifiers)** — 1,162 backend, 1,168 backend tests, 90 frontend src, 198
+frontend tests. The connector layer is already currency-neutral (`amount_native` +
+`currency_code`, zero `_usd`). The earlier "~2,154" was an undercount.
+
+### Phases
+
+| Phase | What | Hours |
+| --- | --- | --- |
+| 0 | Decision lock + sequencing tripwires (below) written into the docs | 1–2 |
+| 1 | Currency spine: `_bootstrap_tenant` fix, tenant-currency helper, wire `tenants.primary_currency` to its first consumers | 8–14 |
+| 2 | Neutral rename + currency columns + CHECK replacement + frontend + tests. ⚠️ Refuter-proven: the layer-sliced "4–6 green PRs" scheme **cannot land green as written** (each layer's rename breaks the next layer's reads — verified `executive_pdf.py:350` reads finance dataclass fields). Regroup as per-identifier repo-wide substitutions, or carry shims. | 45–75 |
+| 3 | Manual-path EGP flip: import, close, exports, explain — EGP in, EGP labeled, EGP out | 12–20 |
+| | **🏁 Minimum EGP beta (manual import)** | **66–111** |
+| 4 | Live-connector EGP: `currency=EGP` request, EGP-keyed re-ingest, workbook acceptance test | 12–20 |
+| 5 | Docs/residue — **including `Docs/22:970`**, whose restore-drill spot-check SQL names `gross_revenue_usd` and would break mid-rehearsal after the rename (refuter finding; the original scoping missed it) | 3–5 |
+| | **Full program** | **81–136** |
+
+**Acceptance baseline (the meaning of "correct numbers"):** when Phase 4 lands, UMS's
+per-channel monthly EGP figures must **equal `Desktop\UMS report\get_revenue.py`'s
+workbook, channel by channel, month by month** — same API, same content owner, same
+currency parameter. Built as an automated comparison, not an eyeball.
+
+### Sequencing tripwires — violations recreate the retracted-audit scenario for real
+
+1. **No multi-month live backfill and no P2.D daily sync before Phase 4.**
+   `source_row_key` hashes the currency (`source_row_keys.py:86`), the normalizer
+   hard-filters to USD (`google_source_normalizer.py:251`), so backfilling now produces
+   throwaway USD facts that can never equal the workbook — and flipping `currency=EGP`
+   *without* Phases 1–3 produces **zero facts, silently**. P2.D's "minimum set" table
+   is gated on Phase 4.
+2. **Do not do P2.2 ("send `currency=USD` explicitly") as standalone work** — it invites
+   the "just change the value" shortcut that skips the honesty phases.
+3. **No real manual money before Phase 3** unless D1 explicitly picks the USD-interim
+   beta — facts have no currency column today, so interim rows become an unlabeled
+   backfill problem.
+4. **Never wire the currency selector.** A selector implies convertible display — the
+   retired FX engine wearing a dropdown. Single-currency regime: shown, not chosen.
+5. **Reject→accept discipline on every gate flip**: each corrected test must go RED with
+   its guard deleted; CHECK-constraint replacements need a wrong-currency-insert reject
+   matrix at the app layer.
+6. **The P0/P1 operational band runs in parallel — it is currency-neutral.** Only
+   P1.3's selector deletion overlaps, and both plans agree it dies.
+
+### Decision points
+
+| # | Decision | Recommendation |
+| --- | --- | --- |
+| D1 | **Beta ordering**: EGP-first (beta starts after Phase 3) vs USD-interim beta now + re-import later | **EGP-first**, with P0/P1 running in parallel so calendar cost overlaps. USD-interim only with the no-Google prohibition and a written re-import plan. |
+| D2 | Constraint shape after removing `= 'USD'` CHECKs | ISO-format CHECK + FK + app-layer tenant-currency gate, mutation-proven — not a hard `= 'EGP'` that re-hardcodes. |
+| D3 | Reporting bulk CSV under EGP | **Pause the report type until the probe answers** (refuter correction: "keep ingesting as USD evidence" would store rows whose label is asserted, not known — violating the program's own honesty invariant). It feeds nothing today, so pausing costs nothing. |
+| D4 | EGP display format (`Docs/16:81` open) | Ship the existing `"1,234.56 EGP"` fallback in Phase 3 (zero cost); pretty format in P1 polish. |
+| D5 | AdSense `currencyCode=EGP` acceptance | **Needs a one-call live probe** — flip with Phase 4. |
+
+**Mandatory probe before Phase 4 is costed as fact:** one live `currency=EGP` request
+*through UMS code*. The 2026-08-25 workbook run proves the parameter works on this
+content owner, but that proof is operator-side; this exact surface produced a
+retracted-wrong-CRITICAL once already, so the repo gets its own evidence first.
 
 ---
 
@@ -673,6 +784,11 @@ costing anything else — it changes what the item *is*.
 
 > **Nothing in this section blocks the recommended beta**, which is manual-import and never
 > calls Google. It becomes mandatory the day the daily live sync is switched on.
+>
+> **Gating added 2026-08-25:** the daily live sync is now additionally gated on **EGP
+> program Phase 4** — switching it on before then would nightly-produce USD facts that
+> can never match the EGP acceptance baseline and must all be re-ingested. This
+> section's "minimum set" queues strictly behind that phase.
 
 ### 🔴 The item is not what it looks like: there is no daily revenue sync to schedule
 
@@ -888,7 +1004,11 @@ it is a uvicorn variable and the Dockerfile passes `--proxy-headers`.
 
 Recorded so they are not re-proposed:
 
-- **EGP end to end** — 3–6 weeks. Its own milestone, gated on the decision above.
+- ~~EGP end to end — 3–6 weeks, gated on the decision above.~~ **Moved onto the plan
+  2026-08-25** — the decision was made (main currency = EGP). See
+  [the EGP program](#the-egp-program--main-currency-is-egp-decided-2026-08-25); the
+  scoped cost (66–111h minimum, 81–136h full) came in below the 3–6-week guess because
+  every table is still empty.
 - **AdSense earnings → revenue facts** — 20–32h. Looks like "set a field the parser
   already has"; is really "introduce a second producer of channel revenue facts and
   defend it against double-counting CMS."

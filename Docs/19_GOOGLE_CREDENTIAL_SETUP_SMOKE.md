@@ -309,6 +309,89 @@ Before the first `dry_run: false` job:
 - Re-run the credential probe after any rotation. Do not reuse old smoke
   evidence for a new secret version.
 
+## Verified operator checklist for THIS deployment (2026-08-25)
+
+Command-by-command path from the Desktop credential to a proven UMS credential row,
+verified against the code: every flag was checked with `--help`, and the Step-3 SQL was
+executed verbatim (rolled back) against a freshly migrated Postgres — `INSERT 0 1`, and
+the re-run failed on exactly `uq_api_connector_credentials_connector_account`, which is
+the intended idempotency signal.
+
+> ⚠️ **Currency sequencing (decided 2026-08-25: main currency = EGP).** The connector
+> currently ingests **USD**. Run at most ONE smoke month through this checklist as
+> disposable plumbing proof, then **STOP — no multi-month backfill, no daily sync —
+> until EGP program Phase 4** (`Docs/21`). Backfilled USD months can never match the
+> EGP workbook acceptance baseline and would all be re-ingested.
+
+**Step 0 — ROTATE the Google OAuth credential first (~1–2h incl. the consent round-trip).**
+The current payload (`Desktop\cms-revenue-2026H1\secrets\google_oauth.json`, plus the
+client-secret file in `Desktop\UMS report\`) has prior chat exposure. Mint a fresh client
+secret and refresh token BEFORE any upload — enshrining a compromised credential in
+Secret Manager is worse than the Desktop file. Consent screen must not be in "Testing"
+status (7-day token expiry; see the get_revenue.py docstring's own warning).
+
+**Step 1 — install the Google Cloud SDK, then upload.** `gcloud` is **not installed on
+this PC** (verified) — install + `gcloud init` first (~0.5–1h), or use the Cloud Console
+UI instead. Payload contract per this doc's "Secret payload contract" section: UTF-8
+JSON with `refresh_token`, `client_id`, `client_secret`, `token_uri` (optional `scopes`).
+
+```powershell
+gcloud secrets create ums-google-oauth --replication-policy=automatic
+gcloud secrets versions add ums-google-oauth --data-file="C:\<secure-path>\payload.json"
+```
+
+Delete the local payload file after the upload succeeds. (gcloud flag syntax needs
+confirmation against current Google docs.)
+
+**Step 2 — GCP auth for the resolver (the missing fourth piece).**
+`gcloud auth application-default login` (or `GOOGLE_APPLICATION_CREDENTIALS` pointing at
+a service-account key). The identity needs `roles/secretmanager.secretAccessor`.
+Without this, both scripts exit 2 with `SecretFetchError`.
+
+**Step 3 — the credential row** (superuser SQL bypasses RLS deliberately; the audited
+alternative is `POST /connectors/credentials` per the Setup sequence above):
+
+```powershell
+docker compose exec postgres psql -U <UMS_DB_USER> -d <UMS_DB_NAME> -c "INSERT INTO api_connector_credentials (tenant_id, connector_key, account_id, encrypted_secret_ref) VALUES ('00000000-0000-0000-0000-000000000001', 'youtube-analytics', 'PlZrS5Fh56RMd9dmSL6XSA', 'gcp-secret-manager://projects/<project>/secrets/ums-google-oauth/versions/latest');"
+```
+
+Expected `INSERT 0 1`; a re-run fails on the unique constraint (correct — rotate the ref
+with `UPDATE`, not a second `INSERT`).
+
+**Step 4 — prove it:**
+
+```powershell
+uv run python scripts/check_google_connector_credential.py --tenant 00000000-0000-0000-0000-000000000001 --connector youtube-analytics --account PlZrS5Fh56RMd9dmSL6XSA
+```
+
+Expected exit 0 with `OK … token_expiry=<iso>`. This commits the telemetry that ARMS the
+live-run gate for roughly one hour. Exit-2 first lines map to causes:
+`SecretFetchError` → Step 2/IAM; `SecretNotFoundError` → the ref path;
+`MalformedSecretPayloadError` → payload JSON; `OAuthRefreshError` → Step 0's token;
+`CredentialNotFoundError` → Step 3.
+
+**Step 5 — service actor (live runs only).** Set
+`UMS_GOOGLE_CONNECTOR_SERVICE_ACTOR_ID` to the UUID `bootstrap_operator.py` printed —
+never the public `.env.example` placeholder.
+
+**Step 6 — optional dry-run.** Costs the same ~54 API calls as a live run.
+⚠️ *Not* free of side effects: the dry-run performs the full credential resolve, and a
+transient `OAuthRefreshError` here commits a FAILED telemetry stamp that **disarms the
+gate Step 4 just armed** — Step 7 then exits 2 even inside the hour. Recovery: re-run
+Step 4.
+
+**Step 7 — ONE live smoke month, within ~1h of Step 4.** First confirm the target month
+is **not closed/locked** (this doc's own smoke-month rule): the locked-month prefilter
+skips silently, so a locked month exits 0 `SUCCEEDED` with **zero facts written** —
+reading as success while proving nothing. Expected on an open month: exit 0,
+`SUCCEEDED … failures=[]`, facts written (in USD — disposable, per the sequencing box).
+`PARTIAL` = zero facts, source rows only. Never run two copies concurrently (no
+CLI-side lock). **Then stop until EGP Phase 4.**
+
+Ops total: **~3–5.5h** including the SDK install and a realistic consent round-trip.
+No UMS code is missing for this checklist — both scripts, the resolver, the schema and
+the gates all exist and match.
+
 ## Validation references
 
 Existing test coverage for this runbook:
