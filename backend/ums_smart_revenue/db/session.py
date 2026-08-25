@@ -186,14 +186,14 @@ def _enable_sqlite_transactional_savepoints(engine: Engine) -> None:
 
     @event.listens_for(engine.pool, "checkin")
     def _release_writer_lock_on_checkin(
-        dbapi_connection: Any, _connection_record: Any
+        _dbapi_connection: Any, _connection_record: Any
     ) -> None:
         """Release the writer lock after SQLAlchemy returns the connection to the pool."""
         _release_writer_lock()
 
     @event.listens_for(engine.pool, "reset")
     def _release_writer_lock_on_reset(
-        dbapi_connection: Any, _connection_record: Any, _reset_state: Any
+        _dbapi_connection: Any, _connection_record: Any, _reset_state: Any
     ) -> None:
         """StaticPool resets in place; reset is the release point when checkin does not fire."""
         _release_writer_lock()
