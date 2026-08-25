@@ -175,6 +175,7 @@ def _load_dependencies() -> dict[str, Any]:
         UserRoleAssignmentError,
     )
     from ums_smart_revenue.auth.users import (
+        USER_STATUS_DISABLED,
         SqlAlchemyUserAccountRepository,
         UserAccountError,
         UserAccountStorageError,
@@ -204,6 +205,7 @@ def _load_dependencies() -> dict[str, Any]:
         "TenantNotFoundError": TenantNotFoundError,
         "TenantStatus": TenantStatus,
         "UMS_TENANT_ID": UMS_TENANT_ID,
+        "USER_STATUS_DISABLED": USER_STATUS_DISABLED,
         "UserAccountError": UserAccountError,
         "UserAccountStorageError": UserAccountStorageError,
         "UserRoleAssignmentConflictError": UserRoleAssignmentConflictError,
@@ -396,6 +398,17 @@ def _ensure_user(
     repository = deps["SqlAlchemyUserAccountRepository"](session, tenant_id=tenant_id)
     existing = repository.get_user_by_email(email=email)
     if existing is not None:
+        # FIX: A disabled account must not be treated as a usable EXISTING
+        # operator. Runtime principals fail-closed on disabled status, but this
+        # path previously returned the id and could still attach --role.
+        if existing.status == deps["USER_STATUS_DISABLED"]:
+            raise ValueError(
+                f"User {email!r} exists with status=disabled. This script creates "
+                "accounts and never reactivates them — flipping the flag would be "
+                "an unaudited identity write before first login, and it would "
+                "silently undo a deliberate deactivation. Nothing was changed. "
+                "Reactivate the users row in the database and re-run."
+            )
         return _UserOutcome(
             email=existing.email,
             user_id=existing.id,
@@ -1041,13 +1054,15 @@ def main(argv: list[str] | None = None) -> int:
             sector_name=args.sector_name,
             company_name=args.company_name,
         )
-    except (deps["UserAccountError"], deps["UserRoleAssignmentError"], ValueError) as exc:
+    except ValueError as exc:
         print(f"{type(exc).__name__}: {exc!s}", file=sys.stderr)
         # FIX: The repository maps EVERY SQLAlchemy failure — including a
         # PostgreSQL row-level-security rejection — onto the deliberately
         # value-free "storage unavailable" message. That is correct fail-closed
         # behaviour and is not softened here, but on its own it leaves the
         # operator with no idea which of two very different causes they hit.
+        # UserAccountError / UserRoleAssignmentError both subclass ValueError,
+        # so naming them alongside ValueError only triggered PYL-W0714.
         if isinstance(exc, deps["UserAccountStorageError"]):
             print(
                 "On PostgreSQL this also covers a row-level-security rejection: "

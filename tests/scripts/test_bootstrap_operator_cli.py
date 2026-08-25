@@ -189,6 +189,51 @@ def test_bootstrap_is_idempotent_and_reports_the_existing_id(tmp_path, capsys):
     assert f"X-User-ID: {first_id}" in output
 
 
+def test_bootstrap_refuses_a_disabled_existing_account(tmp_path, capsys):
+    """A disabled row must not become EXISTING and must not receive --role."""
+    module = _load_script()
+    database_url = _make_database(tmp_path)
+    _seed_role_catalog(database_url)
+
+    assert _run(module, database_url, "--email", _OPERATOR_EMAIL) == 0
+    users = _users(database_url)
+    assert len(users) == 1
+    engine = create_engine(database_url)
+    try:
+        with Session(engine) as session:
+            row = session.get(UserORM, users[0].id)
+            assert row is not None
+            row.status = "disabled"
+            session.commit()
+    finally:
+        engine.dispose()
+    capsys.readouterr()
+
+    exit_code = _run(
+        module,
+        database_url,
+        "--email",
+        _OPERATOR_EMAIL,
+        "--role",
+        "finance_admin",
+    )
+
+    assert exit_code == 2
+    err = capsys.readouterr().err
+    assert "status=disabled" in err
+    assert "Nothing was changed" in err
+    final_users = _users(database_url)
+    assert len(final_users) == 1
+    assert final_users[0].status == "disabled"
+    engine = create_engine(database_url)
+    try:
+        with Session(engine) as session:
+            assignments = list(session.scalars(select(UserRoleAssignmentORM)).all())
+            assert assignments == []
+    finally:
+        engine.dispose()
+
+
 def test_bootstrap_creates_a_second_user_in_one_run(tmp_path, capsys):
     """Repeating --email creates every requested account with its own id."""
     module = _load_script()
@@ -506,7 +551,8 @@ def test_org_unit_outcome_is_read_back_from_the_row_not_the_arguments(tmp_path, 
     module = _load_script()
     database_url = _make_database(tmp_path)
     assert _run(module, database_url, "--email", _OPERATOR_EMAIL, "--org-skeleton") == 0
-    sector = next(unit for unit in _org_units(database_url) if unit.type == "SECTOR")
+    sector = next((unit for unit in _org_units(database_url) if unit.type == "SECTOR"), None)
+    assert sector is not None
 
     _deactivate(database_url, "SECTOR")
     monkeypatch.setattr(module, "_org_unit_drift", lambda *args, **kwargs: None)
@@ -1014,7 +1060,8 @@ def test_seeded_skeleton_clears_both_missing_company_and_missing_sector(tmp_path
     module = _load_script()
     database_url = _make_database(tmp_path)
     assert _run(module, database_url, "--email", _OPERATOR_EMAIL, "--org-skeleton") == 0
-    company = next(unit for unit in _org_units(database_url) if unit.type == "COMPANY")
+    company = next((unit for unit in _org_units(database_url) if unit.type == "COMPANY"), None)
+    assert company is not None
     _add_channel(database_url, channel_id="channel-mapped", org_unit_id=company.id)
     user_id = str(_users(database_url)[0].id)
 
@@ -1077,7 +1124,8 @@ def test_an_inactive_company_reports_missing_sector_so_the_refusal_is_load_beari
     module = _load_script()
     database_url = _make_database(tmp_path)
     assert _run(module, database_url, "--email", _OPERATOR_EMAIL, "--org-skeleton") == 0
-    company = next(unit for unit in _org_units(database_url) if unit.type == "COMPANY")
+    company = next((unit for unit in _org_units(database_url) if unit.type == "COMPANY"), None)
+    assert company is not None
     _add_channel(database_url, channel_id="channel-mapped", org_unit_id=company.id)
     user_id = str(_users(database_url)[0].id)
 
