@@ -108,6 +108,26 @@ backup = _load("backup_database")
 restore = _load("restore_database")
 
 
+def _backup_superuser_psql(superuser: str = "ums"):
+    def fake_psql(_container: str, _sql: str, *, timeout: int) -> str:
+        _ = (_container, _sql, timeout)
+        return superuser
+
+    return fake_psql
+
+
+def _restore_psql(*, superuser: str = "ums", present: list[str] | None = None):
+    roles = list(restore.REQUIRED_ROLES) if present is None else list(present)
+
+    def fake_psql(_container: str, sql: str, *, timeout: int) -> str:
+        _ = (_container, timeout)
+        if "current_user" in sql:
+            return superuser
+        return "\n".join(roles) + "\n"
+
+    return fake_psql
+
+
 # --------------------------------------------------------------------------
 # ONE CLOCK FOR THE WHOLE FILE.
 #
@@ -1335,6 +1355,7 @@ def test_hyphenated_role_lookalike_does_not_satisfy_required_roles(
         return subprocess.CompletedProcess(argv, 0, "", "")
 
     monkeypatch.setattr(backup, "_run_to_file", _lookalike)
+    monkeypatch.setattr(backup, "_psql", _backup_superuser_psql())
     with pytest.raises(backup.BackupError) as raised:
         backup._dump_roles("fake", target, timeout=5, include_passwords=False)
     assert raised.value.code == backup.EXIT_ARTIFACT_INVALID
@@ -2512,9 +2533,9 @@ def test_restore_roles_tolerates_bootstrap_duplicate_nonzero(
         )
 
     monkeypatch.setattr(restore, "_run_with_file", fake_run_with_file)
-    monkeypatch.setattr(restore, "_psql", lambda *_a, **_k: "app_platform\napp_tenant\n")
+    monkeypatch.setattr(restore, "_psql", _restore_psql())
     present = restore._restore_roles("fake", roles_path, timeout=5)
-    assert present == ["app_platform", "app_tenant"]
+    assert present == list(restore.REQUIRED_ROLES)
     out = capsys.readouterr().out
     assert 'role "ums" already exists' in out
     assert "permission denied" not in out
@@ -2539,7 +2560,7 @@ def test_restore_roles_rejects_unexpected_error_line(
         )
 
     monkeypatch.setattr(restore, "_run_with_file", fake_run_with_file)
-    monkeypatch.setattr(restore, "_psql", lambda *_a, **_k: "app_platform\napp_tenant\n")
+    monkeypatch.setattr(restore, "_psql", _restore_psql())
     with pytest.raises(restore.RestoreError) as caught:
         restore._restore_roles("fake", roles_path, timeout=5)
     assert caught.value.code == restore.EXIT_ROLES_FAILED
@@ -2563,6 +2584,7 @@ def test_restore_roles_rejects_nonzero_without_allowed_error(
         )
 
     monkeypatch.setattr(restore, "_run_with_file", fake_run_with_file)
+    monkeypatch.setattr(restore, "_psql", _restore_psql())
     with pytest.raises(restore.RestoreError) as caught:
         restore._restore_roles("fake", roles_path, timeout=5)
     assert caught.value.code == restore.EXIT_ROLES_FAILED
@@ -2588,7 +2610,7 @@ def test_restore_roles_rejects_fatal_even_after_allowed_duplicate(
         )
 
     monkeypatch.setattr(restore, "_run_with_file", fake_run_with_file)
-    monkeypatch.setattr(restore, "_psql", lambda *_a, **_k: "app_platform\napp_tenant\n")
+    monkeypatch.setattr(restore, "_psql", _restore_psql())
     with pytest.raises(restore.RestoreError) as caught:
         restore._restore_roles("fake", roles_path, timeout=5)
     assert caught.value.code == restore.EXIT_ROLES_FAILED
@@ -2754,6 +2776,7 @@ class _FakeContainer:
         monkeypatch.setattr(backup, "_dump_roles", self._dump_roles)
         monkeypatch.setattr(backup, "_dump_database_and_count", self._dump_database_and_count)
         monkeypatch.setattr(backup, "_verify_dump_readable", lambda *a, **k: self.toc_entries)
+        monkeypatch.setattr(backup, "_pg_restore_list", self._pg_restore_list)
         monkeypatch.setattr(backup, "_container_facts", self._facts)
 
     @staticmethod
@@ -2772,6 +2795,13 @@ class _FakeContainer:
         _ = timeout
         target.write_bytes(backup.CUSTOM_FORMAT_MAGIC + b"-fake-archive")
         return dict(self.counts)
+
+    def _pg_restore_list(self, _container: str, _dump_path: Path, *, timeout: int) -> str:
+        """Return a minimal pg_restore listing for fake CLI archives."""
+        _ = (_container, _dump_path, timeout)
+        if self.toc_entries == 0:
+            return ";\n"
+        return ";\n1; 0 0 ACL public TABLE tenants app_tenant\n"
 
     @staticmethod
     def _dump_database(_container: str, target: Path, *, timeout: int) -> None:
@@ -3266,6 +3296,7 @@ def test_roles_sql_that_does_not_name_both_roles_is_refused(
         return subprocess.CompletedProcess(argv, 0, "", "")
 
     monkeypatch.setattr(backup, "_run_to_file", _half_a_roles_file)
+    monkeypatch.setattr(backup, "_psql", _backup_superuser_psql())
 
     with pytest.raises(backup.BackupError) as raised:
         backup._dump_roles("fake", target, timeout=5, include_passwords=False)
@@ -3286,6 +3317,7 @@ def test_roles_sql_naming_both_roles_is_accepted(
         return subprocess.CompletedProcess(argv, 0, "", "")
 
     monkeypatch.setattr(backup, "_run_to_file", _complete_roles_file)
+    monkeypatch.setattr(backup, "_psql", _backup_superuser_psql())
 
     assert backup._dump_roles("fake", target, timeout=5, include_passwords=False) == list(
         backup.REQUIRED_ROLES
@@ -3363,7 +3395,7 @@ def test_restore_roles_accepts_semicolon_terminated_create_role_lines(
         "CREATE ROLE app_tenant;\nCREATE ROLE app_platform;\n",
         encoding="utf-8",
     )
-    monkeypatch.setattr(restore, "_psql", lambda *_a, **_k: "postgres\napp_platform\napp_tenant\n")
+    monkeypatch.setattr(restore, "_psql", _restore_psql(superuser="postgres"))
     monkeypatch.setattr(
         restore,
         "_run_with_file",
@@ -3393,3 +3425,53 @@ def test_backup_roles_rejects_foreign_cluster_roles(
         backup._dump_roles("fake", target, timeout=5, include_passwords=False)
     assert raised.value.code == backup.EXIT_ARTIFACT_INVALID
     assert "extra" in str(raised.value)
+
+
+def test_sync_staging_before_publication_fsyncs_every_artifact(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Publication must flush dump, roles, manifest, and the staging directory."""
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    for name in (backup.DUMP_NAME, backup.ROLES_NAME, backup.MANIFEST_NAME):
+        (staging / name).write_bytes(b"x")
+    synced: list[str] = []
+
+    def _record_file(path: Path) -> None:
+        """record file."""
+        synced.append(path.name)
+
+    def _record_dir(path: Path) -> None:
+        """record dir."""
+        synced.append(path.name + "/")
+
+    monkeypatch.setattr(backup, "_fsync_file", _record_file)
+    monkeypatch.setattr(backup, "_fsync_directory", _record_dir)
+    backup._sync_staging_before_publication(staging)
+    assert synced == [
+        backup.DUMP_NAME,
+        backup.ROLES_NAME,
+        backup.MANIFEST_NAME,
+        "staging/",
+    ]
+
+
+def test_run_backup_syncs_before_and_after_publication_rename(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, clock: _Clock
+) -> None:
+    """The rename path must fsync staging before and the parent directory after."""
+    calls: list[str] = []
+    monkeypatch.setattr(
+        backup,
+        "_sync_staging_before_publication",
+        lambda staging: calls.append(f"staging:{staging.name}"),
+    )
+    monkeypatch.setattr(
+        backup,
+        "_sync_parent_directory_entry",
+        lambda parent: calls.append(f"parent:{parent.name}"),
+    )
+    code = _run_cli(monkeypatch, tmp_path, REAL, "--establish-watermark")
+    assert code == backup.EXIT_OK
+    assert any(item.startswith("staging:") for item in calls)
+    assert any(item.startswith("parent:") for item in calls)

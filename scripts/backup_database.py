@@ -1710,7 +1710,7 @@ def _reclaim_stale_backup_lock(lock_dir: Path) -> bool:
         pid = None
     except (OSError, ValueError):
         pid = None
-    if pid is not None and _pid_is_alive(pid):
+    if pid is not None and _pid_is_alive(pid) and not _lock_age_exceeds_bound(lock_dir):
         return False
     if pid is not None and not _pid_is_alive(pid):
         try:
@@ -2846,6 +2846,73 @@ def _replace_status_file(path: Path, body: str) -> None:
         raise
 
 
+# ============================================================================
+# Purpose: Make a published backup run survive power loss between artifact
+#          write, staging rename, and the retention pass that follows.
+# Database/ORM: None. Host filesystem durability only.
+# Standards: fsync every artifact and the staging directory before rename;
+#            fsync the parent output directory after rename so the published
+#            name is durable before watermark/prune bookkeeping begins.
+#            Windows directory flush uses FlushFileBuffers on a directory
+#            handle; POSIX uses fsync on the directory fd.
+# Blast Radius: Disaster-recovery publication timing only.
+# Connections:
+#   - File: scripts/backup_database.py -> ``run_backup`` rename path.
+#   - File: Docs/22_BACKUP_RESTORE_AND_REHEARSAL.md -> publication contract.
+# ============================================================================
+def _fsync_file(path: Path) -> None:
+    """Durably flush one artifact file."""
+    with path.open("r+b") as handle:
+        handle.flush()
+        os.fsync(handle.fileno())
+
+
+def _fsync_directory(path: Path) -> None:
+    """Durably flush one directory entry when the platform supports it."""
+    try:
+        if os.name == "nt":
+            import ctypes
+            from ctypes import wintypes
+
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            handle = kernel32.CreateFileW(
+                str(path),
+                0,
+                0,
+                None,
+                3,
+                0x02000000,
+                None,
+            )
+            if handle == wintypes.HANDLE(-1).value:
+                return
+            try:
+                kernel32.FlushFileBuffers(handle)
+            finally:
+                kernel32.CloseHandle(handle)
+            return
+        directory_fd = os.open(path, os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    except OSError:
+        # Directory-entry durability is best-effort on network/AV-backed paths.
+        return
+
+
+def _sync_staging_before_publication(staging: Path) -> None:
+    """Flush run artifacts and the staging directory before rename publishes them."""
+    for name in (DUMP_NAME, ROLES_NAME, MANIFEST_NAME):
+        _fsync_file(staging / name)
+    _fsync_directory(staging)
+
+
+def _sync_parent_directory_entry(parent: Path) -> None:
+    """Flush the output directory after rename so the published name is durable."""
+    _fsync_directory(parent)
+
+
 def _append_log(out_dir: Path, line: str) -> bool:
     """Append one audit line to the durable log. True only if it landed."""
     try:
@@ -3173,8 +3240,10 @@ def run_backup(args: argparse.Namespace, out_dir: Path) -> BackupOutcome:
         # artifacts and its verdict so the operator can see what the database
         # looked like at 02:00, but lands outside RUN_DIR_RE.
         destination = final_dir if verdict.accepted else rejected_dir
+        _sync_staging_before_publication(staging)
         staging.rename(destination)
         _restrict_run_dir_mode(destination)
+        _sync_parent_directory_entry(out_dir)
         moved = True
     finally:
         if not moved:
