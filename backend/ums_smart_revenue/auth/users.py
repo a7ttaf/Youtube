@@ -156,13 +156,20 @@ class SqlAlchemyUserAccountRepository:
                 is_service_account=normalized_is_service_account,
             )
             try:
-                self._session.add(row)
-                self._session.flush()
-            except IntegrityError as exc:
-                # FIX: Do not session.rollback() — multi-write callers (operator
+                # FIX: The write runs in ITS OWN savepoint so the IntegrityError
+                # diagnosis below can still query. A failed INSERT aborts the
+                # PostgreSQL transaction and deactivates the session's current
+                # (savepoint) transaction on every backend, so without this the
+                # _email_exists SELECT raised PendingRollbackError and a typed
+                # conflict surfaced as "storage unavailable". No full
+                # session.rollback() here — multi-write callers (operator
                 # bootstrap with repeated --email) share one session; a full
                 # rollback discards earlier flushes while outcome lists still
-                # report success. Each attempt runs inside begin_nested().
+                # report success.
+                with self._session.begin_nested():
+                    self._session.add(row)
+                    self._session.flush()
+            except IntegrityError as exc:
                 if _is_email_constraint_violation(exc) or self._email_exists(normalized_email):
                     raise UserAccountConflictError("User email already exists") from exc
                 raise UserAccountConflictError(
@@ -341,7 +348,8 @@ class SqlAlchemyUserAccountRepository:
     # ============================================================================
     # Purpose: Apply guarded account metadata and lifecycle updates for one tenant.
     # Database/ORM: UserORM/users.
-    # Standards: Repository-owned write, typed domain errors, rollback on conflicts.
+    # Standards: Repository-owned write, typed domain errors, savepoint-scoped
+    #   rollback on conflicts (sibling writes on a shared session are preserved).
     # Blast Radius: Authorization and audit-adjacent account lifecycle state.
     # Connections:
     #   - File: backend/ums_smart_revenue/api/user_accounts.py -> Route error mapping.
@@ -389,10 +397,15 @@ class SqlAlchemyUserAccountRepository:
                 _require_compatible_status(row, update.status)
 
             try:
-                _apply_user_account_update(row, update)
-                self._session.flush()
+                # FIX: Same savepoint isolation as create_user — the failed
+                # UPDATE must be rolled back to a savepoint BEFORE the email
+                # diagnosis below queries, or the deactivated transaction turns
+                # the typed conflict into "storage unavailable". Sibling writes
+                # on the shared session stay flushed either way.
+                with self._session.begin_nested():
+                    _apply_user_account_update(row, update)
+                    self._session.flush()
             except IntegrityError as exc:
-                # FIX: Nested savepoint rollback only — keep sibling session writes.
                 if update.email is not None and (
                     _is_email_constraint_violation(exc)
                     or self._email_exists(update.email, excluding_user_id=user_uuid)
@@ -405,17 +418,48 @@ class SqlAlchemyUserAccountRepository:
 
         return self._run_with_storage_retries(operation)
 
+    # ========================================================================
+    # Purpose: Retry transient storage failures inside a SAVEPOINT so a failed
+    #   flush rolls back only that attempt; sibling writes on a shared session
+    #   (operator bootstrap multi-account) stay flushed. Integrity conflicts stay
+    #   typed — never remapped to "storage unavailable".
+    # Database/ORM: UserORM/users via the caller's Session; begin_nested savepoints.
+    # Standards: Repository-owned retry; typed UserAccountConflictError /
+    #   UserAccountStorageError; no full session.rollback(); SQLite depends on
+    #   db/session.py BEGIN recipe so RELEASE does not early-commit.
+    # Blast Radius: Authorization account lifecycle writes and bootstrap atomicity.
+    # Connections:
+    #   - File: backend/ums_smart_revenue/db/session.py -> SQLite BEGIN/SAVEPOINT.
+    #   - File: scripts/bootstrap_operator.py -> shared-session multi-account create.
+    # ========================================================================
     def _run_with_storage_retries(self, operation: Callable[[], T]) -> T:
         """Retry transient storage failures once and fail closed otherwise.
 
         Each attempt runs inside ``begin_nested()`` so a failed flush rolls
         back only that savepoint. A full ``session.rollback()`` would discard
         earlier writes in a shared multi-account bootstrap transaction.
+
+        On SQLite this depends on the engine-level BEGIN recipe in
+        ``db/session.py::build_engine``: without a real outer transaction,
+        pysqlite's RELEASE of the outermost savepoint durably COMMITS, which
+        is an early commit that breaks the caller's one-transaction envelope.
         """
         for attempt_index in range(USER_ACCOUNT_STORAGE_ATTEMPTS):
             try:
                 with self._session.begin_nested():
                     return operation()
+            except IntegrityError as exc:
+                # FIX: A constraint violation is deterministic — never retryable
+                # storage trouble. create_user/update_user diagnose their own
+                # flush failures (email vs other) inside their inner savepoint,
+                # so an IntegrityError surfacing HERE was raised by the savepoint
+                # boundary itself flushing prior pending session state
+                # (SessionTransaction._take_snapshot flushes on entry). The
+                # savepoint rework mapped that onto "storage unavailable",
+                # misreporting a typed conflict; keep the typed contract.
+                raise UserAccountConflictError(
+                    "User account violates database constraints"
+                ) from exc
             except SQLAlchemyError as exc:
                 # UserAccountConflictError is a ValueError subclass (not
                 # SQLAlchemy), so typed conflicts propagate without a useless

@@ -19,8 +19,10 @@
 
 import importlib.util
 import sys
+from collections.abc import Iterable
 from pathlib import Path
 from types import ModuleType
+from typing import Any
 from uuid import UUID, uuid4
 
 from fastapi.testclient import TestClient
@@ -280,12 +282,12 @@ def test_bootstrap_keeps_earlier_accounts_after_transient_storage_retry(
     flush_calls = {"n": 0}
     real_flush = Session.flush
 
-    def flaky_flush(self, objects=None):
+    def flaky_flush(self: Session, objects: Iterable[Any] | None = None) -> None:
         """Fail the second flush once, then delegate to the real Session.flush."""
         flush_calls["n"] += 1
         if flush_calls["n"] == 2:
             raise OperationalError("INSERT", {}, Exception("simulated transient failure"))
-        return real_flush(self, objects)
+        real_flush(self, objects)
 
     monkeypatch.setattr(Session, "flush", flaky_flush)
     exit_code = _run(

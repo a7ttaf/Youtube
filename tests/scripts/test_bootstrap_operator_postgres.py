@@ -5,8 +5,12 @@
 #   end to end; the same write REJECTS when TENANT_CTX is absent, so the
 #   tenant-context handling is proven load-bearing rather than decorative; a
 #   seeded org unit deactivated in the real database is REFUSED instead of being
-#   announced as healthy; and a URL carrying its password as a query parameter
-#   connects for real and still prints masked.
+#   announced as healthy; a URL carrying its password as a query parameter
+#   connects for real and still prints masked; and a NON-email IntegrityError
+#   inside the shared bootstrap session stays a typed conflict (PostgreSQL
+#   aborts the transaction after a failed INSERT, which SQLite does not — the
+#   exact surface where the savepoint retry rework misreported conflicts as
+#   "storage unavailable").
 # Database/ORM: The full Alembic schema; UserORM, OrgUnitORM,
 #   UserRoleAssignmentORM writes through the app's own tenant-lane session
 #   factory, so the after_begin RLS hook in db/session.py is in the path.
@@ -323,6 +327,79 @@ def test_tenant_scoped_insert_is_rejected_without_tenant_context(migrated_url):
 
     assert "row-level security" in str(excinfo.value).lower()
     assert _scalar(migrated_url, "SELECT count(*) FROM org_units") == 0
+
+
+def test_non_email_integrity_error_stays_a_typed_conflict_on_postgres(migrated_url, monkeypatch):
+    """A real non-email IntegrityError maps to the typed conflict, keeping siblings.
+
+    Codex P1 regression (3416d8d46): the storage-retry savepoint rework left the
+    failed INSERT's ABORTED PostgreSQL transaction in place while
+    ``create_user``'s diagnosis ran its ``_email_exists`` SELECT, so every
+    non-email IntegrityError surfaced as ``UserAccountStorageError`` ("storage
+    unavailable") instead of ``UserAccountConflictError``. The write now runs in
+    its own savepoint, rolled back BEFORE the diagnosis queries, so the typed
+    contract holds on the backend that actually aborts transactions — and the
+    sibling account flushed EARLIER on the same session survives the conflict,
+    which is the sibling-preservation property the savepoint rework exists to
+    protect. Only the id GENERATOR is forged (to collide on the primary key);
+    the write, the failure, and the diagnosis all run against the real database.
+    """
+    import ums_smart_revenue.auth.users as auth_users
+
+    planted_id = UUID("00000000-0000-0000-0000-00000000c011")
+    _execute(
+        migrated_url,
+        "INSERT INTO users (id, tenant_id, email, display_name) "
+        "VALUES (:id, :tenant_id, :email, :display_name)",
+        id=planted_id,
+        tenant_id=_TENANT_ID,
+        email="planted-pg@example.com",
+        display_name="Planted User",
+    )
+    session_factory = build_session_factory(migrated_url)
+    with session_factory() as lookup_session:
+        tenant = SqlAlchemyTenantRepository(lookup_session).get_by_id(_TENANT_ID)
+
+    token = TENANT_CTX.set(tenant)
+    try:
+        with session_factory() as session:
+            repository = auth_users.SqlAlchemyUserAccountRepository(session, tenant_id=_TENANT_ID)
+            repository.create_user(
+                email="sibling-pg@example.com",
+                display_name="Sibling User",
+                is_service_account=False,
+            )
+            monkeypatch.setattr(auth_users, "uuid4", lambda: planted_id)
+            with pytest.raises(
+                auth_users.UserAccountConflictError,
+                match="User account violates database constraints",
+            ):
+                repository.create_user(
+                    email="victim-pg@example.com",
+                    display_name="Victim User",
+                    is_service_account=False,
+                )
+            monkeypatch.undo()
+            session.commit()
+    finally:
+        TENANT_CTX.reset(token)
+
+    assert (
+        _scalar(
+            migrated_url,
+            "SELECT count(*) FROM users WHERE email = :email",
+            email="sibling-pg@example.com",
+        )
+        == 1
+    )
+    assert (
+        _scalar(
+            migrated_url,
+            "SELECT count(*) FROM users WHERE email = :email",
+            email="victim-pg@example.com",
+        )
+        == 0
+    )
 
 
 def test_tenant_scoped_insert_is_accepted_with_tenant_context(migrated_url):

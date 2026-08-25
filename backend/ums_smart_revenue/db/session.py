@@ -1,3 +1,18 @@
+# ============================================================================
+# Purpose: SQLAlchemy engine and session-factory helpers with per-URL engine
+#   caching, SQLite StaticPool writer serialization, and Postgres RLS role hooks.
+# Database/ORM: All ORM models (engine is the shared connection source); Session
+#   factories mark tenant vs platform lanes via session.info.
+# Standards: typed boundaries; no error swallowing; SQLite is test/dev-only;
+#   Postgres pool_pre_ping and dual-lane role switching unchanged.
+# Blast Radius: DB connection topology and transaction discipline. SQLite writer
+#   lock is test/dev-only; Postgres authorization/RLS path is untouched.
+# Connections:
+#   - File: backend/ums_smart_revenue/app.py -> request + platform factories.
+#   - File: backend/ums_smart_revenue/auth/users.py -> savepoint retries rely on
+#     real SQLite BEGIN so RELEASE does not commit.
+#   - File: scripts/bootstrap_operator.py -> one-transaction operator bootstrap.
+# ============================================================================
 """SQLAlchemy engine and session-factory helpers with per-URL engine caching."""
 
 from collections.abc import Callable, Iterator
@@ -39,7 +54,8 @@ _engine_cache_lock = Lock()
 # Standards: typed boundary; no error swallowing; pool_pre_ping retained.
 #   SQLite engines additionally get real BEGIN discipline (see
 #   _enable_sqlite_transactional_savepoints below) so SAVEPOINTs nest instead
-#   of committing.
+#   of committing, plus a per-engine writer lock so independent Sessions cannot
+#   collide on the shared DBAPI connection.
 # Blast Radius: DB connection topology. SQLite branch is test-only; Postgres
 #   path is intentionally unchanged so RLS role switching is not weakened.
 # Connections:
@@ -67,21 +83,30 @@ def build_engine(database_url: str) -> Engine:
 
 
 # ============================================================================
-# Purpose: Make SAVEPOINTs REAL on SQLite. pysqlite's legacy isolation mode
-#   emits BEGIN only before DML, never before SELECT or SAVEPOINT, so a
-#   ``Session.begin_nested()`` entered while the DBAPI sits in autocommit
-#   starts ITS OWN SQLite-level transaction — and the RELEASE on clean exit
-#   DURABLY COMMITS it. Every savepoint-wrapped write in this codebase (the
-#   auth/users.py storage-retry envelope, the audit sinks, the channel-registry
-#   write boundary) therefore committed EARLY on SQLite, silently breaking
-#   one-transaction envelopes: scripts/bootstrap_operator.py promised "the
-#   whole run is one transaction" while a failure AFTER a savepointed account
-#   write left the account half-created (parent-verified red test
+# Purpose: Make SAVEPOINTs REAL on SQLite and serialize independent writers on
+#   the StaticPool connection. pysqlite's legacy isolation mode emits BEGIN only
+#   before DML, never before SELECT or SAVEPOINT, so a ``Session.begin_nested()``
+#   entered while the DBAPI sits in autocommit starts ITS OWN SQLite-level
+#   transaction — and the RELEASE on clean exit DURABLY COMMITS it. Every
+#   savepoint-wrapped write in this codebase (the auth/users.py storage-retry
+#   envelope, the audit sinks, the channel-registry write boundary) therefore
+#   committed EARLY on SQLite, silently breaking one-transaction envelopes:
+#   scripts/bootstrap_operator.py promised "the whole run is one transaction"
+#   while a failure AFTER a savepointed account write left the account
+#   half-created (parent-verified red test
 #   test_bootstrap_reports_a_database_failure_instead_of_a_traceback). This is
 #   the SQLAlchemy-documented pysqlite recipe: stop the DBAPI from managing
 #   transactions and emit BEGIN ourselves whenever SQLAlchemy begins one, so
 #   savepoints nest inside a real outer transaction and RELEASE releases
 #   instead of committing.
+#
+#   The same StaticPool connection is also shared across independent Sessions
+#   (HTTP request + connector scheduler/executor). An unconditional second BEGIN
+#   raises ``cannot start a transaction within a transaction`` or lets Session B
+#   commit/roll back Session A's writes. A per-engine RLock is acquired before
+#   BEGIN and released only after dialect do_commit/do_rollback finishes
+#   (Connection commit/rollback events fire too early). Same-thread overlap
+#   while a txn is already open is refused rather than nesting a colliding BEGIN.
 # Database/ORM: Engine-level transaction discipline for every SQLite session;
 #   no table, column, or query change.
 # Standards: Documented dialect recipe (SQLAlchemy "Serializable isolation /
@@ -89,14 +114,22 @@ def build_engine(database_url: str) -> Engine:
 #   psycopg already emits BEGIN, so its savepoints were always real.
 # Blast Radius: SQLite (test/dev-only per build_engine) transaction semantics:
 #   reads now open a real deferred transaction that holds its snapshot until
-#   commit/rollback/close. No authorization, finance, or Postgres behavior.
+#   commit/rollback/close; concurrent Sessions wait for the writer lock. No
+#   authorization, finance, or Postgres behavior.
 # Connections:
 #   - File: backend/ums_smart_revenue/auth/users.py -> _run_with_storage_retries
 #     relies on RELEASE not committing to keep the bootstrap atomic.
 #   - File: scripts/bootstrap_operator.py -> the one-transaction guarantee.
+#   - File: backend/ums_smart_revenue/app.py -> executor/scheduler share this
+#     engine's session_factory on SQLite test apps.
 # ============================================================================
 def _enable_sqlite_transactional_savepoints(engine: Engine) -> None:
     """Emit real BEGINs on SQLite so SAVEPOINT/RELEASE nest instead of committing."""
+    # StaticPool has one DBAPI connection; one non-reentrant lock is enough.
+    # A boolean (not id(dbapi)) tracks ownership because Connection.dbapi_connection
+    # and dialect.do_commit's argument are not always the same Python object.
+    writer_lock = Lock()
+    lock_held = False
 
     @event.listens_for(engine, "connect")
     def _disable_pysqlite_transaction_management(
@@ -107,23 +140,67 @@ def _enable_sqlite_transactional_savepoints(engine: Engine) -> None:
         # entirely; the begin hook below owns transaction starts instead.
         dbapi_connection.isolation_level = None
 
+    def _release_writer_lock() -> None:
+        """Release the StaticPool writer lock if this engine currently holds it."""
+        nonlocal lock_held
+        if lock_held:
+            lock_held = False
+            writer_lock.release()
+
     @event.listens_for(engine, "begin")
     def _emit_begin(connection: Connection) -> None:
-        """Emit an explicit BEGIN whenever SQLAlchemy starts a transaction."""
-        connection.exec_driver_sql("BEGIN")
+        """Emit an explicit BEGIN for each outer transaction; serialize writers."""
+        # FIX: Hold until dialect do_commit/do_rollback finishes. Connection
+        # commit/rollback events fire BEFORE the DBAPI commit/rollback, so
+        # releasing there races a second Session onto the still-open transaction.
+        nonlocal lock_held
+        writer_lock.acquire()
+        lock_held = True
+        try:
+            dbapi_connection = connection.connection.dbapi_connection
+            if getattr(dbapi_connection, "in_transaction", False):
+                raise RuntimeError(
+                    "Overlapping SQLite Sessions on StaticPool: another transaction "
+                    "is already open on the shared connection. Reuse one Session "
+                    "(see _sqlite_platform_session_from_request) or wait for commit."
+                )
+            connection.exec_driver_sql("BEGIN")
+        except Exception:
+            _release_writer_lock()
+            raise
+
+    dialect = engine.dialect
+    original_do_commit = dialect.do_commit
+    original_do_rollback = dialect.do_rollback
+
+    def _do_commit_and_release(dbapi_connection: Any) -> None:
+        """Commit on the DBAPI connection, then release the StaticPool writer lock."""
+        try:
+            original_do_commit(dbapi_connection)
+        finally:
+            _release_writer_lock()
+
+    def _do_rollback_and_release(dbapi_connection: Any) -> None:
+        """Roll back on the DBAPI connection, then release the StaticPool writer lock."""
+        try:
+            original_do_rollback(dbapi_connection)
+        finally:
+            _release_writer_lock()
+
+    dialect.do_commit = _do_commit_and_release
+    dialect.do_rollback = _do_rollback_and_release
 
 
 # ============================================================================
 # Purpose: Build the default app tenant-lane session factory. Sessions produced
 #   here opt into the Postgres RLS role hook through session.info; raw SQLAlchemy
 #   Sessions used by migrations/tests remain owner sessions unless explicitly
-#   marked. For SQLite (StaticPool) we force every new Session to open a
-#   SAVEPOINT so its commit/rollback lands on its own sub-transaction instead
-#   of the shared outer one — without this, two sessions on the same connection
-#   could clobber each other's uncommitted writes.
+#   marked. SQLite concurrent Sessions are serialized by the engine writer lock
+#   in ``_enable_sqlite_transactional_savepoints``; the HTTP dual-lane path still
+#   reuses one request Session via ``_sqlite_platform_session_from_request``.
 # Database/ORM: SQLAlchemy Session factory metadata only.
 # Standards: explicit role marker; no ambient global role changes for unmarked
-#   sessions; SAVEPOINT isolation scoped to the SQLite engine only.
+#   sessions; SQLite writer serialization scoped to the SQLite engine only.
 # Blast Radius: Authorization/RLS role selection at the DB boundary (Postgres
 #   path); SQLite transaction-isolation discipline (test-only).
 # Connections:
@@ -148,6 +225,8 @@ def build_session_factory(database_url: str, engine: Engine | None = None) -> Se
     # `_sqlite_platform_session_from_request` in `app.py` so the platform lane
     # reuses the request session (the same Session object), which removes the
     # multi-Session contention that would otherwise need SAVEPOINT isolation.
+    # Independent background Sessions (executor/scheduler) serialize via the
+    # per-engine writer lock installed by `_enable_sqlite_transactional_savepoints`.
     # Postgres keeps the default ("conditional_savepoint") because each
     # Session gets a distinct pooled connection with its own outer transaction.
     return sessionmaker(

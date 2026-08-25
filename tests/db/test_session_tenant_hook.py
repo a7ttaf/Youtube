@@ -82,6 +82,78 @@ def test_sqlite_engine_uses_static_pool_for_shared_connection():
     )
 
 
+def test_sqlite_overlapping_sessions_serialize_instead_of_colliding_begin():
+    """Two threads on StaticPool must serialize writers, not collide on BEGIN.
+
+    Qodo #8 / PR #210: the pysqlite BEGIN recipe makes SAVEPOINT real, but an
+    unconditional second BEGIN on the shared DBAPI connection raises
+    ``cannot start a transaction within a transaction`` (or lets Session B
+    commit Session A's writes). The engine writer lock must let both Sessions
+    complete without that OperationalError while preserving nested savepoints.
+    """
+    import threading
+
+    from sqlalchemy import text
+
+    factory = build_session_factory(
+        "sqlite+pysqlite:///file:ums_writer_lock_test?mode=memory&cache=shared&uri=true"
+    )
+    with factory() as setup:
+        setup.execute(text("CREATE TABLE ums_writer_probe (id INTEGER PRIMARY KEY, v TEXT)"))
+        setup.commit()
+
+    errors: list[Exception] = []
+    barrier = threading.Barrier(2)
+
+    def _writer(label: str) -> None:
+        try:
+            with factory() as session:
+                barrier.wait(timeout=5)
+                session.execute(
+                    text("INSERT INTO ums_writer_probe (v) VALUES (:v)"),
+                    {"v": label},
+                )
+                session.commit()
+        except Exception as exc:
+            errors.append(exc)
+
+    threads = [
+        threading.Thread(target=_writer, args=("a",)),
+        threading.Thread(target=_writer, args=("b",)),
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=10)
+        assert not thread.is_alive()
+
+    assert errors == [], f"overlapping SQLite Sessions failed: {errors!r}"
+    with factory() as check:
+        values = set(check.execute(text("SELECT v FROM ums_writer_probe")).scalars())
+    assert values == {"a", "b"}
+
+
+def test_sqlite_begin_nested_still_releases_instead_of_committing():
+    """Nested SAVEPOINT RELEASE must not durable-commit under the BEGIN recipe."""
+    from sqlalchemy import text
+
+    factory = build_session_factory(
+        "sqlite+pysqlite:///file:ums_savepoint_release_test?mode=memory&cache=shared&uri=true"
+    )
+    with factory() as session:
+        session.execute(text("CREATE TABLE ums_savepoint_probe (id INTEGER PRIMARY KEY)"))
+        session.commit()
+
+    with factory() as session:
+        session.begin()
+        with session.begin_nested():
+            session.execute(text("INSERT INTO ums_savepoint_probe (id) VALUES (1)"))
+        session.rollback()
+
+    with factory() as check:
+        assert check.execute(text("SELECT count(*) FROM ums_savepoint_probe")).scalar() == 0
+
+
 def test_postgres_tenant_lane_sets_role_and_trusted_tenant_context():
     """Verify the tenant lane sets app_tenant and the trusted tenant context."""
     url = require_postgres_url()

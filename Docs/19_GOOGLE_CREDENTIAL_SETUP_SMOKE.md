@@ -352,16 +352,20 @@ Without this, both scripts exit 2 with `SecretFetchError`.
 alternative is `POST /connectors/credentials` per the Setup sequence above):
 
 ```powershell
-docker compose exec postgres psql -U <UMS_DB_USER> -d <UMS_DB_NAME> -c "INSERT INTO api_connector_credentials (tenant_id, connector_key, account_id, encrypted_secret_ref) VALUES ('00000000-0000-0000-0000-000000000001', 'youtube-analytics', 'PlZrS5Fh56RMd9dmSL6XSA', 'gcp-secret-manager://projects/<project>/secrets/ums-google-oauth/versions/latest');"
+docker compose exec postgres psql -U <UMS_DB_USER> -d <UMS_DB_NAME> -c "INSERT INTO api_connector_credentials (tenant_id, connector_key, account_id, encrypted_secret_ref) VALUES ('00000000-0000-0000-0000-000000000001', 'youtube-analytics', '<CONTENT_OWNER_ID>', 'gcp-secret-manager://projects/<project>/secrets/ums-google-oauth/versions/latest');"
 ```
 
 Expected `INSERT 0 1`; a re-run fails on the unique constraint (correct — rotate the ref
 with `UPDATE`, not a second `INSERT`).
 
-**Step 4 — prove it:**
+**Step 4 — prove it** (host process; must target the Compose Postgres published on
+localhost — Step 3 inserted into that container, and Compose's in-network hostname
+`postgres` is unreachable from the host):
 
 ```powershell
-uv run python scripts/check_google_connector_credential.py --tenant 00000000-0000-0000-0000-000000000001 --connector youtube-analytics --account PlZrS5Fh56RMd9dmSL6XSA
+# Use 127.0.0.1 and the published port (UMS_POSTGRES_PORT, default 5432), not hostname postgres.
+$env:UMS_DATABASE_URL = "postgresql+psycopg://<UMS_DB_USER>:<UMS_DB_PASSWORD_URLENC>@127.0.0.1:<UMS_POSTGRES_PORT>/<UMS_DB_NAME>"
+uv run python scripts/check_google_connector_credential.py --tenant 00000000-0000-0000-0000-000000000001 --connector youtube-analytics --account <CONTENT_OWNER_ID>
 ```
 
 Expected exit 0 with `OK … token_expiry=<iso>`. This commits the telemetry that ARMS the
