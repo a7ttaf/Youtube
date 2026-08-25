@@ -76,6 +76,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import re
 import subprocess
 import sys
 import time
@@ -255,10 +256,14 @@ def _load_backup(backup_dir: Path) -> dict[str, object]:
     artifacts = manifest.get("artifacts")
     if not isinstance(artifacts, dict):
         raise RestoreError(EXIT_USAGE, f"{manifest_path} has no artifacts block")
-    for name, entry in artifacts.items():
+    for name in (DUMP_NAME, ROLES_NAME):
+        entry = artifacts.get(name)
         expected = entry.get("sha256") if isinstance(entry, dict) else None
-        if not expected:
-            continue
+        if not isinstance(expected, str) or not expected.strip():
+            raise RestoreError(
+                EXIT_ARTIFACT_INTEGRITY,
+                f"{name} has no sha256 in the manifest. Do not restore this run.",
+            )
         actual = _sha256(backup_dir / name)
         if actual != expected:
             raise RestoreError(
@@ -422,8 +427,29 @@ def _create_throwaway(manifest: dict[str, object], *, timeout: int) -> str:
     return name
 
 
-def _destroy_throwaway(name: str, *, timeout: int) -> None:
-    _run(["docker", "rm", "--force", "--volumes", name], timeout=timeout)
+def _destroy_throwaway(name: str, *, timeout: int) -> bool:
+    """Remove the rehearsal container. Returns True only when docker rm succeeded."""
+    completed = _run(["docker", "rm", "--force", "--volumes", name], timeout=timeout)
+    return completed.returncode == 0
+
+
+_ROLE_ALREADY_EXISTS = re.compile(
+    r'^ERROR:\s+role\s+"[^"]+"\s+already exists\s*$',
+    re.IGNORECASE,
+)
+
+
+def _unexpected_roles_errors(stderr: str) -> list[str]:
+    """Return ERROR lines from roles.sql stderr that are not bootstrap duplicates."""
+    unexpected: list[str] = []
+    for line in stderr.splitlines():
+        stripped = line.strip()
+        if not stripped.upper().startswith("ERROR:"):
+            continue
+        if _ROLE_ALREADY_EXISTS.match(stripped):
+            continue
+        unexpected.append(stripped)
+    return unexpected
 
 
 # ============================================================================
@@ -434,10 +460,10 @@ def _destroy_throwaway(name: str, *, timeout: int) -> None:
 # Standards: ON_ERROR_STOP is deliberately OFF for this file -- pg_dumpall
 #            emits CREATE ROLE for the bootstrap superuser too, which already
 #            exists in any container the official image initialised, and that
-#            expected "role already exists" must not abort the restore. The
-#            tolerance is then paid for by an explicit catalog check: the
-#            roles the dump references must be present, or this fails with
-#            exit 5 before a single table is touched.
+#            expected "role already exists" must not abort the restore. Every
+#            other ERROR: line (and a non-zero returncode with unexpected
+#            errors) fails closed with EXIT_ROLES_FAILED. The catalog check
+#            remains a second gate, not a substitute for a clean apply.
 # Blast Radius: Authorization. These roles carry the RLS grant surface; a
 #               restore that proceeded without them would produce a database
 #               whose policies could not be installed.
@@ -452,6 +478,21 @@ def _restore_roles(container: str, roles_path: Path, *, timeout: int) -> list[st
     )
     completed = _run_with_file(argv, timeout=timeout, source=roles_path)
     noise = completed.stderr.strip()
+    unexpected = _unexpected_roles_errors(completed.stderr)
+    if unexpected:
+        detail = "; ".join(unexpected)
+        raise RestoreError(
+            EXIT_ROLES_FAILED,
+            f"roles.sql reported unexpected errors while ON_ERROR_STOP was off: "
+            f"{detail}. Only 'role already exists' for the bootstrap superuser "
+            "is tolerated.",
+        )
+    if completed.returncode != 0:
+        raise RestoreError(
+            EXIT_ROLES_FAILED,
+            f"roles.sql apply exited {completed.returncode}"
+            + (f": {noise}" if noise else ""),
+        )
     if noise:
         print("roles.sql reported (expected: 'role already exists' for the bootstrap user):")
         for line in noise.splitlines():
@@ -759,8 +800,15 @@ def main(argv: list[str] | None = None) -> int:
         return EXIT_INTERNAL
     finally:
         if throwaway and not args.keep_throwaway:
-            _destroy_throwaway(throwaway, timeout=args.docker_timeout)
-            print(f"removed rehearsal container {throwaway}")
+            if _destroy_throwaway(throwaway, timeout=args.docker_timeout):
+                print(f"removed rehearsal container {throwaway}")
+            else:
+                print(
+                    f"RESTORE WARNING: failed to remove rehearsal container "
+                    f"{throwaway}. Remove it with: "
+                    f"docker rm --force --volumes {throwaway}",
+                    file=sys.stderr,
+                )
         elif throwaway:
             print(f"rehearsal container left running: {throwaway}")
             print(f"remove it with: docker rm --force --volumes {throwaway}")

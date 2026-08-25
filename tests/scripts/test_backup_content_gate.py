@@ -2089,15 +2089,98 @@ def test_restore_refuses_a_rejected_manifest_even_if_renamed(tmp_path: Path) -> 
 def test_restore_still_accepts_a_manifest_written_before_the_gate_existed(
     tmp_path: Path,
 ) -> None:
-    """Backwards compatibility: no verdict is not a rejection."""
+    """Backwards compatibility: no content_gate verdict is not a rejection."""
     run = tmp_path / "ums-backup-20260601T000000Z"
     run.mkdir()
-    (run / backup.DUMP_NAME).write_bytes(b"PGDMP-placeholder")
-    (run / backup.ROLES_NAME).write_text("CREATE ROLE app_tenant;\n", encoding="utf-8")
+    dump = run / backup.DUMP_NAME
+    roles = run / backup.ROLES_NAME
+    dump.write_bytes(b"PGDMP-placeholder")
+    roles.write_text("CREATE ROLE app_tenant;\n", encoding="utf-8")
     (run / backup.MANIFEST_NAME).write_text(
-        json.dumps({"schema": backup.MANIFEST_SCHEMA, "artifacts": {}}), encoding="utf-8"
+        json.dumps(
+            {
+                "schema": backup.MANIFEST_SCHEMA,
+                "artifacts": {
+                    backup.DUMP_NAME: {"sha256": restore._sha256(dump)},
+                    backup.ROLES_NAME: {"sha256": restore._sha256(roles)},
+                },
+            }
+        ),
+        encoding="utf-8",
     )
     assert restore._load_backup(run)["schema"] == backup.MANIFEST_SCHEMA
+
+
+def test_restore_requires_sha256_for_both_artifacts(tmp_path: Path) -> None:
+    """Empty artifacts or missing hashes must fail closed before any restore."""
+    dump_bytes = b"PGDMP-placeholder"
+    roles_text = "CREATE ROLE app_tenant;\n"
+
+    empty_artifacts = tmp_path / "empty-artifacts"
+    empty_artifacts.mkdir()
+    (empty_artifacts / backup.DUMP_NAME).write_bytes(dump_bytes)
+    (empty_artifacts / backup.ROLES_NAME).write_text(roles_text, encoding="utf-8")
+    (empty_artifacts / backup.MANIFEST_NAME).write_text(
+        json.dumps({"schema": backup.MANIFEST_SCHEMA, "artifacts": {}}),
+        encoding="utf-8",
+    )
+    with pytest.raises(restore.RestoreError) as empty:
+        restore._load_backup(empty_artifacts)
+    assert empty.value.code == restore.EXIT_ARTIFACT_INTEGRITY
+
+    missing_hash = tmp_path / "missing-hash"
+    missing_hash.mkdir()
+    (missing_hash / backup.DUMP_NAME).write_bytes(dump_bytes)
+    (missing_hash / backup.ROLES_NAME).write_text(roles_text, encoding="utf-8")
+    (missing_hash / backup.MANIFEST_NAME).write_text(
+        json.dumps(
+            {
+                "schema": backup.MANIFEST_SCHEMA,
+                "artifacts": {
+                    backup.DUMP_NAME: {"bytes": len(dump_bytes)},
+                    backup.ROLES_NAME: {"bytes": len(roles_text)},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(restore.RestoreError) as no_hash:
+        restore._load_backup(missing_hash)
+    assert no_hash.value.code == restore.EXIT_ARTIFACT_INTEGRITY
+
+    mismatched = tmp_path / "mismatched-hash"
+    mismatched.mkdir()
+    dump = mismatched / backup.DUMP_NAME
+    roles = mismatched / backup.ROLES_NAME
+    dump.write_bytes(dump_bytes)
+    roles.write_text(roles_text, encoding="utf-8")
+    (mismatched / backup.MANIFEST_NAME).write_text(
+        json.dumps(
+            {
+                "schema": backup.MANIFEST_SCHEMA,
+                "artifacts": {
+                    backup.DUMP_NAME: {"sha256": "0" * 64},
+                    backup.ROLES_NAME: {"sha256": restore._sha256(roles)},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(restore.RestoreError) as bad_hash:
+        restore._load_backup(mismatched)
+    assert bad_hash.value.code == restore.EXIT_ARTIFACT_INTEGRITY
+
+
+def test_unexpected_roles_errors_are_rejected() -> None:
+    """Only bootstrap 'role already exists' noise is tolerated."""
+    assert restore._unexpected_roles_errors(
+        'ERROR:  role "ums" already exists\n'
+    ) == []
+    unexpected = restore._unexpected_roles_errors(
+        'ERROR:  role "ums" already exists\n'
+        'ERROR:  permission denied to alter role\n'
+    )
+    assert unexpected == ['ERROR:  permission denied to alter role']
 
 
 def test_exit_codes_stay_distinct() -> None:
