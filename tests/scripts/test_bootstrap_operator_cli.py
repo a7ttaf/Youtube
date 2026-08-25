@@ -36,6 +36,7 @@ from ums_smart_revenue.auth.permissions import Permission
 from ums_smart_revenue.auth.roles import RoleKey
 from ums_smart_revenue.db.org_models import OrgBase, OrgUnitORM, YouTubeChannelORM
 from ums_smart_revenue.db.security_models import (
+    AuditLogORM,
     PermissionORM,
     RoleORM,
     RolePermissionAssignmentORM,
@@ -355,6 +356,11 @@ def test_bootstrap_assigns_the_requested_global_role(tmp_path, capsys):
                     RolePermissionAssignmentORM.role_key == "finance_admin"
                 )
             ).all()
+            audit_rows = list(
+                session.scalars(
+                    select(AuditLogORM).where(AuditLogORM.event_type == "USER_ROLE_CHANGED")
+                ).all()
+            )
     finally:
         engine.dispose()
 
@@ -363,7 +369,38 @@ def test_bootstrap_assigns_the_requested_global_role(tmp_path, capsys):
     assert assignments[0].active is True
     # The role assignment is only useful because P0.7 seeded the catalog edges.
     assert "finance.view_revenue" in set(catalog_pairs)
+    # One audit row for the first grant; re-run must not emit a second event.
+    assert len(audit_rows) == 1
+    audit = audit_rows[0]
+    assert audit.reason == "operator bootstrap"
+    assert audit.entity_type == "user_role_assignment"
+    assert audit.sensitive is True
+    assert audit.user_id == assignments[0].user_id
+    assert audit.details.get("action") == "assigned"
+    assert audit.details.get("role_key") == "finance_admin"
+    assert audit.details.get("scope_type") == "global"
     assert "EXISTING" in capsys.readouterr().out
+
+
+def test_bootstrap_without_role_emits_no_role_audit(tmp_path):
+    """Account-only bootstrap must not write USER_ROLE_CHANGED."""
+    module = _load_script()
+    database_url = _make_database(tmp_path)
+
+    assert _run(module, database_url, "--email", _OPERATOR_EMAIL) == 0
+
+    engine = create_engine(database_url)
+    try:
+        with Session(engine) as session:
+            audit_rows = list(
+                session.scalars(
+                    select(AuditLogORM).where(AuditLogORM.event_type == "USER_ROLE_CHANGED")
+                ).all()
+            )
+    finally:
+        engine.dispose()
+
+    assert audit_rows == []
 
 
 def test_bootstrap_refuses_a_role_before_the_seed_migration_ran(tmp_path, capsys):

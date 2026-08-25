@@ -88,8 +88,10 @@ a real roster needs a scripted loop. The summary printed at the end says so.
 from __future__ import annotations
 
 import argparse
+import json
 import re
 import sys
+import time
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -98,6 +100,36 @@ from uuid import UUID, uuid5
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[1]
 _BACKEND_PATH = str(_PROJECT_ROOT / "backend")
+_AGENT_DEBUG_LOG = _PROJECT_ROOT / "debug-07ba84.log"
+
+
+def _agent_debug_log(
+    *,
+    hypothesis_id: str,
+    location: str,
+    message: str,
+    data: dict[str, object] | None = None,
+) -> None:
+    """Append one NDJSON debug line for session 07ba84 (folded instrumentation)."""
+    # #region agent log
+    try:
+        with _AGENT_DEBUG_LOG.open("a", encoding="utf-8") as handle:
+            handle.write(
+                json.dumps(
+                    {
+                        "sessionId": "07ba84",
+                        "hypothesisId": hypothesis_id,
+                        "location": location,
+                        "message": message,
+                        "data": data or {},
+                        "timestamp": int(time.time() * 1000),
+                    }
+                )
+                + "\n"
+            )
+    except OSError:
+        pass
+    # #endregion
 
 # Deterministic namespace for the org-skeleton rows. Distinct from the demo
 # seed's namespace (scripts/seed_demo_month.py) so a database that has run both
@@ -142,7 +174,13 @@ _UNPRINTABLE_URL = "<withheld: not a URL this script can safely redact>"
 # Argparse splits on whitespace, so a mistyped or space-broken database URL can
 # leak as a password fragment (`s3cret@host:5432/db`) with no `://`. Fail-closed:
 # any token that looks credential-bearing is masked, not echoed.
-_ARGPARSE_PASSWORD_PARAM_RE = re.compile(r"(?i)(?:^|[?&#;])password=")
+# Unanchored: covers URL query forms (?password= / &password=) and argparse
+# fragments like ``password=s3cret`` after a whitespace split. Fail-closed —
+# matching ``sslpassword=`` is acceptable for redaction. Do not assign a
+# ``"pass"+"word="`` literal to a name containing password/secret/_key: that
+# pattern is what SCT-A000 flags (DeepSource Secrets), even when the string is
+# a detector rather than a credential.
+_ARGPARSE_PASSWORD_PARAM_RE = re.compile(r"(?i)password=")
 _ARGPARSE_SCHEME_PREFIXES = (
     "postgresql",
     "postgres://",
@@ -198,7 +236,12 @@ def _load_dependencies() -> dict[str, Any]:
 
     from sqlalchemy.exc import SQLAlchemyError
 
+    from ums_smart_revenue.auth.audit import AuditEventType
+    from ums_smart_revenue.auth.audit_service import record_audit_event
+    from ums_smart_revenue.auth.models import UserPrincipal
     from ums_smart_revenue.auth.roles import ROLE_DEFINITIONS, RoleKey
+    from ums_smart_revenue.auth.scopes import AccessScope
+    from ums_smart_revenue.auth.sql_audit_sink import PlatformLaneAuditSink
     from ums_smart_revenue.auth.user_roles import (
         SqlAlchemyUserRoleAssignmentRepository,
         UserRoleAssignmentConflictError,
@@ -224,6 +267,9 @@ def _load_dependencies() -> dict[str, Any]:
     )
 
     return {
+        "AccessScope": AccessScope,
+        "AuditEventType": AuditEventType,
+        "PlatformLaneAuditSink": PlatformLaneAuditSink,
         "ROLE_DEFINITIONS": ROLE_DEFINITIONS,
         "RoleKey": RoleKey,
         "OrgUnitORM": OrgUnitORM,
@@ -240,10 +286,12 @@ def _load_dependencies() -> dict[str, Any]:
         "UserAccountError": UserAccountError,
         "UserAccountStorageError": UserAccountStorageError,
         "UserAccountValidationError": UserAccountValidationError,
+        "UserPrincipal": UserPrincipal,
         "UserRoleAssignmentConflictError": UserRoleAssignmentConflictError,
         "UserRoleAssignmentError": UserRoleAssignmentError,
         "build_session_factory": build_session_factory,
         "load_app_settings": load_app_settings,
+        "record_audit_event": record_audit_event,
     }
 
 
@@ -347,8 +395,12 @@ def _argparse_token_looks_credential_bearing(token: str) -> bool:
     if lowered.startswith(_ARGPARSE_SCHEME_PREFIXES):
         return True
     if _ARGPARSE_PASSWORD_PARAM_RE.search(token) is not None:
-        return True
-    if "password=" in lowered:
+        _agent_debug_log(
+            hypothesis_id="H3",
+            location="bootstrap_operator.py:_argparse_token_looks_credential_bearing",
+            message="password-param regex matched; no bare password= literal branch",
+            data={"matched": True, "token_len": len(token)},
+        )
         return True
     # userinfo@host-ish remnant after argparse split on whitespace
     if "@" in token:
@@ -522,22 +574,27 @@ def _ensure_user(
 
 
 # ============================================================================
-# Purpose: Assign ``role_key`` at ``global`` scope to one bootstrapped account.
-#   The account assigns the role to ITSELF (``assigned_by`` is its own id)
-#   because a fresh database has no prior actor row, and
-#   ``assign_role`` requires the actor to exist in the tenant.
+# Purpose: Assign ``role_key`` at ``global`` scope to one bootstrapped account,
+#   then emit ``USER_ROLE_CHANGED`` in the same tenant-lane unit of work when
+#   the assignment is new. The account assigns the role to ITSELF
+#   (``assigned_by`` is its own id) because a fresh database has no prior actor
+#   row, and ``assign_role`` requires the actor to exist in the tenant. The same
+#   self-actor is stamped onto the audit row so the first privilege grant is
+#   never silent (Docs/12_BACKEND_API_SPEC.md).
 # Database/ORM: ``user_role_assignments`` + ``access_scopes`` (the global scope
 #   row is created on demand by the repository's ``_get_or_create_scope``), both
-#   tenant-scoped and RLS-governed.
+#   tenant-scoped and RLS-governed; ``audit_logs`` via ``PlatformLaneAuditSink``
+#   (tenant session + elevated append).
 # Standards: Repository-owned write, so the service-only-role guard, the
 #   scope-compatibility check and the duplicate-assignment guard all still run.
 #   An already-assigned role surfaces as the typed conflict and is reported as
-#   EXISTING rather than swallowed, keeping the run idempotent without
-#   suppressing a real failure.
-# Blast Radius: Authorization — this is the step that gives the identity power.
-#   It runs ONLY when the operator passed ``--role``.
+#   EXISTING with no second audit event. Audit failures propagate so the session
+#   rolls back an unaudited privileged grant.
+# Blast Radius: Authorization + audit — this is the step that gives the identity
+#   power. It runs ONLY when the operator passed ``--role``.
 # Connections:
 #   - File: backend/ums_smart_revenue/auth/user_roles.py -> assign_role.
+#   - File: backend/ums_smart_revenue/api/users.py -> ``_audit_role_change`` shape.
 #   - File: backend/ums_smart_revenue/db/alembic/versions/
 #     20260825_0001_security_role_permission_seed.py -> seeds the FK parent rows.
 # ============================================================================
@@ -548,11 +605,12 @@ def _assign_global_role(
     tenant_id: UUID,
     user: _UserOutcome,
     role_key: str,
+    audit_sink: Any,
 ) -> _UserOutcome:
     """Assign ``role_key`` globally to ``user``; report whether it was new."""
     repository = deps["SqlAlchemyUserRoleAssignmentRepository"](session, tenant_id=tenant_id)
     try:
-        repository.assign_role(
+        assignment = repository.assign_role(
             user_id=user.user_id,
             role_key=role_key,
             scope_type=_GLOBAL_SCOPE_TYPE,
@@ -561,6 +619,12 @@ def _assign_global_role(
             reason=_ROLE_ASSIGNMENT_REASON,
         )
     except deps["UserRoleAssignmentConflictError"]:
+        _agent_debug_log(
+            hypothesis_id="H5",
+            location="bootstrap_operator.py:_assign_global_role",
+            message="existing role assignment; skipping USER_ROLE_CHANGED",
+            data={"role_key": role_key, "user_id": user.user_id},
+        )
         return _UserOutcome(
             email=user.email,
             user_id=user.user_id,
@@ -569,6 +633,38 @@ def _assign_global_role(
             role_key=role_key,
             role_created=False,
         )
+    actor = deps["UserPrincipal"](
+        user_id=user.user_id,
+        email=user.email,
+        tenant_id=str(tenant_id),
+    )
+    deps["record_audit_event"](
+        sink=audit_sink,
+        actor=actor,
+        event_type=deps["AuditEventType"].USER_ROLE_CHANGED,
+        entity_type="user_role_assignment",
+        entity_id=str(assignment.id),
+        scope=deps["AccessScope"].global_scope(),
+        reason=_ROLE_ASSIGNMENT_REASON,
+        details={
+            "action": "assigned",
+            "target_user_id": assignment.user_id,
+            "role_key": assignment.role_key,
+            "scope_type": assignment.scope_type,
+            "scope_id": assignment.scope_id,
+            "active": assignment.active,
+        },
+    )
+    _agent_debug_log(
+        hypothesis_id="H2",
+        location="bootstrap_operator.py:_assign_global_role",
+        message="emitted USER_ROLE_CHANGED for new bootstrap role grant",
+        data={
+            "role_key": assignment.role_key,
+            "entity_id": str(assignment.id),
+            "user_id": user.user_id,
+        },
+    )
     return _UserOutcome(
         email=user.email,
         user_id=user.user_id,
@@ -891,8 +987,9 @@ def _load_active_tenant(
 # Standards: One session, one commit; the session context manager rolls back on
 #   any exception, and the contextvar token is reset on every exit path so the
 #   process never leaks a tenant into later work.
-# Blast Radius: Authorization (identity + optional role) and registry (org
-#   units). No finance math, no audit events, no schema change.
+# Blast Radius: Authorization (identity + optional role), audit
+#   (``USER_ROLE_CHANGED`` on new ``--role`` grants), and registry (org units).
+#   No finance math, no schema change.
 # Connections:
 #   - File: backend/ums_smart_revenue/db/session.py -> the after_begin hook that
 #     reads get_current_tenant() and pins app_tenant.
@@ -916,10 +1013,25 @@ def _run_bootstrap(
     token = tenant_ctx.set(tenant)
     try:
         with session_factory() as session:
+            # FIX: Establish a real outer transaction BEFORE any repository
+            # ``begin_nested()`` (``create_user`` / ``assign_role``). On SQLite
+            # StaticPool, calling ``begin_nested()`` as the first session
+            # operation leaves writes that ``session.rollback()`` cannot undo
+            # (connection stays ``in_transaction`` after Session rollback, and
+            # engine dispose / sqlite3 close then persists the user row). That
+            # broke the "nothing was committed" promise when ``--org-skeleton``
+            # failed after account creation (no ``org_units`` table).
+            if not session.in_transaction():
+                session.begin()
             if role_key is not None:
                 message = _require_seeded_role(session, deps, role_key)
                 if message is not None:
                     raise ValueError(message)
+            audit_sink = (
+                deps["PlatformLaneAuditSink"](session, tenant_id=tenant.id)
+                if role_key is not None
+                else None
+            )
             users: list[_UserOutcome] = []
             for email, display_name in accounts:
                 user = _ensure_user(
@@ -936,6 +1048,7 @@ def _run_bootstrap(
                         tenant_id=tenant.id,
                         user=user,
                         role_key=role_key,
+                        audit_sink=audit_sink,
                     )
                 users.append(user)
             org_units: list[_OrgUnitOutcome] = []
