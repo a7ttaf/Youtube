@@ -327,7 +327,8 @@ UMS_DB_NAME=ums_smart_revenue
 UMS_DB_PASSWORD_URLENC=change-me
 
 # --- Identity ---
-UMS_TRUSTED_GATEWAY_TOKEN=<set-via-environment>
+# UMS_TRUSTED_GATEWAY_TOKEN is required. Set it in the environment; do not commit
+# a real value into this file or into .env that is checked in.
 UMS_AUTHZ_SOURCE=headers
 
 # --- Google connector service principal -------------------------------------

@@ -119,15 +119,17 @@ const startsRegex = (previous: string): boolean =>
 // fragment carrying the interpolation's text.
 const INTERPOLATION = "\u0000";
 
-/** Skip a line or block comment; returns the index just past it. */
-const skipComment = (source: string, index: number): number => {
-  if (source[index + 1] === "/") {
-    let cursor = index;
-    while (cursor < source.length && source[cursor] !== "\n") {
-      cursor += 1;
-    }
-    return cursor;
+/** Skip a `//` line comment; returns the index of the newline (or EOF). */
+const skipLineComment = (source: string, index: number): number => {
+  let cursor = index;
+  while (cursor < source.length && source[cursor] !== "\n") {
+    cursor += 1;
   }
+  return cursor;
+};
+
+/** Skip a block comment starting at `/*`; returns the index just past it. */
+const skipBlockComment = (source: string, index: number): number => {
   let cursor = index + 2;
   while (cursor < source.length && !(source[cursor] === "*" && source[cursor + 1] === "/")) {
     cursor += 1;
@@ -135,29 +137,60 @@ const skipComment = (source: string, index: number): number => {
   return cursor + 2;
 };
 
+/** Skip a line or block comment; returns the index just past it. */
+const skipComment = (source: string, index: number): number =>
+  source[index + 1] === "/" ? skipLineComment(source, index) : skipBlockComment(source, index);
+
+/** One step through a regex literal body. */
+const stepRegexBody = (
+  source: string,
+  cursor: number,
+  inClass: boolean,
+): { cursor: number; inClass: boolean; stop: boolean } => {
+  const ch = source[cursor];
+  if (ch === "\\") {
+    return { cursor: cursor + 2, inClass, stop: false };
+  }
+  if (ch === "\n") {
+    return { cursor, inClass, stop: true };
+  }
+  if (ch === "[") {
+    return { cursor: cursor + 1, inClass: true, stop: false };
+  }
+  if (ch === "]") {
+    return { cursor: cursor + 1, inClass: false, stop: false };
+  }
+  if (ch === "/" && !inClass) {
+    return { cursor, inClass, stop: true };
+  }
+  return { cursor: cursor + 1, inClass, stop: false };
+};
+
 /** Skip a regex literal, honouring escapes and character classes. */
 const skipRegex = (source: string, index: number): number => {
   let cursor = index + 1;
   let inClass = false;
   while (cursor < source.length) {
-    const ch = source[cursor];
-    if (ch === "\\") {
-      cursor += 2;
-      continue;
-    }
-    if (ch === "\n") {
+    const step = stepRegexBody(source, cursor, inClass);
+    cursor = step.cursor;
+    inClass = step.inClass;
+    if (step.stop) {
       break;
     }
-    if (ch === "[") {
-      inClass = true;
-    } else if (ch === "]") {
-      inClass = false;
-    } else if (ch === "/" && !inClass) {
-      break;
-    }
-    cursor += 1;
   }
   return cursor + 1;
+};
+
+/** Append one escaped or raw character from a string literal body. */
+const appendLiteralChar = (
+  source: string,
+  index: number,
+  value: string,
+): { index: number; value: string } => {
+  if (source[index] === "\\") {
+    return { index: index + 2, value: value + (source[index + 1] ?? "") };
+  }
+  return { index: index + 1, value: value + source[index] };
 };
 
 /**
@@ -188,18 +221,12 @@ const scanners: {
     let index = openIndex + 1;
     let value = "";
     while (index < source.length && source[index] !== quote) {
-      if (source[index] === "\\") {
-        value += source[index + 1] ?? "";
-        index += 2;
-        continue;
-      }
       if (quote === "`" && source[index] === "$" && source[index + 1] === "{") {
         index = scanners.scanRegion(source, index + 2, true, literals);
         value += INTERPOLATION;
         continue;
       }
-      value += source[index];
-      index += 1;
+      ({ index, value } = appendLiteralChar(source, index, value));
     }
     literals.push({ value, continuesExpression });
     return index + 1;
@@ -210,39 +237,81 @@ const scanners: {
     let depth = 0;
     let previousToken = "";
     while (index < source.length) {
-      const ch = source[index];
-      const next = source[index + 1] ?? "";
-      if (ch === "/" && (next === "/" || next === "*")) {
-        index = skipComment(source, index);
-        continue;
+      const advanced = advanceScanToken(
+        source,
+        index,
+        previousToken,
+        stopAtCloseBrace,
+        depth,
+        literals,
+      );
+      if (advanced.done) {
+        return advanced.index;
       }
-      if (ch === "/" && startsRegex(previousToken)) {
-        index = skipRegex(source, index);
-        previousToken = "/";
-        continue;
-      }
-      if (ch === '"' || ch === "'" || ch === "`") {
-        index = scanners.readLiteral(source, index, previousToken === "+", literals);
-        previousToken = ch;
-        continue;
-      }
-      if (stopAtCloseBrace) {
-        if (ch === "{") {
-          depth += 1;
-        } else if (ch === "}") {
-          if (depth === 0) {
-            return index + 1;
-          }
-          depth -= 1;
-        }
-      }
-      if (!isWhitespace(ch)) {
-        previousToken = ch;
-      }
-      index += 1;
+      index = advanced.index;
+      depth = advanced.depth;
+      previousToken = advanced.previousToken;
     }
     return index;
   },
+};
+
+/** Advance past a `/` that starts a comment or a regex literal. */
+const advanceSlashToken = (
+  source: string,
+  index: number,
+  previousToken: string,
+  next: string,
+): { index: number; previousToken: string } | null => {
+  if (next === "/" || next === "*") {
+    return { index: skipComment(source, index), previousToken };
+  }
+  if (startsRegex(previousToken)) {
+    return { index: skipRegex(source, index), previousToken: "/" };
+  }
+  return null;
+};
+
+/** Advance one token (comment, regex, literal, brace, or raw char) in a scan. */
+const advanceScanToken = (
+  source: string,
+  index: number,
+  previousToken: string,
+  stopAtCloseBrace: boolean,
+  depth: number,
+  literals: ScannedLiteral[],
+): { index: number; depth: number; previousToken: string; done: boolean } => {
+  const ch = source[index];
+  const next = source[index + 1] ?? "";
+  if (ch === "/") {
+    const slash = advanceSlashToken(source, index, previousToken, next);
+    if (slash !== null) {
+      return { ...slash, depth, done: false };
+    }
+  }
+  if (ch === '"' || ch === "'" || ch === "`") {
+    return {
+      index: scanners.readLiteral(source, index, previousToken === "+", literals),
+      depth,
+      previousToken: ch,
+      done: false,
+    };
+  }
+  if (stopAtCloseBrace && ch === "{") {
+    return { index: index + 1, depth: depth + 1, previousToken: ch, done: false };
+  }
+  if (stopAtCloseBrace && ch === "}") {
+    if (depth === 0) {
+      return { index: index + 1, depth, previousToken: ch, done: true };
+    }
+    return { index: index + 1, depth: depth - 1, previousToken: ch, done: false };
+  }
+  return {
+    index: index + 1,
+    depth,
+    previousToken: isWhitespace(ch) ? previousToken : ch,
+    done: false,
+  };
 };
 
 /**
@@ -285,6 +354,13 @@ const firstSegment = (literal: string): string => {
   return `/${untilPlaceholder.split(/[/?#]/u, 1)[0] ?? ""}`;
 };
 
+/** True when a scanned literal is a leading-slash API path (not a fragment). */
+const isRequestPathLiteral = (literal: ScannedLiteral): boolean =>
+  literal.value.startsWith("/") &&
+  !literal.continuesExpression &&
+  literal.value.length >= 2 &&
+  /^[a-z]/iu.test(literal.value[1] ?? "");
+
 /**
  * Purpose: Derive the set of backend prefixes the application actually
  *   requests, by scanning frontend/src for leading-slash path literals.
@@ -298,13 +374,9 @@ export const discoverRequestedPrefixes = (): string[] => {
   const found = new Set<string>();
   for (const file of sourceFiles(SRC_DIR)) {
     for (const literal of scanStringLiterals(readFileSync(file, "utf8"))) {
-      if (!literal.value.startsWith("/") || literal.continuesExpression) {
-        continue;
+      if (isRequestPathLiteral(literal)) {
+        found.add(firstSegment(literal.value));
       }
-      if (literal.value.length < 2 || !/^[a-z]/iu.test(literal.value[1])) {
-        continue;
-      }
-      found.add(firstSegment(literal.value));
     }
   }
   return [...found].sort();
