@@ -33,6 +33,11 @@ from sqlalchemy.orm import Session
 from ums_smart_revenue.auth.permissions import PERMISSION_DEFINITIONS, Permission
 from ums_smart_revenue.auth.roles import ROLE_DEFINITIONS, RoleKey
 from ums_smart_revenue.auth.seed import initial_role_permission_rows
+from ums_smart_revenue.db.frozen_security_catalog import (
+    FROZEN_PERMISSION_ROWS,
+    FROZEN_ROLE_PERMISSION_ROWS,
+    FROZEN_ROLE_ROWS,
+)
 from ums_smart_revenue.db.security_models import (
     AccessScopeORM,
     PermissionORM,
@@ -342,6 +347,23 @@ def test_migration_downgrade_keeps_rows_a_live_assignment_still_needs() -> None:
         assert "finance.view_revenue" in _stored_permissions(connection)
         assert _stored_pairs(connection) == pairs_before
         assert ("finance_admin", "finance.view_revenue") in _stored_pairs(connection)
+
+def test_frozen_security_catalog_matches_live_registries() -> None:
+    """The migration snapshot must match today's registries until a new revision."""
+    module = _migration_module()
+    assert module.role_seed_rows() == [
+        {
+            "key": role.value,
+            "label": definition.label,
+            "description": definition.description,
+            "service_only": definition.service_only,
+        }
+        for role, definition in sorted(ROLE_DEFINITIONS.items(), key=lambda item: item[0].value)
+    ]
+    assert FROZEN_ROLE_ROWS == module.role_seed_rows()
+    assert FROZEN_PERMISSION_ROWS == module.permission_seed_rows()
+    assert FROZEN_ROLE_PERMISSION_ROWS == module.role_permission_seed_rows()
+
 
 def _values_block(sql: str, header: str, *, last: bool = False) -> str:
     """Return the VALUES body of the INSERT introduced by ``header``."""

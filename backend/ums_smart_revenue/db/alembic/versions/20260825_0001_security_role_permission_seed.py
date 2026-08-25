@@ -90,9 +90,11 @@ re-measure the virgin state in the same commit.
 import sqlalchemy as sa
 from alembic import op
 
-from ums_smart_revenue.auth.permissions import PERMISSION_DEFINITIONS
-from ums_smart_revenue.auth.roles import ROLE_DEFINITIONS
-from ums_smart_revenue.auth.seed import initial_role_permission_rows
+from ums_smart_revenue.db.frozen_security_catalog import (
+    FROZEN_PERMISSION_ROWS,
+    FROZEN_ROLE_PERMISSION_ROWS,
+    FROZEN_ROLE_ROWS,
+)
 
 revision = "20260825_0001"
 down_revision = "20260805_0001"
@@ -121,39 +123,18 @@ _ROLE_PERMISSIONS = sa.table(
 
 
 def role_seed_rows() -> list[dict[str, object]]:
-    """Return the ``roles`` catalog rows derived from ``ROLE_DEFINITIONS``."""
-    return [
-        {
-            "key": role.value,
-            "label": definition.label,
-            "description": definition.description,
-            "service_only": definition.service_only,
-        }
-        for role, definition in sorted(ROLE_DEFINITIONS.items(), key=lambda item: item[0].value)
-    ]
+    """Return the frozen ``roles`` catalog rows for this revision."""
+    return [dict(row) for row in FROZEN_ROLE_ROWS]
 
 
 def permission_seed_rows() -> list[dict[str, object]]:
-    """Return the ``permissions`` catalog rows derived from ``PERMISSION_DEFINITIONS``."""
-    return [
-        {
-            "key": permission.value,
-            "label": definition.label,
-            "sensitive": definition.sensitive,
-            "audit_on_use": definition.audit_on_use,
-        }
-        for permission, definition in sorted(
-            PERMISSION_DEFINITIONS.items(), key=lambda item: item[0].value
-        )
-    ]
+    """Return the frozen ``permissions`` catalog rows for this revision."""
+    return [dict(row) for row in FROZEN_PERMISSION_ROWS]
 
 
 def role_permission_seed_rows() -> list[dict[str, object]]:
-    """Return the ``role_permission_assignments`` rows from ``auth/seed.py``."""
-    return [
-        {"role_key": row["role"], "permission_key": row["permission"]}
-        for row in initial_role_permission_rows()
-    ]
+    """Return the frozen ``role_permission_assignments`` rows for this revision."""
+    return [dict(row) for row in FROZEN_ROLE_PERMISSION_ROWS]
 
 
 def upgrade() -> None:

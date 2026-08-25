@@ -16,7 +16,7 @@
 """SQLAlchemy engine and session-factory helpers with per-URL engine caching."""
 
 from collections.abc import Callable, Iterator
-from threading import Lock
+from threading import Lock, get_ident
 from typing import Any
 
 from sqlalchemy import Connection, Engine, create_engine, event
@@ -130,6 +130,7 @@ def _enable_sqlite_transactional_savepoints(engine: Engine) -> None:
     # and dialect.do_commit's argument are not always the same Python object.
     writer_lock = Lock()
     lock_held = False
+    lock_owner_thread: int | None = None
 
     @event.listens_for(engine, "connect")
     def _disable_pysqlite_transaction_management(
@@ -142,19 +143,33 @@ def _enable_sqlite_transactional_savepoints(engine: Engine) -> None:
 
     def _release_writer_lock() -> None:
         """Release the StaticPool writer lock if this engine currently holds it."""
-        nonlocal lock_held
+        nonlocal lock_held, lock_owner_thread
         if lock_held:
             lock_held = False
+            lock_owner_thread = None
             writer_lock.release()
 
     @event.listens_for(engine, "begin")
     def _emit_begin(connection: Connection) -> None:
         """Emit an explicit BEGIN for each outer transaction; serialize writers."""
-        # FIX: Hold until dialect do_commit/do_rollback finishes. Connection
-        # commit/rollback events fire BEFORE the DBAPI commit/rollback, so
-        # releasing there races a second Session onto the still-open transaction.
-        nonlocal lock_held
-        writer_lock.acquire()
+        # FIX: Hold until the connection returns to the pool after commit/rollback
+        # callbacks finish. Releasing in do_commit alone races a second Session
+        # onto the still-resetting shared StaticPool connection.
+        nonlocal lock_held, lock_owner_thread
+        current_thread = get_ident()
+        if writer_lock.locked():
+            if lock_owner_thread == current_thread:
+                dbapi_connection = connection.connection.dbapi_connection
+                if getattr(dbapi_connection, "in_transaction", False):
+                    raise RuntimeError(
+                        "Overlapping SQLite Sessions on StaticPool: another transaction "
+                        "is already open on the shared connection. Reuse one Session "
+                        "(see _sqlite_platform_session_from_request) or wait for commit."
+                    )
+            writer_lock.acquire()
+        else:
+            writer_lock.acquire()
+        lock_owner_thread = current_thread
         lock_held = True
         try:
             dbapi_connection = connection.connection.dbapi_connection
@@ -169,32 +184,37 @@ def _enable_sqlite_transactional_savepoints(engine: Engine) -> None:
             _release_writer_lock()
             raise
 
+    @event.listens_for(engine.pool, "checkin")
+    def _release_writer_lock_on_checkin(
+        dbapi_connection: Any, _connection_record: Any
+    ) -> None:
+        """Release the writer lock after SQLAlchemy returns the connection to the pool."""
+        _release_writer_lock()
+
+    @event.listens_for(engine.pool, "reset")
+    def _release_writer_lock_on_reset(
+        dbapi_connection: Any, _connection_record: Any, _reset_state: Any
+    ) -> None:
+        """StaticPool resets in place; reset is the release point when checkin does not fire."""
+        _release_writer_lock()
+
     dialect = engine.dialect
     original_do_commit = dialect.do_commit
     original_do_rollback = dialect.do_rollback
 
-    def _do_commit_and_release(dbapi_connection: Any) -> None:
-        """Commit on the DBAPI connection, then release the StaticPool writer lock."""
-        try:
-            original_do_commit(dbapi_connection)
-        finally:
-            _release_writer_lock()
+    def _do_commit(dbapi_connection: Any) -> None:
+        """Commit on the DBAPI connection; lock release waits for pool check-in."""
+        original_do_commit(dbapi_connection)
 
-    def _do_rollback_and_release(dbapi_connection: Any) -> None:
-        """Roll back on the DBAPI connection, then release the StaticPool writer lock."""
-        try:
-            original_do_rollback(dbapi_connection)
-        finally:
-            _release_writer_lock()
+    def _do_rollback(dbapi_connection: Any) -> None:
+        """Roll back on the DBAPI connection; lock release waits for pool check-in."""
+        original_do_rollback(dbapi_connection)
 
     # Deliberate instance-level monkeypatch: the writer lock must release AFTER
-    # the DBAPI commit/rollback completes, and SQLAlchemy's connection events
-    # ("commit"/"rollback") fire BEFORE emission -- releasing there would let a
-    # second writer BEGIN between the event and the actual commit, recreating
-    # the overlap this hook exists to prevent. mypy flags method assignment on
-    # instances by design; the assignment is the mechanism here, not a mistake.
-    dialect.do_commit = _do_commit_and_release  # type: ignore[method-assign]
-    dialect.do_rollback = _do_rollback_and_release  # type: ignore[method-assign]
+    # SQLAlchemy finishes after_commit/reset and returns the connection to the
+    # pool. Connection events and do_commit alone fire too early on StaticPool.
+    dialect.do_commit = _do_commit  # type: ignore[method-assign]
+    dialect.do_rollback = _do_rollback  # type: ignore[method-assign]
 
 
 # ============================================================================

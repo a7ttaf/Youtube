@@ -3307,3 +3307,48 @@ def test_an_empty_roles_file_is_refused(monkeypatch: pytest.MonkeyPatch, tmp_pat
         backup._dump_roles("fake", target, timeout=5, include_passwords=False)
 
     assert raised.value.code == backup.EXIT_ARTIFACT_INVALID
+
+
+def test_validate_dump_roles_covered_rejects_archive_only_role() -> None:
+    """An ACL role present in database.dump but absent from roles.sql is refused."""
+    listing = "123; 2606 0 ACL public TABLE tenants orphan_role\n"
+    roles_body = "CREATE ROLE app_tenant;\nCREATE ROLE app_platform;\n"
+    with pytest.raises(backup.BackupError) as raised:
+        backup._validate_dump_roles_covered(listing=listing, roles_body=roles_body)
+    assert raised.value.code == backup.EXIT_ARTIFACT_INVALID
+    assert "orphan_role" in str(raised.value)
+
+
+def test_restore_roles_rejects_dynamic_do_block(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Procedural role DDL must fail closed before psql executes roles.sql."""
+    roles_path = tmp_path / restore.ROLES_NAME
+    roles_path.write_text(
+        "DO $$ BEGIN EXECUTE 'CREATE ROLE sneaky_role'; END $$;\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(restore, "_psql", lambda *_a, **_k: "postgres")
+    with pytest.raises(restore.RestoreError) as caught:
+        restore._restore_roles("fake", roles_path, timeout=5)
+    assert caught.value.code == restore.EXIT_ROLES_FAILED
+    assert "DO blocks" in str(caught.value)
+
+
+def test_lock_metadata_write_failure_removes_partial_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failed started.at write must not leave a reclaim-blocking lock dir."""
+    real_write_text = Path.write_text
+
+    def _boom(self: Path, *_a: object, **_k: object) -> None:
+        """boom."""
+        if self.name == "started.at":
+            raise OSError("simulated metadata write failure")
+        real_write_text(self, *_a, **_k)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(Path, "write_text", _boom)
+    with pytest.raises(OSError):
+        with backup._exclusive_backup_lock(tmp_path):
+            pass  # pragma: no cover
+    assert not (tmp_path / ".backup.lock").exists()

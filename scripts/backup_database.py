@@ -144,6 +144,7 @@ import sys
 import threading
 import time
 import traceback
+import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -1002,6 +1003,15 @@ def _dump_database_and_count(container: str, target: Path, *, timeout: int) -> d
 # ============================================================================
 def _verify_dump_readable(container: str, dump_path: Path, *, timeout: int) -> int:
     """verify dump readable."""
+    listing = _pg_restore_list(container, dump_path, timeout=timeout)
+    entries = [
+        line for line in listing.splitlines() if line.strip() and not line.startswith(";")
+    ]
+    return len(entries)
+
+
+def _pg_restore_list(container: str, dump_path: Path, *, timeout: int) -> str:
+    """Return the pg_restore --list output for one archive on disk."""
     with dump_path.open("rb") as source:
         completed = subprocess.run(
             _container_sh(container, "exec pg_restore --list"),
@@ -1016,10 +1026,33 @@ def _verify_dump_readable(container: str, dump_path: Path, *, timeout: int) -> i
             EXIT_ARTIFACT_INVALID,
             f"pg_restore --list rejected the written dump: {completed.stderr.strip()}",
         )
-    entries = [
-        line for line in completed.stdout.splitlines() if line.strip() and not line.startswith(";")
-    ]
-    return len(entries)
+    return completed.stdout
+
+
+def _roles_referenced_in_dump_listing(listing: str) -> set[str]:
+    """Return cluster role names referenced by ACL entries in a dump listing."""
+    roles: set[str] = set()
+    for line in listing.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith(";") or " ACL " not in stripped:
+            continue
+        roles.add(stripped.rsplit(None, 1)[-1])
+    return roles
+
+
+def _validate_dump_roles_covered(*, listing: str, roles_body: str) -> None:
+    """Refuse a backup when the archive references roles absent from roles.sql."""
+    missing = sorted(
+        role
+        for role in _roles_referenced_in_dump_listing(listing)
+        if not _role_declared_in_roles_sql(roles_body, role)
+    )
+    if missing:
+        raise BackupError(
+            EXIT_ARTIFACT_INVALID,
+            "database.dump references cluster roles that roles.sql does not declare: "
+            f"{', '.join(missing)}. Restore would fail part-way; refusing to publish.",
+        )
 
 
 # ============================================================================
@@ -1706,8 +1739,12 @@ def _exclusive_backup_lock(out_dir: Path):
         lock, which reclaim already treats as abandoned.
         """
         lock_dir.mkdir()
-        started.write_text(_utc_now().isoformat() + "\n", encoding="utf-8")
-        owner.write_text(f"{os.getpid()}\n", encoding="utf-8")
+        try:
+            started.write_text(_utc_now().isoformat() + "\n", encoding="utf-8")
+            owner.write_text(f"{os.getpid()}\n", encoding="utf-8")
+        except OSError:
+            shutil.rmtree(lock_dir, ignore_errors=True)
+            raise
 
     try:
         _acquire()
@@ -2769,7 +2806,7 @@ def _replace_status_file(path: Path, body: str) -> None:
     if path.exists():
         with path.open("r+", encoding="utf-8"):
             pass
-    aside = path.with_name(path.name + ".tmp")
+    aside = path.with_name(f"{path.name}.{uuid.uuid4().hex}.tmp")
     try:
         with aside.open("w", encoding="utf-8") as handle:
             handle.write(body)
@@ -3043,10 +3080,19 @@ def run_backup(args: argparse.Namespace, out_dir: Path) -> BackupOutcome:
             timeout=args.timeout,
             include_passwords=args.include_role_passwords,
         )
+        dump_listing = _pg_restore_list(container, staging / DUMP_NAME, timeout=args.timeout)
+        _validate_dump_roles_covered(
+            listing=dump_listing,
+            roles_body=(staging / ROLES_NAME).read_text(encoding="utf-8", errors="replace"),
+        )
         toc_entries = -1
         if args.verify_dump:
-            toc_entries = _verify_dump_readable(
-                container, staging / DUMP_NAME, timeout=args.timeout
+            toc_entries = len(
+                [
+                    line
+                    for line in dump_listing.splitlines()
+                    if line.strip() and not line.startswith(";")
+                ]
             )
         # Provenance is collected BEFORE the verdict, not after: the identity it
         # carries is one of the gate's inputs, and the manifest has to record the

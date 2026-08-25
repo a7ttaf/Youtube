@@ -81,6 +81,7 @@ import subprocess
 import sys
 import time
 import traceback
+import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -469,7 +470,12 @@ def _create_throwaway(manifest: dict[str, object], *, timeout: int) -> str:
             "manifest.source is missing image/image_id/database/superuser; pass "
             "--container and restore into a container you prepared yourself",
         )
-    name = THROWAWAY_PREFIX + datetime.now(UTC).strftime("%Y%m%dT%H%M%S")
+    name = (
+        THROWAWAY_PREFIX
+        + datetime.now(UTC).strftime("%Y%m%dT%H%M%S")
+        + "-"
+        + uuid.uuid4().hex[:8]
+    )
     try:
         completed = _run(
             [
@@ -593,6 +599,15 @@ def _allowed_role_duplicate_lines(stderr: str) -> list[str]:
 #   - File: backend/ums_smart_revenue/db/alembic/versions/20260608_0001_tenant_rls_enforcement.py
 #     -> ``_create_role`` (lines 92-113) owns both roles.
 # ============================================================================
+def _unsupported_role_ddl_in_roles_sql(body: str) -> str | None:
+    """Return a reason when roles.sql uses procedural or dynamic role DDL."""
+    if re.search(r"(?im)^\s*DO\b", body):
+        return "DO blocks are not allowed in roles.sql"
+    if re.search(r"(?im)EXECUTE\s+.*CREATE\s+(?:ROLE|USER)", body):
+        return "dynamic CREATE ROLE via EXECUTE is not allowed in roles.sql"
+    return None
+
+
 def _foreign_roles_in_roles_sql(body: str, *, superuser: str) -> list[str]:
     """Return CREATE ROLE names outside the UMS restore allowlist."""
     allowed = {superuser, *REQUIRED_ROLES}
@@ -611,6 +626,9 @@ def _restore_roles(container: str, roles_path: Path, *, timeout: int) -> list[st
     """Apply roles.sql and return the required roles present afterward."""
     body = roles_path.read_text(encoding="utf-8", errors="replace")
     superuser = _psql(container, "SELECT current_user;", timeout=timeout).strip()
+    unsupported = _unsupported_role_ddl_in_roles_sql(body)
+    if unsupported:
+        raise RestoreError(EXIT_ROLES_FAILED, unsupported)
     foreign = _foreign_roles_in_roles_sql(body, superuser=superuser)
     if foreign:
         raise RestoreError(
@@ -680,9 +698,9 @@ def _restore_roles(container: str, roles_path: Path, *, timeout: int) -> list[st
 # ============================================================================
 def _restore_data(container: str, dump_path: Path, *, timeout: int, clean: bool) -> None:
     """Restore database.dump into the target via pg_restore --single-transaction."""
-    flags = "--no-password --single-transaction --no-comments"
+    flags = "--no-password --single-transaction"
     if clean:
-        flags = "--no-password --clean --if-exists --single-transaction --no-comments"
+        flags = "--no-password --clean --if-exists --single-transaction"
     argv = _container_sh(
         container,
         f'exec pg_restore -U "$POSTGRES_USER" -d "$POSTGRES_DB" {flags}',

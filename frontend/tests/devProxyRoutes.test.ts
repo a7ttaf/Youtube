@@ -339,6 +339,34 @@ const tryAdvanceSlash = (
   return { ...slash, depth, done: false };
 };
 
+/** Advance one character or template interpolation inside a string literal scan. */
+const advanceOneLiteralChar = (
+  source: string,
+  index: number,
+  quote: string,
+  value: string,
+  scanRegion: (
+    source: string,
+    start: number,
+    stopAtCloseBrace: boolean,
+    literals: ScannedLiteral[],
+  ) => number,
+  literals: ScannedLiteral[],
+): { index: number; value: string; closed: boolean } => {
+  if (source[index] === quote) {
+    return { index, value, closed: true };
+  }
+  if (isTemplateInterpolation(quote, source, index)) {
+    return {
+      index: scanRegion(source, index + 2, true, literals),
+      value: value + INTERPOLATION,
+      closed: false,
+    };
+  }
+  const advanced = appendLiteralChar(source, index, value);
+  return { index: advanced.index, value: advanced.value, closed: false };
+};
+
 /**
  * Held on one object so mutual recursion does not hit the Temporal Dead Zone
  * and does not use module-scope `function` (JS-0067/0357).
@@ -376,16 +404,19 @@ const scanners: {
     const quote = source[openIndex];
     let index = openIndex + 1;
     let value = "";
-    while (index < source.length) {
-      if (source[index] === quote) {
-        break;
-      }
-      if (isTemplateInterpolation(quote, source, index)) {
-        index = scanners.scanRegion(source, index + 2, true, literals);
-        value += INTERPOLATION;
-        continue;
-      }
-      ({ index, value } = appendLiteralChar(source, index, value));
+    let closed = false;
+    while (index < source.length && !closed) {
+      const step = advanceOneLiteralChar(
+        source,
+        index,
+        quote,
+        value,
+        scanners.scanRegion,
+        literals,
+      );
+      index = step.index;
+      value = step.value;
+      closed = step.closed;
     }
     literals.push({ value, continuesExpression });
     return index + 1;
