@@ -470,6 +470,8 @@ class SqlAlchemyUserAccountRepository:
                     or not _is_retryable_user_storage_error(exc)
                 ):
                     raise UserAccountStorageError("User account storage unavailable") from exc
+                if isinstance(exc, DBAPIError) and exc.connection_invalidated:
+                    self._session.rollback()
                 logger.warning("Retrying user account storage operation after transient failure")
         raise RuntimeError("unreachable user account retry state")
 

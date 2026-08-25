@@ -257,7 +257,7 @@ class ConnectorJobExecutor:
             cancel_futures=True,
         )
 
-    def close(self) -> None:
+    def close(self) -> bool:
         """Shut the pool down deterministically (called from the app lifespan).
 
         Cancel queued futures first (``cancel_futures=True``), audit those
@@ -268,10 +268,15 @@ class ConnectorJobExecutor:
         snapshot and ``shutdown()`` cannot escape the drain. Auditing before
         the bounded drain keeps the shutdown audit reachable even if Docker
         later SIGKILLs the process at ``stop_grace_period``. On drain timeout,
-        log which futures remain and return without hanging. Running futures
-        that finish in time deregister themselves; they are never audited as
+        log which futures remain and return ``False`` so the lifespan can keep
+        logging configured for workers still running. Running futures that
+        finish in time deregister themselves; they are never audited as
         pre-start failures. The weakref finalizer remains as a GC backstop for
         paths that bypass ``close()``.
+
+        Returns:
+            True when every drained worker finished (or none were running).
+            False when the drain timed out with workers still active.
         """
         # FIX: Drain AFTER shutdown from the post-cancel registry. Snapshotting
         # running futures before shutdown misses a queued future that starts
@@ -301,9 +306,9 @@ class ConnectorJobExecutor:
                     len(not_done),
                     list(not_done),
                 )
-                self._finalizer.detach()
-                return
+                return False
         self._finalizer.detach()
+        return True
 
     def has_active_job(
         self,

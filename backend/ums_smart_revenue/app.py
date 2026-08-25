@@ -12,6 +12,7 @@
 # ============================================================================
 """FastAPI application factory and router wiring."""
 
+import logging
 from collections.abc import Iterable
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
@@ -103,6 +104,8 @@ from ums_smart_revenue.tenancy.resolver import (
     SessionFactory as TenantSessionFactory,
 )
 
+logger = logging.getLogger(__name__)
+
 
 def create_app(*, database_url: str | None = None, authz_source: str | None = None) -> FastAPI:
     """Create the FastAPI application with optional SQL-backed authorization."""
@@ -149,6 +152,7 @@ def create_app(*, database_url: str | None = None, authz_source: str | None = No
         try:
             yield
         finally:
+            drain_clean = True
             try:
                 # Scheduler first (stop ticking), then executor (drain workers)
                 # -- see the Standards note above for why the order matters.
@@ -157,9 +161,15 @@ def create_app(*, database_url: str | None = None, authz_source: str | None = No
                     scheduler.close()
                 executor = getattr(fastapi_app.state, "connector_job_executor", None)
                 if executor is not None:
-                    executor.close()
+                    drain_clean = executor.close()
             finally:
-                restore_logging(logging_configuration)
+                if drain_clean:
+                    restore_logging(logging_configuration)
+                else:
+                    logger.error(
+                        "Leaving process logging configured because connector "
+                        "workers are still running after the close drain timeout"
+                    )
 
     _app = FastAPI(
         title="UMS Smart Revenue Control Center API",

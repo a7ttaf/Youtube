@@ -516,6 +516,12 @@ def _ensure_user(
                 "silently undo a deliberate deactivation. Nothing was changed. "
                 "Reactivate the users row in the database and re-run."
             )
+        if existing.is_service_account:
+            raise deps["UserAccountValidationError"](
+                f"User {email!r} is a service account. bootstrap_operator creates "
+                "human operator accounts only — pass a human email or provision "
+                "the service actor through the connector runbook instead."
+            )
         return _UserOutcome(
             email=existing.email,
             user_id=existing.id,
@@ -957,59 +963,66 @@ def _run_bootstrap(
     """Create the accounts, optional role grants, and optional org skeleton."""
     tenant_ctx = deps["TENANT_CTX"]
     token = tenant_ctx.set(tenant)
+    storage_error = deps["UserAccountStorageError"]
     try:
-        with session_factory() as session:
-            # FIX: Establish a real outer transaction BEFORE any repository
-            # ``begin_nested()`` (``create_user`` / ``assign_role``). On SQLite
-            # StaticPool, calling ``begin_nested()`` as the first session
-            # operation leaves writes that ``session.rollback()`` cannot undo
-            # (connection stays ``in_transaction`` after Session rollback, and
-            # engine dispose / sqlite3 close then persists the user row). That
-            # broke the "nothing was committed" promise when ``--org-skeleton``
-            # failed after account creation (no ``org_units`` table).
-            if not session.in_transaction():
-                session.begin()
-            if role_key is not None:
-                message = _require_seeded_role(session, deps, role_key)
-                if message is not None:
-                    raise ValueError(message)
-            audit_sink = (
-                deps["PlatformLaneAuditSink"](session, tenant_id=tenant.id)
-                if role_key is not None
-                else None
-            )
-            users: list[_UserOutcome] = []
-            for email, display_name in accounts:
-                user = _ensure_user(
-                    session,
-                    deps,
-                    tenant_id=tenant.id,
-                    email=email,
-                    display_name=display_name,
-                )
-                if role_key is not None:
-                    user = _assign_global_role(
-                        session,
-                        deps,
-                        tenant_id=tenant.id,
-                        user=user,
-                        role_key=role_key,
-                        audit_sink=audit_sink,
+        for attempt_index in range(2):
+            try:
+                with session_factory() as session:
+                    # FIX: Establish a real outer transaction BEFORE any repository
+                    # ``begin_nested()`` (``create_user`` / ``assign_role``). On SQLite
+                    # StaticPool, calling ``begin_nested()`` as the first session
+                    # operation leaves writes that ``session.rollback()`` cannot undo
+                    # (connection stays ``in_transaction`` after Session rollback, and
+                    # engine dispose / sqlite3 close then persists the user row). That
+                    # broke the "nothing was committed" promise when ``--org-skeleton``
+                    # failed after account creation (no ``org_units`` table).
+                    if not session.in_transaction():
+                        session.begin()
+                    if role_key is not None:
+                        message = _require_seeded_role(session, deps, role_key)
+                        if message is not None:
+                            raise ValueError(message)
+                    audit_sink = (
+                        deps["PlatformLaneAuditSink"](session, tenant_id=tenant.id)
+                        if role_key is not None
+                        else None
                     )
-                users.append(user)
-            org_units: list[_OrgUnitOutcome] = []
-            if org_skeleton:
-                org_units = _ensure_org_skeleton(
-                    session,
-                    deps,
-                    tenant_id=tenant.id,
-                    sector_name=sector_name,
-                    company_name=company_name,
-                )
-            session.commit()
+                    users: list[_UserOutcome] = []
+                    for email, display_name in accounts:
+                        user = _ensure_user(
+                            session,
+                            deps,
+                            tenant_id=tenant.id,
+                            email=email,
+                            display_name=display_name,
+                        )
+                        if role_key is not None:
+                            user = _assign_global_role(
+                                session,
+                                deps,
+                                tenant_id=tenant.id,
+                                user=user,
+                                role_key=role_key,
+                                audit_sink=audit_sink,
+                            )
+                        users.append(user)
+                    org_units: list[_OrgUnitOutcome] = []
+                    if org_skeleton:
+                        org_units = _ensure_org_skeleton(
+                            session,
+                            deps,
+                            tenant_id=tenant.id,
+                            sector_name=sector_name,
+                            company_name=company_name,
+                        )
+                    session.commit()
+                    return users, org_units
+            except storage_error:
+                if attempt_index + 1 >= 2:
+                    raise
     finally:
         tenant_ctx.reset(token)
-    return users, org_units
+    raise RuntimeError("unreachable bootstrap retry state")
 
 
 def _print_user_summary(users: list[_UserOutcome], *, role_key: str | None) -> None:

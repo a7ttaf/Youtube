@@ -121,7 +121,11 @@ ROLES_PRESENT_SQL = (
     "SELECT rolname FROM pg_catalog.pg_roles "
     "WHERE rolname IN ('app_tenant', 'app_platform') ORDER BY rolname;"
 )
-PUBLIC_TABLE_COUNT_SQL = "SELECT count(*) FROM pg_catalog.pg_tables WHERE schemaname = 'public';"
+PUBLIC_TABLE_COUNT_SQL = (
+    "SELECT count(*) FROM pg_catalog.pg_class c "
+    "JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace "
+    "WHERE n.nspname = 'public' AND c.relkind = 'r';"
+)
 LIST_TABLES_SQL = (
     "SELECT tablename FROM pg_catalog.pg_tables WHERE schemaname = 'public' ORDER BY tablename;"
 )
@@ -333,6 +337,11 @@ def _require_docker(*, timeout: int) -> None:
         completed = _run(["docker", "version", "--format", "{{.Server.Version}}"], timeout=timeout)
     except FileNotFoundError as exc:
         raise RestoreError(EXIT_DOCKER_UNAVAILABLE, "docker CLI not found on PATH") from exc
+    except subprocess.TimeoutExpired as exc:
+        raise RestoreError(
+            EXIT_DOCKER_UNAVAILABLE,
+            f"Docker daemon probe timed out after {timeout}s",
+        ) from exc
     if completed.returncode != 0:
         raise RestoreError(
             EXIT_DOCKER_UNAVAILABLE,
@@ -450,36 +459,47 @@ def _create_throwaway(manifest: dict[str, object], *, timeout: int) -> str:
     if not isinstance(source, dict):
         raise RestoreError(EXIT_USAGE, "manifest has no source block")
     image = str(source.get("image") or "")
+    image_id = str(source.get("image_id") or "").strip()
+    run_image = image_id or image
     database = str(source.get("database") or "")
     superuser = str(source.get("superuser") or "")
-    if not image or not database or not superuser:
+    if not run_image or not database or not superuser:
         raise RestoreError(
             EXIT_USAGE,
-            "manifest.source is missing image/database/superuser; pass "
+            "manifest.source is missing image/image_id/database/superuser; pass "
             "--container and restore into a container you prepared yourself",
         )
     name = THROWAWAY_PREFIX + datetime.now(UTC).strftime("%Y%m%dT%H%M%S")
-    completed = _run(
-        [
-            "docker",
-            "run",
-            "--detach",
-            "--name",
-            name,
-            "--env",
-            "POSTGRES_HOST_AUTH_METHOD=trust",
-            "--env",
-            f"POSTGRES_USER={superuser}",
-            "--env",
-            f"POSTGRES_DB={database}",
-            image,
-        ],
-        timeout=timeout,
-    )
+    try:
+        completed = _run(
+            [
+                "docker",
+                "run",
+                "--detach",
+                "--name",
+                name,
+                "--network",
+                "none",
+                "--env",
+                "POSTGRES_HOST_AUTH_METHOD=trust",
+                "--env",
+                f"POSTGRES_USER={superuser}",
+                "--env",
+                f"POSTGRES_DB={database}",
+                run_image,
+            ],
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired as exc:
+        _destroy_throwaway(name, timeout=timeout)
+        raise RestoreError(
+            EXIT_CONTAINER_UNAVAILABLE,
+            f"timed out starting throwaway container from {run_image} after {timeout}s",
+        ) from exc
     if completed.returncode != 0:
         raise RestoreError(
             EXIT_CONTAINER_UNAVAILABLE,
-            f"could not start the throwaway container from {image}: {completed.stderr.strip()}",
+            f"could not start the throwaway container from {run_image}: {completed.stderr.strip()}",
         )
     return name
 
@@ -573,8 +593,32 @@ def _allowed_role_duplicate_lines(stderr: str) -> list[str]:
 #   - File: backend/ums_smart_revenue/db/alembic/versions/20260608_0001_tenant_rls_enforcement.py
 #     -> ``_create_role`` (lines 92-113) owns both roles.
 # ============================================================================
+def _foreign_roles_in_roles_sql(body: str, *, superuser: str) -> list[str]:
+    """Return CREATE ROLE names outside the UMS restore allowlist."""
+    allowed = {superuser, *REQUIRED_ROLES}
+    foreign: list[str] = []
+    pattern = re.compile(
+        r'(?im)^\s*CREATE\s+(?:ROLE|USER)\s+(?:"([^"]+)"|(\S+))',
+    )
+    for match in pattern.finditer(body):
+        name = match.group(1) or match.group(2)
+        if name not in allowed:
+            foreign.append(name)
+    return foreign
+
+
 def _restore_roles(container: str, roles_path: Path, *, timeout: int) -> list[str]:
     """Apply roles.sql and return the required roles present afterward."""
+    body = roles_path.read_text(encoding="utf-8", errors="replace")
+    superuser = _psql(container, "SELECT current_user;", timeout=timeout).strip()
+    foreign = _foreign_roles_in_roles_sql(body, superuser=superuser)
+    if foreign:
+        raise RestoreError(
+            EXIT_ROLES_FAILED,
+            "roles.sql declares cluster roles outside the UMS restore allowlist: "
+            f"{', '.join(sorted(foreign))}. Restore into a dedicated UMS Postgres "
+            "container or regenerate roles.sql from the backup source cluster.",
+        )
     argv = _container_sh(
         container,
         'exec psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" --no-password -v ON_ERROR_STOP=0 -q -f -',

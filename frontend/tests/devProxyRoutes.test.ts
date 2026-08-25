@@ -169,6 +169,40 @@ const REGEX_CLASS_AFTER: Partial<Record<RegexCharKind, boolean>> = {
   closeClass: false,
 };
 
+/** Advance one escaped regex-literal character. */
+const advanceRegexEscape = (
+  cursor: number,
+  inClass: boolean,
+): { cursor: number; inClass: boolean; stop: boolean } => ({
+  cursor: cursor + 2,
+  inClass,
+  stop: false,
+});
+
+/** Stop scanning at the closing regex delimiter. */
+const advanceRegexStop = (
+  cursor: number,
+  inClass: boolean,
+): { cursor: number; inClass: boolean; stop: boolean } => ({
+  cursor,
+  inClass,
+  stop: true,
+});
+
+/** Advance one regex body character, updating class membership when needed. */
+const advanceRegexClass = (
+  source: string,
+  cursor: number,
+  inClass: boolean,
+): { cursor: number; inClass: boolean; stop: boolean } => {
+  const kind = regexCharKind(source[cursor] ?? "", inClass);
+  return {
+    cursor: cursor + 1,
+    inClass: REGEX_CLASS_AFTER[kind] ?? inClass,
+    stop: false,
+  };
+};
+
 /** One step through a regex literal body. */
 const stepRegexBody = (
   source: string,
@@ -177,16 +211,12 @@ const stepRegexBody = (
 ): { cursor: number; inClass: boolean; stop: boolean } => {
   const kind = regexCharKind(source[cursor] ?? "", inClass);
   if (kind === "escape") {
-    return { cursor: cursor + 2, inClass, stop: false };
+    return advanceRegexEscape(cursor, inClass);
   }
   if (kind === "stop") {
-    return { cursor, inClass, stop: true };
+    return advanceRegexStop(cursor, inClass);
   }
-  return {
-    cursor: cursor + 1,
-    inClass: REGEX_CLASS_AFTER[kind] ?? inClass,
-    stop: false,
-  };
+  return advanceRegexClass(source, cursor, inClass);
 };
 
 /** Skip a regex literal, honouring escapes and character classes. */
