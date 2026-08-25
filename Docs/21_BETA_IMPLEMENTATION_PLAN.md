@@ -327,7 +327,7 @@ UMS_DB_NAME=ums_smart_revenue
 UMS_DB_PASSWORD_URLENC=change-me
 
 # --- Identity ---
-UMS_TRUSTED_GATEWAY_TOKEN=local-dev-gateway-token
+UMS_TRUSTED_GATEWAY_TOKEN=<set-via-environment>
 UMS_AUTHZ_SOURCE=headers
 
 # --- Google connector service principal -------------------------------------

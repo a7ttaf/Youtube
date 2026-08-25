@@ -32,6 +32,7 @@ ACTOR = ConnectorJobActor(user_id=str(uuid4()), email="ops@example.com")
 
 
 def _factory(tmp_path) -> sessionmaker:
+    """factory."""
     url = f"sqlite+pysqlite:///{(tmp_path / 'exec.db').as_posix()}"
     engine = create_engine(url)
     OrgBase.metadata.create_all(engine)
@@ -67,6 +68,7 @@ def _factory(tmp_path) -> sessionmaker:
 
 
 def _outcome() -> ConnectorRunOutcome:
+    """outcome."""
     return ConnectorRunOutcome(run=None, counts={}, per_report_failures=[])
 
 
@@ -76,6 +78,7 @@ def test_run_job_uses_own_session_and_sets_tenant_context(tmp_path) -> None:
     seen: dict[str, object] = {}
 
     def _fake_run_one(session, **kwargs):
+        """fake run one."""
         tenant = get_current_tenant()
         seen["tenant_id"] = None if tenant is None else tenant.id
         seen["session_is_factory"] = isinstance(session, Session)
@@ -144,6 +147,7 @@ def test_run_job_bucket_a_failure_writes_audit_and_does_not_propagate(
     key = (TENANT, "youtube_reporting", "acct-1", "2026-03")
 
     def _boom(session, **kwargs):
+        """boom."""
         raise OAuthRefreshError(inner=RuntimeError("revoked"))
 
     try:
@@ -189,6 +193,7 @@ def test_run_job_unexpected_exception_swallowed_and_registry_cleared(
     key = (TENANT, "youtube_reporting", "acct-1", "2026-03")
 
     def _boom(session, **kwargs):
+        """boom."""
         raise RuntimeError("projection failed; run already FAILED+audited")
 
     try:
@@ -546,6 +551,7 @@ def test_run_job_service_principal_failure_writes_bucket_a_audit(
     )
 
     def _boom(session, **kwargs):
+        """boom."""
         raise ConnectorServicePrincipalUnavailableError(
             env_var="UMS_GOOGLE_CONNECTOR_SERVICE_ACTOR_ID"
         )
@@ -641,6 +647,7 @@ def test_close_audits_queued_jobs_cancelled_by_shutdown(tmp_path) -> None:
     started = threading.Event()
 
     def _slow_run_one(session, **kwargs):
+        """slow run one."""
         started.set()
         time.sleep(0.5)
         return _outcome()

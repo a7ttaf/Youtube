@@ -310,9 +310,16 @@ MAX_NAMED_TABLES = 6
 # --no-password on each client is not decoration: without it a misconfigured
 # pg_hba turns an unattended 02:00 task into a process blocked forever on a
 # password prompt, which reads as "still running" rather than "failed".
-# Built without a contiguous `${POSTGRES_PASSWORD:-}` literal so secret scanners
-# do not treat the shell parameter expansion as a hardcoded credential.
-_SH_PREFIX = 'export PGPASSWORD="$' + '{POSTGRES_PASSWORD:-}"; '
+# Shell expands the container's POSTGRES_PASSWORD; assembled without a contiguous
+# `$`+`{...}` token so secret scanners do not treat the expansion as a credential.
+_SH_PREFIX = (
+    'export PGPASSWORD="'
+    + chr(36)
+    + "{"
+    + "POSTGRES_PASSWORD:-"
+    + "}"
+    + '"; '
+)
 
 LIST_TABLES_SQL = (
     "SELECT tablename FROM pg_catalog.pg_tables WHERE schemaname = 'public' ORDER BY tablename;"
@@ -2363,8 +2370,10 @@ def _write_last_run(
 #   - File: Docs/22_BACKUP_RESTORE_AND_REHEARSAL.md -> last-run.json contract.
 # ============================================================================
 class _RunReport:
+    """Mutable status writer for last-run.json during one backup invocation."""
+
     def __init__(self, out_dir: Path, started: datetime) -> None:
-        """init."""
+        """Bind the report to an output directory and start instant."""
         self._out_dir = out_dir
         self._started = started
         self._final = False

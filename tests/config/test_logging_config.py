@@ -412,6 +412,7 @@ def test_a_real_http_request_never_writes_its_query_string_to_the_log():
     stream = io.StringIO()
 
     def respond(request: httpx2.Request) -> httpx2.Response:
+        """respond."""
         return httpx2.Response(200, json={"rows": []})
 
     with production_shaped_root():

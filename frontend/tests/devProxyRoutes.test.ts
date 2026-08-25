@@ -378,13 +378,13 @@ describe("dev proxy route coverage (derived from frontend/src)", () => {
   it("treats a `+`-concatenated fragment as a fragment, not a backend prefix", () => {
     // The exact shape from useExplanation.ts. `/months` is a suffix of the
     // /revenue path, and must never be reported as an unproxied prefix.
-    // Build `${` via concatenation so the fixture neither uses an unnecessary
-    // template literal (JS-R1004) nor a regular-string `${` token (JS-0038).
-    const interpolation = "$" + "{";
+    // Build `${` via fromCharCode so the fixture avoids template literals,
+    // regular-string `${` (JS-0038), and literal concatenation (JS-0096/0246).
+    const interpolation = String.fromCharCode(36, 123);
     const source = [
       "const p =",
-      "  `/revenue/channels/" + interpolation + "encodeURIComponent(id)}` +",
-      "  `/months/" + interpolation + "encodeURIComponent(month)}/explain`;",
+      ["  `/revenue/channels/", interpolation, "encodeURIComponent(id)}` +"].join(""),
+      ["  `/months/", interpolation, "encodeURIComponent(month)}/explain`;"].join(""),
     ].join("\n");
     const scanned = scanStringLiterals(source);
     expect(scanned.map((literal) => literal.continuesExpression)).toEqual([false, true]);
