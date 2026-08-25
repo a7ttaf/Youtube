@@ -131,6 +131,7 @@ def _agent_debug_log(
         pass
     # #endregion
 
+
 # Deterministic namespace for the org-skeleton rows. Distinct from the demo
 # seed's namespace (scripts/seed_demo_month.py) so a database that has run both
 # never collides on the org_units primary key. Folding the tenant id into the

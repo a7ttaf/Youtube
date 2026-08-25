@@ -416,9 +416,10 @@ class SqlAlchemyUserAccountRepository:
             try:
                 with self._session.begin_nested():
                     return operation()
-            except UserAccountConflictError:
-                raise
             except SQLAlchemyError as exc:
+                # UserAccountConflictError is a ValueError subclass (not
+                # SQLAlchemy), so typed conflicts propagate without a useless
+                # `except: raise` (PYL-W0706).
                 # Nested savepoint already rolled back on exit from begin_nested.
                 if (
                     attempt_index + 1 >= USER_ACCOUNT_STORAGE_ATTEMPTS

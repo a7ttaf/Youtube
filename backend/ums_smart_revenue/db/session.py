@@ -2,8 +2,9 @@
 
 from collections.abc import Callable, Iterator
 from threading import Lock
+from typing import Any
 
-from sqlalchemy import Engine, create_engine, event
+from sqlalchemy import Connection, Engine, create_engine, event
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
@@ -36,6 +37,9 @@ _engine_cache_lock = Lock()
 #   audit lane DISTINCT role-switched connections.
 # Database/ORM: All ORM models (engine is the shared connection source).
 # Standards: typed boundary; no error swallowing; pool_pre_ping retained.
+#   SQLite engines additionally get real BEGIN discipline (see
+#   _enable_sqlite_transactional_savepoints below) so SAVEPOINTs nest instead
+#   of committing.
 # Blast Radius: DB connection topology. SQLite branch is test-only; Postgres
 #   path is intentionally unchanged so RLS role switching is not weakened.
 # Connections:
@@ -52,12 +56,59 @@ def build_engine(database_url: str) -> Engine:
         # connection so both sessions serialize through one writer (file-based
         # and in-memory SQLite alike). Postgres needs distinct connections for
         # its two role-switched lanes, so this branch is SQLite-only.
-        return create_engine(
+        engine = create_engine(
             database_url,
             poolclass=StaticPool,
             connect_args={"check_same_thread": False},
         )
+        _enable_sqlite_transactional_savepoints(engine)
+        return engine
     return create_engine(database_url, pool_pre_ping=True)
+
+
+# ============================================================================
+# Purpose: Make SAVEPOINTs REAL on SQLite. pysqlite's legacy isolation mode
+#   emits BEGIN only before DML, never before SELECT or SAVEPOINT, so a
+#   ``Session.begin_nested()`` entered while the DBAPI sits in autocommit
+#   starts ITS OWN SQLite-level transaction — and the RELEASE on clean exit
+#   DURABLY COMMITS it. Every savepoint-wrapped write in this codebase (the
+#   auth/users.py storage-retry envelope, the audit sinks, the channel-registry
+#   write boundary) therefore committed EARLY on SQLite, silently breaking
+#   one-transaction envelopes: scripts/bootstrap_operator.py promised "the
+#   whole run is one transaction" while a failure AFTER a savepointed account
+#   write left the account half-created (parent-verified red test
+#   test_bootstrap_reports_a_database_failure_instead_of_a_traceback). This is
+#   the SQLAlchemy-documented pysqlite recipe: stop the DBAPI from managing
+#   transactions and emit BEGIN ourselves whenever SQLAlchemy begins one, so
+#   savepoints nest inside a real outer transaction and RELEASE releases
+#   instead of committing.
+# Database/ORM: Engine-level transaction discipline for every SQLite session;
+#   no table, column, or query change.
+# Standards: Documented dialect recipe (SQLAlchemy "Serializable isolation /
+#   Savepoints / Transactional DDL" for pysqlite). Postgres path untouched —
+#   psycopg already emits BEGIN, so its savepoints were always real.
+# Blast Radius: SQLite (test/dev-only per build_engine) transaction semantics:
+#   reads now open a real deferred transaction that holds its snapshot until
+#   commit/rollback/close. No authorization, finance, or Postgres behavior.
+# Connections:
+#   - File: backend/ums_smart_revenue/auth/users.py -> _run_with_storage_retries
+#     relies on RELEASE not committing to keep the bootstrap atomic.
+#   - File: scripts/bootstrap_operator.py -> the one-transaction guarantee.
+# ============================================================================
+def _enable_sqlite_transactional_savepoints(engine: Engine) -> None:
+    """Emit real BEGINs on SQLite so SAVEPOINT/RELEASE nest instead of committing."""
+
+    @event.listens_for(engine, "connect")
+    def _disable_pysqlite_transaction_management(
+        dbapi_connection: Any, _connection_record: Any
+    ) -> None:
+        # Legacy-autocommit mode: pysqlite stops emitting implicit BEGINs
+        # entirely; the begin hook below owns transaction starts instead.
+        dbapi_connection.isolation_level = None
+
+    @event.listens_for(engine, "begin")
+    def _emit_begin(connection: Connection) -> None:
+        connection.exec_driver_sql("BEGIN")
 
 
 # ============================================================================

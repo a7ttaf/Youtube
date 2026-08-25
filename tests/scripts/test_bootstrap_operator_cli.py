@@ -274,7 +274,6 @@ def test_bootstrap_keeps_earlier_accounts_after_transient_storage_retry(
     reported CREATED. Savepoint-scoped retries keep sibling writes.
     """
     from sqlalchemy.exc import OperationalError
-    from sqlalchemy.orm import Session
 
     module = _load_script()
     database_url = _make_database(tmp_path)
@@ -282,6 +281,7 @@ def test_bootstrap_keeps_earlier_accounts_after_transient_storage_retry(
     real_flush = Session.flush
 
     def flaky_flush(self, objects=None):
+        """Fail the second flush once, then delegate to the real Session.flush."""
         flush_calls["n"] += 1
         if flush_calls["n"] == 2:
             raise OperationalError("INSERT", {}, Exception("simulated transient failure"))
