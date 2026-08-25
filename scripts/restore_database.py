@@ -853,6 +853,22 @@ def _prepare_restore_target(
     return container, None
 
 
+# ============================================================================
+# Purpose: Orchestrate one restore into an already-resolved container —
+#          wait for Postgres, refuse a non-empty target unless allowed, apply
+#          ``roles.sql``, restore ``database.dump``, then verify row counts.
+# Database/ORM: None in-process. Runs psql / pg_restore inside the target
+#               container only.
+# Standards: Emptiness check before roles so a refused target is unmodified;
+#            roles before data so RLS grants have parents; fail-closed on any
+#            stage via RestoreError.
+# Blast Radius: Disaster recovery writes into the named container; rehearsal
+#               uses a throwaway only.
+# Connections:
+#   - File: scripts/restore_database.py -> ``_restore_roles`` / ``_restore_data`` /
+#     ``_verify`` / ``main``.
+#   - File: Docs/22_BACKUP_RESTORE_AND_REHEARSAL.md -> roles-first procedure.
+# ============================================================================
 def _execute_restore(
     container: str,
     backup_dir: Path,

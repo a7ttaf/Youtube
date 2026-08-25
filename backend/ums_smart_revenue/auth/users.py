@@ -159,7 +159,10 @@ class SqlAlchemyUserAccountRepository:
                 self._session.add(row)
                 self._session.flush()
             except IntegrityError as exc:
-                self._session.rollback()
+                # FIX: Do not session.rollback() — multi-write callers (operator
+                # bootstrap with repeated --email) share one session; a full
+                # rollback discards earlier flushes while outcome lists still
+                # report success. Each attempt runs inside begin_nested().
                 if _is_email_constraint_violation(exc) or self._email_exists(normalized_email):
                     raise UserAccountConflictError("User email already exists") from exc
                 raise UserAccountConflictError(
@@ -389,7 +392,7 @@ class SqlAlchemyUserAccountRepository:
                 _apply_user_account_update(row, update)
                 self._session.flush()
             except IntegrityError as exc:
-                self._session.rollback()
+                # FIX: Nested savepoint rollback only — keep sibling session writes.
                 if update.email is not None and (
                     _is_email_constraint_violation(exc)
                     or self._email_exists(update.email, excluding_user_id=user_uuid)
@@ -403,12 +406,20 @@ class SqlAlchemyUserAccountRepository:
         return self._run_with_storage_retries(operation)
 
     def _run_with_storage_retries(self, operation: Callable[[], T]) -> T:
-        """Retry transient storage failures once and fail closed otherwise."""
+        """Retry transient storage failures once and fail closed otherwise.
+
+        Each attempt runs inside ``begin_nested()`` so a failed flush rolls
+        back only that savepoint. A full ``session.rollback()`` would discard
+        earlier writes in a shared multi-account bootstrap transaction.
+        """
         for attempt_index in range(USER_ACCOUNT_STORAGE_ATTEMPTS):
             try:
-                return operation()
+                with self._session.begin_nested():
+                    return operation()
+            except UserAccountConflictError:
+                raise
             except SQLAlchemyError as exc:
-                self._session.rollback()
+                # Nested savepoint already rolled back on exit from begin_nested.
                 if (
                     attempt_index + 1 >= USER_ACCOUNT_STORAGE_ATTEMPTS
                     or not _is_retryable_user_storage_error(exc)

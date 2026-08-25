@@ -1,4 +1,19 @@
 #!/usr/bin/env python
+# ============================================================================
+# Purpose: Operator CLI that creates the first UMS identity (and optional org
+#   skeleton) after alembic upgrade on a fresh deployment — P0.8/P0.9.
+# Database/ORM: Writes ``users``, ``org_units``, ``access_scopes``, and
+#   ``user_role_assignments`` via repositories / ORM under TENANT_CTX + RLS.
+# Standards: Idempotent; fail-closed on disabled accounts, org drift, and
+#   inactive units; never echo database credentials (summary rebuild + argparse
+#   redaction); typed domain errors mapped to exit 2.
+# Blast Radius: Authorization (identity + optional global role) and org registry.
+# Connections:
+#   - File: Docs/21_BETA_IMPLEMENTATION_PLAN.md -> P0.8 / P0.9.
+#   - File: Docs/20_DEPLOYMENT_READINESS_AUDIT.md -> H2 / H3.
+#   - File: backend/ums_smart_revenue/auth/users.py -> create_user / lookup.
+# ============================================================================
+
 """Create the first UMS operator identity (and, optionally, an org skeleton).
 
 Run this ONCE after ``alembic upgrade head`` on a fresh deployment. It is the
@@ -69,21 +84,6 @@ Assigning channels to the seeded company is one
 no bulk mapping endpoint and the channel-import CSV cannot carry the mapping, so
 a real roster needs a scripted loop. The summary printed at the end says so.
 """
-
-# ============================================================================
-# Purpose: Operator CLI that creates the first UMS identity (and optional org
-#   skeleton) after alembic upgrade on a fresh deployment — P0.8/P0.9.
-# Database/ORM: Writes ``users``, ``org_units``, ``access_scopes``, and
-#   ``user_role_assignments`` via repositories / ORM under TENANT_CTX + RLS.
-# Standards: Idempotent; fail-closed on disabled accounts, org drift, and
-#   inactive units; never echo database credentials (summary rebuild + argparse
-#   redaction); typed domain errors mapped to exit 2.
-# Blast Radius: Authorization (identity + optional global role) and org registry.
-# Connections:
-#   - File: Docs/21_BETA_IMPLEMENTATION_PLAN.md -> P0.8 / P0.9.
-#   - File: Docs/20_DEPLOYMENT_READINESS_AUDIT.md -> H2 / H3.
-#   - File: backend/ums_smart_revenue/auth/users.py -> create_user / lookup.
-# ============================================================================
 
 from __future__ import annotations
 

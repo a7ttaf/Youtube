@@ -141,6 +141,10 @@ class _LoggingLeaseState:
 
 _logging_state = _LoggingLeaseState()
 
+# Handler attributes that survive importlib.reload when module globals reset.
+_HANDLER_PREVIOUS_ROOT_ATTR = "_ums_previous_root_level"
+_HANDLER_PREVIOUS_FIRST_PARTY_ATTR = "_ums_previous_first_party_level"
+
 
 # ============================================================================
 # Purpose: Build the single stdlib formatter used for every UMS log line, in
@@ -300,8 +304,20 @@ def configure_logging(
             # lifespan that still owns the handler.
             if _logging_state.refcount <= 0:
                 _logging_state.refcount = 1
-                _logging_state.previous_root_level = previous_root_level
-                _logging_state.previous_first_party_level = previous_first_party_level
+                # FIX: Do not snapshot the already-configured levels as
+                # "previous" — that would restore WARNING/INFO after every
+                # lease ends. Recover the pre-install originals stored on the
+                # surviving handler at first install.
+                recovered_root = getattr(
+                    existing_handler, _HANDLER_PREVIOUS_ROOT_ATTR, None
+                )
+                recovered_first_party = getattr(
+                    existing_handler, _HANDLER_PREVIOUS_FIRST_PARTY_ATTR, None
+                )
+                if recovered_root is not None:
+                    _logging_state.previous_root_level = recovered_root
+                if recovered_first_party is not None:
+                    _logging_state.previous_first_party_level = recovered_first_party
                 root.setLevel(root_level)
                 first_party.setLevel(numeric_level)
             # FIX: Overlapping create_app() lifespans share one handler. Take a
@@ -311,13 +327,24 @@ def configure_logging(
             return LoggingConfiguration(
                 installed=False,
                 handler=None,
-                previous_root_level=previous_root_level,
-                previous_first_party_level=previous_first_party_level,
+                previous_root_level=(
+                    _logging_state.previous_root_level
+                    if _logging_state.previous_root_level is not None
+                    else previous_root_level
+                ),
+                previous_first_party_level=(
+                    _logging_state.previous_first_party_level
+                    if _logging_state.previous_first_party_level is not None
+                    else previous_first_party_level
+                ),
             )
 
         handler = logging.StreamHandler(sys.stderr if stream is None else stream)
         handler.set_name(UMS_LOG_HANDLER_NAME)
         handler.setFormatter(build_log_formatter())
+        # Survive importlib.reload: module globals reset, handler attributes do not.
+        setattr(handler, _HANDLER_PREVIOUS_ROOT_ATTR, previous_root_level)
+        setattr(handler, _HANDLER_PREVIOUS_FIRST_PARTY_ATTR, previous_first_party_level)
 
         logging.basicConfig(handlers=[handler], level=root_level)
         if handler not in root.handlers:

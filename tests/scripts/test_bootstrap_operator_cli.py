@@ -263,6 +263,53 @@ def test_bootstrap_creates_a_second_user_in_one_run(tmp_path, capsys):
         assert f"X-User-ID: {user.id}" in output
 
 
+def test_bootstrap_keeps_earlier_accounts_after_transient_storage_retry(
+    tmp_path, monkeypatch, capsys
+):
+    """A retryable flush on the second account must not drop the first flush.
+
+    Codex P1: repository storage retries used session.rollback(), which discarded
+    earlier accounts in the shared bootstrap transaction while outcomes still
+    reported CREATED. Savepoint-scoped retries keep sibling writes.
+    """
+    from sqlalchemy.exc import OperationalError
+    from sqlalchemy.orm import Session
+
+    module = _load_script()
+    database_url = _make_database(tmp_path)
+    flush_calls = {"n": 0}
+    real_flush = Session.flush
+
+    def flaky_flush(self, objects=None):
+        flush_calls["n"] += 1
+        if flush_calls["n"] == 2:
+            raise OperationalError("INSERT", {}, Exception("simulated transient failure"))
+        return real_flush(self, objects)
+
+    monkeypatch.setattr(Session, "flush", flaky_flush)
+    exit_code = _run(
+        module,
+        database_url,
+        "--email",
+        _OPERATOR_EMAIL,
+        "--email",
+        "finance@example.com",
+        "--display-name",
+        "Operations",
+        "--display-name",
+        "Finance",
+    )
+
+    assert exit_code == 0
+    assert flush_calls["n"] >= 3
+    users = _users(database_url)
+    assert [user.email for user in users] == ["finance@example.com", _OPERATOR_EMAIL]
+    output = capsys.readouterr().out
+    assert "CREATED" in output
+    for user in users:
+        assert f"X-User-ID: {user.id}" in output
+
+
 def test_bootstrap_rejects_mismatched_display_name_count(tmp_path):
     """Two emails and one display name is an operator error, not a silent pairing."""
     module = _load_script()

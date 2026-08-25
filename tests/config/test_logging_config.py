@@ -925,19 +925,28 @@ def test_reload_readopts_orphaned_handler_without_silencing_prior_lease():
     ``importlib.reload`` clears ``_logging_state`` while the named UMS handler can
     still sit on the root logger. Re-adopt that orphan with a synthetic lease so
     a post-reload configure/restore pair cannot silence the pre-reload owner.
+    Re-adoption must also recover the pre-install levels stored on the handler —
+    snapshotting the already-configured WARNING/INFO as "previous" would leave
+    those floors after every lease ends.
     """
-    with production_shaped_root():
+    with production_shaped_root() as root:
+        first_party = logging.getLogger(FIRST_PARTY_LOGGER_NAME)
+        root.setLevel(logging.ERROR)
+        first_party.setLevel(logging.CRITICAL)
+
         first = configure_logging(level="INFO", stream=io.StringIO())
         handler_before = installed_log_handler()
         assert handler_before is not None
         assert logging_config._logging_state.refcount == 1
+        assert root.level == THIRD_PARTY_LOG_LEVEL
+        assert first_party.level == logging.INFO
 
         # Simulate importlib.reload clearing module globals only.
         logging_config._logging_state = logging_config._LoggingLeaseState()
         assert logging_config._logging_state.refcount == 0
         assert installed_log_handler() is handler_before
 
-        second = configure_logging(level="INFO", stream=io.StringIO())
+        second = configure_logging(level="DEBUG", stream=io.StringIO())
         assert second.installed is False
         restore_logging(second)
 
@@ -948,6 +957,8 @@ def test_reload_readopts_orphaned_handler_without_silencing_prior_lease():
         # Drain the synthetic lease the way a pre-reload lifespan finally would.
         restore_logging(first)
         assert installed_log_handler() is None
+        assert root.level == logging.ERROR
+        assert first_party.level == logging.CRITICAL
 
 
 # ---------------------------------------------------------------------------
