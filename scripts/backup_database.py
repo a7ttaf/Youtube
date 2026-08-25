@@ -896,6 +896,7 @@ def _held_repeatable_read_session(container: str, *, timeout: int):
     assert process.stdin is not None
     assert process.stdout is not None
     assert process.stderr is not None
+
     def run_sql(sql: str) -> str:
         """run sql."""
         deadline = time.monotonic() + max(1, timeout)

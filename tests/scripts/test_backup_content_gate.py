@@ -77,6 +77,7 @@ import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import ModuleType
+from typing import Self
 
 import pytest
 
@@ -1421,9 +1422,11 @@ def test_a_lock_past_the_stale_bound_is_reclaimed_even_with_a_live_owner_pid(
         (lock_dir / "owner.pid").write_text(f"{child.pid}\n", encoding="utf-8")
 
         clock.advance(backup.LOCK_STALE_AFTER - timedelta(minutes=1))
-        with pytest.raises(backup.BackupError) as caught:
-            with backup._exclusive_backup_lock(tmp_path):
-                pass  # pragma: no cover - the acquire must refuse
+        with (
+            pytest.raises(backup.BackupError) as caught,
+            backup._exclusive_backup_lock(tmp_path),
+        ):
+            pass  # pragma: no cover - the acquire must refuse
         assert caught.value.code == backup.EXIT_USAGE
 
         clock.advance(timedelta(minutes=2))
@@ -1488,7 +1491,7 @@ def test_a_status_write_that_dies_midway_leaves_the_old_record_intact(
             """init."""
             self._handle = handle
 
-        def __enter__(self) -> _DiesAfterOneByte:
+        def __enter__(self) -> Self:
             """enter."""
             return self
 
@@ -1502,9 +1505,11 @@ def test_a_status_write_that_dies_midway_leaves_the_old_record_intact(
             self._handle.flush()  # type: ignore[attr-defined]
             raise OSError("simulated crash mid-write")
 
-    def _crashy_open(self: Path, mode: str = "r", *args: object, **kwargs: object) -> object:
+    def _crashy_open(self: Path, *args: object, **kwargs: object) -> object:
         """crashy open."""
-        handle = real_open(self, mode, *args, **kwargs)  # type: ignore[arg-type]
+        mode = str(kwargs.pop("mode", args[0] if args else "r"))
+        rest = args[1:] if args else ()
+        handle = real_open(self, mode, *rest, **kwargs)  # type: ignore[arg-type]
         if "w" in mode and self.parent == tmp_path:
             return _DiesAfterOneByte(handle)
         return handle
