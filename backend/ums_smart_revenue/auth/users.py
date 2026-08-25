@@ -95,37 +95,25 @@ class _UserAccountUpdate:
 class UserAccountError(ValueError):
     """Base class for user account domain failures exposed to API handlers."""
 
-    pass
-
 
 class UserAccountConflictError(UserAccountError):
     """Raised when a requested account mutation conflicts with stored data."""
-
-    pass
 
 
 class UserAccountNotFoundError(UserAccountError):
     """Raised when a requested user account does not exist."""
 
-    pass
-
 
 class UserAccountValidationError(UserAccountError):
     """Raised when account input cannot be normalized into a safe value."""
-
-    pass
 
 
 class UserAccountStorageError(UserAccountError):
     """Raised when account storage is unavailable after retryable attempts."""
 
-    pass
-
 
 class UserAccountServiceAccountPolicyError(UserAccountError):
     """Raised when a stale service-account row blocks a non-owner update."""
-
-    pass
 
 
 class SqlAlchemyUserAccountRepository:

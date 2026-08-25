@@ -146,6 +146,16 @@ def _quote_literal(value: str) -> str:
     return "'" + value.replace("'", "''") + "'"
 
 
+def _count_sql_branch(name: str) -> str:
+    """One UNION ALL branch that counts rows for a validated public table name."""
+    return (
+        "SELECT "
+        + _quote_literal(name)
+        + " AS t, count(*) AS n FROM public."
+        + _quote_identifier(name)
+    )
+
+
 def _run(argv: list[str], *, timeout: int) -> subprocess.CompletedProcess[str]:
     """Run argv with stdin closed and captured text output."""
     return subprocess.run(
@@ -614,10 +624,7 @@ def _table_row_counts(container: str, *, timeout: int) -> dict[str, int]:
     tables = [line.strip() for line in raw.splitlines() if line.strip()]
     if not tables:
         return {}
-    branches = [
-        f"SELECT {_quote_literal(name)} AS t, count(*) AS n FROM public.{_quote_identifier(name)}"
-        for name in tables
-    ]
+    branches = [_count_sql_branch(name) for name in tables]
     counts: dict[str, int] = {}
     sql = " UNION ALL ".join(branches) + " ORDER BY t;"
     for line in _psql(container, sql, timeout=timeout).splitlines():

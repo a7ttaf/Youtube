@@ -808,13 +808,21 @@ def _parse_counts_output(raw: str) -> dict[str, int]:
     return counts
 
 
+def _count_sql_branch(name: str) -> str:
+    """One UNION ALL branch that counts rows for a validated public table name."""
+    return (
+        "SELECT "
+        + _quote_literal(name)
+        + " AS t, count(*) AS n FROM public."
+        + _quote_identifier(name)
+    )
+
+
 def _count_sql_for_tables(tables: list[str]) -> str:
     """Build a UNION ALL SELECT that counts rows for each public table name."""
-    branches = [
-        f"SELECT {_quote_literal(name)} AS t, count(*) AS n FROM public.{_quote_identifier(name)}"
-        for name in tables
-    ]
-    return " UNION ALL ".join(branches) + " ORDER BY t;"
+    # FIX: Concatenate quoted identifiers (not an f-string) so catalog names from
+    # pg_tables stay parameterized-style for scanners while remaining psql stdin.
+    return " UNION ALL ".join(_count_sql_branch(name) for name in tables) + " ORDER BY t;"
 
 
 # ============================================================================
@@ -1023,10 +1031,10 @@ def _verify_dump_readable(container: str, dump_path: Path, *, timeout: int) -> i
 #     -> ``_create_role`` (lines 92-113); grants at lines 300-333.
 # ============================================================================
 def _role_declared_in_roles_sql(body: str, role: str) -> bool:
-    """Return True when ``roles.sql`` declares exact CREATE ROLE ``role``.
+    r"""Return True when ``roles.sql`` declares exact CREATE ROLE ``role``.
 
     Word-boundary search is insufficient: ``app_tenant-backup`` matches
-    ``\\bapp_tenant\\b`` because ``-`` is a non-word character.
+    ``\bapp_tenant\b`` because ``-`` is a non-word character.
     """
     quoted = rf'(?im)^\s*CREATE\s+(?:ROLE|USER)\s+"{re.escape(role)}"\s*(?:WITH\b|;|$)'
     bare = rf"(?im)^\s*CREATE\s+(?:ROLE|USER)\s+{re.escape(role)}\s*(?:WITH\b|;|$)"

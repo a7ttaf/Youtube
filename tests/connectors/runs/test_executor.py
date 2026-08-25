@@ -496,8 +496,10 @@ def test_run_job_dry_run_writes_completed_audit_and_clears_registry(
 def test_run_job_dry_run_no_failures_writes_empty_per_report_failures(
     tmp_path,
 ) -> None:
-    """A dry-run with no per-report failures still audits the completed row,
-    with an empty per_report_failures list."""
+    """A dry-run with no per-report failures still audits the completed row.
+
+    The audited row carries an empty per_report_failures list.
+    """
     factory = _factory(tmp_path)
     executor = ConnectorJobExecutor(session_factory=factory, max_workers=1, stale_running_hours=6)
     key = (TENANT, "youtube_reporting", "acct-1", "2026-03")

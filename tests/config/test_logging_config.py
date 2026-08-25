@@ -715,7 +715,8 @@ def test_configure_logging_applies_the_floor_when_root_already_owns_a_handler(
 
     logging.getLogger("httpx2").info(
         "HTTP Request: GET https://youtubeanalytics.googleapis.com/v2/reports"
-        f"?ids=contentOwner%3D%3D{_FAKE_CONTENT_OWNER_ID}"
+        "?ids=contentOwner%%3D%%3D%s",
+        _FAKE_CONTENT_OWNER_ID,
     )
     logging.getLogger("httpx2").warning("a library problem worth seeing")
     _probe().info("info under a foreign handler")

@@ -128,9 +128,18 @@ class LoggingConfiguration:
 
 
 _logging_lock = threading.Lock()
-_logging_refcount = 0
-_logging_previous_root_level: int | None = None
-_logging_previous_first_party_level: int | None = None
+
+
+@dataclass
+class _LoggingLeaseState:
+    """Process-wide lease counter for the shared UMS root handler."""
+
+    refcount: int = 0
+    previous_root_level: int | None = None
+    previous_first_party_level: int | None = None
+
+
+_logging_state = _LoggingLeaseState()
 
 
 # ============================================================================
@@ -260,8 +269,6 @@ def configure_logging(
     Raises:
         ValueError: If ``level`` is not one of ``LOG_LEVEL_NAMES``.
     """
-    global _logging_refcount, _logging_previous_root_level, _logging_previous_first_party_level
-
     resolved_level = (level if level is not None else load_app_settings().log_level).strip().upper()
     if resolved_level not in ALLOWED_LOG_LEVELS:
         allowed = ", ".join(LOG_LEVEL_NAMES)
@@ -284,7 +291,7 @@ def configure_logging(
             # FIX: Overlapping create_app() lifespans share one handler. Take a
             # lease so the first shutdown cannot strip logging from a still-live
             # second app.
-            _logging_refcount += 1
+            _logging_state.refcount += 1
             return LoggingConfiguration(
                 installed=False,
                 handler=None,
@@ -309,9 +316,9 @@ def configure_logging(
         # touches a non-root logger, so this is the only place the application
         # level is applied on either path.
         first_party.setLevel(numeric_level)
-        _logging_refcount = 1
-        _logging_previous_root_level = previous_root_level
-        _logging_previous_first_party_level = previous_first_party_level
+        _logging_state.refcount = 1
+        _logging_state.previous_root_level = previous_root_level
+        _logging_state.previous_first_party_level = previous_first_party_level
         return LoggingConfiguration(
             installed=True,
             handler=handler,
@@ -342,13 +349,11 @@ def configure_logging(
 # ============================================================================
 def restore_logging(configuration: LoggingConfiguration) -> None:
     """Release one logging lease; remove the handler when the last lease ends."""
-    global _logging_refcount, _logging_previous_root_level, _logging_previous_first_party_level
-
     with _logging_lock:
-        if _logging_refcount <= 0:
+        if _logging_state.refcount <= 0:
             return
-        _logging_refcount -= 1
-        if _logging_refcount > 0:
+        _logging_state.refcount -= 1
+        if _logging_state.refcount > 0:
             return
 
         handler = configuration.handler if configuration.installed else installed_log_handler()
@@ -358,13 +363,13 @@ def restore_logging(configuration: LoggingConfiguration) -> None:
         root.removeHandler(handler)
         handler.close()
         previous_root = (
-            _logging_previous_root_level
-            if _logging_previous_root_level is not None
+            _logging_state.previous_root_level
+            if _logging_state.previous_root_level is not None
             else configuration.previous_root_level
         )
         previous_first_party = (
-            _logging_previous_first_party_level
-            if _logging_previous_first_party_level is not None
+            _logging_state.previous_first_party_level
+            if _logging_state.previous_first_party_level is not None
             else configuration.previous_first_party_level
         )
         root.setLevel(previous_root)
@@ -372,8 +377,8 @@ def restore_logging(configuration: LoggingConfiguration) -> None:
         # so releasing only the root level would leave the factory holding
         # process-global state -- the exact leak restore_logging exists to avoid.
         logging.getLogger(FIRST_PARTY_LOGGER_NAME).setLevel(previous_first_party)
-        _logging_previous_root_level = None
-        _logging_previous_first_party_level = None
+        _logging_state.previous_root_level = None
+        _logging_state.previous_first_party_level = None
 
 
 def installed_log_handler() -> logging.Handler | None:
