@@ -247,27 +247,21 @@ class ConnectorJobExecutor:
 
         Cancel queued futures first (``cancel_futures=True``), audit those
         cancelled jobs immediately as ``job_failed_before_start`` /
-        ``ExecutorShutdown``, then wait for in-flight workers so their logging
-        still hits the configured handlers. Auditing before the blocking drain
-        keeps the shutdown audit reachable even if Docker later SIGKILLs the
-        process at ``stop_grace_period``. Running futures complete and
-        deregister themselves; they are never audited as pre-start failures.
+        ``ExecutorShutdown``, then wait for every future that remained
+        non-cancelled after shutdown so a job that transitioned from queued to
+        running between the pre-shutdown snapshot and ``shutdown()`` cannot
+        escape the drain. Auditing before the blocking drain keeps the shutdown
+        audit reachable even if Docker later SIGKILLs the process at
+        ``stop_grace_period``. Running futures complete and deregister
+        themselves; they are never audited as pre-start failures.
         The weakref finalizer remains as a GC backstop for paths that bypass
         ``close()``.
         """
-        # Snapshot in-flight futures, cancel queued work + audit immediately,
-        # then wait on the running ones. A second shutdown(wait=True) is a
-        # no-op on ThreadPoolExecutor, so we must drain explicitly.
-        with self._lock:
-            running_futures = [
-                entry.future
-                for entry in self._registry.values()
-                if isinstance(entry, _ActiveJob)
-                and entry.future.running()
-                and not entry.future.done()
-            ]
+        # FIX: Drain AFTER shutdown from the post-cancel registry. Snapshotting
+        # running futures before shutdown misses a queued future that starts
+        # between the snapshot and cancel_futures.
         self._executor.shutdown(wait=False, cancel_futures=True)
-        self._audit_pending_on_shutdown()
+        running_futures = self._audit_pending_on_shutdown()
         for future in running_futures:
             try:
                 future.result()
@@ -526,16 +520,17 @@ class ConnectorJobExecutor:
         """
         self._registry[key] = _ActiveJob(future=future, actor_identity=actor_identity)
 
-    def _audit_pending_on_shutdown(self) -> None:
-        """Audit every accepted job that was cancelled before it started.
+    def _audit_pending_on_shutdown(self) -> list[Future]:
+        """Audit cancelled queued jobs; return non-cancelled futures still draining.
 
         Called deterministically from :meth:`close` *after*
         ``ThreadPoolExecutor.shutdown(cancel_futures=True)`` has run. A
         future that is ``cancelled()`` was queued but never started; it will
-        never run and therefore never writes its own lifecycle audit. A
-        running or completed future is left alone -- it (or its worker) owns
-        the audit trail. Any ``_SlotReservation`` that was never activated is
-        not an accepted, committed job and is dropped silently.
+        never run and therefore never writes its own lifecycle audit. Futures
+        that remain non-cancelled after shutdown (including ones that started
+        between a pre-shutdown snapshot and ``shutdown()``) are returned so
+        ``close()`` can wait on them. Any ``_SlotReservation`` that was never
+        activated is not an accepted, committed job and is dropped silently.
 
         The registry is cleared because no new work can be accepted after
         shutdown; running futures will deregister harmlessly when they finish.
@@ -545,12 +540,14 @@ class ConnectorJobExecutor:
             self._registry.clear()
 
         cancelled: list[tuple[_JobKey, ConnectorJobActor]] = []
+        running_futures: list[Future] = []
         for job_key, entry in entries:
             if not isinstance(entry, _ActiveJob):
                 continue
-            if not entry.future.cancelled():
-                continue
-            cancelled.append((job_key, entry.actor_identity))
+            if entry.future.cancelled():
+                cancelled.append((job_key, entry.actor_identity))
+            elif not entry.future.done():
+                running_futures.append(entry.future)
 
         for job_key, actor_identity in cancelled:
             tenant_id, connector_key, account_id, report_month = job_key
@@ -574,6 +571,7 @@ class ConnectorJobExecutor:
                 error_class="ExecutorShutdown",
                 actor_identity=actor_identity,
             )
+        return running_futures
 
     def _run_job(
         self,

@@ -141,6 +141,7 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
 import time
 import traceback
 from contextlib import contextmanager
@@ -671,13 +672,23 @@ def _container_facts(container: str, *, timeout: int) -> dict[str, str]:
         parts = inspected.stdout.strip().split("|")
         for key, value in zip(("container_name", "image", "image_id"), parts, strict=False):
             facts[key] = value.strip().lstrip("/")
-    for env_name, key in (("POSTGRES_DB", "database"), ("POSTGRES_USER", "superuser")):
-        probe = _run(
-            ["docker", "exec", container, "sh", "-c", f'printf "%s" "${env_name}"'],
-            timeout=timeout,
-        )
-        if probe.returncode == 0:
-            facts[key] = probe.stdout.strip()
+    # FIX: Prefer the connected session over optional container env. POSTGRES_DB
+    # can be unset while psql still connects to a default database; publishing
+    # without a real current_database() identity would skip the mismatch gate.
+    connected_db = _psql(container, "SELECT current_database();", timeout=timeout).strip()
+    if connected_db:
+        facts["database"] = connected_db
+    connected_user = _psql(container, "SELECT current_user;", timeout=timeout).strip()
+    if connected_user:
+        facts["superuser"] = connected_user
+    else:
+        for env_name, key in (("POSTGRES_USER", "superuser"),):
+            probe = _run(
+                ["docker", "exec", container, "sh", "-c", f'printf "%s" "${env_name}"'],
+                timeout=timeout,
+            )
+            if probe.returncode == 0 and probe.stdout.strip():
+                facts[key] = probe.stdout.strip()
     server_version = _psql(container, "SHOW server_version;", timeout=timeout).strip()
     if server_version:
         facts["server_version"] = server_version
@@ -797,6 +808,39 @@ def _count_sql_for_tables(tables: list[str]) -> str:
 #            accumulate.
 # Blast Radius: Manifest table_row_counts and restore verification.
 # ============================================================================
+def _readline_with_deadline(stream, deadline: float) -> str:
+    """Read one line from ``stream`` or raise when the monotonic deadline passes."""
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise BackupError(
+            EXIT_COMMAND_FAILED,
+            "snapshot holder timed out waiting for psql output",
+        )
+    box: list[str] = []
+    errors: list[OSError] = []
+
+    def _reader() -> None:
+        try:
+            box.append(stream.readline())
+        except OSError as exc:
+            errors.append(exc)
+
+    worker = threading.Thread(target=_reader, daemon=True)
+    worker.start()
+    worker.join(remaining)
+    if worker.is_alive():
+        raise BackupError(
+            EXIT_COMMAND_FAILED,
+            "snapshot holder timed out waiting for psql output",
+        )
+    if errors:
+        raise BackupError(
+            EXIT_COMMAND_FAILED,
+            f"snapshot holder read failed: {errors[0]}",
+        ) from errors[0]
+    return box[0] if box else ""
+
+
 @contextmanager
 def _held_repeatable_read_session(container: str, *, timeout: int):
     """Yield ``(snapshot_id, run_sql)`` for one held REPEATABLE READ transaction."""
@@ -815,6 +859,7 @@ def _held_repeatable_read_session(container: str, *, timeout: int):
     assert process.stdin is not None
     assert process.stdout is not None
     assert process.stderr is not None
+    deadline = time.monotonic() + max(1, timeout)
 
     def run_sql(sql: str) -> str:
         if process.poll() is not None:
@@ -832,7 +877,9 @@ def _held_repeatable_read_session(container: str, *, timeout: int):
         process.stdin.flush()
         lines: list[str] = []
         while True:
-            line = process.stdout.readline()
+            # FIX: Bound every readline against --timeout. process.wait() alone
+            # never runs while a blocked snapshot/count query holds stdout.
+            line = _readline_with_deadline(process.stdout, deadline)
             if line == "":
                 err = process.stderr.read()
                 raise BackupError(
@@ -846,6 +893,9 @@ def _held_repeatable_read_session(container: str, *, timeout: int):
         return "\n".join(lines)
 
     try:
+        # Fail closed on locked catalog / slow counts inside the holder session.
+        timeout_ms = max(1, int(timeout * 1000))
+        run_sql(f"SET statement_timeout = {timeout_ms};")
         run_sql("BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ;")
         snapshot = run_sql("SELECT pg_export_snapshot();").strip()
         if not snapshot:
@@ -950,6 +1000,17 @@ def _verify_dump_readable(container: str, dump_path: Path, *, timeout: int) -> i
 #   - File: backend/ums_smart_revenue/db/alembic/versions/20260608_0001_tenant_rls_enforcement.py
 #     -> ``_create_role`` (lines 92-113); grants at lines 300-333.
 # ============================================================================
+def _role_declared_in_roles_sql(body: str, role: str) -> bool:
+    """Return True when ``roles.sql`` declares exact CREATE ROLE ``role``.
+
+    Word-boundary search is insufficient: ``app_tenant-backup`` matches
+    ``\\bapp_tenant\\b`` because ``-`` is a non-word character.
+    """
+    quoted = rf'(?im)^\s*CREATE\s+(?:ROLE|USER)\s+"{re.escape(role)}"\s*(?:WITH\b|;|$)'
+    bare = rf"(?im)^\s*CREATE\s+(?:ROLE|USER)\s+{re.escape(role)}\s*(?:WITH\b|;|$)"
+    return re.search(quoted, body) is not None or re.search(bare, body) is not None
+
+
 def _dump_roles(
     container: str, target: Path, *, timeout: int, include_passwords: bool
 ) -> list[str]:
@@ -969,13 +1030,15 @@ def _dump_roles(
     if not target.exists() or target.stat().st_size == 0:
         raise BackupError(EXIT_ARTIFACT_INVALID, "pg_dumpall --roles-only produced an empty file")
     body = target.read_text(encoding="utf-8", errors="replace")
-    missing = [role for role in REQUIRED_ROLES if not re.search(rf"\b{re.escape(role)}\b", body)]
+    # FIX: Require exact CREATE ROLE identifiers, not substring/word-boundary hits
+    # that accept hyphenated lookalikes such as app_tenant-backup.
+    missing = [role for role in REQUIRED_ROLES if not _role_declared_in_roles_sql(body, role)]
     if missing:
         raise BackupError(
             EXIT_ARTIFACT_INVALID,
-            f"{target.name} does not mention {', '.join(missing)}. The dump carries "
-            "RLS policies and grants that reference those roles, so this backup "
-            "would not restore. Refusing to publish it.",
+            f"{target.name} does not declare CREATE ROLE for {', '.join(missing)}. "
+            "The dump carries RLS policies and grants that reference those roles, "
+            "so this backup would not restore. Refusing to publish it.",
         )
     return list(REQUIRED_ROLES)
 
@@ -1382,22 +1445,79 @@ def _read_watermark_file(out_dir: Path) -> tuple[dict[str, int], str | None]:
 #            contention with EXIT_USAGE. Always release in finally.
 # Blast Radius: Backup watermark / identity bookkeeping only.
 # ============================================================================
+def _pid_is_alive(pid: int) -> bool:
+    """Return True when ``pid`` appears to be a live process on this host."""
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        # Process exists but is not killable by this uid.
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def _reclaim_stale_backup_lock(lock_dir: Path) -> bool:
+    """Remove an abandoned ``.backup.lock`` when its owner pid is dead or missing."""
+    owner = lock_dir / "owner.pid"
+    try:
+        raw = owner.read_text(encoding="utf-8").strip()
+        pid = int(raw)
+    except FileNotFoundError:
+        # Pre-owner.pid locks, or crash between mkdir and pid write: reclaim.
+        pid = None
+    except (OSError, ValueError):
+        return False
+    if pid is not None and _pid_is_alive(pid):
+        return False
+    try:
+        if owner.exists():
+            owner.unlink()
+        lock_dir.rmdir()
+    except OSError:
+        return False
+    return True
+
+
 @contextmanager
 def _exclusive_backup_lock(out_dir: Path):
     """Hold an exclusive lock directory under ``out_dir`` for one backup run."""
     lock_dir = out_dir / ".backup.lock"
-    try:
+    owner = lock_dir / "owner.pid"
+
+    def _acquire() -> None:
         lock_dir.mkdir()
+        owner.write_text(f"{os.getpid()}\n", encoding="utf-8")
+
+    try:
+        _acquire()
     except FileExistsError as exc:
-        raise BackupError(
-            EXIT_USAGE,
-            f"another backup is already running (lock {lock_dir}). "
-            "If no backup is running, remove that directory and retry.",
-        ) from exc
+        # FIX: Recover abandoned locks left by kill -9 / host reboot so the
+        # next scheduled run is not wedged until an operator deletes the dir.
+        if _reclaim_stale_backup_lock(lock_dir):
+            try:
+                _acquire()
+            except FileExistsError as retry_exc:
+                raise BackupError(
+                    EXIT_USAGE,
+                    f"another backup is already running (lock {lock_dir}). "
+                    "If no backup is running, remove that directory and retry.",
+                ) from retry_exc
+        else:
+            raise BackupError(
+                EXIT_USAGE,
+                f"another backup is already running (lock {lock_dir}). "
+                "If no backup is running, remove that directory and retry.",
+            ) from exc
     try:
         yield
     finally:
         try:
+            owner.unlink(missing_ok=True)
             lock_dir.rmdir()
         except OSError:
             pass
@@ -1926,6 +2046,15 @@ def _first_run_refusal(tables: int, rows: int, non_seed: int, seed_names: str) -
 
 def _identity_refusal(expected: Identity | None, observed: Identity | None) -> str | None:
     """Tier 1b's message, or None when there is nothing to compare or no mismatch."""
+    # FIX: A bound directory with an unknown observed identity must fail closed;
+    # previously None observed skipped the gate and accepted foreign dumps.
+    if expected is not None and observed is None:
+        return (
+            f"this output directory is bound to {expected.describe()}, but this run "
+            "could not establish the connected database identity "
+            "(current_database/system_identifier). Refusing to publish without a "
+            "comparable identity."
+        )
     if expected is None or observed is None or expected == observed:
         return None
     return (
@@ -2356,6 +2485,12 @@ def run_backup(args: argparse.Namespace, out_dir: Path) -> BackupOutcome:
         # same facts the gate judged.
         facts = _container_facts(container, timeout=args.docker_timeout)
         observed_identity = _identity_from_source(facts)
+        if observed_identity is None:
+            raise BackupError(
+                EXIT_COMMAND_FAILED,
+                "could not establish database identity via current_database()/"
+                "system_identifier; refusing to publish without a comparable identity",
+            )
         verdict = _evaluate_content(
             counts,
             watermark,

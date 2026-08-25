@@ -858,6 +858,23 @@ def test_redaction_leaves_a_credential_free_sqlite_url_intact():
     assert module._redact_database_url(url) == url
 
 
+def test_argparse_error_redacts_misspelled_database_url(capsys):
+    """Unrecognized --databse-url must not echo the password-bearing value."""
+    module = _load_script()
+    secret = "postgresql+psycopg://user:s3cret-pass@host:5432/db"
+    try:
+        module._parse_args(
+            ["--email", "ops@example.com", "--databse-url", secret],
+        )
+    except SystemExit as exc:
+        assert exc.code == 2
+    else:
+        raise AssertionError("argparse should reject an unrecognized --databse-url")
+    err = capsys.readouterr().err
+    assert "s3cret-pass" not in err
+    assert secret not in err
+
+
 def test_redaction_masks_unlisted_query_values_and_keeps_listed_ones():
     """Query values are default-deny: only allow-listed keys keep their value.
 

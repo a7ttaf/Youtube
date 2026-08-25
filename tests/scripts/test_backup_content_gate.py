@@ -1224,8 +1224,19 @@ def test_the_same_database_in_a_recreated_container_is_not_a_mismatch() -> None:
 
 
 def test_an_unknown_identity_never_degrades_to_a_match() -> None:
-    """Either side missing means the check cannot run -- it must not mean "passed"."""
-    for expected, observed in ((IDENTITY_A, None), (None, IDENTITY_B), (None, None)):
+    """Missing observed identity must not silently pass a bound directory."""
+    bound_unknown = backup._evaluate_content(
+        REAL,
+        _watermark(REAL),
+        accept_drop=False,
+        establish=False,
+        expected_identity=IDENTITY_A,
+        observed_identity=None,
+    )
+    assert bound_unknown.accepted is False
+    assert any("could not establish" in reason for reason in bound_unknown.failures)
+
+    for expected, observed in ((None, IDENTITY_B), (None, None)):
         verdict = backup._evaluate_content(
             REAL,
             _watermark(REAL),
@@ -1236,6 +1247,39 @@ def test_an_unknown_identity_never_degrades_to_a_match() -> None:
         )
         assert verdict.accepted is True, (expected, observed)
         assert verdict.identity_adopted is False
+
+
+def test_hyphenated_role_lookalike_does_not_satisfy_required_roles(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """``app_tenant-backup`` must not count as ``app_tenant``."""
+    target = tmp_path / backup.ROLES_NAME
+
+    def _lookalike(argv: list[str], *, timeout: int, target: Path):
+        target.write_text(
+            'CREATE ROLE "app_tenant-backup";\nCREATE ROLE app_platform;\n',
+            encoding="utf-8",
+        )
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(backup, "_run_to_file", _lookalike)
+    with pytest.raises(backup.BackupError) as raised:
+        backup._dump_roles("fake", target, timeout=5, include_passwords=False)
+    assert raised.value.code == backup.EXIT_ARTIFACT_INVALID
+    assert "app_tenant" in str(raised.value)
+
+
+def test_stale_backup_lock_is_reclaimed_when_owner_pid_is_dead(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A leftover lock from a dead process must not wedge the next run."""
+    lock_dir = tmp_path / ".backup.lock"
+    lock_dir.mkdir()
+    (lock_dir / "owner.pid").write_text("424242\n", encoding="utf-8")
+    monkeypatch.setattr(backup, "_pid_is_alive", lambda _pid: False)
+    with backup._exclusive_backup_lock(tmp_path):
+        assert (lock_dir / "owner.pid").read_text(encoding="utf-8").strip() == str(os.getpid())
+    assert not lock_dir.exists()
 
 
 def test_a_bound_directory_refuses_the_second_database_end_to_end(tmp_path: Path) -> None:

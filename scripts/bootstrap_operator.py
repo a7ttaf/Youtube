@@ -77,7 +77,7 @@ import sys
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
-from typing import Any
+from typing import Any, NoReturn
 from uuid import UUID, uuid5
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -293,9 +293,30 @@ def _redact_database_url(database_url: str) -> str:
     ).render_as_string(hide_password=False)
 
 
+def _redact_argparse_token(token: str) -> str:
+    """Mask credential-bearing argv tokens that argparse may echo on error."""
+    if "://" in token or token.lower().startswith(("postgresql", "postgres://", "mysql://")):
+        return _redact_database_url(token)
+    return token
+
+
+def _redact_argparse_message(message: str) -> str:
+    """Redact URL-like tokens from an argparse error message."""
+    return " ".join(_redact_argparse_token(token) for token in message.split())
+
+
+class _RedactingArgumentParser(argparse.ArgumentParser):
+    """ArgumentParser that never echoes raw database URLs on usage errors."""
+
+    def error(self, message: str) -> NoReturn:
+        self.print_usage(sys.stderr)
+        safe = _redact_argparse_message(message)
+        self.exit(2, f"{self.prog}: error: {safe}\n")
+
+
 def _parse_args(argv: list[str]) -> argparse.Namespace:
     """Parse operator CLI arguments for one bootstrap run."""
-    parser = argparse.ArgumentParser(
+    parser = _RedactingArgumentParser(
         description=(
             "Create the first UMS operator user(s), optionally assign a global "
             "role, and optionally create the minimal SECTOR/COMPANY org skeleton."

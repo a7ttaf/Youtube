@@ -263,10 +263,14 @@ x-app-env: &app-env
 # write into it, and every export would fail with "artifact storage
 # unavailable". Keep these paths and the Dockerfile's APP_DATA_HOME in sync.
 # ---------------------------------------------------------------------------
+# Paths are pinned under the durable ``app-data`` mount at ``/var/lib/ums``.
+# Do NOT interpolate host overrides here: Compose only mounts ``app-data`` at
+# ``/var/lib/ums``, so an operator-set path like ``/srv/app/artifacts`` would
+# write into the container writable layer and vanish on recreate.
 x-app-storage-env: &app-storage-env
-  UMS_EXPORT_ARTIFACT_DIR: ${UMS_EXPORT_ARTIFACT_DIR:-/var/lib/ums/artifacts}
+  UMS_EXPORT_ARTIFACT_DIR: /var/lib/ums/artifacts
   UMS_BLOB_BACKEND: ${UMS_BLOB_BACKEND:-file-store}
-  UMS_LOCAL_STORE_ROOT: ${UMS_LOCAL_STORE_ROOT:-/var/lib/ums/blobs}
+  UMS_LOCAL_STORE_ROOT: /var/lib/ums/blobs
   UMS_LOCAL_BLOB_BUCKET: ${UMS_LOCAL_BLOB_BUCKET:-local}
 
 services:

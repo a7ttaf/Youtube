@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import logging
 import sys
+import threading
 import time
 from dataclasses import dataclass
 from typing import TextIO
@@ -114,14 +115,22 @@ THIRD_PARTY_LOG_LEVEL = logging.WARNING
 class LoggingConfiguration:
     """Undo token returned by :func:`configure_logging`.
 
-    ``installed`` is False when the call was a no-op because the UMS handler
-    was already on the root logger; :func:`restore_logging` then does nothing.
+    ``installed`` is True when this call created the shared UMS handler.
+    Every successful configure call (including a lease on an already-installed
+    handler) increments a process-wide reference count; :func:`restore_logging`
+    decrements it and only removes the handler when the count reaches zero.
     """
 
     installed: bool
     handler: logging.Handler | None
     previous_root_level: int
     previous_first_party_level: int
+
+
+_logging_lock = threading.Lock()
+_logging_refcount = 0
+_logging_previous_root_level: int | None = None
+_logging_previous_first_party_level: int | None = None
 
 
 # ============================================================================
@@ -246,11 +255,13 @@ def configure_logging(
 
     Returns:
         A :class:`LoggingConfiguration` whose ``installed`` flag is False when
-        the handler was already present.
+        the handler was already present (caller still holds a restore lease).
 
     Raises:
         ValueError: If ``level`` is not one of ``LOG_LEVEL_NAMES``.
     """
+    global _logging_refcount, _logging_previous_root_level, _logging_previous_first_party_level
+
     resolved_level = (level if level is not None else load_app_settings().log_level).strip().upper()
     if resolved_level not in ALLOWED_LOG_LEVELS:
         allowed = ", ".join(LOG_LEVEL_NAMES)
@@ -267,37 +278,46 @@ def configure_logging(
     first_party = logging.getLogger(FIRST_PARTY_LOGGER_NAME)
     previous_root_level = root.level
     previous_first_party_level = first_party.level
-    if installed_log_handler() is not None:
+
+    with _logging_lock:
+        if installed_log_handler() is not None:
+            # FIX: Overlapping create_app() lifespans share one handler. Take a
+            # lease so the first shutdown cannot strip logging from a still-live
+            # second app.
+            _logging_refcount += 1
+            return LoggingConfiguration(
+                installed=False,
+                handler=None,
+                previous_root_level=previous_root_level,
+                previous_first_party_level=previous_first_party_level,
+            )
+
+        handler = logging.StreamHandler(sys.stderr if stream is None else stream)
+        handler.set_name(UMS_LOG_HANDLER_NAME)
+        handler.setFormatter(build_log_formatter())
+
+        logging.basicConfig(handlers=[handler], level=root_level)
+        if handler not in root.handlers:
+            # basicConfig no-opped because the root logger already owns a handler
+            # (pytest, or an operator-supplied --log-config). Add ours alongside
+            # rather than displacing theirs, and apply the level basicConfig
+            # skipped -- without this the handler is installed but the root floor
+            # is whatever the embedding process happened to leave behind.
+            root.addHandler(handler)
+            root.setLevel(root_level)
+        # Unconditional, and after the basicConfig branch: basicConfig never
+        # touches a non-root logger, so this is the only place the application
+        # level is applied on either path.
+        first_party.setLevel(numeric_level)
+        _logging_refcount = 1
+        _logging_previous_root_level = previous_root_level
+        _logging_previous_first_party_level = previous_first_party_level
         return LoggingConfiguration(
-            installed=False,
-            handler=None,
+            installed=True,
+            handler=handler,
             previous_root_level=previous_root_level,
             previous_first_party_level=previous_first_party_level,
         )
-
-    handler = logging.StreamHandler(sys.stderr if stream is None else stream)
-    handler.set_name(UMS_LOG_HANDLER_NAME)
-    handler.setFormatter(build_log_formatter())
-
-    logging.basicConfig(handlers=[handler], level=root_level)
-    if handler not in root.handlers:
-        # basicConfig no-opped because the root logger already owns a handler
-        # (pytest, or an operator-supplied --log-config). Add ours alongside
-        # rather than displacing theirs, and apply the level basicConfig
-        # skipped -- without this the handler is installed but the root floor
-        # is whatever the embedding process happened to leave behind.
-        root.addHandler(handler)
-        root.setLevel(root_level)
-    # Unconditional, and after the basicConfig branch: basicConfig never
-    # touches a non-root logger, so this is the only place the application
-    # level is applied on either path.
-    first_party.setLevel(numeric_level)
-    return LoggingConfiguration(
-        installed=True,
-        handler=handler,
-        previous_root_level=previous_root_level,
-        previous_first_party_level=previous_first_party_level,
-    )
 
 
 # ============================================================================
@@ -309,9 +329,11 @@ def configure_logging(
 #   startup without releasing it on shutdown would make the factory leave a
 #   permanent global side effect behind and make test behaviour depend on
 #   which app was constructed first. Release is symmetric with the scheduler
-#   and executor teardown already in the lifespan. In production, shutdown is
-#   immediately followed by process exit, and it runs AFTER the workers are
-#   closed, so no real shutdown line loses its handler.
+#   and executor teardown already in the lifespan. Overlapping lifespans share
+#   one handler via reference counting so the first shutdown cannot silence a
+#   still-active second app. In production, shutdown is immediately followed by
+#   process exit, and it runs AFTER the workers are closed, so no real shutdown
+#   line loses its handler.
 # Blast Radius: Root logger handlers + level, and the `ums_smart_revenue`
 #   logger's level. No authorization, finance, audit, or export behavior.
 # Connections:
@@ -319,17 +341,39 @@ def configure_logging(
 #     outer finally, after scheduler.close() and executor.close().
 # ============================================================================
 def restore_logging(configuration: LoggingConfiguration) -> None:
-    """Remove the installed handler and restore both previous levels."""
-    if not configuration.installed or configuration.handler is None:
-        return
-    root = logging.getLogger()
-    root.removeHandler(configuration.handler)
-    configuration.handler.close()
-    root.setLevel(configuration.previous_root_level)
-    # FIX: configure_logging now also writes the first-party logger's level,
-    # so releasing only the root level would leave the factory holding
-    # process-global state -- the exact leak restore_logging exists to avoid.
-    logging.getLogger(FIRST_PARTY_LOGGER_NAME).setLevel(configuration.previous_first_party_level)
+    """Release one logging lease; remove the handler when the last lease ends."""
+    global _logging_refcount, _logging_previous_root_level, _logging_previous_first_party_level
+
+    with _logging_lock:
+        if _logging_refcount <= 0:
+            return
+        _logging_refcount -= 1
+        if _logging_refcount > 0:
+            return
+
+        handler = configuration.handler if configuration.installed else installed_log_handler()
+        if handler is None:
+            return
+        root = logging.getLogger()
+        root.removeHandler(handler)
+        handler.close()
+        previous_root = (
+            _logging_previous_root_level
+            if _logging_previous_root_level is not None
+            else configuration.previous_root_level
+        )
+        previous_first_party = (
+            _logging_previous_first_party_level
+            if _logging_previous_first_party_level is not None
+            else configuration.previous_first_party_level
+        )
+        root.setLevel(previous_root)
+        # FIX: configure_logging now also writes the first-party logger's level,
+        # so releasing only the root level would leave the factory holding
+        # process-global state -- the exact leak restore_logging exists to avoid.
+        logging.getLogger(FIRST_PARTY_LOGGER_NAME).setLevel(previous_first_party)
+        _logging_previous_root_level = None
+        _logging_previous_first_party_level = None
 
 
 def installed_log_handler() -> logging.Handler | None:

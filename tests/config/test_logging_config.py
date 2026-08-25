@@ -787,7 +787,7 @@ def test_restore_logging_puts_both_levels_back_where_it_found_them(
 
 
 def test_restore_logging_of_a_noop_configuration_keeps_the_install():
-    """Only the call that installed the handler may remove it."""
+    """Only the final lease release may remove the shared handler."""
     with production_shaped_root():
         first = configure_logging(level="INFO", stream=io.StringIO())
         second = configure_logging(level="INFO", stream=io.StringIO())
@@ -796,6 +796,19 @@ def test_restore_logging_of_a_noop_configuration_keeps_the_install():
         assert installed_log_handler() is not None
 
         restore_logging(first)
+        assert installed_log_handler() is None
+
+
+def test_overlapping_logging_leases_survive_first_shutdown():
+    """First app shutdown must not silence a still-active second lifespan."""
+    with production_shaped_root():
+        first = configure_logging(level="INFO", stream=io.StringIO())
+        second = configure_logging(level="INFO", stream=io.StringIO())
+
+        restore_logging(first)
+        assert installed_log_handler() is not None
+
+        restore_logging(second)
         assert installed_log_handler() is None
 
 
