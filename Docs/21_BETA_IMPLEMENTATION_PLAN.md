@@ -79,6 +79,7 @@ Three things are worth saying plainly before the table:
 | **P1** | [Runbook + rehearsal](#p1--runbook--rehearsal) | It survives a reboot | **4–6** |
 | | **Beta total** | | **38–55** |
 | **P2** | [After the beta runs](#p2--after-the-beta-runs) | Live connectors, polish | 25–40 |
+| **P2.D** | [Daily live sync + API quota](#p2d--the-daily-live-sync-and-api-quota-coverage) | The sync runs itself, once a day | **15–25** |
 | **P3** | [Explicitly not doing](#p3--explicitly-not-doing) | — | — |
 
 ---
@@ -660,6 +661,225 @@ after the beta proves the rest works.
 | **Reject the `.env.example` placeholder service-actor id in the backend** | 1–2h | `build_connector_service_principal` should refuse `00000000-…-bb` explicitly alongside its `None` check. Compose cannot express this (interpolation has no pattern matching), and an `.env.example`-only fix leaves `docker run --env-file`, bare uvicorn, and future templates exposed. Landing it makes the compose pass-through safe to restore. |
 | **Correct `Docs/19_GOOGLE_CREDENTIAL_SETUP_SMOKE.md:44,226`** | 0.5h | 🔴 Its go-live **checklist** line can be signed off exactly as written while every connector run under compose still refuses, because compose does not forward `UMS_GOOGLE_CONNECTOR_SERVICE_ACTOR_ID`. `README.md` was corrected; that file was outside the compose change's scope and still says the opposite of what happens. |
 | ~~Catch the `ValueError` in `_prune`~~ | — | ✅ **Done in round 3**, structurally rather than as a patch on one call: `_run_stamp` parse-validates and reports unparsable directories instead of dying, `_RunReport` writes `RUNNING` before any work and exactly one terminal record after (plus `INTERRUPTED` from a `finally`), and `main` gained a last-resort handler. The audit for the same shape found three more instances, including an `OSError` prune path where exit 7 also left a stale green. |
+
+---
+
+## P2.D — The daily live sync, and API quota coverage
+
+**Requested by the operator: "cover API rate request … once per day", with the exact clock
+time to be supplied.** Scoped against the code 2026-08-25. Read the first finding before
+costing anything else — it changes what the item *is*.
+
+> **Nothing in this section blocks the recommended beta**, which is manual-import and never
+> calls Google. It becomes mandatory the day the daily live sync is switched on.
+
+### 🔴 The item is not what it looks like: there is no daily revenue sync to schedule
+
+`GroupSyncScheduler` (`connectors/runs/scheduler.py:129`) submits **CMS group-sync jobs
+only**. It never touches revenue ingest. Revenue reaches Google exclusively through
+`run_one` (`orchestrator.py:408`), driven by `POST /connectors/jobs` or
+`scripts/run_google_connector.py` — and **nothing schedules either**.
+
+So "add a time of day to the scheduler" would ship a feature nobody asked for and leave
+revenue exactly as manual as it is today. The real item is *build the missing scheduled
+revenue caller*.
+
+### 🔴 The one that would bite on night two: the run refuses itself after ~1 hour
+
+The live-run admission gate refuses any run whose stored `token_expiry_at` has passed.
+Tonight's successful run stamps `token_expiry_at ≈ now + 1h`. Tomorrow night's run reads
+that as expired and is refused at preflight — **422 on the route, exit 2 on the CLI, and no
+`connector_runs` row on either path.**
+
+**The first scheduled night works and every night after it fails**, leaving no run row to
+explain why. This is the single most important finding in the section precisely because it
+passes the first time you test it. ~1–3h to fix (re-stamp the credential in the wrapper,
+with a test that pushes `token_expiry_at` into the past and demands the run still succeed).
+An in-process scheduler sidesteps it entirely — `run_one` never calls the route's preflight.
+
+*Derived from code, not executed. The ~1h access-token lifetime is Google's published OAuth
+behaviour, not a repo fact.*
+
+### 🔴 A daily-quota 403 is filed as an authentication error, and the reason is discarded
+
+`http_client.py:57` — `_AUTH_STATUSES = frozenset({401, 403})`. Every 403, **including
+daily-quota exhaustion**, goes to `GoogleApiAuthError` with no retry, and
+`_terminal_response_or_raise` (`:271-285`) never calls `response.json()` — so Google's
+`error.errors[].reason` (`quotaExceeded` / `dailyLimitExceeded` / `rateLimitExceeded`) is
+thrown away before anyone sees it.
+
+**Consequence:** quota exhaustion is indistinguishable from a revoked token. The operator
+sees `54 report(s) failed: youtube_analytics:GoogleApiAuthError`, with no status and no
+reason, truncated at 500 chars so roughly 12 of the 54 identical entries survive. One says
+"wait until the quota resets"; the other says "re-authorize". Nothing on screen separates
+them.
+
+The fix is unusually cheap because the plumbing already exists: `_safe_failure_detail`
+(`orchestrator.py:3069-3071`) already surfaces a `.reason` attribute, but
+`_GoogleApiHttpError.__init__` never sets one, so it is always `None`. A new
+`GoogleApiQuotaError` carrying `.reason` lands the real cause in
+`connector_runs.error_summary` with **no orchestrator change**. **3–5h**, and the
+reject→accept matrix must cover 401, 403-quota, 403-non-quota, and 403-with-unparseable-body
+— `tests/connectors/google/test_http_client.py:167-181` currently parametrizes `[401, 403]`
+together and asserts exactly the behaviour being changed.
+
+### What one night actually costs
+
+Because `dimensions=channel` is unsupported for content-owner revenue, there is no bulk
+shape — it is one call per channel:
+
+| Host | Calls per run | Notes |
+| --- | --- | --- |
+| youtubeanalytics (revenue) | **54** | one per channel; `orchestrator.py:3404` loops, `:3419` fetches |
+| youtubeanalytics (groups) | 1 + G | G = channel-type CMS groups |
+| youtubereporting | 2 + D | D = distinct report periods; one download each |
+| adsense | 1 | one `reports:generate` |
+| oauth2 | 4 | one forced refresh per `run_one` |
+
+**Multipliers, all confirmed in code:** a 12-month backfill is 12 jobs and **648** Analytics
+calls; a fully-degraded run can issue **216+ status attempts** because the retry budgets are
+per-request with **no run-wide cap**; each report type added to `SUPPORTED_REPORT_TYPES`
+adds its own downloads. There is **no inter-request pacing** — the only `time.sleep` calls
+in `connectors/` are the four retry backoffs, and `connector_job_max_workers` defaults to 1,
+so the 54 calls go back-to-back on one thread.
+
+**And a dry run costs full price.** Preview a month, then apply it, and you have spent the
+day's quota twice.
+
+> ⚠️ **No Google quota figure appears anywhere in this repo.** A grep of `backend/` and
+> `Docs/` for `quota` returns two prose sentences with no numbers. Any budget must be taken
+> from Google's published documentation and confirmed — do not let a number invented here
+> become load-bearing.
+
+### Nothing counts API calls
+
+`connector_runs` records reports and rows, never requests
+(`db/connector_models.py:53-79`; `CONNECTOR_RUN_COUNT_KEYS` at `repository.py:21-30` is a
+fixed 7-key set about reports and rows). A repo-wide search for
+`quota|api_calls|call_count|budget|request_count` returns only complexity- and retry-budget
+comments.
+
+**The per-run call counter is the prerequisite for everything else here** — it is what turns
+"the sync failed" into "the sync spent its budget". **4–6h.** Once
+`counts_json["api_requests"]` exists, a pre-flight budget check needs no new table: sum that
+key over runs since the last quota reset, compare against a new
+`UMS_GOOGLE_DAILY_REQUEST_BUDGET` parsed by the existing `_load_int`, and refuse **before**
+`start_run` so no half-created `RUNNING` row is left behind. **+3–5h.**
+
+### Two failure shapes the runbook must state
+
+- **One failed channel out of 54 means _zero_ revenue facts that night, not 53/54.** A
+  PARTIAL run skips normalization entirely. Source rows land; facts do not. The dashboard
+  shows nothing new and the Connectors view shows yellow. The honest beta answer is "the
+  next SUCCEEDED run for that month rewrites the facts" (`orchestrator.py:522-523`) — which
+  costs nothing to accept and is **mandatory to write down**, because otherwise a PARTIAL
+  night reads as "it ran".
+- **No resume.** A run that dies at channel 40 of 54 redoes all 54. Real resume is 6–10h and
+  **high risk** — the stale-cleanup keep-set (`orchestrator.py:1719-1720,1766-1773`)
+  preserves historical rows only for channels *not* attempted, so a naive skip either
+  deletes the skipped channel's rows or permanently exempts it from cleanup. Any resume
+  design needs a reject→accept matrix over `_flush_deferred_stale_cleanup_plans` before a
+  line is written.
+
+### Recommendation: Windows Task Scheduler + a thin CLI, mirroring P0.1
+
+Four options were costed. The recommendation is **(c)**:
+
+| Option | Cost | Verdict |
+| --- | --- | --- |
+| (a) time-of-day inside `GroupSyncScheduler` | 3–5h | **Skip** — schedules group sync, not revenue |
+| (b) catch-up-on-start, in-process | +2–4h | Needs a durable marker the scheduler does not have; contradicts its documented no-thunder-on-restart rule |
+| **(c) Task Scheduler + `scripts/run_daily_sync.py`** | **6–10h** | **Recommended** |
+| (d) leave it manual | 0h | Honest fallback |
+
+Why (c): you learn **one** mechanism, because P0.1's backup is already scheduled this way.
+Both jobs then report through `Get-ScheduledTaskInfo` (`LastRunTime`, `LastTaskResult`), and
+Windows' `-StartWhenAvailable` gives **catch-up after a missed trigger for free** — which is
+the behaviour that actually survives a PC restarted daily.
+
+> **Confirmed, and stronger than the earlier pass said:** with `interval_seconds=86400` the
+> in-process scheduler does not merely become unreliable on this PC — it is *structurally
+> unreachable*. The interval runs from process start and `scheduler.py` "writes NOTHING
+> itself", so there is no last-tick marker to resume from. A box that is up 9 hours a day
+> never reaches a 24-hour interval, ever.
+
+The wrapper must inherit P0.1's bookkeeping exactly: `last-run.json` written `RUNNING`
+before any work, one terminal record on the way out, an `INTERRUPTED` record from a
+`finally`, and an exit code that cannot be `0` when the record did not land. **Under Task
+Scheduler stderr goes nowhere** (`Docs/22:373`) — that lesson took five rounds to learn on
+the backup; do not re-learn it here.
+
+### Timezone: put the time in the trigger, not in the code
+
+**Recommendation: the run time lives in the Task Scheduler trigger only** (`-Daily -At
+HH:MM`, Windows local = Africa/Cairo), written into the runbook beside the backup's 02:00
+with the timezone stated explicitly — which `Docs/22:796` does not currently do. **Add no
+timezone setting to the codebase.**
+
+> ⚠️ If an in-process scheduler is built instead, the setting **must** be named UTC
+> (`UMS_..._RUN_AT_UTC=HH:MM`). The container has no TZ, so an operator who sets `03:00`
+> expecting Cairo gets 03:00 UTC — **05:00 Cairo** — silently. A DST shift on an unlabelled
+> time is the classic silent failure: the run keeps working and moves an hour.
+
+Also note Google's daily quotas reset on **US/Pacific** midnight, which is a different
+boundary again from both Cairo and UTC — so the budget window and the run time are not the
+same clock. **Confirm the reset boundary against Google's documentation before implementing
+the budget check.**
+
+### Hard prerequisite, inherited from the P0 work
+
+**Compose deliberately does not forward `UMS_GOOGLE_CONNECTOR_SERVICE_ACTOR_ID`** — the P0
+band removed it because `.env.example` ships a public placeholder UUID that satisfied a
+fail-closed check. Until the backend rejects that placeholder (a P2 row above), the operator
+must supply a real provisioned actor via an untracked `docker-compose.override.yml`
+(recipe at `docker-compose.yml:143-152`).
+
+This blocks **every** option, including the manual one: `orchestrator.py:894` calls
+`_build_connector_service_principal_or_raise` *before* `start_run`, so without it there is no
+run row at all, on any path. **0.25–0.5h.**
+
+### Minimum set to switch on a daily live sync
+
+| # | Item | Hours |
+| --- | --- | --- |
+| 1 | `docker-compose.override.yml` with a real service-actor UUID | 0.25–0.5 |
+| 2 | Stale `token_expiry_at` escape — *without this it works once and never again* | 1–3 |
+| 3 | Per-run API call counter | 4–6 |
+| 4 | `GoogleApiQuotaError` — separate quota from auth, keep the reason | 3–5 |
+| 5 | `scripts/run_daily_sync.py` + one Task Scheduler task + runbook | 6–10 |
+| 6 | Runbook lines: PARTIAL = zero facts; dry runs cost quota; timezone stated | 1 |
+| | **Total** | **15–25h** |
+
+Pre-flight budget enforcement (+3–5h) and resume (+6–10h) come after, and both depend on
+item 3.
+
+### Related: the *inbound* rate limit is dead, and so is Redis
+
+Blocker M4 said compose advertises three protections that do not exist. **Confirmed for rate
+limiting, and stronger than published:** `UMS_RATE_LIMIT_PER_MINUTE` appears in exactly one
+place in the whole tracked repo — `docker-compose.yml:99` — read by no settings loader, no
+middleware, no library and no test.
+
+**Redis is equally dead** — `REDIS_URL` at `docker-compose.yml:101` only, and **zero**
+`import redis` anywhere — yet it runs as a service with a volume, a healthcheck, and a hard
+`service_healthy` gate that both `app` and `app-dev` block on. The P0 band just gave that
+container log rotation. Worth deciding whether it should run at all.
+
+For a single-operator localhost beta, the missing inbound limiter is defensible: every port
+binds `127.0.0.1`. But note M4's mitigation sentence is wrong — the `BoundedSemaphore(8)` it
+cites is installed only under `UMS_AUTHZ_SOURCE=database`, and the beta runs `headers`, so
+**in the configured beta mode there is no inbound concurrency control at all.**
+
+A double-click on "sync" *is* genuinely covered, by three layers (dedup, in-flight skip, and
+advisory locks) — **but the CLI path bypasses all three.** Two CLI runs produce correct data
+and two `connector_runs` rows for the same scope. Relevant because option (c) *is* a CLI
+path: register the Task Scheduler task with `IgnoreNew` so Windows will not start a second
+copy.
+
+**Two stale citations to fold into the next `Docs/20` edit:** `Docs/20:409` cites
+`docker-compose.yml:89-92`, now `:98`/`:99`/`:101` after the P0 commit; and
+`FORWARDED_ALLOW_IPS` (`:100`) sits in the same block but is **not** one of the dead three —
+it is a uvicorn variable and the Dockerfile passes `--proxy-headers`.
 
 ---
 
