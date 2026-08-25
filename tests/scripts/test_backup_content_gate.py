@@ -51,6 +51,20 @@ The "the CLI" section at the end of this file runs ``backup.main`` end to end
 against a faked container and asserts the PROCESS outcome.
 """
 
+# ============================================================================
+# Purpose: Regression suite for backup content-gate, watermark, retention, and
+#   last-run status contracts — every defect here was found against a live
+#   database and is reproduced without one from pure inputs + CLI drives.
+# Database/ORM: None required for the pure-function cases; CLI tests exercise
+#   scripts/backup_database.py against temp directories / fakes.
+# Standards: Fail-closed gates; no suppressions; fixtures derived from migration
+#   seed reality rather than assumed literals.
+# Blast Radius: Disaster-recovery operator CLIs only. No authz or finance math.
+# Connections:
+#   - File: scripts/backup_database.py -> content gate, prune, watermark, status.
+#   - File: scripts/restore_database.py -> consumers of gated backup runs.
+# ============================================================================
+
 from __future__ import annotations
 
 import ast

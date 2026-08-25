@@ -220,6 +220,7 @@ def test_bootstrap_refuses_a_disabled_existing_account(tmp_path, capsys):
 
     assert exit_code == 2
     err = capsys.readouterr().err
+    assert "UserAccountValidationError" in err
     assert "status=disabled" in err
     assert "Nothing was changed" in err
     final_users = _users(database_url)
@@ -873,6 +874,30 @@ def test_argparse_error_redacts_misspelled_database_url(capsys):
     err = capsys.readouterr().err
     assert "s3cret-pass" not in err
     assert secret not in err
+
+
+def test_argparse_redaction_masks_split_password_fragment():
+    """Whitespace-split URL remnants must not echo password fragments.
+
+    Argparse splits error text on spaces, so a broken database URL can leak as
+    ``s3cret-pass@host:5432/db`` with no ``://``. Fail-closed masking must
+    catch that host-ish ``userinfo@host`` shape.
+    """
+    module = _load_script()
+    secret_fragment = "s3cret-pass@db.internal.example:5432/ums"
+    message = (
+        "unrecognized arguments: --databse-url postgresql+psycopg://user: "
+        f"{secret_fragment}"
+    )
+
+    redacted = module._redact_argparse_message(message)
+
+    assert "s3cret-pass" not in redacted
+    assert secret_fragment not in redacted
+    assert module._UNPRINTABLE_URL in redacted
+    assert "password=s3cret" not in module._redact_argparse_message(
+        "error: bad option password=s3cret"
+    )
 
 
 def test_redaction_masks_unlisted_query_values_and_keeps_listed_ones():

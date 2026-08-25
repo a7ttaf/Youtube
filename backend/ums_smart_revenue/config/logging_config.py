@@ -281,13 +281,29 @@ def configure_logging(
     # API call. See THIRD_PARTY_LOG_LEVEL for the measurement.
     root_level = max(numeric_level, THIRD_PARTY_LOG_LEVEL)
 
-    root = logging.getLogger()
-    first_party = logging.getLogger(FIRST_PARTY_LOGGER_NAME)
-    previous_root_level = root.level
-    previous_first_party_level = first_party.level
-
     with _logging_lock:
-        if installed_log_handler() is not None:
+        # FIX: Snapshot previous levels inside the same critical section that
+        # mutates them. Reading outside the lock raced with a concurrent
+        # restore_logging that put the originals back after this call had
+        # already captured the still-configured values as "previous".
+        root = logging.getLogger()
+        first_party = logging.getLogger(FIRST_PARTY_LOGGER_NAME)
+        previous_root_level = root.level
+        previous_first_party_level = first_party.level
+
+        existing_handler = installed_log_handler()
+        if existing_handler is not None:
+            # FIX: importlib.reload clears module globals (refcount=0) while the
+            # named handler can still sit on the root logger. Re-adopt that
+            # orphaned install with one synthetic pre-reload lease so a new
+            # configure/restore pair cannot strip logging from under an older
+            # lifespan that still owns the handler.
+            if _logging_state.refcount <= 0:
+                _logging_state.refcount = 1
+                _logging_state.previous_root_level = previous_root_level
+                _logging_state.previous_first_party_level = previous_first_party_level
+                root.setLevel(root_level)
+                first_party.setLevel(numeric_level)
             # FIX: Overlapping create_app() lifespans share one handler. Take a
             # lease so the first shutdown cannot strip logging from a still-live
             # second app.

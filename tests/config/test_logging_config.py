@@ -38,6 +38,7 @@ import io
 import logging
 import re
 import sys
+import threading
 import time
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -147,6 +148,7 @@ def isolated_logging_state() -> Iterator[None]:
     try:
         yield
     finally:
+        logging_config._logging_state = logging_config._LoggingLeaseState()
         root.setLevel(saved_root_level)
         # Only ever REMOVE handlers a test introduced. Re-adding snapshot
         # handlers would be wrong: pytest builds a fresh LogCaptureHandler per
@@ -849,6 +851,102 @@ def test_overlapping_logging_leases_survive_first_shutdown():
         assert installed_log_handler() is not None
 
         restore_logging(second)
+        assert installed_log_handler() is None
+
+
+def test_configure_snapshots_levels_under_lock_against_concurrent_restore(
+    monkeypatch,
+):
+    """Previous levels must be read inside the lock, not before waiting on it.
+
+    Pause the final restore after it has acquired ``_logging_lock`` but before
+    it restores levels. A concurrent configure that snapshots outside the lock
+    would capture still-configured levels as "previous"; after restore puts the
+    originals back, that stale snapshot would permanently lose ERROR/CRITICAL.
+    """
+    with production_shaped_root() as root:
+        root.setLevel(logging.ERROR)
+        first_party = logging.getLogger(FIRST_PARTY_LOGGER_NAME)
+        first_party.setLevel(logging.CRITICAL)
+
+        configuration = configure_logging(level="INFO", stream=io.StringIO())
+        assert root.level == THIRD_PARTY_LOG_LEVEL
+
+        restore_entered = threading.Event()
+        release_restore = threading.Event()
+        result: dict[str, object] = {}
+
+        real_remove_handler = logging.Logger.removeHandler
+
+        def gated_remove_handler(self: logging.Logger, handler: logging.Handler) -> None:
+            """gated remove handler."""
+            if self is logging.getLogger() and not restore_entered.is_set():
+                restore_entered.set()
+                assert release_restore.wait(timeout=5)
+            real_remove_handler(self, handler)
+
+        monkeypatch.setattr(logging.Logger, "removeHandler", gated_remove_handler)
+
+        def run_restore() -> None:
+            """run restore."""
+            restore_logging(configuration)
+
+        def run_configure() -> None:
+            """run configure."""
+            assert restore_entered.wait(timeout=5)
+            # Give the buggy path a chance to snapshot outside the lock while
+            # restore still holds it and levels are still the configured ones.
+            time.sleep(0.05)
+            result["cfg"] = configure_logging(level="DEBUG", stream=io.StringIO())
+
+        restore_thread = threading.Thread(target=run_restore)
+        configure_thread = threading.Thread(target=run_configure)
+        restore_thread.start()
+        assert restore_entered.wait(timeout=5)
+        configure_thread.start()
+        time.sleep(0.1)
+        release_restore.set()
+        restore_thread.join(timeout=5)
+        configure_thread.join(timeout=5)
+
+        cfg = result["cfg"]
+        assert isinstance(cfg, logging_config.LoggingConfiguration)
+        assert cfg.previous_root_level == logging.ERROR
+        assert cfg.previous_first_party_level == logging.CRITICAL
+        restore_logging(cfg)
+        assert installed_log_handler() is None
+        assert root.level == logging.ERROR
+        assert first_party.level == logging.CRITICAL
+
+
+def test_reload_readopts_orphaned_handler_without_silencing_prior_lease():
+    """After module globals reset, a new configure/restore must not strip a prior install.
+
+    ``importlib.reload`` clears ``_logging_state`` while the named UMS handler can
+    still sit on the root logger. Re-adopt that orphan with a synthetic lease so
+    a post-reload configure/restore pair cannot silence the pre-reload owner.
+    """
+    with production_shaped_root():
+        first = configure_logging(level="INFO", stream=io.StringIO())
+        handler_before = installed_log_handler()
+        assert handler_before is not None
+        assert logging_config._logging_state.refcount == 1
+
+        # Simulate importlib.reload clearing module globals only.
+        logging_config._logging_state = logging_config._LoggingLeaseState()
+        assert logging_config._logging_state.refcount == 0
+        assert installed_log_handler() is handler_before
+
+        second = configure_logging(level="INFO", stream=io.StringIO())
+        assert second.installed is False
+        restore_logging(second)
+
+        # Synthetic pre-reload lease keeps the orphaned handler alive.
+        assert installed_log_handler() is handler_before
+        assert logging_config._logging_state.refcount == 1
+
+        # Drain the synthetic lease the way a pre-reload lifespan finally would.
+        restore_logging(first)
         assert installed_log_handler() is None
 
 

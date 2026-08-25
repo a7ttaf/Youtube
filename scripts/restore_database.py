@@ -484,6 +484,19 @@ def _create_throwaway(manifest: dict[str, object], *, timeout: int) -> str:
     return name
 
 
+# ============================================================================
+# Purpose: Remove the disposable rehearsal container started by
+#          ``_create_throwaway``. Returns success/failure rather than raising
+#          so a finally-block cleanup cannot mask the restore exit code.
+# Database/ORM: Destroys one empty rehearsal cluster only.
+# Standards: ``docker rm --force --volumes``; TimeoutExpired is treated as a
+#            failed destroy (False), never allowed to escape cleanup.
+# Blast Radius: Destroys only the named throwaway container. Touches no
+#               existing container, volume, or compose project.
+# Connections:
+#   - File: scripts/restore_database.py -> ``_create_throwaway`` / main finally.
+#   - File: scripts/backup_database.py -> source image recorded in manifest.
+# ============================================================================
 def _destroy_throwaway(name: str, *, timeout: int) -> bool:
     """Remove the rehearsal container. Returns True only when docker rm succeeded."""
     try:

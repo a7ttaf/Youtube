@@ -705,3 +705,69 @@ def test_close_audits_queued_jobs_cancelled_by_shutdown(tmp_path) -> None:
     assert not any(a.details.get("report_month") == "2026-03" for a in shutdown_audits)
     # The registry is cleared after shutdown.
     assert executor._registry == {}
+
+
+def test_close_returns_within_timeout_when_worker_hangs(tmp_path, monkeypatch) -> None:
+    """close() must not block forever when a worker never finishes."""
+    import threading
+    import time
+
+    import ums_smart_revenue.connectors.runs.executor as executor_module
+
+    monkeypatch.setattr(executor_module, "CLOSE_DRAIN_TIMEOUT_SECONDS", 0.2)
+
+    factory = _factory(tmp_path)
+    executor = ConnectorJobExecutor(session_factory=factory, max_workers=1, stale_running_hours=6)
+    started = threading.Event()
+    release = threading.Event()
+
+    def _hang_forever(session, **kwargs):
+        """hang forever."""
+        started.set()
+        release.wait(timeout=30)
+        return _outcome()
+
+    try:
+        with patch("ums_smart_revenue.connectors.runs.executor.run_one", _hang_forever):
+            executor.submit(
+                tenant_id=TENANT,
+                connector_key="youtube_reporting",
+                account_id="acct-hang",
+                report_month="2026-03",
+                dry_run=False,
+                triggered_by_user_id=None,
+                actor_identity=ACTOR,
+            )
+            assert started.wait(timeout=5)
+            began = time.monotonic()
+            executor.close()
+            elapsed = time.monotonic() - began
+        assert elapsed < 2.0, f"close() hung for {elapsed:.2f}s"
+    finally:
+        release.set()
+        executor.close()
+
+
+def test_close_logs_worker_exception_from_done_futures(tmp_path, caplog) -> None:
+    """Worker exceptions observed during close drain must be logged, not swallowed."""
+    import logging
+    from concurrent.futures import Future
+
+    factory = _factory(tmp_path)
+    executor = ConnectorJobExecutor(session_factory=factory, max_workers=1, stale_running_hours=6)
+    boom = Future()
+    boom.set_exception(RuntimeError("drain boom"))
+
+    with (
+        patch.object(executor, "_audit_pending_on_shutdown", return_value=[boom]),
+        caplog.at_level(logging.ERROR),
+    ):
+        executor.close()
+
+    matching = [
+        record
+        for record in caplog.records
+        if "Connector job worker raised during executor close drain" in record.getMessage()
+    ]
+    assert matching, caplog.text
+    assert any(record.exc_info is not None for record in matching)

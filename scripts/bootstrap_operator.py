@@ -70,9 +70,25 @@ no bulk mapping endpoint and the channel-import CSV cannot carry the mapping, so
 a real roster needs a scripted loop. The summary printed at the end says so.
 """
 
+# ============================================================================
+# Purpose: Operator CLI that creates the first UMS identity (and optional org
+#   skeleton) after alembic upgrade on a fresh deployment — P0.8/P0.9.
+# Database/ORM: Writes ``users``, ``org_units``, ``access_scopes``, and
+#   ``user_role_assignments`` via repositories / ORM under TENANT_CTX + RLS.
+# Standards: Idempotent; fail-closed on disabled accounts, org drift, and
+#   inactive units; never echo database credentials (summary rebuild + argparse
+#   redaction); typed domain errors mapped to exit 2.
+# Blast Radius: Authorization (identity + optional global role) and org registry.
+# Connections:
+#   - File: Docs/21_BETA_IMPLEMENTATION_PLAN.md -> P0.8 / P0.9.
+#   - File: Docs/20_DEPLOYMENT_READINESS_AUDIT.md -> H2 / H3.
+#   - File: backend/ums_smart_revenue/auth/users.py -> create_user / lookup.
+# ============================================================================
+
 from __future__ import annotations
 
 import argparse
+import re
 import sys
 from dataclasses import dataclass
 from functools import lru_cache
@@ -122,6 +138,20 @@ _REDACTED = "REDACTED"
 # confidence. Withholding it is the fail-closed choice: a URL this function
 # cannot take apart is exactly the one whose password could be anywhere in it.
 _UNPRINTABLE_URL = "<withheld: not a URL this script can safely redact>"
+
+# Argparse splits on whitespace, so a mistyped or space-broken database URL can
+# leak as a password fragment (`s3cret@host:5432/db`) with no `://`. Fail-closed:
+# any token that looks credential-bearing is masked, not echoed.
+_ARGPARSE_PASSWORD_PARAM_RE = re.compile(r"(?i)(?:^|[?&#;])password=")
+_ARGPARSE_SCHEME_PREFIXES = (
+    "postgresql",
+    "postgres://",
+    "postgres:",
+    "mysql://",
+    "mysql:",
+    "mariadb://",
+    "mariadb:",
+)
 
 
 @dataclass(frozen=True)
@@ -179,6 +209,7 @@ def _load_dependencies() -> dict[str, Any]:
         SqlAlchemyUserAccountRepository,
         UserAccountError,
         UserAccountStorageError,
+        UserAccountValidationError,
     )
     from ums_smart_revenue.config.settings import load_app_settings
     from ums_smart_revenue.db.org_models import OrgUnitORM
@@ -208,6 +239,7 @@ def _load_dependencies() -> dict[str, Any]:
         "USER_STATUS_DISABLED": USER_STATUS_DISABLED,
         "UserAccountError": UserAccountError,
         "UserAccountStorageError": UserAccountStorageError,
+        "UserAccountValidationError": UserAccountValidationError,
         "UserRoleAssignmentConflictError": UserRoleAssignmentConflictError,
         "UserRoleAssignmentError": UserRoleAssignmentError,
         "build_session_factory": build_session_factory,
@@ -293,15 +325,54 @@ def _redact_database_url(database_url: str) -> str:
     ).render_as_string(hide_password=False)
 
 
+# ============================================================================
+# Purpose: Keep argparse usage/error text from echoing database credentials.
+#   Stock argparse splits on whitespace and reprints unrecognized argv tokens,
+#   so a mistyped ``--databse-url`` (or a URL broken across spaces) can leak
+#   the password as a bare fragment with no ``://``. These helpers fail-closed:
+#   any token that looks credential-bearing is masked via ``_redact_database_url``
+#   or replaced with ``_UNPRINTABLE_URL`` / ``_REDACTED``.
+# Database/ORM: None. Pure string work; opens no connection.
+# Standards: Fail-closed redaction at the CLI boundary before stderr leave.
+# Blast Radius: Operator stderr only. No authz, finance, or audit behavior.
+# Connections:
+#   - File: scripts/bootstrap_operator.py -> ``_RedactingArgumentParser.error``.
+#   - File: scripts/bootstrap_operator.py -> ``_redact_database_url``.
+# ============================================================================
+def _argparse_token_looks_credential_bearing(token: str) -> bool:
+    """Return True when *token* may carry database credentials."""
+    lowered = token.lower()
+    if "://" in token:
+        return True
+    if lowered.startswith(_ARGPARSE_SCHEME_PREFIXES):
+        return True
+    if _ARGPARSE_PASSWORD_PARAM_RE.search(token) is not None:
+        return True
+    if "password=" in lowered:
+        return True
+    # userinfo@host-ish remnant after argparse split on whitespace
+    if "@" in token:
+        userinfo, _, hostpart = token.partition("@")
+        if userinfo and hostpart and (
+            "." in hostpart or ":" in hostpart or "/" in hostpart or hostpart[0].isalnum()
+        ):
+            return True
+    return False
+
+
 def _redact_argparse_token(token: str) -> str:
     """Mask credential-bearing argv tokens that argparse may echo on error."""
-    if "://" in token or token.lower().startswith(("postgresql", "postgres://", "mysql://")):
+    if not _argparse_token_looks_credential_bearing(token):
+        return token
+    lowered = token.lower()
+    if "://" in token or lowered.startswith(_ARGPARSE_SCHEME_PREFIXES):
         return _redact_database_url(token)
-    return token
+    # Split password / userinfo fragments are not full URLs — withhold entirely.
+    return _UNPRINTABLE_URL
 
 
 def _redact_argparse_message(message: str) -> str:
-    """Redact URL-like tokens from an argparse error message."""
+    """Redact credential-bearing tokens from an argparse error message."""
     return " ".join(_redact_argparse_token(token) for token in message.split())
 
 
@@ -424,7 +495,7 @@ def _ensure_user(
         # operator. Runtime principals fail-closed on disabled status, but this
         # path previously returned the id and could still attach --role.
         if existing.status == deps["USER_STATUS_DISABLED"]:
-            raise ValueError(
+            raise deps["UserAccountValidationError"](
                 f"User {email!r} exists with status=disabled. This script creates "
                 "accounts and never reactivates them — flipping the flag would be "
                 "an unaudited identity write before first login, and it would "
@@ -965,12 +1036,9 @@ def _print_org_summary(org_units: list[_OrgUnitOutcome]) -> None:
 #   REBUILDS it from non-credential components via ``_redact_database_url``, so
 #   no password — userinfo, query parameter or otherwise — reaches the console,
 #   and a URL that cannot be decomposed is withheld instead of guessed at.
-#
-#   That guarantee covers the summary and the handlers here, NOT argparse's own
-#   usage errors: a mistyped flag (``--databse-url``) makes stock argparse echo
-#   the unrecognised argument, credential and all, before main() is entered.
-#   Fixing that means parsing unknown arguments ourselves; it is recorded as an
-#   open item rather than silently implied away by a broader claim here.
+#   Argparse usage errors are covered by ``_RedactingArgumentParser`` /
+#   ``_redact_argparse_message``, which fail-closed on credential-bearing tokens
+#   including whitespace-split password fragments.
 # Blast Radius: Operator surface. The writes it drives touch authorization
 #   (identity, optional role) and the org registry.
 # Connections:

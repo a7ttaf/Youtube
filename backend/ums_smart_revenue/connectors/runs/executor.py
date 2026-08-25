@@ -28,7 +28,7 @@ from __future__ import annotations
 import logging
 import threading
 import weakref
-from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from uuid import UUID
 
@@ -72,6 +72,21 @@ from ums_smart_revenue.tenancy.context import TENANT_CTX
 from ums_smart_revenue.tenancy.models import make_placeholder_tenant
 
 logger = logging.getLogger(__name__)
+
+# ============================================================================
+# Purpose: Bound ConnectorJobExecutor.close() so FastAPI lifespan teardown
+#   cannot hang past Compose's stop_grace_period (default 120s). A stalled
+#   connector worker must not block graceful shutdown forever; 90s leaves
+#   headroom for audit + logging restore before SIGKILL.
+# Database/ORM: None.
+# Standards: concurrent.futures.wait timeout only; no unbounded future.result().
+# Blast Radius: Shutdown durability — timed-out workers may still be running
+#   when the process exits; queued-job shutdown audit already ran before drain.
+# Connections:
+#   - File: docker-compose.yml -> stop_grace_period default 120s.
+#   - File: backend/ums_smart_revenue/app.py -> lifespan calls close().
+# ============================================================================
+CLOSE_DRAIN_TIMEOUT_SECONDS = 90.0
 
 _JobKey = tuple[UUID, str, str, str]
 
@@ -247,27 +262,47 @@ class ConnectorJobExecutor:
 
         Cancel queued futures first (``cancel_futures=True``), audit those
         cancelled jobs immediately as ``job_failed_before_start`` /
-        ``ExecutorShutdown``, then wait for every future that remained
-        non-cancelled after shutdown so a job that transitioned from queued to
-        running between the pre-shutdown snapshot and ``shutdown()`` cannot
-        escape the drain. Auditing before the blocking drain keeps the shutdown
-        audit reachable even if Docker later SIGKILLs the process at
-        ``stop_grace_period``. Running futures complete and deregister
-        themselves; they are never audited as pre-start failures.
-        The weakref finalizer remains as a GC backstop for paths that bypass
-        ``close()``.
+        ``ExecutorShutdown``, then wait (with ``CLOSE_DRAIN_TIMEOUT_SECONDS``)
+        for every future that remained non-cancelled after shutdown so a job
+        that transitioned from queued to running between the pre-shutdown
+        snapshot and ``shutdown()`` cannot escape the drain. Auditing before
+        the bounded drain keeps the shutdown audit reachable even if Docker
+        later SIGKILLs the process at ``stop_grace_period``. On drain timeout,
+        log which futures remain and return without hanging. Running futures
+        that finish in time deregister themselves; they are never audited as
+        pre-start failures. The weakref finalizer remains as a GC backstop for
+        paths that bypass ``close()``.
         """
         # FIX: Drain AFTER shutdown from the post-cancel registry. Snapshotting
         # running futures before shutdown misses a queued future that starts
-        # between the snapshot and cancel_futures.
+        # between the snapshot and cancel_futures. Bound the wait so a stalled
+        # worker cannot block lifespan past Compose stop_grace_period.
         self._executor.shutdown(wait=False, cancel_futures=True)
         running_futures = self._audit_pending_on_shutdown()
-        for future in running_futures:
-            try:
-                future.result()
-            except Exception:
-                # Worker exceptions are owned by the job body / audit path.
-                pass
+        if running_futures:
+            done, not_done = wait(
+                running_futures,
+                timeout=CLOSE_DRAIN_TIMEOUT_SECONDS,
+            )
+            for future in done:
+                try:
+                    future.result()
+                except Exception:
+                    # FIX: Surface worker failures that completed during drain;
+                    # the previous bare ``except Exception: pass`` hid them.
+                    logger.exception(
+                        "Connector job worker raised during executor close drain"
+                    )
+            if not_done:
+                logger.error(
+                    "Executor close drain timed out after %.0fs; "
+                    "%d worker future(s) still running: %s",
+                    CLOSE_DRAIN_TIMEOUT_SECONDS,
+                    len(not_done),
+                    list(not_done),
+                )
+                self._finalizer.detach()
+                return
         self._finalizer.detach()
 
     def has_active_job(
