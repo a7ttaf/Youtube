@@ -178,6 +178,21 @@ LAST_RUN_SIDECAR = "last-run-{stamp}.json"
 STATUS_WRITE_ATTEMPTS = 5
 STATUS_WRITE_BACKOFF_SECONDS = 0.5
 
+LOCK_DIR_NAME = ".backup.lock"
+LOCK_OWNER_NAME = "owner.pid"
+LOCK_STARTED_NAME = "started.at"
+# Belt over the liveness probe's braces: a lock whose recorded start is older
+# than this is reclaimed even if its owner pid reads ALIVE. The probe alone is
+# not enough because Windows recycles pids -- a backup killed by a reboot can
+# leave a pid that some unrelated long-lived process now owns, and no probe can
+# tell that impostor from the real owner. The bound is 6 hours = 3x the
+# -ExecutionTimeLimit (2h) that Docs/22's scheduled task enforces, so no
+# scheduled run can legitimately still hold the lock at that age; the 3x margin
+# covers a slow manual console run (which the scheduler's limit does not kill)
+# and modest clock error, while staying far enough under the 24h nightly
+# cadence that a wedged lock always self-heals before the next scheduled run.
+LOCK_STALE_AFTER = timedelta(hours=6)
+
 MANIFEST_SCHEMA = "ums-backup/1"
 WATERMARK_SCHEMA = "ums-backup-watermark/1"
 
@@ -312,14 +327,7 @@ MAX_NAMED_TABLES = 6
 # password prompt, which reads as "still running" rather than "failed".
 # Shell expands the container's POSTGRES_PASSWORD; assembled without a contiguous
 # `$`+`{...}` token so secret scanners do not treat the expansion as a credential.
-_SH_PREFIX = (
-    'export PGPASSWORD="'
-    + chr(36)
-    + "{"
-    + "POSTGRES_PASSWORD:-"
-    + "}"
-    + '"; '
-)
+_SH_PREFIX = 'export PGPASSWORD="' + chr(36) + "{" + "POSTGRES_PASSWORD:-" + "}" + '"; '
 
 LIST_TABLES_SQL = (
     "SELECT tablename FROM pg_catalog.pg_tables WHERE schemaname = 'public' ORDER BY tablename;"
@@ -876,8 +884,7 @@ def _held_repeatable_read_session(container: str, *, timeout: int):
     """Yield ``(snapshot_id, run_sql)`` for one held REPEATABLE READ transaction."""
     argv = _container_sh(
         container,
-        'exec psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" '
-        "--no-password -v ON_ERROR_STOP=1 -Atq",
+        'exec psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" --no-password -v ON_ERROR_STOP=1 -Atq',
     )
     process = subprocess.Popen(
         argv,
@@ -889,10 +896,9 @@ def _held_repeatable_read_session(container: str, *, timeout: int):
     assert process.stdin is not None
     assert process.stdout is not None
     assert process.stderr is not None
-    deadline = time.monotonic() + max(1, timeout)
-
     def run_sql(sql: str) -> str:
         """run sql."""
+        deadline = time.monotonic() + max(1, timeout)
         if process.poll() is not None:
             err = process.stderr.read()
             raise BackupError(
@@ -1482,61 +1488,224 @@ def _read_watermark_file(out_dir: Path) -> tuple[dict[str, int], str | None]:
 #     and does not guarantee".
 # ============================================================================
 # ============================================================================
-# Purpose: Serialize overlapping backup invocations on one --out-dir so two
-#          processes cannot load the same watermark, both publish, and race the
-#          final watermark write.
-# Database/ORM: None. Host filesystem lock directory only.
-# Standards: Atomic ``mkdir`` (works on Windows without flock). Fail closed on
-#            contention with EXIT_USAGE. Always release in finally.
-# Blast Radius: Backup watermark / identity bookkeeping only.
+# Purpose: Decide whether the pid recorded in ``.backup.lock`` belongs to a live
+#          process, WITHOUT signalling anything. This is what stale-lock
+#          reclaim turns on, so a wrong answer either wedges every nightly run
+#          behind a dead lock or lets two backups race one watermark.
+# Database/ORM: None. Host process table only.
+# Standards: The POSIX branch is the classic ``os.kill(pid, 0)`` existence
+#            probe. On Windows that same call is NOT a probe:
+#            ``signal.CTRL_C_EVENT == 0``, so ``os.kill(pid, 0)`` is
+#            ``GenerateConsoleCtrlEvent(CTRL_C_EVENT, pid)`` -- MEASURED on the
+#            deployment box, it reported freshly-dead pids ALIVE (5/5), so
+#            reclaim never fired and every run after a hard stop exited 2 until
+#            an operator hand-deleted the lock; and it can DELIVER a real
+#            Ctrl+C to the target's console group -- a self-probe killed its
+#            own console, and the test suite Ctrl+C'd itself mid-run. The
+#            win32 branch therefore never touches a signal API: it opens the
+#            pid with ``OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION |
+#            SYNCHRONIZE)`` and asks ``WaitForSingleObject(handle, 0)`` whether
+#            the process is signaled (exited-but-handle-still-open reads DEAD,
+#            running reads ALIVE); ``ERROR_INVALID_PARAMETER`` means the pid is
+#            gone, ``ERROR_ACCESS_DENIED`` means it exists, and the fallback
+#            for a denied SYNCHRONIZE right is ``GetExitCodeProcess`` vs
+#            ``STILL_ACTIVE``. Ambiguity fails closed toward ALIVE -- never
+#            reclaiming is a wedge the LOCK_STALE_AFTER bound recovers from,
+#            while wrongly reclaiming races two backups. ctypes is stdlib, so
+#            tests/test_version_baseline.py's exact dependency set is intact.
+# Blast Radius: Backup lock reclaim only. No signal is ever generated, so a
+#               probe can never terminate the probed process or this one.
+# Connections:
+#   - File: scripts/backup_database.py -> ``_reclaim_stale_backup_lock`` is the
+#     only caller.
+#   - File: Docs/22_BACKUP_RESTORE_AND_REHEARSAL.md -> the 2h
+#     -ExecutionTimeLimit kill is the ordinary producer of abandoned locks.
 # ============================================================================
-def _pid_is_alive(pid: int) -> bool:
-    """Return True when ``pid`` appears to be a live process on this host."""
-    if pid <= 0:
-        return False
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        # Process exists but is not killable by this uid.
+if sys.platform == "win32":
+    import ctypes
+
+    _PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+    _SYNCHRONIZE = 0x00100000
+    _WAIT_OBJECT_0 = 0x00000000
+    _WAIT_TIMEOUT = 0x00000102
+    _STILL_ACTIVE = 259
+    _ERROR_ACCESS_DENIED = 5
+    _ERROR_INVALID_PARAMETER = 87
+
+    _KERNEL32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    _KERNEL32.OpenProcess.restype = ctypes.c_void_p
+    _KERNEL32.OpenProcess.argtypes = (ctypes.c_uint32, ctypes.c_int, ctypes.c_uint32)
+    _KERNEL32.WaitForSingleObject.restype = ctypes.c_uint32
+    _KERNEL32.WaitForSingleObject.argtypes = (ctypes.c_void_p, ctypes.c_uint32)
+    _KERNEL32.GetExitCodeProcess.restype = ctypes.c_int
+    _KERNEL32.GetExitCodeProcess.argtypes = (
+        ctypes.c_void_p,
+        ctypes.POINTER(ctypes.c_ulong),
+    )
+    _KERNEL32.CloseHandle.restype = ctypes.c_int
+    _KERNEL32.CloseHandle.argtypes = (ctypes.c_void_p,)
+
+    def _exit_code_says_alive(handle: int) -> bool:
+        """``GetExitCodeProcess`` fallback: STILL_ACTIVE (259) reads as alive.
+
+        A process that genuinely exited WITH code 259 is misread alive; that
+        rare misread wedges nothing forever because ``LOCK_STALE_AFTER``
+        reclaims on age regardless of this answer.
+        """
+        exit_code = ctypes.c_ulong()
+        ok = _KERNEL32.GetExitCodeProcess(handle, ctypes.byref(exit_code))
+        return bool(ok) and exit_code.value == _STILL_ACTIVE
+
+    def _pid_is_alive(pid: int) -> bool:
+        """Return True when ``pid`` is a live process on this host. Signal-free."""
+        if pid <= 0:
+            return False
+        handle = _KERNEL32.OpenProcess(
+            _PROCESS_QUERY_LIMITED_INFORMATION | _SYNCHRONIZE, False, pid
+        )
+        if not handle:
+            err = ctypes.get_last_error()
+            if err == _ERROR_INVALID_PARAMETER:
+                # No such process (or its last handle is closed): dead.
+                return False
+            if err == _ERROR_ACCESS_DENIED:
+                # Exists but SYNCHRONIZE was refused; retry with query only.
+                handle = _KERNEL32.OpenProcess(_PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+                if not handle:
+                    # Exists and is shielded from us entirely: alive.
+                    return True
+                try:
+                    return _exit_code_says_alive(handle)
+                finally:
+                    _KERNEL32.CloseHandle(handle)
+            # Unknown failure: fail closed toward alive; age reclaim recovers.
+            return True
+        try:
+            state = _KERNEL32.WaitForSingleObject(handle, 0)
+            if state == _WAIT_OBJECT_0:
+                # Signaled: the process has exited, even if handles remain open.
+                return False
+            if state == _WAIT_TIMEOUT:
+                return True
+            # WAIT_FAILED or unexpected: fall back to the exit-code read.
+            return _exit_code_says_alive(handle)
+        finally:
+            _KERNEL32.CloseHandle(handle)
+
+else:
+
+    def _pid_is_alive(pid: int) -> bool:
+        """Return True when ``pid`` is a live process on this host. Signal-free."""
+        if pid <= 0:
+            return False
+        try:
+            # Signal 0 performs the permission/existence check without
+            # delivering anything -- POSIX-only semantics; see the win32 branch.
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            # Process exists but is not killable by this uid.
+            return True
+        except OSError:
+            return False
         return True
-    except OSError:
+
+
+def _lock_started_at(lock_dir: Path) -> datetime | None:
+    """Parse the lock's recorded start instant, or None when absent/corrupt."""
+    try:
+        raw = (lock_dir / LOCK_STARTED_NAME).read_text(encoding="utf-8").strip()
+        stamp = datetime.fromisoformat(raw)
+    except (OSError, ValueError):
+        return None
+    if stamp.tzinfo is None:
+        # A naive stamp cannot be compared with the aware clock; treat as absent.
+        return None
+    return stamp
+
+
+def _lock_age_exceeds_bound(lock_dir: Path) -> bool:
+    """True when the lock's recorded start is older than ``LOCK_STALE_AFTER``.
+
+    A lock without a readable ``started.at`` (hand-made, or written by the
+    pre-timestamp revision) is never stale BY AGE; the liveness probe still
+    governs it. Every lock this script writes carries the stamp, and it is
+    written before ``owner.pid``, so a lock with an owner always has one.
+    """
+    started = _lock_started_at(lock_dir)
+    if started is None:
         return False
-    return True
+    return _utc_now() - started > LOCK_STALE_AFTER
 
 
 def _reclaim_stale_backup_lock(lock_dir: Path) -> bool:
-    """Remove an abandoned ``.backup.lock`` when its owner pid is dead or missing."""
-    owner = lock_dir / "owner.pid"
+    """Remove an abandoned ``.backup.lock``: owner dead, or lock over-age."""
+    owner = lock_dir / LOCK_OWNER_NAME
+    owner_unreadable = False
     try:
         raw = owner.read_text(encoding="utf-8").strip()
-        pid = int(raw)
+        pid: int | None = int(raw)
     except FileNotFoundError:
-        # Pre-owner.pid locks, or crash between mkdir and pid write: reclaim.
+        # FIX: A lock directory without owner.pid may be mid-acquire. Reclaim
+        # only once the age bound proves it stale, never on a fresh mkdir race.
+        if not _lock_age_exceeds_bound(lock_dir):
+            return False
         pid = None
     except (OSError, ValueError):
-        return False
-    if pid is not None and _pid_is_alive(pid):
-        return False
+        pid = None
+        owner_unreadable = True
+    if not _lock_age_exceeds_bound(lock_dir):
+        # FIX: an unreadable owner.pid used to wedge forever; now only until
+        # the age bound. Within the bound it still refuses, fail closed.
+        if owner_unreadable:
+            return False
+        if pid is not None and _pid_is_alive(pid):
+            return False
     try:
-        if owner.exists():
-            owner.unlink()
+        owner.unlink(missing_ok=True)
+        (lock_dir / LOCK_STARTED_NAME).unlink(missing_ok=True)
         lock_dir.rmdir()
     except OSError:
         return False
     return True
 
 
+# ============================================================================
+# Purpose: Serialize overlapping backup invocations on one --out-dir so two
+#          processes cannot load the same watermark, both publish, and race the
+#          final watermark write.
+# Database/ORM: None. Host filesystem lock directory only.
+# Standards: Atomic ``mkdir`` (works on Windows without flock). Fail closed on
+#            contention with EXIT_USAGE. Always release in finally. A release
+#            that fails (AV/OneDrive holding the directory) is a durable
+#            WARNING in backup.log and on stderr, never a silent pass: the run
+#            may still exit 0 -- its backup IS valid -- but tonight's leftover
+#            lock is tomorrow's reclaim, and the operator must be able to see
+#            where it came from. Stale locks are reclaimed when the recorded
+#            owner pid is dead (``_pid_is_alive``) or the recorded start
+#            instant is over ``LOCK_STALE_AFTER`` old.
+# Blast Radius: Backup watermark / identity bookkeeping only.
+# Connections:
+#   - File: scripts/backup_database.py -> ``_execute`` wraps the whole run in
+#     this lock; ``_append_log`` carries the release-failure warning.
+# ============================================================================
 @contextmanager
 def _exclusive_backup_lock(out_dir: Path):
     """Hold an exclusive lock directory under ``out_dir`` for one backup run."""
-    lock_dir = out_dir / ".backup.lock"
-    owner = lock_dir / "owner.pid"
+    lock_dir = out_dir / LOCK_DIR_NAME
+    owner = lock_dir / LOCK_OWNER_NAME
+    started = lock_dir / LOCK_STARTED_NAME
 
     def _acquire() -> None:
-        """acquire."""
+        """Create the lock and record start instant, then owner pid.
+
+        ``started.at`` is written BEFORE ``owner.pid`` so no lock ever holds an
+        owner without an age; a crash between the writes leaves an ownerless
+        lock, which reclaim already treats as abandoned.
+        """
         lock_dir.mkdir()
+        started.write_text(_utc_now().isoformat() + "\n", encoding="utf-8")
         owner.write_text(f"{os.getpid()}\n", encoding="utf-8")
 
     try:
@@ -1564,9 +1733,21 @@ def _exclusive_backup_lock(out_dir: Path):
     finally:
         try:
             owner.unlink(missing_ok=True)
+            started.unlink(missing_ok=True)
             lock_dir.rmdir()
-        except OSError:
-            pass
+        except OSError as release_exc:
+            # FIX: a swallowed release failure meant a transient AV/OneDrive
+            # hold left the lock behind after an exit-0 run -- success tonight,
+            # a reclaim (or, before the probe fix, a wedge) tomorrow, with
+            # nothing anywhere saying why. The run's verdict stands, but the
+            # leftover is now on the durable record.
+            line = (
+                f"{_utc_now().isoformat()} WARNING lock release failed: "
+                f"{release_exc}; {lock_dir} was left behind and the next run "
+                "will have to reclaim it"
+            )
+            _append_log(out_dir, line)
+            print(f"WARNING: {line}", file=sys.stderr)
 
 
 def _restrict_run_dir_mode(path: Path) -> None:
@@ -1960,8 +2141,7 @@ def _append_shrunk_seed_tables(
     seeds_shrunk = [
         name
         for name in SEED_TABLES
-        if watermark.tables.get(name, 0) > 0
-        and 0 < counts.get(name, 0) < watermark.tables[name]
+        if watermark.tables.get(name, 0) > 0 and 0 < counts.get(name, 0) < watermark.tables[name]
     ]
     if not seeds_shrunk:
         return
@@ -2033,9 +2213,7 @@ def _append_directory_floor_failure(
         f"high-water mark ({watermark.source}). The mark is a maximum over "
         "history, not last night's run, so a drain cannot walk it down."
     )
-    rebaseline.update(
-        name for name, mark in watermark.tables.items() if mark > counts.get(name, 0)
-    )
+    rebaseline.update(name for name, mark in watermark.tables.items() if mark > counts.get(name, 0))
 
 
 def _relative_content_failures(
@@ -2528,7 +2706,9 @@ def _prune(out_dir: Path, *, keep_days: int, keep_min: int, now: datetime) -> Pr
     runs = _collect_dated_backup_runs(out_dir, now=now, skipped=skipped, future=future)
     classified = [(run, _run_has_content(run)) for run, _ in runs]
     protected = _retention_protected_names(classified, keep_min=keep_min)
-    cutoff = now - timedelta(days=max(keep_days, 0))
+    if keep_days < 0:
+        raise ValueError(f"--keep-days must be >= 0, got {keep_days}")
+    cutoff = now - timedelta(days=keep_days)
     removed = _delete_expired_dated_runs(runs, protected=protected, cutoff=cutoff)
     _prune_side_run_directories(
         out_dir,
@@ -2558,16 +2738,48 @@ def _prune(out_dir: Path, *, keep_days: int, keep_min: int, now: datetime) -> Pr
 # ============================================================================
 def _write_status_file(path: Path, body: str, *, append: bool) -> None:
     """write status file."""
-    mode = "a" if append else "w"
     for attempt in range(1, STATUS_WRITE_ATTEMPTS + 1):
         try:
-            with path.open(mode, encoding="utf-8") as handle:
-                handle.write(body)
+            if append:
+                with path.open("a", encoding="utf-8") as handle:
+                    handle.write(body)
+            else:
+                _replace_status_file(path, body)
             return
         except OSError:
             if attempt == STATUS_WRITE_ATTEMPTS:
                 raise
             time.sleep(STATUS_WRITE_BACKOFF_SECONDS)
+
+
+def _replace_status_file(path: Path, body: str) -> None:
+    """Replace ``path`` with ``body`` atomically: write aside, then rename over.
+
+    FIX: the whole-file mode used to be ``open("w")`` -- truncate in place -- so
+    a crash or power cut between the truncate and the final byte left
+    last-run.json TORN: neither the previous run's record nor this one's. Now
+    the new record is complete on disk before ``os.replace`` swaps it in, so a
+    reader sees the old record or the new one, never half of either. The
+    probe-open below keeps "the destination refuses writers" (a FileShare.None
+    hold, or a read-only bit) a FAILURE on every platform exactly as before:
+    without it, POSIX rename would silently bypass a read-only canonical file,
+    and the escalation contract in ``_write_last_run`` would never fire there.
+    """
+    if path.exists():
+        with path.open("r+", encoding="utf-8"):
+            pass
+    aside = path.with_name(path.name + ".tmp")
+    try:
+        with aside.open("w", encoding="utf-8") as handle:
+            handle.write(body)
+        os.replace(aside, path)
+    except OSError:
+        try:
+            aside.unlink(missing_ok=True)
+        except OSError:
+            # Best-effort litter cleanup; the original error is the story.
+            pass
+        raise
 
 
 def _append_log(out_dir: Path, line: str) -> bool:
@@ -2823,9 +3035,7 @@ def run_backup(args: argparse.Namespace, out_dir: Path) -> BackupOutcome:
         # Capture the archive first, then roles.sql. Role DDL committed after a
         # pre-dump roles capture but before the snapshot would otherwise leave
         # ACL/owner references in database.dump with no matching CREATE ROLE.
-        counts = _dump_database_and_count(
-            container, staging / DUMP_NAME, timeout=args.timeout
-        )
+        counts = _dump_database_and_count(container, staging / DUMP_NAME, timeout=args.timeout)
         roles = _dump_roles(
             container,
             staging / ROLES_NAME,
@@ -3112,6 +3322,12 @@ def _resolve_out_dir(raw: str | None) -> Path:
 def main(argv: list[str] | None = None) -> int:
     """main."""
     args = _parse_args(argv if argv is not None else sys.argv[1:])
+    if args.keep_days < 0:
+        print(
+            f"BACKUP FAILED (exit {EXIT_USAGE}): --keep-days must be >= 0, got {args.keep_days}",
+            file=sys.stderr,
+        )
+        return EXIT_USAGE
     started = _utc_now()
     try:
         out_dir = _resolve_out_dir(args.out_dir)

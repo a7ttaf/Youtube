@@ -187,8 +187,14 @@ def _enable_sqlite_transactional_savepoints(engine: Engine) -> None:
         finally:
             _release_writer_lock()
 
-    dialect.do_commit = _do_commit_and_release
-    dialect.do_rollback = _do_rollback_and_release
+    # Deliberate instance-level monkeypatch: the writer lock must release AFTER
+    # the DBAPI commit/rollback completes, and SQLAlchemy's connection events
+    # ("commit"/"rollback") fire BEFORE emission -- releasing there would let a
+    # second writer BEGIN between the event and the actual commit, recreating
+    # the overlap this hook exists to prevent. mypy flags method assignment on
+    # instances by design; the assignment is the mechanism here, not a mistake.
+    dialect.do_commit = _do_commit_and_release  # type: ignore[method-assign]
+    dialect.do_rollback = _do_rollback_and_release  # type: ignore[method-assign]
 
 
 # ============================================================================

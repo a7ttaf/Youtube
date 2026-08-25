@@ -1340,17 +1340,184 @@ def test_hyphenated_role_lookalike_does_not_satisfy_required_roles(
     assert "app_tenant" in str(raised.value)
 
 
-def test_stale_backup_lock_is_reclaimed_when_owner_pid_is_dead(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    """A leftover lock from a dead process must not wedge the next run."""
+def _spawn(code: str) -> subprocess.Popen[bytes]:
+    """A real child process running ``code``, in its OWN process group.
+
+    The group flag is Windows-only belt-and-braces: the probe under test never
+    signals anything, but if a regression ever reintroduced the old
+    ``os.kill(pid, 0)`` probe -- which is ``GenerateConsoleCtrlEvent`` on
+    Windows -- the stray Ctrl+C would land in the child's group, not in the
+    console group running this suite. That regression then fails these tests
+    instead of killing the whole pytest run, which is how it was first seen.
+    """
+    return subprocess.Popen(
+        [sys.executable, "-c", code],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
+    )
+
+
+def test_stale_backup_lock_is_reclaimed_when_owner_pid_is_dead(tmp_path: Path) -> None:
+    """A leftover lock from a GENUINELY dead process must not wedge the next run.
+
+    No monkeypatching of ``_pid_is_alive``: the previous revision mocked it to
+    False, and the mocked bit was exactly the broken primitive. On Windows the
+    old ``os.kill(pid, 0)`` probe read freshly-dead pids as ALIVE (measured
+    5/5 on the deployment box), so reclaim never fired and every nightly run
+    after a hard stop exited 2 -- while this test stayed green. A real child
+    is spawned and ``wait()``ed, so the pid below is genuinely dead, and there
+    is deliberately no ``started.at`` in the planted lock: age-based reclaim
+    cannot mask a probe that cannot see death.
+    """
+    child = _spawn("pass")
+    child.wait()
     lock_dir = tmp_path / ".backup.lock"
     lock_dir.mkdir()
-    (lock_dir / "owner.pid").write_text("424242\n", encoding="utf-8")
-    monkeypatch.setattr(backup, "_pid_is_alive", lambda _pid: False)
+    (lock_dir / "owner.pid").write_text(f"{child.pid}\n", encoding="utf-8")
     with backup._exclusive_backup_lock(tmp_path):
         assert (lock_dir / "owner.pid").read_text(encoding="utf-8").strip() == str(os.getpid())
     assert not lock_dir.exists()
+
+
+def test_pid_probe_reads_live_as_alive_and_dead_as_dead_without_signalling() -> None:
+    """The probe's truth table, against real processes, and its side-effects.
+
+    The live half also asserts the probed child SURVIVES the probe: the old
+    Windows probe was ``GenerateConsoleCtrlEvent`` and could deliver a real
+    Ctrl+C to the target. The dead half probes after ``kill()`` + ``wait()``
+    while this Popen object still holds an open handle to the child, which is
+    precisely the exited-but-handle-still-open case OpenProcess alone misreads.
+    """
+    child = _spawn("import time; time.sleep(60)")
+    try:
+        assert backup._pid_is_alive(child.pid) is True
+        assert child.poll() is None, "probing a pid must not signal it"
+    finally:
+        child.kill()
+        child.wait()
+    assert backup._pid_is_alive(child.pid) is False
+    assert backup._pid_is_alive(0) is False
+    assert backup._pid_is_alive(-1) is False
+
+
+def test_a_lock_past_the_stale_bound_is_reclaimed_even_with_a_live_owner_pid(
+    tmp_path: Path, clock: _Clock
+) -> None:
+    """Pid recycling: an inherited pid can read ALIVE forever, so age must win.
+
+    A backup killed by a reboot frees its pid for any unrelated long-lived
+    process; no liveness probe can tell that impostor from the real owner. The
+    lock records its start instant, and past ``LOCK_STALE_AFTER`` -- sized
+    against the scheduled task's 2h -ExecutionTimeLimit -- it is reclaimed
+    regardless of what the probe says. Below the bound the live pid still
+    holds the lock: the boundary is asserted from both sides.
+    """
+    child = _spawn("import time; time.sleep(60)")
+    try:
+        lock_dir = tmp_path / ".backup.lock"
+        lock_dir.mkdir()
+        (lock_dir / "started.at").write_text(backup._utc_now().isoformat() + "\n", encoding="utf-8")
+        (lock_dir / "owner.pid").write_text(f"{child.pid}\n", encoding="utf-8")
+
+        clock.advance(backup.LOCK_STALE_AFTER - timedelta(minutes=1))
+        with pytest.raises(backup.BackupError) as caught:
+            with backup._exclusive_backup_lock(tmp_path):
+                pass  # pragma: no cover - the acquire must refuse
+        assert caught.value.code == backup.EXIT_USAGE
+
+        clock.advance(timedelta(minutes=2))
+        with backup._exclusive_backup_lock(tmp_path):
+            assert (lock_dir / "owner.pid").read_text(encoding="utf-8").strip() == str(os.getpid())
+        assert not lock_dir.exists()
+    finally:
+        child.kill()
+        child.wait()
+
+
+def test_the_lock_records_its_start_instant(tmp_path: Path) -> None:
+    """``started.at`` is the age bound's supply side; acquisition writes it."""
+    with backup._exclusive_backup_lock(tmp_path):
+        raw = (tmp_path / ".backup.lock" / "started.at").read_text(encoding="utf-8").strip()
+        assert datetime.fromisoformat(raw) == SUITE_NOW
+
+
+def test_a_failed_lock_release_is_a_durable_warning_not_a_silent_pass(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A transient AV/OneDrive hold at release used to vanish without a trace.
+
+    The run's exit code may still be 0 -- its backup is valid -- but the
+    leftover lock is tomorrow's reclaim, so the operator must be able to see
+    where it came from. The failure here is real, not mocked: a file planted
+    inside the lock directory makes the release ``rmdir`` fail with
+    ENOTEMPTY, the way a scanner's transient hold does.
+    """
+    intruder = tmp_path / ".backup.lock" / "intruder"
+    with backup._exclusive_backup_lock(tmp_path):
+        intruder.write_text("scanner hold\n", encoding="utf-8")
+    assert (tmp_path / ".backup.lock").exists(), "the failed release leaves the dir"
+    assert "lock release failed" in capsys.readouterr().err
+    log = (tmp_path / backup.LOG_NAME).read_text(encoding="utf-8")
+    assert "WARNING lock release failed" in log
+    intruder.unlink()
+
+
+def test_a_status_write_that_dies_midway_leaves_the_old_record_intact(
+    tmp_path: Path,
+) -> None:
+    """Power cut mid-write: last-run.json must never be left torn.
+
+    The old whole-file write was ``open("w")`` -- truncate in place -- so a
+    crash between the truncate and the last byte destroyed the previous record
+    without completing the new one. The crash is injected at the OS boundary
+    (the handle dies after one byte); the sequence under test -- write aside,
+    then ``os.replace`` -- is the real one. Under truncate-in-place this test
+    fails with a one-byte canonical file.
+    """
+    canonical = tmp_path / backup.LAST_RUN_NAME
+    assert backup._write_last_run(tmp_path, {"status": "OK", "exit_code": 0}) is True
+    before = canonical.read_text(encoding="utf-8")
+
+    real_open = Path.open
+
+    class _DiesAfterOneByte:
+        """A writer that persists one byte and then reports a crash."""
+
+        def __init__(self, handle: object) -> None:
+            """init."""
+            self._handle = handle
+
+        def __enter__(self) -> _DiesAfterOneByte:
+            """enter."""
+            return self
+
+        def __exit__(self, *_exc: object) -> None:
+            """exit."""
+            self._handle.close()  # type: ignore[attr-defined]
+
+        def write(self, body: str) -> int:
+            """Write one byte, flush it to disk, then die."""
+            self._handle.write(body[:1])  # type: ignore[attr-defined]
+            self._handle.flush()  # type: ignore[attr-defined]
+            raise OSError("simulated crash mid-write")
+
+    def _crashy_open(self: Path, mode: str = "r", *args: object, **kwargs: object) -> object:
+        """crashy open."""
+        handle = real_open(self, mode, *args, **kwargs)  # type: ignore[arg-type]
+        if "w" in mode and self.parent == tmp_path:
+            return _DiesAfterOneByte(handle)
+        return handle
+
+    # A private MonkeyPatch context: the function-scoped ``monkeypatch``
+    # instance is shared with the autouse clock fixture, and ``undo()`` on it
+    # would unfreeze the suite clock mid-test.
+    with pytest.MonkeyPatch.context() as crash_zone:
+        crash_zone.setattr(Path, "open", _crashy_open)
+        assert backup._write_last_run(tmp_path, {"status": "REJECTED", "exit_code": 8}) is False
+
+    assert canonical.read_text(encoding="utf-8") == before
+    assert json.loads(before)["exit_code"] == 0
 
 
 def test_a_bound_directory_refuses_the_second_database_end_to_end(tmp_path: Path) -> None:
@@ -1991,7 +2158,16 @@ def test_a_failure_to_clear_the_previous_green_is_carried_to_the_exit_code(
 
 
 def test_a_transient_lock_is_retried_rather_than_failing_the_run(tmp_path: Path) -> None:
-    """An AV scanner holds a file for seconds; that must not turn a run red."""
+    """An AV scanner holds a file for seconds; that must not turn a run red.
+
+    The canonical file EXISTS here, holding the previous record, because that
+    is what a scanner can hold: since the write went atomic (write aside, then
+    replace), the canonical file is touched by a probe-open and by the final
+    ``os.replace``, and a missing canonical is simply created. The flaky open
+    stands in for the scanner on the canonical path; the aside file passes
+    through untouched.
+    """
+    backup._write_last_run(tmp_path, {"status": "RUNNING", "exit_code": None})
     target = tmp_path / backup.LAST_RUN_NAME
     attempts = {"n": 0}
     real_open = Path.open
@@ -2306,17 +2482,12 @@ def test_restore_requires_sha256_for_both_artifacts(tmp_path: Path) -> None:
 
 def test_unexpected_roles_errors_are_rejected() -> None:
     """Only bootstrap 'role already exists' noise is tolerated."""
-    assert restore._unexpected_roles_errors(
-        'ERROR:  role "ums" already exists\n'
-    ) == []
-    assert restore._unexpected_roles_errors(
-        'psql: :12: ERROR:  role "ums" already exists\n'
-    ) == []
+    assert restore._unexpected_roles_errors('ERROR:  role "ums" already exists\n') == []
+    assert restore._unexpected_roles_errors('psql: :12: ERROR:  role "ums" already exists\n') == []
     unexpected = restore._unexpected_roles_errors(
-        'ERROR:  role "ums" already exists\n'
-        'psql: :40: ERROR:  permission denied to alter role\n'
+        'ERROR:  role "ums" already exists\npsql: :40: ERROR:  permission denied to alter role\n'
     )
-    assert unexpected == ['psql: :40: ERROR:  permission denied to alter role']
+    assert unexpected == ["psql: :40: ERROR:  permission denied to alter role"]
 
 
 def test_restore_roles_tolerates_bootstrap_duplicate_nonzero(
@@ -2336,9 +2507,7 @@ def test_restore_roles_tolerates_bootstrap_duplicate_nonzero(
         )
 
     monkeypatch.setattr(restore, "_run_with_file", fake_run_with_file)
-    monkeypatch.setattr(
-        restore, "_psql", lambda *_a, **_k: "app_platform\napp_tenant\n"
-    )
+    monkeypatch.setattr(restore, "_psql", lambda *_a, **_k: "app_platform\napp_tenant\n")
     present = restore._restore_roles("fake", roles_path, timeout=5)
     assert present == ["app_platform", "app_tenant"]
     out = capsys.readouterr().out
@@ -2360,15 +2529,12 @@ def test_restore_roles_rejects_unexpected_error_line(
             returncode=3,
             stdout="",
             stderr=(
-                'ERROR:  role "ums" already exists\n'
-                "ERROR:  permission denied to create role\n"
+                'ERROR:  role "ums" already exists\nERROR:  permission denied to create role\n'
             ),
         )
 
     monkeypatch.setattr(restore, "_run_with_file", fake_run_with_file)
-    monkeypatch.setattr(
-        restore, "_psql", lambda *_a, **_k: "app_platform\napp_tenant\n"
-    )
+    monkeypatch.setattr(restore, "_psql", lambda *_a, **_k: "app_platform\napp_tenant\n")
     with pytest.raises(restore.RestoreError) as caught:
         restore._restore_roles("fake", roles_path, timeout=5)
     assert caught.value.code == restore.EXIT_ROLES_FAILED
@@ -2417,9 +2583,7 @@ def test_restore_roles_rejects_fatal_even_after_allowed_duplicate(
         )
 
     monkeypatch.setattr(restore, "_run_with_file", fake_run_with_file)
-    monkeypatch.setattr(
-        restore, "_psql", lambda *_a, **_k: "app_platform\napp_tenant\n"
-    )
+    monkeypatch.setattr(restore, "_psql", lambda *_a, **_k: "app_platform\napp_tenant\n")
     with pytest.raises(restore.RestoreError) as caught:
         restore._restore_roles("fake", roles_path, timeout=5)
     assert caught.value.code == restore.EXIT_ROLES_FAILED
@@ -2454,7 +2618,18 @@ def test_destroy_throwaway_false_on_docker_rm_timeout(
 
 
 def test_overlapping_backup_lock_is_exclusive(tmp_path: Path) -> None:
-    """A second process must fail before loading the watermark."""
+    """A second process must fail before loading the watermark.
+
+    The contender's reclaim attempt probes the FIRST holder's pid, which here
+    is pytest's own -- a live pid in this console group. That was once lethal:
+    the old Windows probe was ``os.kill(pid, 0)`` ==
+    ``GenerateConsoleCtrlEvent(CTRL_C_EVENT, pid)``, and running this test
+    Ctrl+C'd the entire pytest run (measured: "KeyboardInterrupt ... 1 failed,
+    194 passed" mid-suite). The probe is now OpenProcess/WaitForSingleObject
+    on win32 -- no signal API anywhere in it -- so probing a live console-group
+    pid is inert by construction and this test may safely keep exercising the
+    real contention path.
+    """
 
     def _contend() -> None:
         """contend."""
