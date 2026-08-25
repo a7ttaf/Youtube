@@ -61,6 +61,28 @@ FROM python:${PYTHON_VERSION}-slim@${PYTHON_BASE_DIGEST} AS runtime
 ARG APP_USER=app
 ARG APP_UID=10001
 
+# Mount point for the durable `app-data` volume (docker-compose.yml). Export
+# artifacts and connector blobs live under here instead of in the container's
+# writable layer, which a rebuild or `docker compose down` discards. Keep this
+# path in sync with UMS_EXPORT_ARTIFACT_DIR / UMS_LOCAL_STORE_ROOT in
+# docker-compose.yml's x-app-storage-env anchor.
+#
+# The directory and its two subdirectories are created and chowned in the
+# runtime RUN below, and that is load-bearing rather than tidiness: Docker
+# seeds an empty named volume from whatever the image has at the mount point,
+# ownership included. If the path were absent from the image, Docker would
+# create the mount point root-owned and uid ${APP_UID} could not write into it
+# — every export would then fail with
+# ExportArtifactStorageError("artifact storage unavailable"), surfacing as a
+# permanent 503 on download, because FileSystemExportArtifactStore.save() only
+# mkdir()s the leaf directories and has no fallback when the parent is not
+# writable (backend/ums_smart_revenue/reports/artifact_storage.py).
+#
+# No `VOLUME` instruction on purpose: VOLUME would make every plain
+# `docker run` of this image spawn an anonymous volume that nothing ever
+# reclaims. The mount is declared in docker-compose.yml where it belongs.
+ARG APP_DATA_HOME=/var/lib/ums
+
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PATH="/opt/venv/bin:${PATH}" \
@@ -99,7 +121,9 @@ RUN apt-get update \
  && useradd  --system --uid ${APP_UID} --gid ${APP_USER} \
              --home-dir ${APP_HOME} --shell /sbin/nologin ${APP_USER} \
  && mkdir -p ${APP_HOME} \
- && chown ${APP_USER}:${APP_USER} ${APP_HOME}
+ && chown ${APP_USER}:${APP_USER} ${APP_HOME} \
+ && mkdir -p ${APP_DATA_HOME}/artifacts ${APP_DATA_HOME}/blobs \
+ && chown -R ${APP_USER}:${APP_USER} ${APP_DATA_HOME}
 
 # Pull the virtualenv from the builder, then drop the source tree alongside.
 COPY --from=builder --chown=${APP_USER}:${APP_USER} /opt/venv /opt/venv

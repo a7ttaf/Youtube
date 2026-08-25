@@ -1202,13 +1202,35 @@ and the reconciled-net content (Phase 4 allocation/tax) feeding report bodies.
   (PR #8) plus the `CHANNELS_MISSING_REVENUE_FACTS` per-channel coverage check
   (PR #98, active+revenue_required channels with no monthly fact); broader
   quality checks not built.
-- ⏳ Backup/export retention — remaining: not started. **Audited 2026-08-24 and
-  raised to a beta BLOCKER** (`Docs/20_DEPLOYMENT_READINESS_AUDIT.md`, B3): no
-  `pg_dump` script exists anywhere in the repo, while `docker-compose.yml:7`
-  documents `docker compose down -v` as an ordinary teardown — that deletes the
-  `postgres-data` volume and every revenue fact in it. Must be fixed before real
-  CMS data is ingested. Export artifacts are separately at risk (B4): they default
-  to the container temp dir with no volume mounted.
+- 🟡 Backup/export retention — **database backup shipped 2026-08-25; export-artifact
+  retention still not started.** Audited 2026-08-24 and raised to a beta BLOCKER
+  (`Docs/20_DEPLOYMENT_READINESS_AUDIT.md`, B3): no `pg_dump` script existed anywhere
+  in the repo, while `docker-compose.yml:7` documented `docker compose down -v` as an
+  ordinary teardown — that deletes the `postgres-data` volume and every revenue fact
+  in it.
+  - ✅ **Closed:** `scripts/backup_database.py` + `scripts/restore_database.py` +
+    `tests/scripts/test_backup_content_gate.py`, with the runbook
+    `Docs/22_BACKUP_RESTORE_AND_REHEARSAL.md`. Roles are dumped alongside the archive
+    (`pg_dumpall --roles-only`) and the restore refuses to proceed without
+    `app_tenant` / `app_platform` — without that, backups look perfect and are
+    unrestorable. Rehearsed end to end: 38/38 tables, 187/187 rows, privilege surface
+    identical to the source. The compose header now warns about `down -v` instead of
+    documenting it as routine.
+  - ✅ **B4 closed:** export artifacts and connector blobs now live in the named
+    `app-data` volume (`docker-compose.yml:362`, mounted `:286,339`), verified through
+    the real API dependency (`from_environment()`, `api/exports.py:245`).
+  - ⏳ **Open:** the `app-data` volume is **not in the backup set**; the content gate's
+    absolute floor (`MIN_ROWS = 1`) is ~180× below a real virgin install, so total data
+    loss can still publish a green `OK` in an output directory with no baseline; and
+    the collapse check re-anchors nightly. All three are recorded in Docs/22 and
+    costed in `Docs/21` (P2).
+  - 🔴 **New blocker found while doing this work, and it preceded all of the above:**
+    the compose stack **could never have started.** `postgres:18-alpine` sets
+    `PGDATA=/var/lib/postgresql/18/docker`; the volume was mounted at the pre-18 path
+    `/var/lib/postgresql/data`, which Postgres 18 rejects — restart loop, every
+    dependent service blocked. Had it started, the database would have lived in the
+    container's writable layer. Fixed at `docker-compose.yml:226`; see
+    `Docs/20`, blocker **B0**.
 - ✅ **RETRACTED 2026-08-25 — "Analytics revenue currency is fabricated as USD."**
   This entry previously carried a 🔴 blocker claiming live ingest would record EGP
   amounts as USD. **That was wrong.** `currency` on YouTube Analytics `reports.query`
@@ -1237,7 +1259,7 @@ and the reconciled-net content (Phase 4 allocation/tax) feeding report bodies.
   - ⏳ **DECISION — `Docs/16_OPEN_DECISIONS.md:70-71` is still unanswered:** are USD
     facts acceptable with the EGP bank settlement explained as FX variance? The code
     has assumed "yes" since PR #42 without anyone saying so.
-- ⏳ Deployment readiness for a first beta — **audited 2026-08-24/25 in four rounds,
+- ⏳ Deployment readiness for a first beta — **audited 2026-08-24/25 in five rounds,
   see `Docs/20_DEPLOYMENT_READINESS_AUDIT.md`; the costed plan is
   `Docs/21_BETA_IMPLEMENTATION_PLAN.md` (38–55 hours to a runnable beta).**
   Verdict: the application is feature-ready, the deployment is not. Round 2 briefly
@@ -1248,15 +1270,23 @@ and the reconciled-net content (Phase 4 allocation/tax) feeding report bodies.
   a single page with no router, and a connector job killed mid-run 409-blocks its
   month for six hours. Round 3 traced "no buttons work / it looks like a mockup" to
   three causes, the largest being that the dev proxy ships `assistant_analyst` —
-  **2 of 28 permissions** (`frontend/vite.config.ts:69`, `auth/seed.py`) — so the
-  product has been demoed through its second-most-restricted role. Five blockers,
-  none requiring redesign:
-  no authentication front door (the app takes identity from gateway headers and
-  the compose stack ships no gateway), the default `headers` authz mode lets a
-  caller assert their own role, no database backup, ephemeral artifact storage,
-  and no non-dev path to serve the browser app. Two viable beta shapes are
-  documented there; real revenue can be ingested without any Google/GCP
-  dependency via the first-class `MANUAL_UPLOAD` import path.
+  **2 of 26 permissions** (`frontend/vite.config.ts:86`, `auth/seed.py`) — so the
+  product has been demoed through one of its two weakest roles. *(Correction
+  2026-08-25: this entry, `Docs/20` and `Docs/21` all published "2 of 28". The
+  `Permission` enum has **26** members — `auth/permissions.py:5-31`. The conclusion is
+  unchanged; the denominator was wrong.)* **Six** blockers, none requiring redesign:
+  the compose stack could not start at all (**B0**, found in round 5 by running it —
+  now fixed), no authentication front door (the app takes identity from gateway
+  headers and the compose stack ships no gateway), the default `headers` authz mode
+  lets a caller assert their own role, no database backup (now closed), ephemeral
+  artifact storage (now closed), and no non-dev path to serve the browser app. Two
+  viable beta shapes are documented there; real revenue can be ingested without any
+  Google/GCP dependency via the first-class `MANUAL_UPLOAD` import path.
+  **Round 5 (execution) landed W0.2 and P0.1–P0.5** and killed three published claims:
+  "the stack has never been started" understated a stack that *could not* start,
+  "Vite's SPA fallback answers the unproxied request" is refuted (it returns a bare
+  404 with no body and no `Content-Type` when the client sends
+  `Accept: application/json`), and the permission denominator above.
 - ⏳ Google credential token monitoring — remaining: credentials repo (PRs #33, #34) +
   four `api_connector_credentials` refresh-telemetry columns (last-attempt,
   token-expiry, last-status, last-error-class) stamped at the
@@ -1284,10 +1314,15 @@ and the reconciled-net content (Phase 4 allocation/tax) feeding report bodies.
   (PAYMENT_VARIANCE smart alert + payment-match) are detected; missing-REPORT
   detection is deferred (no expected-connectors baseline).
 
-### Status (2026-06-13)
+### Status (2026-06-13, updated 2026-08-25)
 
 Audit-log infrastructure shipped end-to-end and tenant-scoped, and the
 smart-alerts surface now flags per-channel missing-revenue-fact coverage
 (`CHANNELS_MISSING_REVENUE_FACTS`, PR #98). Remaining hardening (report-coverage
-baseline, backup/retention, live Google credential token monitoring) awaits the ingestion +
+baseline, live Google credential token monitoring) awaits the ingestion +
 expectation-model work that produces the underlying signals.
+
+**2026-08-25:** database backup/restore/rehearsal shipped out of the beta deployment
+audit (see the Backup/export retention entry above) — it did not need the
+expectation-model work, only the deployment work. Export-artifact retention and the
+`app-data` backup remain open.

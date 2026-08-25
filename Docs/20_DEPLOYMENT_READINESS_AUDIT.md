@@ -1,12 +1,12 @@
 # 20 — Deployment Readiness Audit (First Beta, Single PC)
 
-**Audited:** 2026-08-24 – 2026-08-25, at `main` = `d8418cea2`, in four rounds.
+**Audited:** 2026-08-24 – 2026-08-25, at `main` = `d8418cea2`, in five rounds.
 **Target deployment:** first beta on one Windows PC via `docker compose`, **bound to
 localhost only**, operator-run, with **real** YouTube CMS revenue data.
-**Method:** read-only code audit. Every finding carries `file:line` evidence, and
-**every round was re-checked by an independent adversarial pass** whose job was to
-refute it. Those passes reversed or downgraded findings in every round; the
-corrections are recorded rather than quietly dropped.
+**Method:** rounds 1–4 were a read-only code audit; round 5 executed. Every finding
+carries `file:line` evidence, and **every round was re-checked by an independent
+adversarial pass** whose job was to refute it. Those passes reversed or downgraded
+findings in every round; the corrections are recorded rather than quietly dropped.
 
 - **Round 1 — deployment surface:** auth, secrets, data lifecycle, bootstrap, config.
 - **Round 2 — deep audit:** PC/host lifecycle, frontend completeness, observability,
@@ -16,6 +16,11 @@ corrections are recorded rather than quietly dropped.
 - **Round 4 — implementation scoping:** every finding costed against the code before
   planning. **This round retracted Round 2's headline CRITICAL** and corrected four
   other published claims.
+- **Round 5 — execution.** The plan's W0.2 and P0.1–P0.5 items were implemented and
+  the stack was **started for the first time**. That single act produced the largest
+  finding in the whole audit — see [B0](#b0--the-compose-stack-could-never-have-started-resolved).
+  Rounds 1–4 all described the stack as *unrehearsed*; it was in fact **broken**, and
+  four rounds of reading could not have found it.
 
 > **Scope note.** This audit answers one question: *what stands between the current
 > `main` and a first beta on this PC?* Round 1 was about **running** it. Round 2
@@ -104,10 +109,17 @@ PR #42 without anyone saying so.
 **None of D1/D1b/D2 blocks the recommended beta**, which uses manual import (H5) and
 never calls Google.
 
-### The deployment verdict (Round 1) still holds
+### The deployment verdict (Round 1) still holds — and Round 5 made it stronger
 
-**Five blockers**, none requiring redesign — the most important is architectural
-even though its fix is deployment work:
+Round 5 added a sixth blocker, [B0](#b0--the-compose-stack-could-never-have-started-resolved),
+which is more severe than any of the original five and which **no amount of reading
+would have found**. `docker compose up` had never been run against this file. When it
+finally was, Postgres restart-looped and every dependent service was blocked. The
+honest restatement of the Round 1 verdict is therefore not "feature-ready, deployment
+not ready" but **"feature-ready, deployment never once executed."**
+
+**Six blockers**, none requiring redesign — the most important of the original five is
+architectural even though its fix is deployment work:
 
 **UMS has no login of its own.** There is no password, session, cookie, or token
 login anywhere in the backend (`db/security_models.py:38-78` — `UserORM` has no
@@ -126,6 +138,78 @@ Two beta shapes follow from that, described concretely in
 
 ## Blockers
 
+### B0 — The compose stack could never have started (RESOLVED)
+
+*Numbered `0` because it was found last and precedes all the others causally: while it
+stood, B1–B5 were unreachable — there was no running stack to have a gateway in front
+of, no database to back up, and no container to mount an artifact volume on.*
+
+**Found:** Round 5, on the first `docker compose up` ever run against this file.
+**Severity:** blocker, and strictly worse than anything rounds 1–4 published.
+**Status:** fixed and verified — `docker-compose.yml:226`, rationale at `:198-225`.
+
+`postgres:18-alpine` sets `PGDATA=/var/lib/postgresql/18/docker` and declares its own
+`VOLUME` at the **parent** path. `docker-compose.yml` mounted the named volume at the
+pre-18 path `/var/lib/postgresql/data`. Postgres 18 hard-errors on that unused mount
+and restart-loops. Reproduced at the unmodified tree (`restarts=7`, `health=unhealthy`),
+and the image's own log names the fix:
+
+```text
+umslanea-postgres-1  restarting  Restarting (1) 4 seconds ago
+postgres-1 | Counter to that, there appears to be PostgreSQL data in:
+postgres-1 |   /var/lib/postgresql/data (unused mount/volume)
+postgres-1 | The suggested container configuration for 18+ is to place a single mount
+postgres-1 | at /var/lib/postgresql which will then place PostgreSQL data in a
+postgres-1 | subdirectory ...
+```
+
+```text
+$ docker image inspect postgres:18-alpine --format '{{json .Config.Env}}'
+[..., "PG_MAJOR=18", "PG_VERSION=18.4", ..., "PGDATA=/var/lib/postgresql/18/docker"]
+$ docker image inspect postgres:18-alpine --format '{{json .Config.Volumes}}'
+{"/var/lib/postgresql":{}}
+```
+
+**Two distinct failures, not one.** The visible one is that nothing started. The
+invisible one is worse: had Postgres started anyway, `PGDATA` would have resolved
+*outside* the mounted volume, so the entire database would have lived in the
+container's writable layer and been destroyed by the next `--build`, `--force-recreate`
+or `down`. A stack in that state looks healthy and loses everything on a routine
+rebuild.
+
+The failure trips on a **fresh, empty** volume — the check fires on the legacy path
+merely *being* a mountpoint — so this was never a stale-data problem and there is no
+migration path to write.
+
+#### What is now verified (this is measured, not assumed)
+
+| Claim | Evidence |
+|---|---|
+| The whole stack comes up | `up -d --build --wait` → `postgres/redis/app` **Healthy**, `migrate` **Exited (0)** |
+| `PGDATA` is inside the volume | `SHOW data_directory` = `/var/lib/postgresql/18/docker`; `/proc/mounts` shows the volume at `/var/lib/postgresql` |
+| Data survives a **container replacement** | row written, `docker compose down` (no `-v`), `up` → different container id, row returns carrying its **original** `written_at`; `alembic upgrade head` re-ran and exited 0 |
+| The fix does not merely mask `-v` | `down -v` → volumes removed, fresh `initdb`, full migration chain, 38 tables, `app_tenant` + `app_platform` present |
+| The `app` mount works | `/var/lib/ums`, `/var/lib/ums/artifacts`, `/var/lib/ums/blobs` all owned by uid 10001, write OK — so B4's "every export 503s" mode is genuinely closed |
+| `redis` has no equivalent bug | `redis:7-alpine` declares `VOLUME /data` and compose mounts `redis-data:/data`. Correct as-is. |
+
+An independent adversarial pass attacked the fix from five angles (fresh boot,
+container replacement, `--force-recreate` + rebuild, `down -v`, and recycling the
+volume left behind by the broken config) and it held every time. It also proved the
+app *serves* rather than merely reporting healthy: from the host, `/livez` → 200 and
+`/openapi.json` → 200 (201,966 bytes).
+
+#### What this reframes
+
+- **B3 was real but incomplete.** "No backup" understated it: there was also **nothing
+  durable to back up**. Both halves are now closed —
+  see [`22_BACKUP_RESTORE_AND_REHEARSAL.md`](22_BACKUP_RESTORE_AND_REHEARSAL.md).
+- **Round 3's "the compose stack has never been started on this PC"** was recorded as
+  an untested-environment caveat. It was not a caveat. It was the only thing hiding a
+  blocker, and the phrasing implied the stack *would* have started. It would not have.
+- **The general lesson**, worth more than the fix: four rounds of increasingly
+  adversarial reading, including one round whose entire method was costing changes
+  against exact lines, did not find this. Executing it found it in under a minute.
+
 ### B1 — No authentication front door; the compose stack has no gateway
 `backend/ums_smart_revenue/api/dependencies.py:77-120` builds the full
 `UserPrincipal` — id, email, **role**, scope — from caller-supplied headers, gated
@@ -136,13 +220,13 @@ already labels this "bootstrap/development mode".
 **Consequence:** anyone who can reach the port *and* holds the token is whoever
 they say they are, at whatever role they choose.
 **For a localhost beta:** acceptable **only** because every published port binds to
-`127.0.0.1` (`docker-compose.yml:41,56,98,125`). Keep that binding. Do not expose
+`127.0.0.1` (`docker-compose.yml:196,240,284,333`). Keep that binding. Do not expose
 the app to LAN, Tailscale, or a tunnel without first doing B2 *and* putting a real
 authenticating proxy in front.
 
 ### B2 — The default authz mode lets a caller assert their own role
 `UMS_AUTHZ_SOURCE` defaults to `headers` (`config/settings.py:27,87-91`;
-`docker-compose.yml:23` passes `${UMS_AUTHZ_SOURCE:-headers}`). In that mode the
+`docker-compose.yml:87` passes `${UMS_AUTHZ_SOURCE:-headers}`). In that mode the
 `X-Role` header *is* the role — `X-Role: super_owner` grants super-owner. The safer
 mode exists and is wired: `database` loads the authoritative role and permissions
 from SQL and takes only identity from the header (`app.py:332`;
@@ -156,35 +240,73 @@ No backup mechanism exists anywhere in the repo: `pg_dump` appears **only** as
 prose in `Docs/17_MULTI_TENANT_ARCHITECTURE.md` (a manual tenant-slice procedure) —
 there is no script in `scripts/`, `ci/`, or the `Makefile`.
 `Docs/01_IMPLEMENTATION_PLAN.md:1205` states it plainly: *"Backup/export retention —
-remaining: not started."* Meanwhile `docker-compose.yml:7` documents
-`docker compose down -v` as an ordinary teardown command — that deletes the
-`postgres-data` volume and every revenue fact in it, unrecoverably.
+remaining: not started."* Meanwhile `docker-compose.yml:7` (as it stood at
+`d8418cea2`) documented `docker compose down -v` as an ordinary teardown command —
+that deletes the `postgres-data` volume and every revenue fact in it, unrecoverably.
 
 **Fix before any real data is ingested:** a scheduled `pg_dump -Fc` writing to a
 **host** directory (not a container volume), plus one rehearsed restore. Until that
 exists, treat the beta database as disposable and re-importable.
+
+> **Correction (Round 5) — this finding was true but understated.** "There is no
+> backup" assumed there was something durable to back up. There was not: while
+> [B0](#b0--the-compose-stack-could-never-have-started-resolved) stood, the cluster
+> would have lived in the container's writable layer. The two findings compound —
+> a rebuild, not just `down -v`, would have destroyed the data, and no backup existed
+> to recover from either.
+>
+> **Status: closed.** `scripts/backup_database.py` + `scripts/restore_database.py`
+> ship with a rehearsed restore; the runbook is
+> [`22_BACKUP_RESTORE_AND_REHEARSAL.md`](22_BACKUP_RESTORE_AND_REHEARSAL.md).
+> `docker-compose.yml:10-22` now carries an explicit `down -v` warning instead of
+> documenting it as ordinary teardown. Two limits are recorded rather than hidden:
+> the `app-data` volume is **not** in the backup set, and the backup's content gate
+> has a known-weak absolute floor (Docs/22, *What a green run does not guarantee*).
 
 ### B4 — Export artifacts and connector blobs live on ephemeral container paths
 Generated workbooks/PDFs/slide packs default to the container's temp directory
 (`reports/artifact_storage.py:13` — `tempfile.gettempdir()/ums-smart-revenue-export-artifacts`),
 and connector raw-file blobs default to `cwd/_local_blob_store`
 (`connectors/runs/orchestrator.py:3125`), which resolves to `/srv/app/_local_blob_store`
-(`Dockerfile:109`). `docker-compose.yml` declares only `postgres-data` and
-`redis-data` volumes — **neither path is mounted**. Both are wiped by any rebuild,
-`--force-recreate`, or `down`.
+(`Dockerfile:109`). At the time of audit `docker-compose.yml` declared only
+`postgres-data` and `redis-data` volumes — **neither path was mounted**. Both were
+wiped by any rebuild, `--force-recreate`, or `down`.
 
 **Fix:** set `UMS_EXPORT_ARTIFACT_DIR` and `UMS_LOCAL_STORE_ROOT` to paths inside a
 new named volume, and mount it on `app` (and `migrate`, if it ever writes there).
+
+> **Status update (Round 5) — closed, and this sentence is now stale.** A third
+> volume, `app-data` (`docker-compose.yml:362`), is declared and mounted at
+> `/var/lib/ums` on both `app` (`:286`) and `app-dev` (`:339`), with
+> `UMS_EXPORT_ARTIFACT_DIR` / `UMS_LOCAL_STORE_ROOT` pointed inside it. Verified in a
+> running container: `/var/lib/ums/artifacts` and `/var/lib/ums/blobs` exist, are owned
+> by uid 10001, and are writable. The adversarial pass went one step further than the
+> implementation did and exercised the **real** dependency —
+> `current_export_artifact_store()` via `from_environment()` (`api/exports.py:245`)
+> resolves to `/var/lib/ums/artifacts`, where a bare `FileSystemExportArtifactStore()`
+> would still resolve to the module default under `/tmp`. So the permanent-503 mode is
+> closed on the path the API actually uses, not merely on a constructor.
+>
+> **Not closed:** `app-data` is not covered by the database backup. See
+> [`22_BACKUP_RESTORE_AND_REHEARSAL.md`](22_BACKUP_RESTORE_AND_REHEARSAL.md),
+> *Open items*.
 
 ### B5 — There is no browser app in any non-dev path
 `frontend/` has no Dockerfile; compose has no frontend service; the backend mounts
 no static files. The **only** thing that injects gateway headers is the Vite *dev
 server* proxy (`frontend/vite.config.ts` `server.proxy`) — there is no
 `preview.proxy`, so a built bundle served statically gets 401 on every call
-(`api/dependencies.py:96-99`). Two further gaps in that proxy: its route list omits
-`/users` and `/org-units` (`vite.config.ts:13-32`), and no CORS middleware exists
-anywhere in the backend, so a cross-origin bundle would fail preflight
-(`client.ts:90` sets `X-UMS-Tenant`, a non-simple header).
+(`api/dependencies.py:96-99`). Two further gaps in that proxy: its route list omitted
+`/users` and `/org-units`, and no CORS middleware exists anywhere in the backend, so a
+cross-origin bundle would fail preflight (`client.ts:90` sets `X-UMS-Tenant`, a
+non-simple header).
+
+> **Status update (Round 5).** The route-list half is fixed: `TENANT_SCOPED_ROUTES`
+> now carries `/org-units` and `/users` and spans `vite.config.ts:16-49`. The list is
+> guarded by `frontend/tests/devProxyRoutes.test.ts`, which **derives** the required
+> set from the path literals in `frontend/src/lib/api/**` rather than comparing the
+> list to a hand-copy of itself. The CORS half is unchanged and remains a non-issue
+> for the same-origin dev-server beta path.
 
 **Fix (beta-grade):** run the Vite dev server as the beta UI — it is the only
 working configuration — or put a small reverse proxy in front of a built bundle
@@ -265,7 +387,7 @@ revenue CSV endpoint. A beta must script the loop.
 `/health` and `/livez` return a hardcoded payload — no DB session, no dependency
 check (`app.py:204-212`). `/readyz` appears in the tenancy bypass list
 (`tenancy/resolver.py:73-80`) implying it should exist, but **no route registers
-it**. The compose healthcheck targets `/livez` (`docker-compose.yml:99-104`), so the
+it**. The compose healthcheck targets `/livez` (`docker-compose.yml:288`), so the
 container reports healthy with a dead database.
 
 ### M2 — Crashed connector jobs stay `RUNNING` forever
@@ -284,7 +406,7 @@ beta volume; matters for disk on a long-running single PC.
 
 ### M4 — Compose advertises three protections that do not exist
 `UMS_CORS_ALLOWED_ORIGINS`, `UMS_RATE_LIMIT_PER_MINUTE`, and `REDIS_URL`
-(`docker-compose.yml:25-28`) are read by **no backend code, no test, and no
+(`docker-compose.yml:89-92`) are read by **no backend code, no test, and no
 library** — verified by two independent search methods. There is no CORS
 middleware, no rate limiting of any kind, and Redis is unused while remaining a
 hard `service_healthy` startup dependency.
@@ -307,7 +429,26 @@ mode is 503s, not shedding.
 `UMS_TRUSTED_GATEWAY_TOKEN` (`:24`) via `:?` syntax — none of which appear in
 `.env.example`, and the README's documented first-run path is local Postgres +
 uvicorn, not compose. Separately, both `README.md:180` and `docker-compose.yml:17`
-point at `deploy/helm/` — **that directory does not exist.**
+(as they stood at `d8418cea2`) point at `deploy/helm/` — **that directory does not
+exist.**
+
+> **Status update (Round 5) — the `deploy/helm/` half is closed, and the claim was
+> weaker than published.** The directory does not merely *not exist now*: it has
+> **never existed in this repository.** Verified two ways —
+> `git ls-files deploy` returns nothing, and `git log --all -- deploy` returns **zero
+> commits**. Every reference was aspirational text that was never backed by a file.
+> All four are corrected: `docker-compose.yml:54-59` (says plainly there is no Helm
+> chart and no `deploy/` directory), `README.md` (the layout tree no longer lists it,
+> and the "secrets layer" sentence no longer implies a cluster exists), and
+> `SECURITY.md` (the vulnerability-scope list and the hardening posture). The only
+> surviving mentions are `.gitignore:223-224`, two ignore patterns for Helm chart
+> caches left by PR #28 — harmless, and left alone because `.gitignore` was outside
+> the scope of this change.
+>
+> **The env-template half is NOT closed.** `.env.example` still predates the database
+> variables, so `docker compose --env-file .env.example config` exits 1 on
+> `UMS_DB_USER`; `docker-compose.yml:32-52` now carries the authoritative list and an
+> explicit warning instead. Completing the template is plan item **P0.3**.
 
 ---
 
@@ -315,7 +456,9 @@ point at `deploy/helm/` — **that directory does not exist.**
 
 These were checked and found correct — no action needed:
 
-- **Localhost binding**: every published port binds `127.0.0.1` (`docker-compose.yml:41,56,98,125`).
+- **Localhost binding**: every published port binds `127.0.0.1`
+  (`docker-compose.yml:196,240,284,333`). Re-verified at runtime in Round 5 — all
+  three published ports render `host_ip: 127.0.0.1` in `docker compose config`.
 - **Gateway token handling**: constant-time comparison (`secrets.compare_digest`,
   `api/dependencies.py:287`), fails closed with 503 when unconfigured, and compose
   refuses to start without it.
@@ -351,11 +494,16 @@ Vite dev server injects the fixed operator identity. **Revenue enters by manual
 import, not by connector** — so Google is never called and the currency questions
 (D1/D2) do not arise: the operator supplies the figures directly.
 
-Required before real data: **B3** (backups), **B4** (artifact volume — note the
-permanent-503 consequence), and the **logging fix** (one `basicConfig` call, so that
-INFO-level connector progress is recorded and what already prints can be placed in
-time). B1/B2 are *accepted risks* documented in the runbook rather than fixed,
-justified solely by the localhost binding.
+Required before real data: **B0** (the stack must actually start), **B3** (backups),
+**B4** (artifact volume — note the permanent-503 consequence), and the **logging fix**
+(one `basicConfig` call, so that INFO-level connector progress is recorded and what
+already prints can be placed in time). B1/B2 are *accepted risks* documented in the
+runbook rather than fixed, justified solely by the localhost binding.
+
+> **Round 5 status:** B0, B3 and B4 are closed and verified. The logging fix (P0.6)
+> is **not** done. Neither is the runbook that writes B1/B2 down as accepted risks —
+> until that exists, "accepted risk" is a phrase in an audit rather than a decision
+> the operator has actually been shown.
 
 Also needed: compose `.env` template, the `security_seed.sql` step (H1), a first-user
 recipe (H3), a reboot runbook (nothing restarts itself), and a written note that a
@@ -469,10 +617,17 @@ question they answer. Severities are the **post-refutation** ones.
 - **HIGH — nothing brings the stack back after a Windows Update reboot.**
   `restart: unless-stopped` only acts once the Docker daemon runs, and Docker Desktop
   starts at **user login**, not at boot — after an unattended 3am reboot the PC sits
-  at the lock screen with nothing running. `app-dev` has no `restart` key at all
-  (`docker-compose.yml:109-138`), and the beta UI (the Vite dev server) is a host
-  process outside compose entirely. **`README.md` does not contain the string
-  "docker" anywhere**, and nothing in the repo mentions Docker Desktop or WSL2.
+  at the lock screen with nothing running. `app-dev` (`docker-compose.yml:317`) has
+  no `restart` key at all, and the beta UI (the Vite dev server) is a host process
+  outside compose entirely. **`README.md` does not contain the string "docker"
+  anywhere**, and nothing in the repo mentions Docker Desktop or WSL2.
+
+  > **Partial status update (Round 5).** The README now has a compose section, and
+  > `Docs/22` documents the Docker-Desktop-starts-at-login constraint and builds the
+  > backup's Task Scheduler registration around it. `app-dev` still has no `restart`
+  > key — deliberately, it is a `--profile dev` opt-in, not part of the beta stack —
+  > and **nothing yet brings the whole stack back after a reboot**. That is the
+  > runbook item in P1, and it remains open.
 - **MEDIUM — the group-sync scheduler can never fire on a PC that restarts daily.**
   The first tick fires one full interval (default 24h) *after* start
   (`scheduler.py:184-190`), and the scheduler persists nothing — no last-run
@@ -483,10 +638,49 @@ question they answer. Severities are the **post-refutation** ones.
   `UMS_GROUP_SYNC_SCHEDULE_ENABLED`, `UMS_GOOGLE_CONNECTOR_SERVICE_ACTOR_ID`, and the
   storage roots — so the compose stack **cannot run a connector pull at all** without
   editing the compose file.
+
+  > **Status update (Round 5) — mostly closed, with one deliberate omission.** The
+  > storage roots and the executor/scheduler variables are now forwarded
+  > (`docker-compose.yml:143-147`, `:169+`). `UMS_GOOGLE_CONNECTOR_SERVICE_ACTOR_ID`
+  > is **deliberately still not forwarded** (`docker-compose.yml:103-141`), because
+  > `.env.example` ships it uncommented as the public placeholder
+  > `00000000-…-bb` and `connectors/google/audit.py:90-94` refuses only on `None`,
+  > accepting any syntactically valid UUID. Forwarding it would mean every operator
+  > who ran `cp .env.example .env` silently attributed their connector audit trail to
+  > one well-known id published in a public template. A refusal is recoverable; a
+  > mis-attributed audit trail is not.
+  >
+  > **Two costs of that choice, stated plainly.** (1) Google connector ingestion in
+  > the long-running `app` service is off until either the backend rejects the
+  > placeholder explicitly or P0.3 lands. Not a beta blocker — the recommended beta
+  > path is manual import (H5) and never calls Google. (2) The operator-facing docs
+  > that told you to set this variable became actively wrong. `README.md` is
+  > corrected; **`Docs/19_GOOGLE_CREDENTIAL_SETUP_SMOKE.md:44,226` is not** — see the
+  > [Round 5 section](#round-5--what-executing-the-plan-found), which also carries the
+  > recommended durable fix.
+  >
+  > **New exposure introduced by the same change, recorded rather than discovered
+  > later.** Optional variables that were previously inert in `.env` now reach the app
+  > and hit `settings.py`'s fail-fast parsers. A typo takes the API down:
+  > `UMS_CONNECTOR_JOB_MAX_WORKERS=two` →
+  > `ValueError: UMS_CONNECTOR_JOB_MAX_WORKERS must be a positive integer`
+  > (`config/settings.py:216`), which under `restart: unless-stopped` restart-loops
+  > rather than starting. This is settings.py's stated fail-fast contract and the
+  > message lands in `docker compose logs app`, so it is a **behaviour change, not a
+  > defect** — but it is worth knowing before you edit those lines. The adjacent
+  > hypothesis was checked and **refuted**: a blank value is safe (`VAR=` parses to the
+  > default), so only a malformed value bites.
 - **MEDIUM — no log rotation is configured on any service**, so container logs grow
   unbounded on the host disk.
+
+  > **Closed (Round 5).** Every service carries the `x-logging` anchor
+  > (`json-file`, `max-size 10m`, `max-file 5` → ~50 MiB per service), verified applied
+  > at runtime on a live container.
 - **MEDIUM — the 10s scheduler close budget equals Docker's entire stop grace**, so
   the shutdown audit of queued jobs often never runs. Set `stop_grace_period: 120s`.
+
+  > **Closed (Round 5).** `stop_grace_period: 120s`, verified at runtime as
+  > `StopTimeout=120` on the running container.
 
 ### Will it hold up at real scale?
 
@@ -529,6 +723,10 @@ question they answer. Severities are the **post-refutation** ones.
 4. A connector run interrupted by a reboot refuses to re-run for six hours.
 5. Slow burn: nothing is purged, nothing is vacuumed, no log rotation.
 
+> **Round 5 re-rank.** Item 5's log-rotation half is closed. Everything else on this
+> list stands, and one item should be added at the top that no reading round could
+> have placed there: **the stack does not start.** It was rank 0 the whole time.
+
 ---
 
 ## Round 3 — "the buttons don't work and it's a mockup"
@@ -536,23 +734,32 @@ question they answer. Severities are the **post-refutation** ones.
 Reported from hands-on use, then traced to root cause. All three observations are
 correct, and they have three *different* causes — one of which is a one-line fix.
 
-### Why no button works: the shipped dev identity has 2 of 28 permissions
+### Why no button works: the shipped dev identity has 2 of 26 permissions
+
+> **Correction (Round 5): this section previously said "2 of 28", and 28 is wrong.**
+> The `Permission` enum (`backend/ums_smart_revenue/auth/permissions.py:5-31`) has
+> **26** members — counted mechanically, not by eye:
+> `len(list(Permission))` → `26`. The ratio, and everything the section concludes from
+> it, is otherwise unchanged; only the denominator was inflated. The same wrong number
+> appeared in `Docs/21` and `Docs/01` and is corrected in both.
+> (`SECURITY.md:65` already said 26 and was right all along.)
 
 The buttons are **not** unwired. Of 43 `<button>` elements across the UI, **39 carry
 a handler**; the 4 that don't are the global chrome controls already recorded as
 dead. They fail at the API, not in the DOM.
 
 `frontend/vite.config.ts` injects a fixed dev identity, and its default role is
-`assistant_analyst`:
+`assistant_analyst` (`vite.config.ts:86`):
 
 ```
 ["X-Role", "VITE_DEV_GATEWAY_ROLE", "assistant_analyst"],
 ```
 
 `auth/seed.py` grants that role exactly two permissions — `VIEW_ANALYTICS` and
-`VIEW_CONFIDENCE` — out of 28 defined. It is the second-weakest role in the system;
-only `AUDIT_VIEWER` has fewer. For comparison: `FINANCE_ADMIN` has 15,
-`CORPORATE_ADMIN` 12, `DATA_STEWARD` 5.
+`VIEW_CONFIDENCE` — out of 26 defined. Only `audit_viewer` (1) has fewer; it ties with
+`system_integration_user` for second-weakest. For comparison, measured the same way:
+`finance_admin` 15, `corporate_admin` 12, `finance_approver` 11, `data_steward` 5,
+`super_owner` 26.
 
 So out of the box every write action (import, sync, run connector, lock month,
 export, manage users) is denied, and so is every read gated on `VIEW_REVENUE`,
@@ -572,20 +779,57 @@ from the README is arguably the single highest-impact documentation gap here.
 > **repo-root `.env`**, which does not currently exist on this machine. Following
 > the original instruction would have silently changed nothing.
 
-### A second reason parts of the Registry look broken: `/org-units` is not proxied
+### A second reason parts of the Registry look broken: `/org-units` was not proxied
 
 `RegistryView` calls `useOrgUnits()` unconditionally on mount
-(`RegistryView.tsx:1216` → `GET /org-units`), but `TENANT_SCOPED_ROUTES`
-(`vite.config.ts:13-32`) lists `/tenants`, `/session`, `/revenue`, `/finance-close`,
-`/exports`, `/connectors`, `/adsense`, `/channels`, `/groups`, `/audit` — **no
-`/org-units`, no `/users`**. Since the beta UI *is* the Vite dev server (B5), that
-request never reaches the backend; Vite's SPA fallback answers it.
+(`RegistryView.tsx:1216` → `GET /org-units`), but `TENANT_SCOPED_ROUTES` listed
+`/tenants`, `/session`, `/revenue`, `/finance-close`, `/exports`, `/connectors`,
+`/adsense`, `/channels`, `/groups`, `/audit` — **no `/org-units`, no `/users`**.
+Since the beta UI *is* the Vite dev server (B5), that request never reached the
+backend.
+
+> **Correction (Round 5) — the mechanism published here was wrong, and so was the
+> status.** This section said *"Vite's SPA fallback answers it"* and labelled the
+> finding *"not verified by running"*. It has now been run, by booting the real
+> `vite.config.ts` through Vite's `createServer` and issuing the exact request the
+> client issues. The SPA fallback does **not** answer it:
+>
+> ```text
+> # Accept: application/json  — what frontend/src/lib/api/client.ts sends
+> {"path":"/reports/raw-files","status":404,"contentType":null,"bodyBytes":0}
+> {"path":"/exchange-rates",  "status":404,"contentType":null,"bodyBytes":0}
+>
+> # Accept: text/html,...     — what a browser address-bar navigation sends
+> {"path":"/reports/raw-files","status":200,"contentType":"text/html","bodyBytes":750}
+>
+> # a PROXIED route, for contrast (no backend was running)
+> {"path":"/org-units","status":502,"contentType":"text/plain","bodyBytes":0}
+> ```
+>
+> `client.ts` defaults `Accept: application/json` (`buildHeaders`, `client.ts:76-78`).
+> Vite's html fallback **declines** that Accept, so the dev server returns a bare
+> **404 with a zero-length body and no `Content-Type` header at all**. `index.html`
+> comes back only for an html-accepting navigation. The difference matters for
+> diagnosis: an operator who pastes the URL into the address bar sees the app render
+> and concludes the route is fine, while the app's own fetch has been getting an empty
+> 404 the whole time.
 
 `RegistryView` degrades gracefully (`orgUnitState.data ?? []`, showing raw ids
-instead of names), so it is not a crash — but the Company and Sector columns will
-never resolve to names, and it reads as a backend bug. **Fix: one line** in that
-array. Not verified by running; reasoned from `client.ts:247-249` and Vite's
-SPA-fallback behaviour.
+instead of names), so it is not a crash — but the Company and Sector columns never
+resolve to names, and it reads as a backend bug.
+
+> **Beyond what the plan costed: this also broke a write path.** The same empty
+> `companies` list (`RegistryView.tsx:1247-1251`, `orgUnitState.data` filtered to
+> `type === "COMPANY"`) feeds the **Mapping Change Request** company `<select>`
+> (`RegistryView.tsx:840-845`). With `/org-units` unproxied that dropdown contained
+> nothing but its `Select company…` placeholder, so **the operator could not assign a
+> channel to a company from the UI at all** — the one UI-reachable write on that
+> screen. That is a functional gap, not a cosmetic one, and it belongs to plan item
+> **P0.9** (the org-unit skeleton), whose two seeded rows are worthless if the picker
+> that consumes them is empty.
+
+**Status: fixed.** `TENANT_SCOPED_ROUTES` now carries `/org-units` and `/users`
+(`vite.config.ts:16-49`), guarded by `frontend/tests/devProxyRoutes.test.ts`.
 
 ### Why the data looks fake: because some of it is
 
@@ -629,6 +873,16 @@ engine you are not allowed to reach.**
 The hands-on session that produced them ran on the operator's **Mac**, not on the
 target PC. On the PC, `docker volume ls` shows no `ums-smart-revenue` volumes — the
 compose stack has never been started on the machine this audit targets.
+
+> **Correction (Round 5) — "never been started" was the observation; "could not have
+> started" is the fact.** This paragraph, and every paragraph derived from it, treated
+> the absence of volumes as an *untested-environment caveat*: the implication was that
+> the stack would come up and simply had not been asked to. It would not have.
+> `docker compose up` against this file put Postgres into a restart loop on any
+> machine, Mac or PC — see
+> [B0](#b0--the-compose-stack-could-never-have-started-resolved). The absent volumes
+> were not a gap in the evidence; they were the evidence, and this audit read them as
+> the wrong thing for four rounds.
 
 That split matters when reading the rest of this document:
 
@@ -707,9 +961,11 @@ invalidates published *advice*; two are new findings the earlier rounds missed.
    (`vite.config.ts:41-51,93,151`), and `:38` records that as a deliberate past fix.
    Following the original instruction would have changed nothing. The correct file is
    the repo-root `.env`, which does not exist on this machine.
-4. **NEW — `/org-units` is not in the dev proxy** (`vite.config.ts:13-32`), while
-   `RegistryView` calls it on mount. Company/Sector names will never resolve in the
-   beta. One line.
+4. **NEW — `/org-units` is not in the dev proxy**, while `RegistryView` calls it on
+   mount. Company/Sector names will never resolve in the beta. One line.
+   *Round 5: fixed and confirmed by running it. The costing under-scoped it, though —
+   it also emptied the Mapping Change Request company picker, so it was a broken write
+   path, not only unresolved names. See the corrected section above.*
 5. **NEW — a second, untested delete path.** A full `run_deduction_ingestion.py` run
    (no `--source`) deletes the reconciliation workflow's components for that month
    (`deduction_ingestion.py:586` → `:269-284`). No test covers it.
@@ -728,18 +984,139 @@ Two further items worth carrying, found while costing but not defects in the aud
 
 ---
 
+## Round 5 — what executing the plan found
+
+Rounds 1–4 read. Round 5 ran W0.2 and P0.1–P0.5 and then attacked the result. Two
+findings came out of it that no reading pass produced, and three published claims died.
+
+### The headline: reading found five blockers, running found the sixth in a minute
+
+[B0](#b0--the-compose-stack-could-never-have-started-resolved) is the whole lesson of
+this round. It was not subtle, not conditional, and not environment-specific — the
+image printed the fix in its own log — and four rounds of audit, including one whose
+entire method was naming the exact line a fix would touch, walked past it. The
+distinguishing feature of B0 is not that it was hard to see; it is that **seeing it
+required starting the thing.**
+
+Worth carrying forward: a "has never been run" line in an audit is not a caveat to be
+noted and worked around. It is an unopened box, and it should be opened before the
+findings around it are trusted.
+
+### Published claims Round 5 killed
+
+1. **"The compose stack has never been started"** — true, but the conclusion drawn
+   from it ("therefore the first beta run is the first rehearsal") was too gentle. The
+   stack *could not* start. Corrected in three places above.
+2. **"Vite's SPA fallback answers the unproxied request"** — refuted by running it. It
+   returns a bare 404 with a zero-length body and no `Content-Type`; `index.html` only
+   comes back for an html-accepting navigation. Corrected in the Round 3 section.
+3. **"2 of 28 permissions"** — the enum has 26. Corrected here, in `Docs/21` and in
+   `Docs/01`.
+
+Two more claims were corrected inside the implementation itself rather than here:
+`docker-compose.yml`'s header no longer says `.env.example` "lists every variable this
+file requires" (it does not — `--env-file .env.example config` exits 1), and it no
+longer points at a `deploy/helm/` that has never existed.
+
+### The one thing Round 5 shipped half of
+
+`UMS_GOOGLE_CONNECTOR_SERVICE_ACTOR_ID` was removed from the compose pass-through for
+a good reason (see the status note under *Does it survive this PC?*), but the change
+initially landed with its documentation half missing — `README.md`'s env table and the
+`Docs/19` go-live checklist both told the operator to set a variable that the app would
+then report as unset. The episode is recorded because the failure shape is worth
+remembering: **a correct, deliberate trade is indistinguishable from a bug to the
+person who hits it, if the only record of the decision lives in a file they never
+open.**
+
+- ✅ `README.md` is corrected: the env table flags the variable as not forwarded by
+  compose, and a note explains why, what it costs, and the
+  `docker-compose.override.yml` escape hatch (verified working).
+- ❌ **`Docs/19_GOOGLE_CREDENTIAL_SETUP_SMOKE.md` is still wrong and was not touched
+  here.** `Docs/19:44` ("`UMS_GOOGLE_CONNECTOR_SERVICE_ACTOR_ID` is set for live
+  non-dry-run execution") and `Docs/19:226` (a go-live **checklist** line —
+  "`…SERVICE_ACTOR_ID` is set to an active service actor with `connectors.run_jobs`")
+  can both be satisfied exactly as written while every connector run under compose
+  still refuses. That file was outside this change's scope; it needs the same
+  correction, and until it lands the checklist can be signed off on a stack that
+  cannot run a connector.
+
+> **Recommended durable fix, not yet implemented (backend work).** Compose interpolation
+> has only `:-` / `:?` / `:+` / `-` — no pattern matching — so a compose-side refusal of
+> a *specific* value is not constructible, and an `.env.example`-only fix would still
+> leave `docker run --env-file .env`, a bare uvicorn, and any future template exposed.
+> The complete fix is in `build_connector_service_principal`: reject
+> `00000000-0000-0000-0000-0000000000bb` explicitly alongside the existing `None`
+> check, with its own message. That closes it at the boundary that already owns the
+> fail-closed contract, and makes the compose pass-through safe to restore.
+
+### Backup: P0.1 landed, and its own adversarial pass found real holes
+
+`scripts/backup_database.py`, `scripts/restore_database.py`, 24 tests, and
+[`22_BACKUP_RESTORE_AND_REHEARSAL.md`](22_BACKUP_RESTORE_AND_REHEARSAL.md) ship. The
+roles trap (B3's worst shape — backups that look perfect and are unrestorable) is
+closed and rehearsed end to end: 38/38 tables, 187/187 rows, and a privilege surface
+that matches the source exactly.
+
+Two defects the first implementation shipped were caught and one was fixed:
+
+- **Fixed — retention could evict the only backup containing data.** Seven content-free
+  nights filled the `--keep-min` window and pushed the real backup out of it. Retention
+  is now content-aware, and proven on the exact fixture that produced the failure.
+- **Not fixed — the content gate's absolute floor is far too low.** `MIN_ROWS = 1`
+  is justified in the code by "a freshly migrated database has one stamp row." That
+  premise is false for this application: migration `20260523_0001` seeds
+  `ISO_4217_CURRENCIES_2026_05`, which is **178 rows** (verified by importing it), so a
+  virgin `alembic upgrade head` carries 180 rows, not 1. A database truncated to
+  nothing but `alembic_version` therefore still passes the floor and publishes a green
+  `OK`. The relative collapse check is the only real protection, and it re-anchors
+  every night, so a slow drain passes too.
+
+Both limits are written into Docs/22 rather than left implicit — see *What a green run
+does not guarantee* there. They are recorded as **open**, not closed, and they are the
+first thing to fix after the beta boots.
+
+### What Round 5 verified that nobody had tested before
+
+- Data survives a container replacement (row returns with its original timestamp).
+- `down -v` still genuinely re-initialises: fresh `initdb`, full migration chain, 38
+  tables, `app_tenant` and `app_platform` present.
+- The app **serves** rather than merely reporting healthy: `/livez` 200 and
+  `/openapi.json` 200 from the host on the published port.
+- Export artifacts resolve to the mounted volume **through the real API dependency**
+  (`from_environment()`, `api/exports.py:245`), not just through a bare constructor.
+- The dev proxy's route list is now guarded by a test that derives its expectation from
+  `frontend/src/lib/api/**` instead of comparing the list to a copy of itself.
+
+### Still not verified, after Round 5
+
+- **Nothing has run on the target Windows PC.** Every compose result above came from
+  throwaway projects on the development machine. Docker Desktop's start timing, WSL2
+  behaviour, and the reboot-recovery path remain unverified on the real hardware.
+- **No scheduled task has been registered**, on either machine.
+- **No real CMS revenue has been backed up or restored.** The reference database is a
+  seeded schema.
+- **`.env.example` is still incomplete** (P0.3), so `cp .env.example .env` is still not
+  enough to boot the stack.
+
+---
+
 ## Evidence index
 
 | Area | Primary evidence |
 | --- | --- |
 | Gateway-asserted identity | `api/dependencies.py:77-120,139-158,181-189` |
-| Authz mode default | `config/settings.py:27,87-91`; `docker-compose.yml:23` |
+| Authz mode default | `config/settings.py:27,87-91`; `docker-compose.yml:87` |
 | No local auth | `db/security_models.py:38-78` (no password column) |
-| Backups absent | `Docs/01_IMPLEMENTATION_PLAN.md:1205`; `docker-compose.yml:7` |
-| Ephemeral artifacts | `reports/artifact_storage.py:13`; `orchestrator.py:3125`; `Dockerfile:109` |
-| Frontend serving | `frontend/vite.config.ts` (`server.proxy` only, routes `:13-32`) |
+| Backups absent (now closed) | `Docs/01_IMPLEMENTATION_PLAN.md:1205`; `scripts/backup_database.py`; `Docs/22_BACKUP_RESTORE_AND_REHEARSAL.md` |
+| Postgres 18 volume mount (B0) | `docker-compose.yml:226`, rationale `:198-225`; image `PGDATA=/var/lib/postgresql/18/docker`, `Config.Volumes={"/var/lib/postgresql":{}}` |
+| Ephemeral artifacts (now mounted) | `reports/artifact_storage.py:13`; `orchestrator.py:3125`; `Dockerfile:109`; volume `docker-compose.yml:362`, mounts `:286,339` |
+| Frontend serving | `frontend/vite.config.ts` (`server.proxy` only, routes `:16-49`) |
+| Dev-proxy route guard | `frontend/tests/devProxyRoutes.test.ts` (derived from `frontend/src/lib/api/**`) |
+| Permission count (26, not 28) | `auth/permissions.py:5-31`; `auth/seed.py`; `SECURITY.md:65` |
+| `deploy/helm/` never existed | `git ls-files deploy` → empty; `git log --all -- deploy` → 0 commits |
 | Roles seed | `backend/ums_smart_revenue/db/security_seed.sql` |
 | Manual revenue import | `api/revenue.py:197-206,1016`; `finance/revenue_facts.py:32` |
 | Secret resolvers | `connectors/credentials.py:30-37`; `connectors/google/secret_resolver.py:70-84` |
-| Dead compose config | `docker-compose.yml:25-28`; `Docs/16_OPEN_DECISIONS.md:35-38` |
-| Localhost binding | `docker-compose.yml:41,56,98,125` |
+| Dead compose config | `docker-compose.yml:89-92`; `Docs/16_OPEN_DECISIONS.md:35-38` |
+| Localhost binding | `docker-compose.yml:196,240,284,333` |

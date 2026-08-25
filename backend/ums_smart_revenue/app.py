@@ -7,6 +7,8 @@
 # Connections:
 #   - File: backend/ums_smart_revenue/api/export_templates.py -> Router wiring.
 #   - File: backend/ums_smart_revenue/config/settings.py -> Runtime settings.
+#   - File: backend/ums_smart_revenue/config/logging_config.py -> The ASGI
+#     lifespan owns the one-time process logging configuration (P0.6).
 # ============================================================================
 """FastAPI application factory and router wiring."""
 
@@ -72,6 +74,7 @@ from ums_smart_revenue.api.session import router as session_router
 from ums_smart_revenue.api.source_rows import router as source_rows_router
 from ums_smart_revenue.api.tenants import router as tenants_router
 from ums_smart_revenue.api.users import router as users_router
+from ums_smart_revenue.config.logging_config import configure_logging, restore_logging
 from ums_smart_revenue.config.settings import (
     AUTHZ_SOURCE_DATABASE,
     AUTHZ_SOURCE_HEADERS,
@@ -112,37 +115,51 @@ def create_app(*, database_url: str | None = None, authz_source: str | None = No
         raise ValueError("database authz_source requires database_url or UMS_DATABASE_URL")
 
     # ========================================================================
-    # Purpose: Close the module-owned GroupSyncScheduler and ConnectorJobExecutor
-    #   on app shutdown so the tick thread and worker threads tear down
+    # Purpose: Install the process logging configuration on startup, then on
+    #   shutdown close the module-owned GroupSyncScheduler and
+    #   ConnectorJobExecutor so the tick thread and worker threads tear down
     #   deterministically (each one's weakref.finalize GC backstop is a safety
-    #   net, not the primary teardown). No startup work.
-    # Database/ORM: None directly; both own their own session factories.
+    #   net, not the primary teardown), and finally release the logging state.
+    # Database/ORM: None directly; both workers own their own session factories.
     # Standards: getattr-guarded so a disabled app (no scheduler, no executor)
     #   shuts down cleanly. Fail-closed default OFF means the import-time app
     #   spawns no threads. Close ORDER matters: scheduler FIRST (stop ticking,
     #   so it can submit no further jobs), THEN executor (drain in-flight
     #   workers) -- closing the executor first would let a scheduler tick
-    #   submit into an already-shutting-down pool.
-    # Blast Radius: Process lifecycle / threads only. No finance, auth, audit,
-    #   or graph projection impact.
+    #   submit into an already-shutting-down pool. restore_logging runs LAST,
+    #   in an outer finally, so both workers' shutdown lines still reach the
+    #   configured handler and a close() failure cannot leak the handler.
+    #   Logging is configured HERE and not in create_app because create_app
+    #   runs at import (`app = create_app()` at the foot of this module) --
+    #   configuring there would make importing this module reconfigure the
+    #   importing process's logging, which is how a test suite becomes
+    #   order-dependent. The lifespan runs once per served process.
+    # Blast Radius: Process lifecycle / threads / root logger only. No finance,
+    #   auth, audit, or graph projection impact.
     # Connections:
+    #   - File: backend/ums_smart_revenue/config/logging_config.py ->
+    #     configure_logging / restore_logging.
     #   - File: backend/ums_smart_revenue/connectors/runs/executor.py -> close().
     #   - File: backend/ums_smart_revenue/connectors/runs/scheduler.py -> close().
     # ========================================================================
     @asynccontextmanager
     async def _lifespan(fastapi_app: FastAPI):
-        """Yield through serving, then close the scheduler and executor if present."""
+        """Configure logging, serve, then close the workers and release logging."""
+        logging_configuration = configure_logging(level=settings.log_level)
         try:
             yield
         finally:
-            # Scheduler first (stop ticking), then executor (drain workers) --
-            # see the Standards note above for why the order is load-bearing.
-            scheduler = getattr(fastapi_app.state, "group_sync_scheduler", None)
-            if scheduler is not None:
-                scheduler.close()
-            executor = getattr(fastapi_app.state, "connector_job_executor", None)
-            if executor is not None:
-                executor.close()
+            try:
+                # Scheduler first (stop ticking), then executor (drain workers)
+                # -- see the Standards note above for why the order matters.
+                scheduler = getattr(fastapi_app.state, "group_sync_scheduler", None)
+                if scheduler is not None:
+                    scheduler.close()
+                executor = getattr(fastapi_app.state, "connector_job_executor", None)
+                if executor is not None:
+                    executor.close()
+            finally:
+                restore_logging(logging_configuration)
 
     _app = FastAPI(
         title="UMS Smart Revenue Control Center API",

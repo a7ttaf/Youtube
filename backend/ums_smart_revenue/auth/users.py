@@ -252,6 +252,46 @@ class SqlAlchemyUserAccountRepository:
 
         return self._run_with_storage_retries(operation)
 
+    # ============================================================================
+    # Purpose: Resolve one account by its normalized email within the current
+    #   tenant, returning ``None`` when no such account exists. Added so an
+    #   operator bootstrap can be idempotent: ``create_user`` raises
+    #   ``UserAccountConflictError`` on a re-run and the caller still has to
+    #   report the SERVER-GENERATED id of the row that already exists (audit H3),
+    #   which previously had no repository-owned lookup.
+    # Database/ORM: UserORM/users — tenant-scoped read only.
+    # Standards: Repository-owned SQLAlchemy read behind the same storage-retry
+    #   wrapper as every other method here; the email is normalized through the
+    #   shared ``_normalize_email`` so the lookup matches the ``uq_users_email_lower``
+    #   index and the uniqueness rule ``create_user`` enforces. Absence is a
+    #   ``None`` return, not an exception, because "not created yet" is the
+    #   expected first-run state rather than a failure.
+    # Blast Radius: Authorization-adjacent read. Grants nothing, mutates nothing,
+    #   and cannot cross a tenant boundary (``tenant_id`` is always in the WHERE).
+    # Connections:
+    #   - File: scripts/bootstrap_operator.py -> the idempotent first-run caller.
+    #   - File: backend/ums_smart_revenue/auth/users.py -> ``_email_exists`` uses
+    #     the identical normalized-email predicate for the conflict check.
+    # ============================================================================
+    def get_user_by_email(self, *, email: str) -> UserAccountEntry | None:
+        """Return the tenant's account for ``email``, or ``None`` when absent."""
+        normalized_email = _normalize_email(email)
+
+        def operation() -> UserAccountEntry | None:
+            """Attempt one normalized-email account lookup against the session."""
+            row = self._session.scalars(
+                select(UserORM)
+                .where(
+                    UserORM.tenant_id == self._tenant_id,
+                    func.lower(UserORM.email) == normalized_email,
+                )
+                .order_by(UserORM.id)
+                .limit(1)
+            ).one_or_none()
+            return None if row is None else self._to_entry(row)
+
+        return self._run_with_storage_retries(operation)
+
     def get_access_profile(self, *, user_id: str) -> UserAccessProfileEntry:
         """Load one account with active role assignments and direct grants."""
         user_uuid = _parse_uuid(user_id, field_name="user_id")

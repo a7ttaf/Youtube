@@ -41,7 +41,7 @@ credential reference. The packet must not be copied into repo docs.
 | Secret location | GCP Secret Manager secret name/version; do not paste the secret value into UMS |
 | Runtime IAM | UMS runtime identity has read access only to the needed secret version |
 | Tenant/account mapping | UMS tenant id, `connector_key`, and Google `account_id` or CMS content owner id |
-| Service actor | `UMS_GOOGLE_CONNECTOR_SERVICE_ACTOR_ID` is set for live non-dry-run execution |
+| Service actor | A service-actor UUID **you provisioned**, holding `connectors.run_jobs`, recorded in the tracker. Never the placeholder `.env.example` ships. Under `docker compose` it cannot be supplied through `.env` — see [Supplying the service actor under `docker compose`](#supplying-the-service-actor-under-docker-compose) |
 | Smoke month | A non-closed month or approved historical month to use for the first dry-run |
 
 ## Secret payload contract
@@ -213,6 +213,66 @@ This path submits an audited job through the executor and may call Google APIs.
 It is therefore not the first smoke. Use it after the credential probe and CLI
 dry-run pass.
 
+## Supplying the service actor under `docker compose`
+
+Read this before signing the service-actor line in the live-run gate below. It is
+the one checklist item that can be satisfied exactly as an operator would expect
+and still leave every connector run refusing.
+
+**`docker-compose.yml` does not forward `UMS_GOOGLE_CONNECTOR_SERVICE_ACTOR_ID`.**
+Compose forwards plenty of other variables from `.env`, but not this one, so
+putting it there has no effect on the compose `app` service. Every connector run
+then fails closed with the variable reported as *unset*:
+
+```text
+ValueError: UMS_GOOGLE_CONNECTOR_SERVICE_ACTOR_ID must be set to a UUID before
+connector audit emitters can build a service principal
+```
+
+— while the operator is looking at the line they set in `.env`. The
+variable is withheld on purpose: `.env.example` currently ships it uncommented as
+the public placeholder `00000000-0000-0000-0000-0000000000bb`, and
+`connectors/google/audit.py` refuses only on *unset*, accepting any syntactically
+valid UUID. Forwarding it would attribute the connector audit trail of every
+operator who ran `cp .env.example .env` to one well-known id from a public
+template. A refused run is recoverable; a mis-attributed audit trail is not.
+See the comment block in `docker-compose.yml` for the two fixes that would let
+the pass-through be restored.
+
+To supply the value under compose, add an untracked `docker-compose.override.yml`
+beside `docker-compose.yml`. Compose merges it automatically — no `-f` flag:
+
+```yaml
+services:
+  app:
+    environment:
+      UMS_GOOGLE_CONNECTOR_SERVICE_ACTOR_ID: "<your provisioned service-actor uuid>"
+```
+
+Then prove the value actually reached the service before you sign anything:
+
+```powershell
+docker compose config | Select-String SERVICE_ACTOR
+docker compose up -d app
+```
+
+If the first command prints nothing, the app will refuse every connector run no
+matter what `.env` says. The override reaches **only** the service it names — add
+a matching `app-dev:` block if you run the dev profile.
+
+Two things that do **not** work, both worth knowing before you burn an hour:
+
+- `docker compose run -e UMS_GOOGLE_CONNECTOR_SERVICE_ACTOR_ID=… app` — this
+  affects a one-off container, not the long-running `app` service that serves
+  `POST /connectors/jobs`.
+- Setting it in `.env`, in any form. It is not forwarded; there is nothing to
+  pick it up.
+
+Outside compose there is no such gap: `uv run uvicorn …` and the
+`scripts/run_google_connector.py` CLI read the variable from the environment
+normally, which is why the CLI dry-run in the previous section works with a
+plain `$env:` assignment.
+
 ## Live-run gate
 
 Before the first `dry_run: false` job:
@@ -223,8 +283,16 @@ Before the first `dry_run: false` job:
 - `POST /connectors/credentials/{connector_key}/{account_id}/test` returned
   `status: "ok"` for the exact connector/account.
 - CLI `--dry-run` passed for the exact tenant/connector/account/month.
-- `UMS_GOOGLE_CONNECTOR_SERVICE_ACTOR_ID` is set to an active service actor
-  with `connectors.run_jobs`.
+- `UMS_GOOGLE_CONNECTOR_SERVICE_ACTOR_ID` is set to an active service actor with
+  `connectors.run_jobs`, **and the process that will run the job has been shown
+  to see it.** Sign this off against observed output, not against a line in
+  `.env`: compose does not forward this particular variable, so
+  `docker compose config | Select-String SERVICE_ACTOR` must print the variable.
+  If it prints nothing, this item is NOT satisfied however the env file looks —
+  see [Supplying the service actor under `docker compose`](#supplying-the-service-actor-under-docker-compose).
+- The value is a service actor you provisioned, not the
+  `00000000-0000-0000-0000-0000000000bb` placeholder from `.env.example`. The
+  runtime check refuses only on *unset* and will accept the placeholder silently.
 - The target month is not locked unless the owner explicitly approves the
   behavior for a closed month.
 - Operator has reviewed the expected source tables and rollback note below.
