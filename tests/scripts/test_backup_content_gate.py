@@ -2303,6 +2303,34 @@ def test_restore_roles_rejects_nonzero_without_allowed_error(
     assert caught.value.code == restore.EXIT_ROLES_FAILED
 
 
+def test_restore_roles_rejects_fatal_even_after_allowed_duplicate(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """An allowed bootstrap duplicate must not mask a later FATAL apply failure."""
+    roles_path = tmp_path / restore.ROLES_NAME
+    roles_path.write_text("CREATE ROLE app_tenant;\n", encoding="utf-8")
+
+    def fake_run_with_file(*_a, **_k):
+        return subprocess.CompletedProcess(
+            args=[],
+            returncode=2,
+            stdout="",
+            stderr=(
+                'ERROR:  role "ums" already exists\n'
+                "FATAL:  terminating connection due to administrator command\n"
+            ),
+        )
+
+    monkeypatch.setattr(restore, "_run_with_file", fake_run_with_file)
+    monkeypatch.setattr(
+        restore, "_psql", lambda *_a, **_k: "app_platform\napp_tenant\n"
+    )
+    with pytest.raises(restore.RestoreError) as caught:
+        restore._restore_roles("fake", roles_path, timeout=5)
+    assert caught.value.code == restore.EXIT_ROLES_FAILED
+    assert "terminating connection" in str(caught.value)
+
+
 def test_destroy_throwaway_false_on_docker_rm_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2316,14 +2344,27 @@ def test_destroy_throwaway_false_on_docker_rm_failure(
     assert restore._destroy_throwaway("ums-restore-rehearsal-x", timeout=5) is False
 
 
+def test_destroy_throwaway_false_on_docker_rm_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """TimeoutExpired from docker rm must not escape cleanup."""
+
+    def _timeout(*_a, **_k):
+        raise subprocess.TimeoutExpired(cmd=["docker", "rm"], timeout=1)
+
+    monkeypatch.setattr(restore, "_run", _timeout)
+    assert restore._destroy_throwaway("ums-restore-rehearsal-x", timeout=5) is False
+
+
 def test_overlapping_backup_lock_is_exclusive(tmp_path: Path) -> None:
     """A second process must fail before loading the watermark."""
-    with (
-        backup._exclusive_backup_lock(tmp_path),
-        pytest.raises(backup.BackupError) as caught,
-    ):
+
+    def _contend() -> None:
         with backup._exclusive_backup_lock(tmp_path):
             pass
+
+    with backup._exclusive_backup_lock(tmp_path), pytest.raises(backup.BackupError) as caught:
+        _contend()
     assert caught.value.code == backup.EXIT_USAGE
     assert "another backup is already running" in str(caught.value)
     assert not (tmp_path / ".backup.lock").exists()
@@ -2435,25 +2476,26 @@ class _FakeContainer:
 
     @staticmethod
     def _dump_roles(
-        container: str, target: Path, *, timeout: int, include_passwords: bool
+        _container: str, target: Path, *, timeout: int, include_passwords: bool
     ) -> list[str]:
-        del container, timeout, include_passwords
+        _ = (timeout, include_passwords)
         target.write_text("CREATE ROLE app_tenant;\nCREATE ROLE app_platform;\n", encoding="utf-8")
         return list(backup.REQUIRED_ROLES)
 
     def _dump_database_and_count(
-        self, container: str, target: Path, *, timeout: int
+        self, _container: str, target: Path, *, timeout: int
     ) -> dict[str, int]:
-        del container, timeout
+        _ = timeout
         target.write_bytes(backup.CUSTOM_FORMAT_MAGIC + b"-fake-archive")
         return dict(self.counts)
 
     @staticmethod
-    def _dump_database(container: str, target: Path, *, timeout: int) -> None:
-        del container, timeout
+    def _dump_database(_container: str, target: Path, *, timeout: int) -> None:
+        _ = timeout
         target.write_bytes(backup.CUSTOM_FORMAT_MAGIC + b"-fake-archive")
 
     def _facts(self, container: str, *, timeout: int) -> dict[str, str]:
+        _ = timeout
         return {
             "container": container,
             "database": self.identity.database,

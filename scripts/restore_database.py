@@ -443,7 +443,12 @@ def _create_throwaway(manifest: dict[str, object], *, timeout: int) -> str:
 
 def _destroy_throwaway(name: str, *, timeout: int) -> bool:
     """Remove the rehearsal container. Returns True only when docker rm succeeded."""
-    completed = _run(["docker", "rm", "--force", "--volumes", name], timeout=timeout)
+    try:
+        completed = _run(["docker", "rm", "--force", "--volumes", name], timeout=timeout)
+    except subprocess.TimeoutExpired:
+        # FIX: Timeout must not escape a finally-block cleanup and mask the
+        # restore result; treat it as a failed destroy like a nonzero exit.
+        return False
     return completed.returncode == 0
 
 
@@ -454,15 +459,21 @@ _ROLE_ALREADY_EXISTS = re.compile(
 
 
 def _unexpected_roles_errors(stderr: str) -> list[str]:
-    """Return ERROR lines from roles.sql stderr that are not bootstrap duplicates.
+    """Return FATAL/ERROR lines from roles.sql stderr that are not bootstrap duplicates.
 
     ``psql -f -`` often prefixes diagnostics as ``psql: :N: ERROR: ...``; extract
     the ``ERROR:`` portion before classifying so prefixed lines are not skipped.
+    FATAL lines (for example connection termination) always fail closed even when
+    an earlier allowed duplicate made ``returncode != 0`` look expected.
     """
     unexpected: list[str] = []
     for line in stderr.splitlines():
         stripped = line.strip()
-        marker = stripped.upper().find("ERROR:")
+        upper = stripped.upper()
+        if "FATAL:" in upper:
+            unexpected.append(stripped)
+            continue
+        marker = upper.find("ERROR:")
         if marker < 0:
             continue
         diagnostic = stripped[marker:]

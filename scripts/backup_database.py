@@ -2466,14 +2466,17 @@ def run_backup(args: argparse.Namespace, out_dir: Path) -> BackupOutcome:
 
     moved = False
     try:
+        # Capture the archive first, then roles.sql. Role DDL committed after a
+        # pre-dump roles capture but before the snapshot would otherwise leave
+        # ACL/owner references in database.dump with no matching CREATE ROLE.
+        counts = _dump_database_and_count(
+            container, staging / DUMP_NAME, timeout=args.timeout
+        )
         roles = _dump_roles(
             container,
             staging / ROLES_NAME,
             timeout=args.timeout,
             include_passwords=args.include_role_passwords,
-        )
-        counts = _dump_database_and_count(
-            container, staging / DUMP_NAME, timeout=args.timeout
         )
         toc_entries = -1
         if args.verify_dump:
