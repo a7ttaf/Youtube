@@ -24,6 +24,7 @@ DEFAULT_TENANT_ID = UUID(UMS_TENANT_ID)
 
 
 def auth_headers(role: str, user_id: UUID = ADMIN_ID) -> dict[str, str]:
+    """Helper ``auth_headers``."""
     return {
         "x-user-id": str(user_id),
         "x-user-email": f"{role}@example.com",
@@ -34,10 +35,12 @@ def auth_headers(role: str, user_id: UUID = ADMIN_ID) -> dict[str, str]:
 
 
 def build_database_url(tmp_path) -> str:
+    """Helper ``build_database_url``."""
     return f"sqlite+pysqlite:///{(tmp_path / 'user-accounts.db').as_posix()}"
 
 
 def seed_database(database_url: str) -> None:
+    """Helper ``seed_database``."""
     engine = create_engine(database_url)
     SecurityBase.metadata.create_all(engine)
     with Session(engine) as session:
@@ -46,6 +49,7 @@ def seed_database(database_url: str) -> None:
 
 
 def test_corporate_admin_creates_human_user_with_audit(tmp_path):
+    """Exercise ``test_corporate_admin_creates_human_user_with_audit``."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -79,6 +83,7 @@ def test_corporate_admin_creates_human_user_with_audit(tmp_path):
 
 
 def test_assistant_cannot_create_user_accounts(tmp_path):
+    """Exercise ``test_assistant_cannot_create_user_accounts``."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -98,6 +103,7 @@ def test_assistant_cannot_create_user_accounts(tmp_path):
 
 
 def test_duplicate_user_email_is_rejected_case_insensitively(tmp_path):
+    """Exercise ``test_duplicate_user_email_is_rejected_case_insensitively``."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -127,6 +133,7 @@ def test_duplicate_user_email_is_rejected_case_insensitively(tmp_path):
 
 
 def test_historical_duplicate_user_emails_return_conflict(tmp_path):
+    """Exercise ``test_historical_duplicate_user_emails_return_conflict``."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     engine = create_engine(database_url)
@@ -171,6 +178,7 @@ def test_historical_duplicate_user_emails_return_conflict(tmp_path):
     ],
 )
 def test_malformed_user_email_is_rejected(tmp_path, email):
+    """Exercise ``test_malformed_user_email_is_rejected``."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -190,6 +198,7 @@ def test_malformed_user_email_is_rejected(tmp_path, email):
 
 
 def test_user_repository_rejects_non_string_email(tmp_path):
+    """Exercise ``test_user_repository_rejects_non_string_email``."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     engine = create_engine(database_url)
@@ -209,6 +218,7 @@ def test_user_repository_rejects_non_string_email(tmp_path):
 
 
 def test_user_repository_rejects_non_string_user_id(tmp_path):
+    """Exercise ``test_user_repository_rejects_non_string_user_id``."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     engine = create_engine(database_url)
@@ -224,6 +234,7 @@ def test_user_repository_rejects_non_string_user_id(tmp_path):
 
 
 def test_user_repository_rejects_non_boolean_service_account_flag(tmp_path):
+    """Exercise ``test_user_repository_rejects_non_boolean_service_account_flag``."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     engine = create_engine(database_url)
@@ -266,6 +277,7 @@ def test_user_repository_maps_email_unique_constraint_to_conflict(
     tmp_path,
     monkeypatch,
 ):
+    """Exercise ``test_user_repository_maps_email_unique_constraint_to_conflict``."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     engine = create_engine(database_url)
@@ -289,6 +301,7 @@ def test_user_repository_maps_unknown_integrity_error_to_conflict(
     tmp_path,
     monkeypatch,
 ):
+    """Exercise ``test_user_repository_maps_unknown_integrity_error_to_conflict``."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     engine = create_engine(database_url)
@@ -298,6 +311,7 @@ def test_user_repository_maps_unknown_integrity_error_to_conflict(
         monkeypatch.setattr(repository, "_email_exists", lambda *args, **kwargs: False)
 
         def fail_flush(*args, **kwargs):
+            """Helper ``fail_flush``."""
             raise IntegrityError(
                 "insert",
                 {},
@@ -321,6 +335,7 @@ def test_user_repository_retries_transient_create_storage_error(
     tmp_path,
     monkeypatch,
 ):
+    """Exercise ``test_user_repository_retries_transient_create_storage_error``."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     engine = create_engine(database_url)
@@ -331,6 +346,7 @@ def test_user_repository_retries_transient_create_storage_error(
         flush_attempts = 0
 
         def flaky_flush(*args, **kwargs):
+            """Helper ``flaky_flush``."""
             nonlocal flush_attempts
             flush_attempts += 1
             if flush_attempts == 1:
@@ -364,6 +380,7 @@ def test_user_repository_returns_conflict_for_concurrent_duplicate_create(
         injected_duplicate = False
 
         def flush_with_concurrent_duplicate(*args, **kwargs):
+            """Helper ``flush_with_concurrent_duplicate``."""
             nonlocal injected_duplicate
             if not injected_duplicate:
                 injected_duplicate = True
@@ -490,6 +507,7 @@ def test_update_user_email_conflict_diagnosis_survives_a_real_failed_flush(
         email_exists_calls = {"n": 0}
 
         def email_exists_missing_the_race_winner(email, **kwargs):
+            """Helper ``email_exists_missing_the_race_winner``."""
             email_exists_calls["n"] += 1
             if email_exists_calls["n"] == 1:
                 # The TOCTOU window: the pre-flush check ran before the winner
@@ -507,6 +525,7 @@ def test_update_user_email_conflict_diagnosis_survives_a_real_failed_flush(
 
 
 def test_corporate_admin_cannot_create_service_account(tmp_path):
+    """Exercise ``test_corporate_admin_cannot_create_service_account``."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -527,6 +546,7 @@ def test_corporate_admin_cannot_create_service_account(tmp_path):
 
 
 def test_super_owner_creates_service_account(tmp_path):
+    """Exercise ``test_super_owner_creates_service_account``."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -556,6 +576,7 @@ def test_super_owner_creates_service_account(tmp_path):
 
 
 def test_corporate_admin_updates_user_status_with_audit(tmp_path):
+    """Exercise ``test_corporate_admin_updates_user_status_with_audit``."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -610,6 +631,7 @@ def test_create_user_rolls_back_account_when_audit_recording_fails(
     seed_database(database_url)
 
     def fail_audit_recording(**_kwargs: object) -> None:
+        """Helper ``fail_audit_recording``."""
         raise RuntimeError
 
     monkeypatch.setattr(users_api, "record_audit_event", fail_audit_recording)
@@ -665,6 +687,7 @@ def test_patch_user_rolls_back_account_when_audit_recording_fails(
     user_id = create_response.json()["id"]
 
     def fail_audit_recording(**_kwargs: object) -> None:
+        """Helper ``fail_audit_recording``."""
         raise RuntimeError
 
     monkeypatch.setattr(users_api, "record_audit_event", fail_audit_recording)
@@ -922,6 +945,7 @@ def test_user_repository_returns_conflict_for_concurrent_duplicate_update(
         injected_duplicate = False
 
         def flush_with_concurrent_duplicate(*args, **kwargs):
+            """Helper ``flush_with_concurrent_duplicate``."""
             nonlocal injected_duplicate
             if not injected_duplicate:
                 injected_duplicate = True
@@ -949,6 +973,7 @@ def test_user_repository_returns_conflict_for_concurrent_duplicate_update(
 
 
 def test_update_to_historical_duplicate_email_returns_conflict(tmp_path):
+    """Exercise ``test_update_to_historical_duplicate_email_returns_conflict``."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -992,6 +1017,7 @@ def test_update_to_historical_duplicate_email_returns_conflict(tmp_path):
 
 
 def test_user_update_requires_at_least_one_account_field(tmp_path):
+    """Exercise ``test_user_update_requires_at_least_one_account_field``."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -1021,6 +1047,7 @@ def test_user_update_requires_at_least_one_account_field(tmp_path):
 
 
 def test_assistant_cannot_update_user_or_probe_user_id(tmp_path):
+    """Exercise ``test_assistant_cannot_update_user_or_probe_user_id``."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))

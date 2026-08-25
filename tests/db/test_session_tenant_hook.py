@@ -106,6 +106,7 @@ def test_sqlite_overlapping_sessions_serialize_instead_of_colliding_begin():
     barrier = threading.Barrier(2)
 
     def _writer(label: str) -> None:
+        """Test helper ``_writer``."""
         try:
             with factory() as session:
                 barrier.wait(timeout=5)
@@ -185,19 +186,25 @@ def test_no_context_clears_stale_context_when_clear_helper_is_absent():
     """Missing clear helper must not leave a stale tenant row on pooled backends."""
 
     class _Result:
+        """Test double / helper class ``_Result``."""
         def __init__(self, value=None):
+            """Test helper ``__init__``."""
             self._value = value
 
         def scalar(self):
+            """Test helper ``scalar``."""
             return self._value
 
     class _Connection:
+        """Test double / helper class ``_Connection``."""
         dialect = type("Dialect", (), {"name": "postgresql"})()
 
         def __init__(self):
+            """Test helper ``__init__``."""
             self.calls = []
 
         def exec_driver_sql(self, sql, parameters=None):
+            """Test helper ``exec_driver_sql``."""
             self.calls.append((sql, parameters))
             if sql == "SELECT to_regprocedure(%s) IS NOT NULL":
                 return _Result(False)
