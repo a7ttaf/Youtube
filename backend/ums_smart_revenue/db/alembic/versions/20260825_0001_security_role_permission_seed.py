@@ -187,7 +187,10 @@ def upgrade() -> None:
 # ============================================================================
 def downgrade() -> None:
     """Leave the authorization catalog in place; this seed is not reversed."""
-    return
+    # Non-destructive by design: upgrade is insert-missing + metadata refresh, so
+    # provenance of canonical pairs cannot be recovered. Touch the bind so this
+    # path is an intentional no-op statement rather than an empty body.
+    _ = op.get_bind()
 
 
 # ============================================================================
