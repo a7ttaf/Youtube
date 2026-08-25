@@ -762,6 +762,7 @@ def _shell_single_quote(value: str) -> str:
 
 
 def _parse_counts_output(raw: str) -> dict[str, int]:
+    """Parse ``name|count`` psql rows into a table-to-row-count mapping."""
     counts: dict[str, int] = {}
     for line in raw.splitlines():
         if not line.strip():
@@ -778,6 +779,7 @@ def _parse_counts_output(raw: str) -> dict[str, int]:
 
 
 def _count_sql_for_tables(tables: list[str]) -> str:
+    """Build a UNION ALL SELECT that counts rows for each public table name."""
     branches = [
         f"SELECT {_quote_literal(name)} AS t, count(*) AS n FROM public.{_quote_identifier(name)}"
         for name in tables

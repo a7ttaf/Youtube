@@ -165,13 +165,16 @@ const skipRegex = (source: string, index: number): number => {
  * it, and return the index just past the closing quote. A `${...}` inside a
  * template is scanned as code — so literals nested in an interpolation are
  * collected too — and contributes a single placeholder to the literal's text.
+ *
+ * Declared as a function (not const) so mutual recursion with scanRegion is
+ * safe under Temporal Dead Zone rules (DeepSource JS-0357).
  */
-const readLiteral = (
+function readLiteral(
   source: string,
   openIndex: number,
   continuesExpression: boolean,
   literals: ScannedLiteral[],
-): number => {
+): number {
   const quote = source[openIndex];
   let index = openIndex + 1;
   let value = "";
@@ -191,19 +194,19 @@ const readLiteral = (
   }
   literals.push({ value, continuesExpression });
   return index + 1;
-};
+}
 
 /**
  * Scan a region of code, collecting literals. When `stopAtCloseBrace` is set
  * the region is a template interpolation and the scan returns at its matching
  * `}`; otherwise it runs to end of file.
  */
-const scanRegion = (
+function scanRegion(
   source: string,
   start: number,
   stopAtCloseBrace: boolean,
   literals: ScannedLiteral[],
-): number => {
+): number {
   let index = start;
   let depth = 0;
   let previousToken = "";
@@ -240,7 +243,7 @@ const scanRegion = (
     index += 1;
   }
   return index;
-};
+}
 
 /**
  * Purpose: Extract every string/template literal from TypeScript source,

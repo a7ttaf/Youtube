@@ -2185,10 +2185,12 @@ def test_unexpected_roles_errors_are_rejected() -> None:
 
 def test_overlapping_backup_lock_is_exclusive(tmp_path: Path) -> None:
     """A second process must fail before loading the watermark."""
-    with backup._exclusive_backup_lock(tmp_path):
-        with pytest.raises(backup.BackupError) as caught:
-            with backup._exclusive_backup_lock(tmp_path):
-                pass
+    with (
+        backup._exclusive_backup_lock(tmp_path),
+        pytest.raises(backup.BackupError) as caught,
+    ):
+        with backup._exclusive_backup_lock(tmp_path):
+            pass
     assert caught.value.code == backup.EXIT_USAGE
     assert "another backup is already running" in str(caught.value)
     assert not (tmp_path / ".backup.lock").exists()
@@ -2298,19 +2300,24 @@ class _FakeContainer:
         monkeypatch.setattr(backup, "_verify_dump_readable", lambda *a, **k: self.toc_entries)
         monkeypatch.setattr(backup, "_container_facts", self._facts)
 
+    @staticmethod
     def _dump_roles(
-        self, container: str, target: Path, *, timeout: int, include_passwords: bool
+        container: str, target: Path, *, timeout: int, include_passwords: bool
     ) -> list[str]:
+        del container, timeout, include_passwords
         target.write_text("CREATE ROLE app_tenant;\nCREATE ROLE app_platform;\n", encoding="utf-8")
         return list(backup.REQUIRED_ROLES)
 
     def _dump_database_and_count(
         self, container: str, target: Path, *, timeout: int
     ) -> dict[str, int]:
+        del container, timeout
         target.write_bytes(backup.CUSTOM_FORMAT_MAGIC + b"-fake-archive")
         return dict(self.counts)
 
-    def _dump_database(self, container: str, target: Path, *, timeout: int) -> None:
+    @staticmethod
+    def _dump_database(container: str, target: Path, *, timeout: int) -> None:
+        del container, timeout
         target.write_bytes(backup.CUSTOM_FORMAT_MAGIC + b"-fake-archive")
 
     def _facts(self, container: str, *, timeout: int) -> dict[str, str]:

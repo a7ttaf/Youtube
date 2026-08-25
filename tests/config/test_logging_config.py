@@ -850,7 +850,8 @@ def test_unknown_principal_warning_reaches_the_configured_handler(monkeypatch):
         def __init__(self, _session: object) -> None:
             """Accept and ignore the request session."""
 
-        def load(self, *, user_id: str, tenant_id: str) -> None:
+        @staticmethod
+        def load(*, user_id: str, tenant_id: str) -> None:
             """Raise the error the SQL loader raises for an unknown user."""
             raise PrincipalNotFoundError(f"no stored user {user_id} in tenant {tenant_id}")
 

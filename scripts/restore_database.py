@@ -122,19 +122,23 @@ class RestoreError(Exception):
     """Fatal restore failure carrying the exit code the operator should see."""
 
     def __init__(self, code: int, message: str) -> None:
+        """Attach the operator-facing exit code to the failure message."""
         super().__init__(message)
         self.code = code
 
 
 def _quote_identifier(name: str) -> str:
+    """Double-quote a SQL identifier, escaping embedded quotes."""
     return '"' + name.replace('"', '""') + '"'
 
 
 def _quote_literal(value: str) -> str:
+    """Single-quote a SQL string literal, escaping embedded quotes."""
     return "'" + value.replace("'", "''") + "'"
 
 
 def _run(argv: list[str], *, timeout: int) -> subprocess.CompletedProcess[str]:
+    """Run argv with stdin closed and captured text output."""
     return subprocess.run(
         argv,
         stdin=subprocess.DEVNULL,
@@ -148,6 +152,7 @@ def _run(argv: list[str], *, timeout: int) -> subprocess.CompletedProcess[str]:
 def _run_with_input(
     argv: list[str], *, timeout: int, stdin_text: str
 ) -> subprocess.CompletedProcess[str]:
+    """Run argv feeding stdin_text and capturing text output."""
     return subprocess.run(
         argv,
         input=stdin_text,
@@ -161,6 +166,7 @@ def _run_with_input(
 def _run_with_file(
     argv: list[str], *, timeout: int, source: Path
 ) -> subprocess.CompletedProcess[str]:
+    """Run argv with binary stdin from source and captured text output."""
     with source.open("rb") as handle:
         return subprocess.run(
             argv,
@@ -173,10 +179,12 @@ def _run_with_file(
 
 
 def _container_sh(container: str, body: str) -> list[str]:
+    """Build a docker exec argv that runs body under sh with PGPASSWORD set."""
     return ["docker", "exec", "-i", container, "sh", "-c", _SH_PREFIX + body]
 
 
 def _psql(container: str, sql: str, *, timeout: int, stop_on_error: bool = True) -> str:
+    """Run SQL via psql inside the container and return stdout."""
     stop = "1" if stop_on_error else "0"
     argv = _container_sh(
         container,
@@ -193,6 +201,7 @@ def _psql(container: str, sql: str, *, timeout: int, stop_on_error: bool = True)
 
 
 def _sha256(path: Path) -> str:
+    """Return the hex SHA-256 digest of a file."""
     with path.open("rb") as handle:
         return hashlib.file_digest(handle, "sha256").hexdigest()
 
@@ -218,6 +227,7 @@ def _sha256(path: Path) -> str:
 #     the ``.rejected`` naming this function refuses.
 # ============================================================================
 def _load_backup(backup_dir: Path) -> dict[str, object]:
+    """Load and integrity-check a backup run; return its manifest dict."""
     if not backup_dir.is_dir():
         raise RestoreError(EXIT_USAGE, f"{backup_dir} is not a directory")
     if backup_dir.name.endswith(REJECTED_SUFFIX):
@@ -275,6 +285,7 @@ def _load_backup(backup_dir: Path) -> dict[str, object]:
 
 
 def _require_docker(*, timeout: int) -> None:
+    """Fail closed unless the docker CLI can talk to a running daemon."""
     try:
         completed = _run(["docker", "version", "--format", "{{.Server.Version}}"], timeout=timeout)
     except FileNotFoundError as exc:
@@ -287,6 +298,7 @@ def _require_docker(*, timeout: int) -> None:
 
 
 def _resolve_container(*, explicit: str | None, project: str, service: str, timeout: int) -> str:
+    """Return a running container id/name from --container or compose labels."""
     if explicit:
         completed = _run(
             ["docker", "inspect", "--format", "{{.State.Running}}", explicit], timeout=timeout
@@ -342,6 +354,7 @@ def _resolve_container(*, explicit: str | None, project: str, service: str, time
 #     on the backup side and must stay in step with this one.
 # ============================================================================
 def _await_postgres(container: str, *, wait_seconds: int, timeout: int) -> None:
+    """Wait until TCP-ready Postgres accepts SELECT 1 on the target database."""
     deadline = time.monotonic() + max(wait_seconds, 0)
     last_error = "postgres did not answer"
     while True:
@@ -389,6 +402,7 @@ def _await_postgres(container: str, *, wait_seconds: int, timeout: int) -> None:
 #     source.database and source.superuser in manifest.json.
 # ============================================================================
 def _create_throwaway(manifest: dict[str, object], *, timeout: int) -> str:
+    """Start a disposable Postgres container from the backup manifest source."""
     source = manifest.get("source")
     if not isinstance(source, dict):
         raise RestoreError(EXIT_USAGE, "manifest has no source block")
@@ -472,6 +486,7 @@ def _unexpected_roles_errors(stderr: str) -> list[str]:
 #     -> ``_create_role`` (lines 92-113) owns both roles.
 # ============================================================================
 def _restore_roles(container: str, roles_path: Path, *, timeout: int) -> list[str]:
+    """Apply roles.sql and return the required roles present afterward."""
     argv = _container_sh(
         container,
         'exec psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" --no-password -v ON_ERROR_STOP=0 -q -f -',
@@ -531,6 +546,7 @@ def _restore_roles(container: str, roles_path: Path, *, timeout: int) -> list[st
 #     archive this restores.
 # ============================================================================
 def _restore_data(container: str, dump_path: Path, *, timeout: int, clean: bool) -> None:
+    """Restore database.dump into the target via pg_restore --single-transaction."""
     flags = "--no-password --single-transaction --no-comments"
     if clean:
         flags = "--no-password --clean --if-exists --single-transaction --no-comments"
@@ -551,6 +567,7 @@ def _restore_data(container: str, dump_path: Path, *, timeout: int, clean: bool)
 
 
 def _table_row_counts(container: str, *, timeout: int) -> dict[str, int]:
+    """Return {tablename: row_count} for every table in public."""
     raw = _psql(container, LIST_TABLES_SQL, timeout=timeout)
     tables = [line.strip() for line in raw.splitlines() if line.strip()]
     if not tables:
@@ -593,6 +610,7 @@ def _table_row_counts(container: str, *, timeout: int) -> dict[str, int]:
 #     manifest's table_row_counts block compared here.
 # ============================================================================
 def _verify(container: str, manifest: dict[str, object], *, timeout: int) -> bool:
+    """Compare restored public table row counts to the manifest; True if all match."""
     expected_raw = manifest.get("table_row_counts")
     expected: dict[str, int] = {}
     if isinstance(expected_raw, dict):
@@ -642,6 +660,7 @@ def _verify(container: str, manifest: dict[str, object], *, timeout: int) -> boo
 
 
 def _parse_args(argv: list[str]) -> argparse.Namespace:
+    """Parse restore CLI arguments."""
     parser = argparse.ArgumentParser(
         description=(
             "Restore a backup run produced by scripts/backup_database.py: roles first, "
@@ -712,6 +731,7 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
 
 
 def _guard_empty(container: str, *, allow_nonempty: bool, timeout: int) -> None:
+    """Refuse a non-empty public schema unless --allow-nonempty was passed."""
     raw = _psql(container, PUBLIC_TABLE_COUNT_SQL, timeout=timeout).strip()
     try:
         existing = int(raw or "0")
@@ -749,6 +769,7 @@ def _guard_empty(container: str, *, allow_nonempty: bool, timeout: int) -> None:
 #     handler so neither CLI can exit on an undocumented code.
 # ============================================================================
 def main(argv: list[str] | None = None) -> int:
+    """Run one restore (or rehearsal) and return a documented exit code."""
     args = _parse_args(argv if argv is not None else sys.argv[1:])
     backup_dir = Path(args.backup_dir).expanduser()
     throwaway: str | None = None
