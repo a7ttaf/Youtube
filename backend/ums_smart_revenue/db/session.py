@@ -102,12 +102,14 @@ def _enable_sqlite_transactional_savepoints(engine: Engine) -> None:
     def _disable_pysqlite_transaction_management(
         dbapi_connection: Any, _connection_record: Any
     ) -> None:
+        """Disable pysqlite auto-BEGIN so SAVEPOINT nests under our begin hook."""
         # Legacy-autocommit mode: pysqlite stops emitting implicit BEGINs
         # entirely; the begin hook below owns transaction starts instead.
         dbapi_connection.isolation_level = None
 
     @event.listens_for(engine, "begin")
     def _emit_begin(connection: Connection) -> None:
+        """Emit an explicit BEGIN whenever SQLAlchemy starts a transaction."""
         connection.exec_driver_sql("BEGIN")
 
 
