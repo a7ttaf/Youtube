@@ -87,6 +87,10 @@ So: if a later revision seeds another table, or this one changes how it inserts,
 re-measure the virgin state in the same commit.
 """
 
+import json
+import time
+from pathlib import Path
+
 import sqlalchemy as sa
 from alembic import op
 
@@ -98,6 +102,8 @@ revision = "20260825_0001"
 down_revision = "20260805_0001"
 branch_labels = None
 depends_on = None
+
+_AGENT_DEBUG_LOG = Path(__file__).resolve().parents[5] / "debug-07ba84.log"
 
 _ROLES = sa.table(
     "roles",
@@ -116,14 +122,6 @@ _PERMISSIONS = sa.table(
 _ROLE_PERMISSIONS = sa.table(
     "role_permission_assignments",
     sa.column("role_key", sa.Text()),
-    sa.column("permission_key", sa.Text()),
-)
-_USER_ROLE_ASSIGNMENTS = sa.table(
-    "user_role_assignments",
-    sa.column("role_key", sa.Text()),
-)
-_USER_PERMISSION_GRANTS = sa.table(
-    "user_permission_grants",
     sa.column("permission_key", sa.Text()),
 )
 
@@ -172,12 +170,49 @@ def upgrade() -> None:
     _seed_role_permission_assignments(bind)
 
 
+# ============================================================================
+# Purpose: Data-only rollback for this revision is intentionally non-destructive.
+#   Upgrade is insert-missing + metadata refresh: on a database that already ran
+#   ``security_seed.sql`` (a state upgrade explicitly supports) it inserts zero
+#   catalog rows. Provenance of any given canonical pair cannot be recovered later,
+#   so deleting ``role_permission_seed_rows()`` on downgrade would destroy
+#   pre-existing authorization catalog state this revision did not create.
+#   Operator-added non-canonical pairs would survive a registry wipe, but the
+#   H1/P0.7 catalog itself would not. Leaving the catalog in place keeps
+#   PostgreSQL authorization parents intact; re-upgrade remains idempotent.
+# Database/ORM: ``roles``, ``permissions``, ``role_permission_assignments`` —
+#   left unchanged. No Alembic ``op.*`` DDL.
+# Standards: Fail-closed for authorization catalog integrity over perfect
+#   reverse symmetry. Documented irreversible data seed (same family as other
+#   seed revisions that refuse a destructive reverse).
+# Blast Radius: Authorization catalog rows persist after ``alembic downgrade`` of
+#   this revision. No finance numbers, no RLS widening, no permission softening.
+# Connections:
+#   - File: Docs/20_DEPLOYMENT_READINESS_AUDIT.md -> H1 / P0.7.
+#   - File: tests/db/test_security_role_permission_seed_migration.py -> guards.
+# ============================================================================
 def downgrade() -> None:
-    """Remove the seeded catalog rows that no live authorization row still needs."""
-    bind = op.get_bind()
-    _unseed_role_permission_assignments(bind)
-    _unseed_permissions(bind)
-    _unseed_roles(bind)
+    """Leave the authorization catalog in place; this seed is not reversed."""
+    # #region agent log
+    try:
+        with _AGENT_DEBUG_LOG.open("a", encoding="utf-8") as handle:
+            handle.write(
+                json.dumps(
+                    {
+                        "sessionId": "07ba84",
+                        "hypothesisId": "H1",
+                        "location": "20260825_0001:downgrade",
+                        "message": "non-destructive downgrade; catalog unseed skipped",
+                        "data": {"destructive_unseed": False},
+                        "timestamp": int(time.time() * 1000),
+                    }
+                )
+                + "\n"
+            )
+    except OSError:
+        pass
+    # #endregion
+    return
 
 
 # ============================================================================
@@ -286,75 +321,3 @@ def _seed_role_permission_assignments(bind: sa.engine.Connection) -> None:
     ]
     if missing:
         op.bulk_insert(_ROLE_PERMISSIONS, missing)
-
-
-# ============================================================================
-# Purpose: Reverse of ``_seed_role_permission_assignments`` — delete exactly the
-#   (role, permission) pairs this revision seeds, leaving any operator-added pair
-#   in place.
-# Database/ORM: ``role_permission_assignments``.
-# Standards: One parameterised DELETE per seeded pair rather than a row-value
-#   ``IN`` tuple, because row-value ``IN`` support varies by dialect and this
-#   revision must downgrade on the SQLite migration-testing path too.
-# Blast Radius: Authorization — narrows the effective permission set of seeded
-#   roles. Downgrade-only path; never runs during a forward upgrade.
-# Connections:
-#   - File: backend/ums_smart_revenue/auth/seed.py -> the pair source.
-# ============================================================================
-def _unseed_role_permission_assignments(bind: sa.engine.Connection) -> None:
-    """Delete the seeded (role, permission) pairs one parameterised row at a time."""
-    for row in role_permission_seed_rows():
-        bind.execute(
-            _ROLE_PERMISSIONS.delete().where(
-                _ROLE_PERMISSIONS.c.role_key == row["role_key"],
-                _ROLE_PERMISSIONS.c.permission_key == row["permission_key"],
-            )
-        )
-
-
-# ============================================================================
-# Purpose: Reverse of ``_seed_permissions``, but only for permission rows that
-#   nothing still references. A permission still carried by a live
-#   ``user_permission_grants`` row (FK ondelete RESTRICT) or by a surviving
-#   ``role_permission_assignments`` row is deliberately left in place, so a
-#   downgrade cannot orphan or hard-fail on live authorization state.
-# Database/ORM: ``permissions``; reads ``user_permission_grants`` and
-#   ``role_permission_assignments`` to decide.
-# Standards: Fail-safe by omission — the guard keeps rows rather than deleting
-#   them, so the reverse path can never widen or destroy a live grant.
-# Blast Radius: Authorization. Downgrade-only path.
-# Connections:
-#   - File: backend/ums_smart_revenue/db/alembic/versions/
-#     20260510_0001_security_foundation.py -> the RESTRICT foreign keys.
-# ============================================================================
-def _unseed_permissions(bind: sa.engine.Connection) -> None:
-    """Delete seeded permission rows that no grant or role edge still references."""
-    referenced = set(
-        bind.execute(sa.select(_USER_PERMISSION_GRANTS.c.permission_key)).scalars()
-    ) | set(bind.execute(sa.select(_ROLE_PERMISSIONS.c.permission_key)).scalars())
-    keys = [row["key"] for row in permission_seed_rows() if row["key"] not in referenced]
-    if keys:
-        bind.execute(_PERMISSIONS.delete().where(_PERMISSIONS.c.key.in_(keys)))
-
-
-# ============================================================================
-# Purpose: Reverse of ``_seed_roles``, but only for role rows that nothing still
-#   references. A role still carried by a live ``user_role_assignments`` row (FK
-#   ondelete RESTRICT) or by a surviving ``role_permission_assignments`` row is
-#   left in place.
-# Database/ORM: ``roles``; reads ``user_role_assignments`` and
-#   ``role_permission_assignments`` to decide.
-# Standards: Fail-safe by omission, same rationale as ``_unseed_permissions``.
-# Blast Radius: Authorization. Downgrade-only path.
-# Connections:
-#   - File: backend/ums_smart_revenue/db/alembic/versions/
-#     20260510_0001_security_foundation.py -> the RESTRICT foreign keys.
-# ============================================================================
-def _unseed_roles(bind: sa.engine.Connection) -> None:
-    """Delete seeded role rows that no assignment or role edge still references."""
-    referenced = set(bind.execute(sa.select(_USER_ROLE_ASSIGNMENTS.c.role_key)).scalars()) | set(
-        bind.execute(sa.select(_ROLE_PERMISSIONS.c.role_key)).scalars()
-    )
-    keys = [row["key"] for row in role_seed_rows() if row["key"] not in referenced]
-    if keys:
-        bind.execute(_ROLES.delete().where(_ROLES.c.key.in_(keys)))

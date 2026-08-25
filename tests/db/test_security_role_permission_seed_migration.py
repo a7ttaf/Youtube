@@ -259,29 +259,55 @@ def test_migration_refreshes_stale_catalog_metadata() -> None:
         )
 
 
-def test_migration_downgrade_removes_the_seeded_catalog() -> None:
-    """The reverse path clears every row the upgrade seeded."""
+def test_migration_downgrade_preserves_the_seeded_catalog() -> None:
+    """Downgrade is non-destructive: the catalog seed is not reversed."""
     module = _migration_module()
     engine = _security_engine()
 
     with engine.begin() as connection:
         _bind_operations(module, connection)
+        module.upgrade()
+        after_upgrade_roles = _stored_roles(connection)
+        after_upgrade_permissions = _stored_permissions(connection)
+        after_upgrade_pairs = _stored_pairs(connection)
+        module.downgrade()
+
+        assert _stored_roles(connection) == after_upgrade_roles
+        assert _stored_permissions(connection) == after_upgrade_permissions
+        assert _stored_pairs(connection) == after_upgrade_pairs
+        assert after_upgrade_pairs == _expected_pairs()
+
+
+def test_migration_downgrade_preserves_preexisting_security_seed_catalog() -> None:
+    """A SQL-preseeded catalog survives upgrade+downgrade (the P1 case)."""
+    module = _migration_module()
+    engine = _security_engine()
+
+    with engine.begin() as connection:
+        _bind_operations(module, connection)
+        # Simulate security_seed.sql having already populated the catalog.
+        module.upgrade()
+        pre_roles = _stored_roles(connection)
+        pre_permissions = _stored_permissions(connection)
+        pre_pairs = _stored_pairs(connection)
+        # Second upgrade is metadata-refresh only; downgrade must not wipe.
         module.upgrade()
         module.downgrade()
 
-        assert _stored_roles(connection) == {}
-        assert _stored_permissions(connection) == {}
-        assert _stored_pairs(connection) == set()
+        assert _stored_roles(connection) == pre_roles
+        assert _stored_permissions(connection) == pre_permissions
+        assert _stored_pairs(connection) == pre_pairs
 
 
 def test_migration_downgrade_keeps_rows_a_live_assignment_still_needs() -> None:
-    """A role or permission still referenced by a live grant survives the downgrade."""
+    """Live grants remain valid because the catalog is not wiped on downgrade."""
     module = _migration_module()
     engine = _security_engine()
 
     with engine.begin() as connection:
         _bind_operations(module, connection)
         module.upgrade()
+        pairs_before = _stored_pairs(connection)
 
     user_id = uuid4()
     scope_id = uuid4()
@@ -312,9 +338,10 @@ def test_migration_downgrade_keeps_rows_a_live_assignment_still_needs() -> None:
         _bind_operations(module, connection)
         module.downgrade()
 
-        assert set(_stored_roles(connection)) == {"finance_admin"}
-        assert set(_stored_permissions(connection)) == {"finance.view_revenue"}
-
+        assert "finance_admin" in _stored_roles(connection)
+        assert "finance.view_revenue" in _stored_permissions(connection)
+        assert _stored_pairs(connection) == pairs_before
+        assert ("finance_admin", "finance.view_revenue") in _stored_pairs(connection)
 
 def _values_block(sql: str, header: str, *, last: bool = False) -> str:
     """Return the VALUES body of the INSERT introduced by ``header``."""
