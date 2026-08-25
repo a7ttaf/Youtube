@@ -187,6 +187,7 @@ def test_no_context_clears_stale_context_when_clear_helper_is_absent():
 
     class _Result:
         """Test double / helper class ``_Result``."""
+
         def __init__(self, value=None):
             """Test helper ``__init__``."""
             self._value = value
@@ -197,6 +198,7 @@ def test_no_context_clears_stale_context_when_clear_helper_is_absent():
 
     class _Connection:
         """Test double / helper class ``_Connection``."""
+
         dialect = type("Dialect", (), {"name": "postgresql"})()
 
         def __init__(self):
