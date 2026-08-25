@@ -1030,13 +1030,32 @@ def _pg_restore_list(container: str, dump_path: Path, *, timeout: int) -> str:
 
 
 def _roles_referenced_in_dump_listing(listing: str) -> set[str]:
-    """Return cluster role names referenced by ACL entries in a dump listing."""
+    """Return cluster role names referenced as ACL grantees or object owners."""
     roles: set[str] = set()
+    owner_markers = (
+        " TABLE ",
+        " SEQUENCE ",
+        " SCHEMA ",
+        " INDEX ",
+        " VIEW ",
+        " MATERIALIZED VIEW ",
+        " FUNCTION ",
+        " TYPE ",
+        " DOMAIN ",
+        " AGGREGATE ",
+        " FOREIGN TABLE ",
+    )
     for line in listing.splitlines():
         stripped = line.strip()
-        if not stripped or stripped.startswith(";") or " ACL " not in stripped:
+        if not stripped or stripped.startswith(";") or not stripped[0].isdigit():
             continue
-        roles.add(stripped.rsplit(None, 1)[-1])
+        if " ACL " in stripped:
+            roles.add(stripped.rsplit(None, 1)[-1])
+            continue
+        if any(marker in stripped for marker in owner_markers):
+            owner = stripped.rsplit(None, 1)[-1]
+            if owner != "-":
+                roles.add(owner)
     return roles
 
 
@@ -3173,13 +3192,14 @@ def run_backup(args: argparse.Namespace, out_dir: Path) -> BackupOutcome:
             timeout=args.timeout,
             include_passwords=args.include_role_passwords,
         )
-        dump_listing = _pg_restore_list(container, staging / DUMP_NAME, timeout=args.timeout)
-        _validate_dump_roles_covered(
-            listing=dump_listing,
-            roles_body=(staging / ROLES_NAME).read_text(encoding="utf-8", errors="replace"),
-        )
+        dump_listing = ""
         toc_entries = -1
         if args.verify_dump:
+            dump_listing = _pg_restore_list(container, staging / DUMP_NAME, timeout=args.timeout)
+            _validate_dump_roles_covered(
+                listing=dump_listing,
+                roles_body=(staging / ROLES_NAME).read_text(encoding="utf-8", errors="replace"),
+            )
             toc_entries = len(
                 [
                     line

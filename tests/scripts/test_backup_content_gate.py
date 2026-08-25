@@ -2855,6 +2855,23 @@ def test_the_cli_publishes_a_first_run_and_returns_zero(
     assert record["exit_code"] == backup.EXIT_OK
 
 
+def test_no_verify_dump_skips_pg_restore_list(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, clock: _Clock
+) -> None:
+    """--no-verify-dump must not invoke pg_restore --list at all."""
+    called = {"n": 0}
+
+    def _forbidden(*_a: object, **_k: object) -> str:
+        called["n"] += 1
+        raise AssertionError("pg_restore --list must not run when --no-verify-dump is set")
+
+    _FakeContainer(REAL).install(monkeypatch)
+    monkeypatch.setattr(backup, "_pg_restore_list", _forbidden)
+    code = _run_cli(monkeypatch, tmp_path, REAL, "--establish-watermark", "--no-verify-dump")
+    assert code == backup.EXIT_OK
+    assert called["n"] == 0
+
+
 def test_the_cli_refuses_a_first_run_without_the_acknowledgement(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, clock: _Clock
 ) -> None:
@@ -3351,6 +3368,16 @@ def test_validate_dump_roles_covered_rejects_archive_only_role() -> None:
     assert "orphan_role" in str(raised.value)
 
 
+def test_validate_dump_roles_covered_rejects_table_owner_only_role() -> None:
+    """TABLE owners must be covered, not only ACL grantees."""
+    listing = "3; 2615 16384 TABLE public tenants stale_owner\n"
+    roles_body = "CREATE ROLE app_tenant;\nCREATE ROLE app_platform;\n"
+    with pytest.raises(backup.BackupError) as raised:
+        backup._validate_dump_roles_covered(listing=listing, roles_body=roles_body)
+    assert raised.value.code == backup.EXIT_ARTIFACT_INVALID
+    assert "stale_owner" in str(raised.value)
+
+
 def test_restore_roles_rejects_dynamic_do_block(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -3380,9 +3407,8 @@ def test_lock_metadata_write_failure_removes_partial_directory(
         real_write_text(self, *_a, **_k)  # type: ignore[arg-type]
 
     monkeypatch.setattr(Path, "write_text", _boom)
-    with pytest.raises(OSError):
-        with backup._exclusive_backup_lock(tmp_path):
-            pass  # pragma: no cover
+    with pytest.raises(OSError), backup._exclusive_backup_lock(tmp_path):
+        pass  # pragma: no cover
     assert not (tmp_path / ".backup.lock").exists()
 
 
