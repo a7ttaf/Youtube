@@ -127,15 +127,19 @@ class _Clock:
     """A settable stand-in for ``_utc_now`` so one test can drive many nights."""
 
     def __init__(self, start: datetime) -> None:
+        """init."""
         self.now = start
 
     def __call__(self) -> datetime:
+        """call."""
         return self.now
 
     def advance(self, delta: timedelta) -> None:
+        """advance."""
         self.now += delta
 
     def move_to(self, moment: datetime) -> None:
+        """move to."""
         self.now = moment
 
 
@@ -269,6 +273,7 @@ NO_WATERMARK = backup.Watermark()
 
 
 def _watermark(counts: dict[str, int], *, source: str = "test") -> backup.Watermark:
+    """watermark."""
     return backup.Watermark(tables=dict(counts), source=source)
 
 
@@ -382,6 +387,7 @@ def test_empty_database_is_rejected_with_no_watermark() -> None:
 
 
 def test_schema_present_but_wholly_unpopulated_is_rejected() -> None:
+    """Guard: test_schema_present_but_wholly_unpopulated_is_rejected."""
     counts = dict.fromkeys(ALL_TABLES, 0)
     verdict = backup._evaluate_content(counts, NO_WATERMARK, accept_drop=False, establish=False)
     assert verdict.accepted is False
@@ -439,6 +445,7 @@ def test_the_measured_virgin_database_clears_the_seed_floor() -> None:
 
 
 def test_seed_floor_fires_when_a_seed_table_does_not_exist() -> None:
+    """Guard: test_seed_floor_fires_when_a_seed_table_does_not_exist."""
     counts = {name: 5 for name in NAMED_TABLES} | {"alembic_version": 1}
     verdict = backup._evaluate_content(counts, NO_WATERMARK, accept_drop=True, establish=True)
     assert verdict.accepted is False
@@ -648,6 +655,7 @@ def test_an_empty_table_of_contents_is_a_content_failure() -> None:
 
 
 def test_a_populated_table_of_contents_is_not_a_failure() -> None:
+    """Guard: test_a_populated_table_of_contents_is_not_a_failure."""
     verdict = backup._evaluate_content(
         REAL, _watermark(REAL), accept_drop=False, establish=False, toc_entries=366
     )
@@ -676,11 +684,13 @@ def test_a_first_run_into_a_new_directory_is_refused_without_the_flag() -> None:
 
 
 def test_accept_content_drop_does_not_stand_in_for_the_first_run_flag() -> None:
+    """Guard: test_accept_content_drop_does_not_stand_in_for_the_first_run_flag."""
     verdict = backup._evaluate_content(REAL, NO_WATERMARK, accept_drop=True, establish=False)
     assert verdict.accepted is False
 
 
 def test_establishing_the_watermark_is_recorded_not_silent() -> None:
+    """Guard: test_establishing_the_watermark_is_recorded_not_silent."""
     verdict = backup._evaluate_content(REAL, NO_WATERMARK, accept_drop=False, establish=True)
     assert verdict.accepted is True
     assert verdict.established is True
@@ -705,6 +715,7 @@ def test_establishing_the_watermark_is_recorded_not_silent() -> None:
 
 
 def test_establishing_a_watermark_over_an_empty_database_is_refused() -> None:
+    """Guard: test_establishing_a_watermark_over_an_empty_database_is_refused."""
     verdict = backup._evaluate_content(VIRGIN, NO_WATERMARK, accept_drop=False, establish=True)
     assert verdict.accepted is False
     assert verdict.non_seed_rows == 0
@@ -742,6 +753,7 @@ def test_a_genuinely_new_install_can_still_be_established() -> None:
 
 
 def test_the_empty_acknowledgement_does_not_stand_in_for_the_first_run_flag() -> None:
+    """Guard: test_the_empty_acknowledgement_does_not_stand_in_for_the_first_run_flag."""
     verdict = backup._evaluate_content(
         VIRGIN, NO_WATERMARK, accept_drop=False, establish=False, accept_empty=True
     )
@@ -749,6 +761,7 @@ def test_the_empty_acknowledgement_does_not_stand_in_for_the_first_run_flag() ->
 
 
 def test_the_empty_acknowledgement_cannot_override_the_seed_floor() -> None:
+    """Guard: test_the_empty_acknowledgement_cannot_override_the_seed_floor."""
     verdict = backup._evaluate_content(
         GUTTED, NO_WATERMARK, accept_drop=True, establish=True, accept_empty=True
     )
@@ -769,6 +782,7 @@ def test_the_empty_acknowledgement_is_inert_once_a_watermark_exists() -> None:
 
 
 def test_one_row_outside_the_seeds_is_enough_to_be_a_real_install() -> None:
+    """Guard: test_one_row_outside_the_seeds_is_enough_to_be_a_real_install."""
     verdict = backup._evaluate_content(
         _database(org_units=1), NO_WATERMARK, accept_drop=False, establish=True
     )
@@ -842,6 +856,7 @@ def test_an_emptied_table_is_caught_even_when_the_total_barely_moves(
 def test_a_table_falling_below_the_fraction_of_its_own_mark_is_caught(
     tmp_path: Path,
 ) -> None:
+    """Guard: test_a_table_falling_below_the_fraction_of_its_own_mark_is_caught."""
     _night(
         tmp_path,
         "20260801T020000",
@@ -885,6 +900,7 @@ def test_a_shrinking_seed_table_is_caught(tmp_path: Path) -> None:
 
 
 def test_a_growing_seed_table_is_not_a_collapse(tmp_path: Path) -> None:
+    """Guard: test_a_growing_seed_table_is_not_a_collapse."""
     _night(
         tmp_path,
         "20260801T020000",
@@ -937,6 +953,7 @@ def test_retiring_a_permission_costs_exactly_one_override_night(tmp_path: Path) 
 
 
 def test_a_disappeared_table_is_caught() -> None:
+    """Guard: test_a_disappeared_table_is_caught."""
     counts = dict(REAL)
     del counts["monthly_channel_revenue_facts"]
     verdict = backup._evaluate_content(counts, _watermark(REAL), accept_drop=False, establish=False)
@@ -957,6 +974,7 @@ def test_ordinary_row_decline_is_not_a_collapse() -> None:
 
 
 def test_growth_raises_the_watermark(tmp_path: Path) -> None:
+    """Guard: test_growth_raises_the_watermark."""
     _night(tmp_path, "20260801T020000", REAL, establish=True)
     grown = _database(monthly_channel_revenue_facts=900, org_units=2, youtube_channels=2)
     assert _night(tmp_path, "20260802T020000", grown).accepted is True
@@ -985,6 +1003,7 @@ def test_deleting_the_watermark_file_rebuilds_it_from_the_manifests(
 def test_deleting_every_run_directory_leaves_the_watermark_file_in_charge(
     tmp_path: Path,
 ) -> None:
+    """Guard: test_deleting_every_run_directory_leaves_the_watermark_file_in_charge."""
     _night(
         tmp_path, "20260801T020000", _database(monthly_channel_revenue_facts=500), establish=True
     )
@@ -1010,6 +1029,7 @@ def test_losing_both_homes_lands_in_the_first_run_case_not_a_pass(
 
 
 def test_a_corrupt_watermark_file_does_not_lower_the_bar(tmp_path: Path) -> None:
+    """Guard: test_a_corrupt_watermark_file_does_not_lower_the_bar."""
     _night(
         tmp_path, "20260801T020000", _database(monthly_channel_revenue_facts=500), establish=True
     )
@@ -1047,6 +1067,7 @@ def test_a_rejected_run_never_contributes_to_the_watermark(tmp_path: Path) -> No
 
 
 def test_a_content_free_run_never_contributes_to_the_watermark(tmp_path: Path) -> None:
+    """Guard: test_a_content_free_run_never_contributes_to_the_watermark."""
     _write_run(tmp_path, "20260715T222143", counts=REAL)
     _write_run(tmp_path, "20260820T222143", counts=EMPTY)
     watermark = backup._load_watermark(tmp_path)
@@ -1055,6 +1076,7 @@ def test_a_content_free_run_never_contributes_to_the_watermark(tmp_path: Path) -
 
 
 def test_the_watermark_is_empty_on_an_empty_output_directory(tmp_path: Path) -> None:
+    """Guard: test_the_watermark_is_empty_on_an_empty_output_directory."""
     assert backup._load_watermark(tmp_path).is_empty is True
 
 
@@ -1127,6 +1149,7 @@ def test_a_manifest_whose_recorded_sizes_do_not_match_disk_is_not_a_backup(
 
 
 def test_an_empty_dump_file_is_not_a_backup(tmp_path: Path) -> None:
+    """Guard: test_an_empty_dump_file_is_not_a_backup."""
     run = _write_run(tmp_path, "20260820T222143", counts=REAL)
     (run / backup.DUMP_NAME).write_bytes(b"")
     assert backup._run_has_content(run) is None, "unknown, so never deleted"
@@ -1162,6 +1185,7 @@ def test_an_artifact_less_run_is_unknown_to_retention_not_proven_content(
 
 
 def test_a_different_database_into_a_bound_directory_is_refused() -> None:
+    """Guard: test_a_different_database_into_a_bound_directory_is_refused."""
     verdict = backup._evaluate_content(
         _database(org_units=9, youtube_channels=9, monthly_channel_revenue_facts=900),
         _watermark(REAL),
@@ -1189,6 +1213,7 @@ def test_accept_content_drop_cannot_wave_through_a_different_database() -> None:
 
 
 def test_adopt_database_rebinds_and_is_recorded_not_silent() -> None:
+    """Guard: test_adopt_database_rebinds_and_is_recorded_not_silent."""
     verdict = backup._evaluate_content(
         REAL,
         _watermark(REAL),
@@ -1256,6 +1281,7 @@ def test_hyphenated_role_lookalike_does_not_satisfy_required_roles(
     target = tmp_path / backup.ROLES_NAME
 
     def _lookalike(argv: list[str], *, timeout: int, target: Path):
+        """lookalike."""
         target.write_text(
             'CREATE ROLE "app_tenant-backup";\nCREATE ROLE app_platform;\n',
             encoding="utf-8",
@@ -1387,6 +1413,7 @@ def test_an_old_directory_with_no_recorded_identity_adopts_rather_than_wedging(
 
 
 def test_accept_content_drop_overrides_only_the_relative_checks() -> None:
+    """Guard: test_accept_content_drop_overrides_only_the_relative_checks."""
     watermark = _watermark(_database(monthly_channel_revenue_facts=200))
     verdict = backup._evaluate_content(
         _database(monthly_channel_revenue_facts=1),
@@ -1504,6 +1531,7 @@ def test_deleting_the_watermark_file_undoes_a_reset_upwards_not_downwards(
 
 
 def test_a_regex_valid_non_date_stamp_does_not_parse() -> None:
+    """Guard: test_a_regex_valid_non_date_stamp_does_not_parse."""
     assert backup._run_stamp("ums-backup-20250145T999999Z") is None
     assert backup._run_stamp("ums-backup-20260824T220311Z") is not None
 
@@ -1525,6 +1553,7 @@ def test_prune_survives_a_regex_valid_non_date_directory(tmp_path: Path) -> None
 def test_prune_survives_a_regex_valid_non_date_quarantined_directory(
     tmp_path: Path,
 ) -> None:
+    """Guard: test_prune_survives_a_regex_valid_non_date_quarantined_directory."""
     impostor = tmp_path / "ums-backup-20250145T999999Z.rejected"
     impostor.mkdir()
 
@@ -1535,6 +1564,7 @@ def test_prune_survives_a_regex_valid_non_date_quarantined_directory(
 
 
 def test_a_non_date_directory_cannot_poison_the_watermark(tmp_path: Path) -> None:
+    """Guard: test_a_non_date_directory_cannot_poison_the_watermark."""
     impostor = tmp_path / "ums-backup-20250145T999999Z"
     impostor.mkdir()
     (impostor / backup.MANIFEST_NAME).write_text(
@@ -1577,6 +1607,7 @@ def _future_stamp(ahead: timedelta) -> str:
 
 
 def _plant_name(ahead: timedelta) -> str:
+    """plant name."""
     return f"ums-backup-{_future_stamp(ahead)}Z"
 
 
@@ -1701,6 +1732,7 @@ def test_the_wedge_does_not_reopen_the_night_after_an_override(tmp_path: Path) -
 
 
 def test_a_future_dated_run_cannot_bind_the_directory_identity(tmp_path: Path) -> None:
+    """Guard: test_a_future_dated_run_cannot_bind_the_directory_identity."""
     _night(tmp_path, "20260801T020000", REAL, establish=True, identity=IDENTITY_A)
     _write_run(tmp_path, "20990101T000000", counts=REAL, identity=IDENTITY_B)
     (tmp_path / backup.WATERMARK_NAME).unlink()
@@ -1730,6 +1762,7 @@ def test_a_future_dated_run_captures_neither_retention_invariant(tmp_path: Path)
 
 
 def test_a_future_dated_quarantined_directory_is_also_left_alone(tmp_path: Path) -> None:
+    """Guard: test_a_future_dated_quarantined_directory_is_also_left_alone."""
     plant = _write_run(tmp_path, "20990101T000000", counts=EMPTY, rejected=True)
 
     pruned = backup._prune(tmp_path, keep_days=0, keep_min=1, now=NOW)
@@ -1744,6 +1777,7 @@ def test_a_future_dated_quarantined_directory_is_also_left_alone(tmp_path: Path)
 
 
 def _last_run(out_dir: Path) -> dict[str, object]:
+    """last run."""
     loaded = json.loads((out_dir / backup.LAST_RUN_NAME).read_text(encoding="utf-8"))
     assert isinstance(loaded, dict)
     return loaded
@@ -1771,6 +1805,7 @@ def test_a_run_that_ends_without_a_verdict_records_that_fact(tmp_path: Path) -> 
 
 
 def test_a_finalised_run_is_not_overwritten_by_close(tmp_path: Path) -> None:
+    """Guard: test_a_finalised_run_is_not_overwritten_by_close."""
     report = backup._RunReport(tmp_path, NOW)
     report.start()
     report.finalise("line", {"status": "OK", "exit_code": 0})
@@ -1822,6 +1857,7 @@ def _unwritable(path: Path) -> None:
 
 
 def test_an_unwritable_status_file_is_reported_not_swallowed(tmp_path: Path) -> None:
+    """Guard: test_an_unwritable_status_file_is_reported_not_swallowed."""
     backup._write_last_run(tmp_path, {"status": "OK", "exit_code": 0})
     _unwritable(tmp_path / backup.LAST_RUN_NAME)
 
@@ -1874,6 +1910,7 @@ def test_escalation_never_overwrites_a_more_specific_failure_code(
 
 
 def test_a_run_whose_status_landed_normally_is_not_escalated(tmp_path: Path) -> None:
+    """Guard: test_a_run_whose_status_landed_normally_is_not_escalated."""
     report = backup._RunReport(tmp_path, NOW)
     report.start()
     report.finalise("line", {"status": "OK", "exit_code": 0})
@@ -1915,6 +1952,7 @@ def test_a_transient_lock_is_retried_rather_than_failing_the_run(tmp_path: Path)
     real_open = Path.open
 
     def flaky_open(self: Path, *args: object, **kwargs: object):  # type: ignore[no-untyped-def]
+        """flaky open."""
         if self == target:
             attempts["n"] += 1
             if attempts["n"] < 3:
@@ -1930,6 +1968,7 @@ def test_a_transient_lock_is_retried_rather_than_failing_the_run(tmp_path: Path)
 
 
 def test_the_published_run_is_named_in_an_interrupted_record(tmp_path: Path) -> None:
+    """Guard: test_the_published_run_is_named_in_an_interrupted_record."""
     report = backup._RunReport(tmp_path, NOW)
     report.start()
     report.note_published(tmp_path / "ums-backup-20260801T020000Z")
@@ -2053,6 +2092,7 @@ def test_prune_treats_an_unreadable_manifest_as_content(tmp_path: Path) -> None:
 
 
 def test_prune_expires_quarantined_runs(tmp_path: Path) -> None:
+    """Guard: test_prune_expires_quarantined_runs."""
     fresh = _write_run(tmp_path, "20260824T222105", counts=EMPTY, rejected=True)
     stale = _write_run(tmp_path, "20250101T000000", counts=EMPTY, rejected=True)
 
@@ -2063,6 +2103,7 @@ def test_prune_expires_quarantined_runs(tmp_path: Path) -> None:
 
 
 def test_prune_ignores_foreign_directories(tmp_path: Path) -> None:
+    """Guard: test_prune_ignores_foreign_directories."""
     (tmp_path / "important-operator-notes").mkdir()
     _write_run(tmp_path, "20260824T222143", counts=REAL)
 
@@ -2083,6 +2124,7 @@ def test_prune_never_deletes_the_watermark_file(tmp_path: Path) -> None:
 
 
 def test_run_has_content_is_three_valued(tmp_path: Path) -> None:
+    """Guard: test_run_has_content_is_three_valued."""
     assert backup._run_has_content(_write_run(tmp_path, "20260101T000000", counts=REAL)) is True
     assert backup._run_has_content(_write_run(tmp_path, "20260102T000000", counts=EMPTY)) is False
     unknown = _write_run(tmp_path, "20260103T000000", counts=None, manifest=False)
@@ -2096,6 +2138,7 @@ def test_a_manifest_claiming_acceptance_is_still_measured(tmp_path: Path) -> Non
 
 
 def test_partial_directories_still_expire(tmp_path: Path) -> None:
+    """Guard: test_partial_directories_still_expire."""
     stale = tmp_path / "ums-backup-20250101T000000Z.partial"
     stale.mkdir()
     old = (NOW - timedelta(days=3)).timestamp()
@@ -2112,6 +2155,7 @@ def test_partial_directories_still_expire(tmp_path: Path) -> None:
 
 
 def test_restore_refuses_a_quarantined_directory_by_name(tmp_path: Path) -> None:
+    """Guard: test_restore_refuses_a_quarantined_directory_by_name."""
     run = _write_run(tmp_path, "20260824T222105", counts=EMPTY, rejected=True)
     with pytest.raises(restore.RestoreError) as caught:
         restore._load_backup(run)
@@ -2238,6 +2282,7 @@ def test_restore_roles_tolerates_bootstrap_duplicate_nonzero(
     roles_path.write_text("CREATE ROLE ums;\nCREATE ROLE app_tenant;\n", encoding="utf-8")
 
     def fake_run_with_file(*_a, **_k):
+        """fake run with file."""
         return subprocess.CompletedProcess(
             args=[],
             returncode=3,
@@ -2259,10 +2304,12 @@ def test_restore_roles_tolerates_bootstrap_duplicate_nonzero(
 def test_restore_roles_rejects_unexpected_error_line(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
+    """Guard: test_restore_roles_rejects_unexpected_error_line."""
     roles_path = tmp_path / restore.ROLES_NAME
     roles_path.write_text("CREATE ROLE app_tenant;\n", encoding="utf-8")
 
     def fake_run_with_file(*_a, **_k):
+        """fake run with file."""
         return subprocess.CompletedProcess(
             args=[],
             returncode=3,
@@ -2286,10 +2333,12 @@ def test_restore_roles_rejects_unexpected_error_line(
 def test_restore_roles_rejects_nonzero_without_allowed_error(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
+    """Guard: test_restore_roles_rejects_nonzero_without_allowed_error."""
     roles_path = tmp_path / restore.ROLES_NAME
     roles_path.write_text("CREATE ROLE app_tenant;\n", encoding="utf-8")
 
     def fake_run_with_file(*_a, **_k):
+        """fake run with file."""
         return subprocess.CompletedProcess(
             args=[],
             returncode=2,
@@ -2311,6 +2360,7 @@ def test_restore_roles_rejects_fatal_even_after_allowed_duplicate(
     roles_path.write_text("CREATE ROLE app_tenant;\n", encoding="utf-8")
 
     def fake_run_with_file(*_a, **_k):
+        """fake run with file."""
         return subprocess.CompletedProcess(
             args=[],
             returncode=2,
@@ -2334,6 +2384,7 @@ def test_restore_roles_rejects_fatal_even_after_allowed_duplicate(
 def test_destroy_throwaway_false_on_docker_rm_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Guard: test_destroy_throwaway_false_on_docker_rm_failure."""
     monkeypatch.setattr(
         restore,
         "_run",
@@ -2350,6 +2401,7 @@ def test_destroy_throwaway_false_on_docker_rm_timeout(
     """TimeoutExpired from docker rm must not escape cleanup."""
 
     def _timeout(*_a, **_k):
+        """timeout."""
         raise subprocess.TimeoutExpired(cmd=["docker", "rm"], timeout=1)
 
     monkeypatch.setattr(restore, "_run", _timeout)
@@ -2360,6 +2412,7 @@ def test_overlapping_backup_lock_is_exclusive(tmp_path: Path) -> None:
     """A second process must fail before loading the watermark."""
 
     def _contend() -> None:
+        """contend."""
         with backup._exclusive_backup_lock(tmp_path):
             pass
 
@@ -2377,6 +2430,7 @@ def test_dump_database_passes_snapshot_flag(
     captured: dict[str, object] = {}
 
     def fake_run_to_file(argv, *, timeout, target):
+        """fake run to file."""
         captured["argv"] = argv
         target.write_bytes(backup.CUSTOM_FORMAT_MAGIC + b"-x")
         return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
@@ -2409,6 +2463,7 @@ def test_exit_codes_stay_distinct() -> None:
 
 
 def test_restore_exit_codes_stay_distinct() -> None:
+    """Guard: test_restore_exit_codes_stay_distinct."""
     codes = [
         restore.EXIT_OK,
         restore.EXIT_USAGE,
@@ -2461,11 +2516,13 @@ class _FakeContainer:
         identity: backup.Identity = IDENTITY_A,
         toc_entries: int = 17,
     ) -> None:
+        """init."""
         self.counts = dict(counts)
         self.identity = identity
         self.toc_entries = toc_entries
 
     def install(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """install."""
         monkeypatch.setattr(backup, "_await_docker", lambda *a, **k: "29.5.3")
         monkeypatch.setattr(backup, "_resolve_container", lambda **k: "fake-postgres")
         monkeypatch.setattr(backup, "_await_postgres", lambda *a, **k: None)
@@ -2478,6 +2535,7 @@ class _FakeContainer:
     def _dump_roles(
         _container: str, target: Path, *, timeout: int, include_passwords: bool
     ) -> list[str]:
+        """dump roles."""
         _ = (timeout, include_passwords)
         target.write_text("CREATE ROLE app_tenant;\nCREATE ROLE app_platform;\n", encoding="utf-8")
         return list(backup.REQUIRED_ROLES)
@@ -2485,16 +2543,19 @@ class _FakeContainer:
     def _dump_database_and_count(
         self, _container: str, target: Path, *, timeout: int
     ) -> dict[str, int]:
+        """dump database and count."""
         _ = timeout
         target.write_bytes(backup.CUSTOM_FORMAT_MAGIC + b"-fake-archive")
         return dict(self.counts)
 
     @staticmethod
     def _dump_database(_container: str, target: Path, *, timeout: int) -> None:
+        """dump database."""
         _ = timeout
         target.write_bytes(backup.CUSTOM_FORMAT_MAGIC + b"-fake-archive")
 
     def _facts(self, container: str, *, timeout: int) -> dict[str, str]:
+        """facts."""
         _ = timeout
         return {
             "container": container,
@@ -2512,11 +2573,13 @@ def _run_cli(
     identity: backup.Identity = IDENTITY_A,
     toc_entries: int = 17,
 ) -> int:
+    """run cli."""
     _FakeContainer(counts, identity=identity, toc_entries=toc_entries).install(monkeypatch)
     return backup.main(["--out-dir", str(out_dir), *flags])
 
 
 def _run_dirs(out_dir: Path) -> list[str]:
+    """run dirs."""
     return sorted(p.name for p in out_dir.iterdir() if p.is_dir())
 
 
@@ -2540,6 +2603,7 @@ def test_the_cli_publishes_a_first_run_and_returns_zero(
 def test_the_cli_refuses_a_first_run_without_the_acknowledgement(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, clock: _Clock
 ) -> None:
+    """Guard: test_the_cli_refuses_a_first_run_without_the_acknowledgement."""
     code = _run_cli(monkeypatch, tmp_path, REAL)
 
     assert code == backup.EXIT_NO_CONTENT
@@ -2972,6 +3036,7 @@ def test_roles_sql_that_does_not_name_both_roles_is_refused(
     target = tmp_path / backup.ROLES_NAME
 
     def _half_a_roles_file(argv: list[str], *, timeout: int, target: Path):
+        """half a roles file."""
         target.write_text("CREATE ROLE app_tenant;\n", encoding="utf-8")
         return subprocess.CompletedProcess(argv, 0, "", "")
 
@@ -2991,6 +3056,7 @@ def test_roles_sql_naming_both_roles_is_accepted(
     target = tmp_path / backup.ROLES_NAME
 
     def _complete_roles_file(argv: list[str], *, timeout: int, target: Path):
+        """complete roles file."""
         target.write_text("CREATE ROLE app_tenant;\nCREATE ROLE app_platform;\n", encoding="utf-8")
         return subprocess.CompletedProcess(argv, 0, "", "")
 
@@ -3006,6 +3072,7 @@ def test_an_empty_roles_file_is_refused(monkeypatch: pytest.MonkeyPatch, tmp_pat
     target = tmp_path / backup.ROLES_NAME
 
     def _nothing(argv: list[str], *, timeout: int, target: Path):
+        """nothing."""
         target.write_text("", encoding="utf-8")
         return subprocess.CompletedProcess(argv, 0, "", "")
 

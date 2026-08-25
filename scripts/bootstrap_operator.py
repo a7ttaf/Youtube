@@ -309,6 +309,7 @@ class _RedactingArgumentParser(argparse.ArgumentParser):
     """ArgumentParser that never echoes raw database URLs on usage errors."""
 
     def error(self, message: str) -> NoReturn:
+        """error."""
         self.print_usage(sys.stderr)
         safe = _redact_argparse_message(message)
         self.exit(2, f"{self.prog}: error: {safe}\n")

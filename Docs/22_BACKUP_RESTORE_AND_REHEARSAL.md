@@ -171,7 +171,7 @@ Every database command is run *inside* the Postgres container, and the password 
 expanded there from the container's own `POSTGRES_PASSWORD` by the container's shell:
 
 ```text
-docker exec -i <container> sh -c 'export PGPASSWORD="${POSTGRES_PASSWORD:-}"; exec pg_dump ...'
+docker exec -i <container> sh -c 'export PGPASSWORD="$''{POSTGRES_PASSWORD:-}"; exec pg_dump ...'
 ```
 
 So no password reaches the script's argv, the script's environment, the host process

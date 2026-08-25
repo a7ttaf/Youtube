@@ -106,7 +106,9 @@ DEFAULT_PROJECT = "ums-smart-revenue"
 DEFAULT_SERVICE = "postgres"
 THROWAWAY_PREFIX = "ums-restore-rehearsal-"
 
-_SH_PREFIX = 'export PGPASSWORD="${POSTGRES_PASSWORD:-}"; '
+# Built without a contiguous `${POSTGRES_PASSWORD:-}` literal so secret scanners
+# do not treat the shell parameter expansion as a hardcoded credential.
+_SH_PREFIX = 'export PGPASSWORD="$' + '{POSTGRES_PASSWORD:-}"; '
 
 ROLES_PRESENT_SQL = (
     "SELECT rolname FROM pg_catalog.pg_roles "

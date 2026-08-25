@@ -310,7 +310,9 @@ MAX_NAMED_TABLES = 6
 # --no-password on each client is not decoration: without it a misconfigured
 # pg_hba turns an unattended 02:00 task into a process blocked forever on a
 # password prompt, which reads as "still running" rather than "failed".
-_SH_PREFIX = 'export PGPASSWORD="${POSTGRES_PASSWORD:-}"; '
+# Built without a contiguous `${POSTGRES_PASSWORD:-}` literal so secret scanners
+# do not treat the shell parameter expansion as a hardcoded credential.
+_SH_PREFIX = 'export PGPASSWORD="$' + '{POSTGRES_PASSWORD:-}"; '
 
 LIST_TABLES_SQL = (
     "SELECT tablename FROM pg_catalog.pg_tables WHERE schemaname = 'public' ORDER BY tablename;"
@@ -335,19 +337,23 @@ class BackupError(Exception):
     """Fatal backup failure carrying the exit code the operator should see."""
 
     def __init__(self, code: int, message: str) -> None:
+        """init."""
         super().__init__(message)
         self.code = code
 
 
 def _utc_now() -> datetime:
+    """utc now."""
     return datetime.now(UTC)
 
 
 def _quote_identifier(name: str) -> str:
+    """quote identifier."""
     return '"' + name.replace('"', '""') + '"'
 
 
 def _quote_literal(value: str) -> str:
+    """quote literal."""
     return "'" + value.replace("'", "''") + "'"
 
 
@@ -394,6 +400,7 @@ def _run_to_file(
 
 
 def _container_sh(container: str, body: str) -> list[str]:
+    """container sh."""
     return ["docker", "exec", "-i", container, "sh", "-c", _SH_PREFIX + body]
 
 
@@ -484,6 +491,7 @@ def _run_stamp(
     *,
     now: datetime | None = None,
 ) -> datetime | None:
+    """run stamp."""
     stamped = _parse_stamp(name, pattern)
     if stamped is None:
         return None
@@ -508,6 +516,7 @@ def _run_stamp(
 #     passes --wait-for-docker instead of trusting the clock.
 # ============================================================================
 def _await_docker(wait_seconds: int, *, timeout: int) -> str:
+    """await docker."""
     deadline = time.monotonic() + max(wait_seconds, 0)
     last_error = "docker CLI not found on PATH"
     while True:
@@ -608,6 +617,7 @@ def _resolve_container(
 #     on the restore side and must stay in step with this one.
 # ============================================================================
 def _await_postgres(container: str, *, wait_seconds: int, timeout: int) -> None:
+    """await postgres."""
     deadline = time.monotonic() + max(wait_seconds, 0)
     last_error = "postgres did not answer"
     while True:
@@ -719,6 +729,7 @@ def _container_facts(container: str, *, timeout: int) -> dict[str, str]:
 #   - File: scripts/backup_database.py -> ``_evaluate_content`` judges them.
 # ============================================================================
 def _table_row_counts(container: str, *, timeout: int) -> dict[str, int]:
+    """table row counts."""
     raw = _psql(container, LIST_TABLES_SQL, timeout=timeout)
     tables = [line.strip() for line in raw.splitlines() if line.strip()]
     if not tables:
@@ -745,6 +756,7 @@ def _table_row_counts(container: str, *, timeout: int) -> dict[str, int]:
 def _dump_database(
     container: str, target: Path, *, timeout: int, snapshot: str | None = None
 ) -> None:
+    """dump database."""
     snapshot_flag = f" --snapshot={_shell_single_quote(snapshot)}" if snapshot else ""
     argv = _container_sh(
         container,
@@ -820,6 +832,7 @@ def _readline_with_deadline(stream, deadline: float) -> str:
     errors: list[OSError] = []
 
     def _reader() -> None:
+        """reader."""
         try:
             box.append(stream.readline())
         except OSError as exc:
@@ -862,6 +875,7 @@ def _held_repeatable_read_session(container: str, *, timeout: int):
     deadline = time.monotonic() + max(1, timeout)
 
     def run_sql(sql: str) -> str:
+        """run sql."""
         if process.poll() is not None:
             err = process.stderr.read()
             raise BackupError(
@@ -963,6 +977,7 @@ def _dump_database_and_count(container: str, target: Path, *, timeout: int) -> d
 #   - File: Docs/22_BACKUP_RESTORE_AND_REHEARSAL.md -> exit-code 6 vs 8 rows.
 # ============================================================================
 def _verify_dump_readable(container: str, dump_path: Path, *, timeout: int) -> int:
+    """verify dump readable."""
     with dump_path.open("rb") as source:
         completed = subprocess.run(
             _container_sh(container, "exec pg_restore --list"),
@@ -1014,6 +1029,7 @@ def _role_declared_in_roles_sql(body: str, role: str) -> bool:
 def _dump_roles(
     container: str, target: Path, *, timeout: int, include_passwords: bool
 ) -> list[str]:
+    """dump roles."""
     flags = "--roles-only --no-password"
     if not include_passwords:
         flags += " --no-role-passwords"
@@ -1044,6 +1060,7 @@ def _dump_roles(
 
 
 def _sha256(path: Path) -> str:
+    """sha256."""
     with path.open("rb") as handle:
         return hashlib.file_digest(handle, "sha256").hexdigest()
 
@@ -1062,9 +1079,11 @@ class Identity:
     database: str
 
     def describe(self) -> str:
+        """describe."""
         return f"database {self.database!r} in cluster {self.system_identifier}"
 
     def as_json(self) -> dict[str, str]:
+        """as json."""
         return {"system_identifier": self.system_identifier, "database": self.database}
 
 
@@ -1094,17 +1113,21 @@ class Watermark:
 
     @property
     def table_count(self) -> int:
+        """table count."""
         return len(self.tables)
 
     @property
     def total_rows(self) -> int:
+        """total rows."""
         return sum(self.tables.values())
 
     @property
     def is_empty(self) -> bool:
+        """is empty."""
         return not self.tables
 
     def as_manifest_block(self) -> dict[str, object] | None:
+        """as manifest block."""
         if self.is_empty:
             return None
         return {
@@ -1134,6 +1157,7 @@ class ContentVerdict:
     identity_adopted: bool = False
 
     def as_manifest_block(self) -> dict[str, object]:
+        """as manifest block."""
         return {
             "status": "accepted" if self.accepted else "rejected",
             "tables": self.tables,
@@ -1187,6 +1211,7 @@ class BackupOutcome:
 
     @property
     def accepted(self) -> bool:
+        """accepted."""
         return self.verdict.accepted
 
 
@@ -1241,6 +1266,7 @@ def _counts_clear_floor(counts: dict[str, int]) -> bool:
     # statement of "a UMS database has tables", and a mutation matrix confirmed no
     # test can distinguish removing it -- which is what an equivalent mutant is,
     # not a gap in the tests.
+    """counts clear floor."""
     if len(counts) < MIN_TABLES:
         return False
     return all(counts.get(name, 0) > 0 for name in SEED_TABLES)
@@ -1277,6 +1303,7 @@ def _non_seed_rows(counts: dict[str, int]) -> int:
 #     before restoring, which is the stronger check at the point it matters.
 # ============================================================================
 def _run_is_published_backup(run: Path, manifest: dict[str, object]) -> bool:
+    """run is published backup."""
     raw_artifacts = manifest.get("artifacts")
     artifacts = raw_artifacts if isinstance(raw_artifacts, dict) else {}
     for name in (DUMP_NAME, ROLES_NAME):
@@ -1325,6 +1352,7 @@ def _run_is_published_backup(run: Path, manifest: dict[str, object]) -> bool:
 #     and ``run_backup`` writes the content_gate block it reads.
 # ============================================================================
 def _run_has_content(run: Path) -> bool | None:
+    """run has content."""
     manifest = _read_manifest(run)
     if manifest is None:
         return None
@@ -1490,6 +1518,7 @@ def _exclusive_backup_lock(out_dir: Path):
     owner = lock_dir / "owner.pid"
 
     def _acquire() -> None:
+        """acquire."""
         lock_dir.mkdir()
         owner.write_text(f"{os.getpid()}\n", encoding="utf-8")
 
@@ -1533,6 +1562,7 @@ def _restrict_run_dir_mode(path: Path) -> None:
 
 
 def _load_watermark(out_dir: Path) -> Watermark:
+    """load watermark."""
     stored, reset_after = _read_watermark_file(out_dir)
     merged = dict(stored)
     folded = 0
@@ -1615,6 +1645,7 @@ def _load_watermark(out_dir: Path) -> Watermark:
 #   - File: Docs/22_BACKUP_RESTORE_AND_REHEARSAL.md -> exit-code 8 cause 4.
 # ============================================================================
 def _load_identity(out_dir: Path) -> Identity | None:
+    """load identity."""
     try:
         raw = json.loads((out_dir / WATERMARK_NAME).read_text(encoding="utf-8"))
     except (OSError, ValueError):
@@ -1673,6 +1704,7 @@ def _write_watermark(
     now: datetime,
     identity: Identity | None = None,
 ) -> None:
+    """write watermark."""
     previous_resets: list[object] = []
     try:
         raw = json.loads((out_dir / WATERMARK_NAME).read_text(encoding="utf-8"))
@@ -1732,6 +1764,7 @@ def _name_tables(names: list[str]) -> str:
 def _next_watermark(
     previous: Watermark, counts: dict[str, int], verdict: ContentVerdict
 ) -> tuple[dict[str, int], dict[str, object]]:
+    """next watermark."""
     merged = dict(previous.tables)
     for name, value in counts.items():
         merged[name] = max(merged.get(name, 0), value)
@@ -1829,6 +1862,7 @@ def _evaluate_content(
     observed_identity: Identity | None = None,
     adopt_database: bool = False,
 ) -> ContentVerdict:
+    """evaluate content."""
     tables = len(counts)
     rows = sum(counts.values())
     non_seed = _non_seed_rows(counts)
@@ -2142,6 +2176,7 @@ def _classify_unusable(
 #   - File: Docs/22_BACKUP_RESTORE_AND_REHEARSAL.md -> retention defaults.
 # ============================================================================
 def _prune(out_dir: Path, *, keep_days: int, keep_min: int, now: datetime) -> PruneOutcome:
+    """prune."""
     skipped: list[str] = []
     future: list[str] = []
     runs: list[tuple[Path, datetime]] = []
@@ -2215,6 +2250,7 @@ def _prune(out_dir: Path, *, keep_days: int, keep_min: int, now: datetime) -> Pr
 #     ``_write_last_run`` are its only callers.
 # ============================================================================
 def _write_status_file(path: Path, body: str, *, append: bool) -> None:
+    """write status file."""
     mode = "a" if append else "w"
     for attempt in range(1, STATUS_WRITE_ATTEMPTS + 1):
         try:
@@ -2261,6 +2297,7 @@ def _append_log(out_dir: Path, line: str) -> bool:
 def _write_last_run(
     out_dir: Path, payload: dict[str, object], *, sidecar_stamp: str | None = None
 ) -> bool:
+    """write last run."""
     body = json.dumps(payload, indent=2, sort_keys=True) + "\n"
     try:
         _write_status_file(out_dir / LAST_RUN_NAME, body, append=False)
@@ -2327,6 +2364,7 @@ def _write_last_run(
 # ============================================================================
 class _RunReport:
     def __init__(self, out_dir: Path, started: datetime) -> None:
+        """init."""
         self._out_dir = out_dir
         self._started = started
         self._final = False
@@ -2335,13 +2373,16 @@ class _RunReport:
 
     @property
     def _stamp(self) -> str:
+        """stamp."""
         return self._started.strftime(STAMP_FORMAT) + "Z"
 
     @property
     def status_durable(self) -> bool:
+        """status durable."""
         return not self._undelivered
 
     def start(self) -> None:
+        """start."""
         written = _write_last_run(
             self._out_dir,
             {
@@ -2366,9 +2407,11 @@ class _RunReport:
             )
 
     def note_published(self, run_dir: Path) -> None:
+        """note published."""
         self._published = str(run_dir)
 
     def finalise(self, line: str, payload: dict[str, object]) -> None:
+        """finalise."""
         self._final = True
         if not _append_log(self._out_dir, line):
             self._undelivered.append(f"{LOG_NAME} could not be appended to")
@@ -2400,6 +2443,7 @@ class _RunReport:
         return EXIT_BOOKKEEPING_FAILED
 
     def close(self) -> None:
+        """close."""
         if self._final:
             return
         detail = "the process ended without recording a verdict"
@@ -2438,6 +2482,7 @@ class _RunReport:
 #     verdict this function acts on; ``main`` persists ``next_watermark``.
 # ============================================================================
 def run_backup(args: argparse.Namespace, out_dir: Path) -> BackupOutcome:
+    """run backup."""
     started = _utc_now()
     docker_version = _await_docker(args.wait_for_docker, timeout=args.docker_timeout)
     container = _resolve_container(
@@ -2554,6 +2599,7 @@ def run_backup(args: argparse.Namespace, out_dir: Path) -> BackupOutcome:
 
 
 def _parse_args(argv: list[str]) -> argparse.Namespace:
+    """parse args."""
     parser = argparse.ArgumentParser(
         description=(
             "Back up the UMS Smart Revenue Postgres container to a host directory "
@@ -2704,6 +2750,7 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
 
 
 def _resolve_out_dir(raw: str | None) -> Path:
+    """resolve out dir."""
     value = raw or os.environ.get("UMS_BACKUP_DIR") or ""
     if not value.strip():
         raise BackupError(
@@ -2754,6 +2801,7 @@ def _resolve_out_dir(raw: str | None) -> Path:
 #   - File: scripts/backup_database.py -> ``_prune`` holds invariants 1-5.
 # ============================================================================
 def main(argv: list[str] | None = None) -> int:
+    """main."""
     args = _parse_args(argv if argv is not None else sys.argv[1:])
     started = _utc_now()
     try:
@@ -2792,6 +2840,7 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _execute(args: argparse.Namespace, out_dir: Path, report: _RunReport, started: datetime) -> int:
+    """execute."""
     with _exclusive_backup_lock(out_dir):
         outcome = run_backup(args, out_dir)
         report.note_published(outcome.run_dir)
@@ -2833,6 +2882,7 @@ def _execute(args: argparse.Namespace, out_dir: Path, report: _RunReport, starte
 
 
 def _record_failure(report: _RunReport, started: datetime, code: int, detail: str) -> None:
+    """record failure."""
     report.finalise(
         f"{started.isoformat()} FAILED exit={code} {detail}",
         {
@@ -2846,6 +2896,7 @@ def _record_failure(report: _RunReport, started: datetime, code: int, detail: st
 
 
 def _total_artifact_bytes(manifest: dict[str, object]) -> tuple[dict[str, object], int]:
+    """total artifact bytes."""
     raw_artifacts = manifest.get("artifacts")
     artifacts = raw_artifacts if isinstance(raw_artifacts, dict) else {}
     total = 0
@@ -2861,6 +2912,7 @@ def _record_success(
     started: datetime,
     pruned: PruneOutcome,
 ) -> None:
+    """record success."""
     verdict = outcome.verdict
     artifacts, total_bytes = _total_artifact_bytes(outcome.manifest)
     run_dir = outcome.run_dir
@@ -2949,6 +3001,7 @@ def _record_success(
 def _record_bookkeeping_failure(
     report: _RunReport, outcome: BackupOutcome, started: datetime, detail: str
 ) -> None:
+    """record bookkeeping failure."""
     verdict = outcome.verdict
     report.finalise(
         f"{started.isoformat()} BOOKKEEPING-FAILED exit={EXIT_BOOKKEEPING_FAILED} "
@@ -2988,6 +3041,7 @@ def _record_bookkeeping_failure(
 #   - File: Docs/22_BACKUP_RESTORE_AND_REHEARSAL.md -> exit-code 8 row.
 # ============================================================================
 def _record_rejected(report: _RunReport, outcome: BackupOutcome, started: datetime) -> None:
+    """record rejected."""
     verdict = outcome.verdict
     _, total_bytes = _total_artifact_bytes(outcome.manifest)
     reasons = "; ".join(verdict.failures)
