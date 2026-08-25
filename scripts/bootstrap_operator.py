@@ -88,10 +88,8 @@ a real roster needs a scripted loop. The summary printed at the end says so.
 from __future__ import annotations
 
 import argparse
-import json
 import re
 import sys
-import time
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -100,37 +98,6 @@ from uuid import UUID, uuid5
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[1]
 _BACKEND_PATH = str(_PROJECT_ROOT / "backend")
-_AGENT_DEBUG_LOG = _PROJECT_ROOT / "debug-07ba84.log"
-
-
-def _agent_debug_log(
-    *,
-    hypothesis_id: str,
-    location: str,
-    message: str,
-    data: dict[str, object] | None = None,
-) -> None:
-    """Append one NDJSON debug line for session 07ba84 (folded instrumentation)."""
-    # #region agent log
-    try:
-        with _AGENT_DEBUG_LOG.open("a", encoding="utf-8") as handle:
-            handle.write(
-                json.dumps(
-                    {
-                        "sessionId": "07ba84",
-                        "hypothesisId": hypothesis_id,
-                        "location": location,
-                        "message": message,
-                        "data": data or {},
-                        "timestamp": int(time.time() * 1000),
-                    }
-                )
-                + "\n"
-            )
-    except OSError:
-        pass
-    # #endregion
-
 
 # Deterministic namespace for the org-skeleton rows. Distinct from the demo
 # seed's namespace (scripts/seed_demo_month.py) so a database that has run both
@@ -396,12 +363,6 @@ def _argparse_token_looks_credential_bearing(token: str) -> bool:
     if lowered.startswith(_ARGPARSE_SCHEME_PREFIXES):
         return True
     if _ARGPARSE_PASSWORD_PARAM_RE.search(token) is not None:
-        _agent_debug_log(
-            hypothesis_id="H3",
-            location="bootstrap_operator.py:_argparse_token_looks_credential_bearing",
-            message="password-param regex matched; no bare password= literal branch",
-            data={"matched": True, "token_len": len(token)},
-        )
         return True
     # userinfo@host-ish remnant after argparse split on whitespace
     if "@" in token:
@@ -620,12 +581,6 @@ def _assign_global_role(
             reason=_ROLE_ASSIGNMENT_REASON,
         )
     except deps["UserRoleAssignmentConflictError"]:
-        _agent_debug_log(
-            hypothesis_id="H5",
-            location="bootstrap_operator.py:_assign_global_role",
-            message="existing role assignment; skipping USER_ROLE_CHANGED",
-            data={"role_key": role_key, "user_id": user.user_id},
-        )
         return _UserOutcome(
             email=user.email,
             user_id=user.user_id,
@@ -654,16 +609,6 @@ def _assign_global_role(
             "scope_type": assignment.scope_type,
             "scope_id": assignment.scope_id,
             "active": assignment.active,
-        },
-    )
-    _agent_debug_log(
-        hypothesis_id="H2",
-        location="bootstrap_operator.py:_assign_global_role",
-        message="emitted USER_ROLE_CHANGED for new bootstrap role grant",
-        data={
-            "role_key": assignment.role_key,
-            "entity_id": str(assignment.id),
-            "user_id": user.user_id,
         },
     )
     return _UserOutcome(

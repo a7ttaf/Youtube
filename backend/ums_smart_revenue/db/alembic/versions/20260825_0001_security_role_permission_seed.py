@@ -87,10 +87,6 @@ So: if a later revision seeds another table, or this one changes how it inserts,
 re-measure the virgin state in the same commit.
 """
 
-import json
-import time
-from pathlib import Path
-
 import sqlalchemy as sa
 from alembic import op
 
@@ -102,8 +98,6 @@ revision = "20260825_0001"
 down_revision = "20260805_0001"
 branch_labels = None
 depends_on = None
-
-_AGENT_DEBUG_LOG = Path(__file__).resolve().parents[5] / "debug-07ba84.log"
 
 _ROLES = sa.table(
     "roles",
@@ -193,25 +187,6 @@ def upgrade() -> None:
 # ============================================================================
 def downgrade() -> None:
     """Leave the authorization catalog in place; this seed is not reversed."""
-    # #region agent log
-    try:
-        with _AGENT_DEBUG_LOG.open("a", encoding="utf-8") as handle:
-            handle.write(
-                json.dumps(
-                    {
-                        "sessionId": "07ba84",
-                        "hypothesisId": "H1",
-                        "location": "20260825_0001:downgrade",
-                        "message": "non-destructive downgrade; catalog unseed skipped",
-                        "data": {"destructive_unseed": False},
-                        "timestamp": int(time.time() * 1000),
-                    }
-                )
-                + "\n"
-            )
-    except OSError:
-        pass
-    # #endregion
     return
 
 
