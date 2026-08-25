@@ -2186,6 +2186,92 @@ def test_unexpected_roles_errors_are_rejected() -> None:
     assert unexpected == ['psql: :40: ERROR:  permission denied to alter role']
 
 
+def test_restore_roles_tolerates_bootstrap_duplicate_nonzero(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """ON_ERROR_STOP=0 + bootstrap 'already exists' must not abort."""
+    roles_path = tmp_path / restore.ROLES_NAME
+    roles_path.write_text("CREATE ROLE ums;\nCREATE ROLE app_tenant;\n", encoding="utf-8")
+
+    def fake_run_with_file(*_a, **_k):
+        return subprocess.CompletedProcess(
+            args=[],
+            returncode=3,
+            stdout="",
+            stderr='ERROR:  role "ums" already exists\n',
+        )
+
+    monkeypatch.setattr(restore, "_run_with_file", fake_run_with_file)
+    monkeypatch.setattr(
+        restore, "_psql", lambda *_a, **_k: "app_platform\napp_tenant\n"
+    )
+    present = restore._restore_roles("fake", roles_path, timeout=5)
+    assert present == ["app_platform", "app_tenant"]
+    out = capsys.readouterr().out
+    assert 'role "ums" already exists' in out
+    assert "permission denied" not in out
+
+
+def test_restore_roles_rejects_unexpected_error_line(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    roles_path = tmp_path / restore.ROLES_NAME
+    roles_path.write_text("CREATE ROLE app_tenant;\n", encoding="utf-8")
+
+    def fake_run_with_file(*_a, **_k):
+        return subprocess.CompletedProcess(
+            args=[],
+            returncode=3,
+            stdout="",
+            stderr=(
+                'ERROR:  role "ums" already exists\n'
+                "ERROR:  permission denied to create role\n"
+            ),
+        )
+
+    monkeypatch.setattr(restore, "_run_with_file", fake_run_with_file)
+    monkeypatch.setattr(
+        restore, "_psql", lambda *_a, **_k: "app_platform\napp_tenant\n"
+    )
+    with pytest.raises(restore.RestoreError) as caught:
+        restore._restore_roles("fake", roles_path, timeout=5)
+    assert caught.value.code == restore.EXIT_ROLES_FAILED
+    assert "permission denied" in str(caught.value)
+
+
+def test_restore_roles_rejects_nonzero_without_allowed_error(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    roles_path = tmp_path / restore.ROLES_NAME
+    roles_path.write_text("CREATE ROLE app_tenant;\n", encoding="utf-8")
+
+    def fake_run_with_file(*_a, **_k):
+        return subprocess.CompletedProcess(
+            args=[],
+            returncode=2,
+            stdout="",
+            stderr='FATAL:  database "missing" does not exist\n',
+        )
+
+    monkeypatch.setattr(restore, "_run_with_file", fake_run_with_file)
+    with pytest.raises(restore.RestoreError) as caught:
+        restore._restore_roles("fake", roles_path, timeout=5)
+    assert caught.value.code == restore.EXIT_ROLES_FAILED
+
+
+def test_destroy_throwaway_false_on_docker_rm_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        restore,
+        "_run",
+        lambda *_a, **_k: subprocess.CompletedProcess(
+            args=[], returncode=1, stdout="", stderr="Error: No such container"
+        ),
+    )
+    assert restore._destroy_throwaway("ums-restore-rehearsal-x", timeout=5) is False
+
+
 def test_overlapping_backup_lock_is_exclusive(tmp_path: Path) -> None:
     """A second process must fail before loading the watermark."""
     with (

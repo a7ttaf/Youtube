@@ -472,6 +472,20 @@ def _unexpected_roles_errors(stderr: str) -> list[str]:
     return unexpected
 
 
+def _allowed_role_duplicate_lines(stderr: str) -> list[str]:
+    """Return stderr lines whose ERROR diagnostic is only bootstrap role-already-exists."""
+    allowed: list[str] = []
+    for line in stderr.splitlines():
+        stripped = line.strip()
+        marker = stripped.upper().find("ERROR:")
+        if marker < 0:
+            continue
+        diagnostic = stripped[marker:]
+        if _ROLE_ALREADY_EXISTS.match(diagnostic):
+            allowed.append(stripped)
+    return allowed
+
+
 # ============================================================================
 # Purpose: Apply roles.sql, then refuse to continue unless app_tenant and
 #          app_platform actually exist. This is the trap the whole script is
@@ -480,10 +494,11 @@ def _unexpected_roles_errors(stderr: str) -> list[str]:
 # Standards: ON_ERROR_STOP is deliberately OFF for this file -- pg_dumpall
 #            emits CREATE ROLE for the bootstrap superuser too, which already
 #            exists in any container the official image initialised, and that
-#            expected "role already exists" must not abort the restore. Every
-#            other ERROR: line (and a non-zero returncode with unexpected
-#            errors) fails closed with EXIT_ROLES_FAILED. The catalog check
-#            remains a second gate, not a substitute for a clean apply.
+#            expected "role already exists" must not abort the restore (psql
+#            often exits non-zero for that ERROR). Every other ERROR: line, or
+#            a non-zero exit with no allowed duplicate ERROR, fails closed with
+#            EXIT_ROLES_FAILED. The catalog check remains a second gate, not a
+#            substitute for a clean apply.
 # Blast Radius: Authorization. These roles carry the RLS grant surface; a
 #               restore that proceeded without them would produce a database
 #               whose policies could not be installed.
@@ -498,25 +513,26 @@ def _restore_roles(container: str, roles_path: Path, *, timeout: int) -> list[st
         'exec psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" --no-password -v ON_ERROR_STOP=0 -q -f -',
     )
     completed = _run_with_file(argv, timeout=timeout, source=roles_path)
-    noise = completed.stderr.strip()
     unexpected = _unexpected_roles_errors(completed.stderr)
     if unexpected:
-        detail = "; ".join(unexpected)
         raise RestoreError(
             EXIT_ROLES_FAILED,
             f"roles.sql reported unexpected errors while ON_ERROR_STOP was off: "
-            f"{detail}. Only 'role already exists' for the bootstrap superuser "
-            "is tolerated.",
+            f"{'; '.join(unexpected)}. Only 'role already exists' for the "
+            "bootstrap superuser is tolerated.",
         )
-    if completed.returncode != 0:
+    allowed = _allowed_role_duplicate_lines(completed.stderr)
+    # Non-zero is expected when the bootstrap duplicate ERROR fired.
+    # Non-zero with no allowed ERROR lines (empty/FATAL/other noise) fails closed.
+    if completed.returncode != 0 and not allowed:
+        noise = completed.stderr.strip() or f"psql exited {completed.returncode}"
         raise RestoreError(
             EXIT_ROLES_FAILED,
-            f"roles.sql apply exited {completed.returncode}"
-            + (f": {noise}" if noise else ""),
+            f"roles.sql apply exited {completed.returncode}: {noise}",
         )
-    if noise:
+    if allowed:
         print("roles.sql reported (expected: 'role already exists' for the bootstrap user):")
-        for line in noise.splitlines():
+        for line in allowed:
             print(f"    {line}")
     present = [
         line.strip()
@@ -779,6 +795,8 @@ def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv if argv is not None else sys.argv[1:])
     backup_dir = Path(args.backup_dir).expanduser()
     throwaway: str | None = None
+    code: int | None = None
+    ok = False
     try:
         manifest = _load_backup(backup_dir)
         _require_docker(timeout=args.docker_timeout)
@@ -811,10 +829,10 @@ def main(argv: list[str] | None = None) -> int:
         ok = _verify(container, manifest, timeout=args.timeout)
     except RestoreError as exc:
         print(f"RESTORE FAILED (exit {exc.code}): {exc}", file=sys.stderr)
-        return exc.code
+        code = exc.code
     except (OSError, subprocess.SubprocessError) as exc:
         print(f"RESTORE FAILED (exit {EXIT_RESTORE_FAILED}): {exc}", file=sys.stderr)
-        return EXIT_RESTORE_FAILED
+        code = EXIT_RESTORE_FAILED
     # Last resort, and deliberately broad. Nothing is swallowed -- the traceback
     # is printed -- but the process exits on a documented code instead of a bare
     # 1 that means nothing to the operator or to Task Scheduler.
@@ -824,7 +842,7 @@ def main(argv: list[str] | None = None) -> int:
             f"RESTORE FAILED (exit {EXIT_INTERNAL}): unexpected {type(exc).__name__}: {exc}",
             file=sys.stderr,
         )
-        return EXIT_INTERNAL
+        code = EXIT_INTERNAL
     finally:
         if throwaway and not args.keep_throwaway:
             if _destroy_throwaway(throwaway, timeout=args.docker_timeout):
@@ -836,10 +854,15 @@ def main(argv: list[str] | None = None) -> int:
                     f"docker rm --force --volumes {throwaway}",
                     file=sys.stderr,
                 )
+                # Promote only when restore+verify would otherwise be success.
+                if code is None and ok:
+                    code = EXIT_CONTAINER_UNAVAILABLE
         elif throwaway:
             print(f"rehearsal container left running: {throwaway}")
             print(f"remove it with: docker rm --force --volumes {throwaway}")
 
+    if code is not None and not ok:
+        return code
     if not ok:
         print(
             "VERIFICATION FAILED: the restored row counts do not match the manifest.",
@@ -848,6 +871,8 @@ def main(argv: list[str] | None = None) -> int:
         return EXIT_VERIFY_FAILED
     print()
     print("RESTORE VERIFIED: every table matched the manifest row count.")
+    if code is not None:
+        return code
     return EXIT_OK
 
 
