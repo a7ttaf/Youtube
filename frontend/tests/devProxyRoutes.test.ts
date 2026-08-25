@@ -120,10 +120,12 @@ const startsRegex = (previous: string): boolean =>
 const INTERPOLATION = "\u0000";
 
 /** Skip a line or block comment; returns the index just past it. */
-function skipComment(source: string, index: number): number {
+const skipComment = (source: string, index: number): number => {
   if (source[index + 1] === "/") {
     let cursor = index;
-    while (cursor < source.length && source[cursor] !== "\n") cursor += 1;
+    while (cursor < source.length && source[cursor] !== "\n") {
+      cursor += 1;
+    }
     return cursor;
   }
   let cursor = index + 2;
@@ -131,10 +133,10 @@ function skipComment(source: string, index: number): number {
     cursor += 1;
   }
   return cursor + 2;
-}
+};
 
 /** Skip a regex literal, honouring escapes and character classes. */
-function skipRegex(source: string, index: number): number {
+const skipRegex = (source: string, index: number): number => {
   let cursor = index + 1;
   let inClass = false;
   while (cursor < source.length) {
@@ -143,14 +145,20 @@ function skipRegex(source: string, index: number): number {
       cursor += 2;
       continue;
     }
-    if (ch === "\n") break;
-    if (ch === "[") inClass = true;
-    else if (ch === "]") inClass = false;
-    else if (ch === "/" && !inClass) break;
+    if (ch === "\n") {
+      break;
+    }
+    if (ch === "[") {
+      inClass = true;
+    } else if (ch === "]") {
+      inClass = false;
+    } else if (ch === "/" && !inClass) {
+      break;
+    }
     cursor += 1;
   }
   return cursor + 1;
-}
+};
 
 /**
  * Read one string or template literal starting at its opening quote, recording
@@ -158,12 +166,12 @@ function skipRegex(source: string, index: number): number {
  * template is scanned as code — so literals nested in an interpolation are
  * collected too — and contributes a single placeholder to the literal's text.
  */
-function readLiteral(
+const readLiteral = (
   source: string,
   openIndex: number,
   continuesExpression: boolean,
   literals: ScannedLiteral[],
-): number {
+): number => {
   const quote = source[openIndex];
   let index = openIndex + 1;
   let value = "";
@@ -183,19 +191,19 @@ function readLiteral(
   }
   literals.push({ value, continuesExpression });
   return index + 1;
-}
+};
 
 /**
  * Scan a region of code, collecting literals. When `stopAtCloseBrace` is set
  * the region is a template interpolation and the scan returns at its matching
  * `}`; otherwise it runs to end of file.
  */
-function scanRegion(
+const scanRegion = (
   source: string,
   start: number,
   stopAtCloseBrace: boolean,
   literals: ScannedLiteral[],
-): number {
+): number => {
   let index = start;
   let depth = 0;
   let previousToken = "";
@@ -217,17 +225,22 @@ function scanRegion(
       continue;
     }
     if (stopAtCloseBrace) {
-      if (ch === "{") depth += 1;
-      else if (ch === "}") {
-        if (depth === 0) return index + 1;
+      if (ch === "{") {
+        depth += 1;
+      } else if (ch === "}") {
+        if (depth === 0) {
+          return index + 1;
+        }
         depth -= 1;
       }
     }
-    if (!isWhitespace(ch)) previousToken = ch;
+    if (!isWhitespace(ch)) {
+      previousToken = ch;
+    }
     index += 1;
   }
   return index;
-}
+};
 
 /**
  * Purpose: Extract every string/template literal from TypeScript source,
@@ -253,13 +266,21 @@ export const scanStringLiterals = (source: string): ScannedLiteral[] => {
 const sourceFiles = (dir: string): string[] =>
   readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
     const full = path.join(dir, entry.name);
-    if (entry.isDirectory()) return sourceFiles(full);
+    if (entry.isDirectory()) {
+      return sourceFiles(full);
+    }
     return SOURCE_SUFFIXES.some((suffix) => entry.name.endsWith(suffix)) ? [full] : [];
   });
 
-/** The first path segment of a literal, e.g. "/revenue/months/x" -> "/revenue". */
-const firstSegment = (literal: string): string =>
-  `/${literal.slice(1).split(/[/?#\u0000]/u, 1)[0]}`;
+/**
+ * The first path segment of a literal, e.g. "/revenue/months/x" -> "/revenue".
+ * Split on INTERPOLATION as a string first so no control character appears in a
+ * regex (DeepSource JS-0004); then terminate on / ? # only.
+ */
+const firstSegment = (literal: string): string => {
+  const untilPlaceholder = literal.slice(1).split(INTERPOLATION, 1)[0] ?? "";
+  return `/${untilPlaceholder.split(/[/?#]/u, 1)[0] ?? ""}`;
+};
 
 /**
  * Purpose: Derive the set of backend prefixes the application actually
@@ -274,8 +295,12 @@ export const discoverRequestedPrefixes = (): string[] => {
   const found = new Set<string>();
   for (const file of sourceFiles(SRC_DIR)) {
     for (const literal of scanStringLiterals(readFileSync(file, "utf8"))) {
-      if (!literal.value.startsWith("/") || literal.continuesExpression) continue;
-      if (literal.value.length < 2 || !/^[a-z]/iu.test(literal.value[1])) continue;
+      if (!literal.value.startsWith("/") || literal.continuesExpression) {
+        continue;
+      }
+      if (literal.value.length < 2 || !/^[a-z]/iu.test(literal.value[1])) {
+        continue;
+      }
       found.add(firstSegment(literal.value));
     }
   }
@@ -324,11 +349,19 @@ const injectedHeaders = (entry: ConfigurableProxyEntry, route: string): [string,
   let handler: ProxyReqHandler | undefined;
   entry.configure({
     on: (event, fn) => {
-      if (event === "proxyReq") handler = fn;
+      if (event === "proxyReq") {
+        handler = fn;
+      }
     },
   });
-  if (!handler) throw new Error(`expected ${route} to register a proxyReq handler`);
-  handler({ setHeader: (header, value) => void collected.push([header, value]) });
+  if (!handler) {
+    throw new Error(`expected ${route} to register a proxyReq handler`);
+  }
+  handler({
+    setHeader: (header: string, value: string) => {
+      collected.push([header, value]);
+    },
+  });
   return collected;
 };
 
@@ -342,10 +375,12 @@ describe("dev proxy route coverage (derived from frontend/src)", () => {
   it("treats a `+`-concatenated fragment as a fragment, not a backend prefix", () => {
     // The exact shape from useExplanation.ts. `/months` is a suffix of the
     // /revenue path, and must never be reported as an unproxied prefix.
+    // Split around `{` so `${...}` is not a single regular-string token
+    // (DeepSource JS-0038). The joined source still matches useExplanation.ts.
     const source = [
       "const p =",
-      "  `/revenue/channels/${encodeURIComponent(id)}` +",
-      "  `/months/${encodeURIComponent(month)}/explain`;",
+      "  `/revenue/channels/$" + "{encodeURIComponent(id)}` +",
+      "  `/months/$" + "{encodeURIComponent(month)}/explain`;",
     ].join("\n");
     const scanned = scanStringLiterals(source);
     expect(scanned.map((literal) => literal.continuesExpression)).toEqual([false, true]);
