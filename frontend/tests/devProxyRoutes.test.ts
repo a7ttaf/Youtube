@@ -166,84 +166,84 @@ const skipRegex = (source: string, index: number): number => {
  * template is scanned as code — so literals nested in an interpolation are
  * collected too — and contributes a single placeholder to the literal's text.
  *
- * Declared as a function (not const) so mutual recursion with scanRegion is
- * safe under Temporal Dead Zone rules (DeepSource JS-0357).
+ * Held on a local object with scanRegion so mutual recursion does not hit the
+ * Temporal Dead Zone and does not use module-scope `function` (JS-0067/0357).
  */
-function readLiteral(
-  source: string,
-  openIndex: number,
-  continuesExpression: boolean,
-  literals: ScannedLiteral[],
-): number {
-  const quote = source[openIndex];
-  let index = openIndex + 1;
-  let value = "";
-  while (index < source.length && source[index] !== quote) {
-    if (source[index] === "\\") {
-      value += source[index + 1] ?? "";
-      index += 2;
-      continue;
-    }
-    if (quote === "`" && source[index] === "$" && source[index + 1] === "{") {
-      index = scanRegion(source, index + 2, true, literals);
-      value += INTERPOLATION;
-      continue;
-    }
-    value += source[index];
-    index += 1;
-  }
-  literals.push({ value, continuesExpression });
-  return index + 1;
-}
-
-/**
- * Scan a region of code, collecting literals. When `stopAtCloseBrace` is set
- * the region is a template interpolation and the scan returns at its matching
- * `}`; otherwise it runs to end of file.
- */
-function scanRegion(
-  source: string,
-  start: number,
-  stopAtCloseBrace: boolean,
-  literals: ScannedLiteral[],
-): number {
-  let index = start;
-  let depth = 0;
-  let previousToken = "";
-  while (index < source.length) {
-    const ch = source[index];
-    const next = source[index + 1] ?? "";
-    if (ch === "/" && (next === "/" || next === "*")) {
-      index = skipComment(source, index);
-      continue;
-    }
-    if (ch === "/" && startsRegex(previousToken)) {
-      index = skipRegex(source, index);
-      previousToken = "/";
-      continue;
-    }
-    if (ch === '"' || ch === "'" || ch === "`") {
-      index = readLiteral(source, index, previousToken === "+", literals);
-      previousToken = ch;
-      continue;
-    }
-    if (stopAtCloseBrace) {
-      if (ch === "{") {
-        depth += 1;
-      } else if (ch === "}") {
-        if (depth === 0) {
-          return index + 1;
-        }
-        depth -= 1;
+const scanners: {
+  readLiteral: (
+    source: string,
+    openIndex: number,
+    continuesExpression: boolean,
+    literals: ScannedLiteral[],
+  ) => number;
+  scanRegion: (
+    source: string,
+    start: number,
+    stopAtCloseBrace: boolean,
+    literals: ScannedLiteral[],
+  ) => number;
+} = {
+  readLiteral(source, openIndex, continuesExpression, literals) {
+    const quote = source[openIndex];
+    let index = openIndex + 1;
+    let value = "";
+    while (index < source.length && source[index] !== quote) {
+      if (source[index] === "\\") {
+        value += source[index + 1] ?? "";
+        index += 2;
+        continue;
       }
+      if (quote === "`" && source[index] === "$" && source[index + 1] === "{") {
+        index = scanners.scanRegion(source, index + 2, true, literals);
+        value += INTERPOLATION;
+        continue;
+      }
+      value += source[index];
+      index += 1;
     }
-    if (!isWhitespace(ch)) {
-      previousToken = ch;
+    literals.push({ value, continuesExpression });
+    return index + 1;
+  },
+
+  scanRegion(source, start, stopAtCloseBrace, literals) {
+    let index = start;
+    let depth = 0;
+    let previousToken = "";
+    while (index < source.length) {
+      const ch = source[index];
+      const next = source[index + 1] ?? "";
+      if (ch === "/" && (next === "/" || next === "*")) {
+        index = skipComment(source, index);
+        continue;
+      }
+      if (ch === "/" && startsRegex(previousToken)) {
+        index = skipRegex(source, index);
+        previousToken = "/";
+        continue;
+      }
+      if (ch === '"' || ch === "'" || ch === "`") {
+        index = scanners.readLiteral(source, index, previousToken === "+", literals);
+        previousToken = ch;
+        continue;
+      }
+      if (stopAtCloseBrace) {
+        if (ch === "{") {
+          depth += 1;
+        } else if (ch === "}") {
+          if (depth === 0) {
+            return index + 1;
+          }
+          depth -= 1;
+        }
+      }
+      if (!isWhitespace(ch)) {
+        previousToken = ch;
+      }
+      index += 1;
     }
-    index += 1;
-  }
-  return index;
-}
+    return index;
+  },
+};
 
 /**
  * Purpose: Extract every string/template literal from TypeScript source,
@@ -261,7 +261,7 @@ function scanRegion(
  */
 export const scanStringLiterals = (source: string): ScannedLiteral[] => {
   const literals: ScannedLiteral[] = [];
-  scanRegion(source, 0, false, literals);
+  scanners.scanRegion(source, 0, false, literals);
   return literals;
 };
 
@@ -378,12 +378,13 @@ describe("dev proxy route coverage (derived from frontend/src)", () => {
   it("treats a `+`-concatenated fragment as a fragment, not a backend prefix", () => {
     // The exact shape from useExplanation.ts. `/months` is a suffix of the
     // /revenue path, and must never be reported as an unproxied prefix.
-    // Split around `{` so `${...}` is not a single regular-string token
-    // (DeepSource JS-0038). The joined source still matches useExplanation.ts.
+    // Escaped \${ inside a template literal yields the characters `${` without
+    // being an interpolation, and without regular-string `${` (JS-0038) or
+    // literal concatenation (JS-0096).
     const source = [
       "const p =",
-      "  `/revenue/channels/$" + "{encodeURIComponent(id)}` +",
-      "  `/months/$" + "{encodeURIComponent(month)}/explain`;",
+      `  \`/revenue/channels/\${encodeURIComponent(id)}\` +`,
+      `  \`/months/\${encodeURIComponent(month)}/explain\`;`,
     ].join("\n");
     const scanned = scanStringLiterals(source);
     expect(scanned.map((literal) => literal.continuesExpression)).toEqual([false, true]);
