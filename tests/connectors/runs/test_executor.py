@@ -670,7 +670,7 @@ def test_close_audits_queued_jobs_cancelled_by_shutdown(tmp_path) -> None:
             started.wait(timeout=5)
             # The second future is still pending in the queue.
             executor.close()
-            # The first future may still complete; we do not wait for it.
+            # close() waits for the running first job; the queued second is cancelled.
             _ = first
             _ = second
     finally:

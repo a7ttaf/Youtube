@@ -246,13 +246,15 @@ class ConnectorJobExecutor:
         """Shut the pool down deterministically (called from the app lifespan).
 
         First cancels all queued futures via ``shutdown(cancel_futures=True)``,
-        then audits any futures that were definitively cancelled as
-        ``job_failed_before_start`` with ``error_class="ExecutorShutdown"``.
-        Running futures are allowed to finish and deregister themselves; they
-        are never audited as pre-start failures. The weakref finalizer remains
-        as a GC backstop for paths that bypass ``close()``.
+        waits for in-flight workers to finish (``wait=True``) so their logging
+        still hits the configured handlers, then audits any futures that were
+        definitively cancelled as ``job_failed_before_start`` with
+        ``error_class="ExecutorShutdown"``. Running futures complete and
+        deregister themselves; they are never audited as pre-start failures.
+        The weakref finalizer remains as a GC backstop for paths that bypass
+        ``close()``.
         """
-        self._executor.shutdown(wait=False, cancel_futures=True)
+        self._executor.shutdown(wait=True, cancel_futures=True)
         self._audit_pending_on_shutdown()
         self._finalizer.detach()
 

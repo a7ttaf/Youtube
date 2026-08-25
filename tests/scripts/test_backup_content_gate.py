@@ -2183,6 +2183,37 @@ def test_unexpected_roles_errors_are_rejected() -> None:
     assert unexpected == ['ERROR:  permission denied to alter role']
 
 
+def test_overlapping_backup_lock_is_exclusive(tmp_path: Path) -> None:
+    """A second process must fail before loading the watermark."""
+    with backup._exclusive_backup_lock(tmp_path):
+        with pytest.raises(backup.BackupError) as caught:
+            with backup._exclusive_backup_lock(tmp_path):
+                pass
+    assert caught.value.code == backup.EXIT_USAGE
+    assert "another backup is already running" in str(caught.value)
+    assert not (tmp_path / ".backup.lock").exists()
+
+
+def test_dump_database_passes_snapshot_flag(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """pg_dump must receive the exported snapshot id."""
+    captured: dict[str, object] = {}
+
+    def fake_run_to_file(argv, *, timeout, target):
+        captured["argv"] = argv
+        target.write_bytes(backup.CUSTOM_FORMAT_MAGIC + b"-x")
+        return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(backup, "_run_to_file", fake_run_to_file)
+    target = tmp_path / "database.dump"
+    backup._dump_database("ctr", target, timeout=30, snapshot="00000004-00000005-1")
+    argv = captured["argv"]
+    assert isinstance(argv, list)
+    joined = " ".join(argv)
+    assert "--snapshot='00000004-00000005-1'" in joined
+
+
 def test_exit_codes_stay_distinct() -> None:
     """Exit 8 and 9 are the newer ones; none may collide with an older class."""
     codes = [
@@ -2263,9 +2294,8 @@ class _FakeContainer:
         monkeypatch.setattr(backup, "_resolve_container", lambda **k: "fake-postgres")
         monkeypatch.setattr(backup, "_await_postgres", lambda *a, **k: None)
         monkeypatch.setattr(backup, "_dump_roles", self._dump_roles)
-        monkeypatch.setattr(backup, "_dump_database", self._dump_database)
+        monkeypatch.setattr(backup, "_dump_database_and_count", self._dump_database_and_count)
         monkeypatch.setattr(backup, "_verify_dump_readable", lambda *a, **k: self.toc_entries)
-        monkeypatch.setattr(backup, "_table_row_counts", lambda *a, **k: dict(self.counts))
         monkeypatch.setattr(backup, "_container_facts", self._facts)
 
     def _dump_roles(
@@ -2273,6 +2303,12 @@ class _FakeContainer:
     ) -> list[str]:
         target.write_text("CREATE ROLE app_tenant;\nCREATE ROLE app_platform;\n", encoding="utf-8")
         return list(backup.REQUIRED_ROLES)
+
+    def _dump_database_and_count(
+        self, container: str, target: Path, *, timeout: int
+    ) -> dict[str, int]:
+        target.write_bytes(backup.CUSTOM_FORMAT_MAGIC + b"-fake-archive")
+        return dict(self.counts)
 
     def _dump_database(self, container: str, target: Path, *, timeout: int) -> None:
         target.write_bytes(backup.CUSTOM_FORMAT_MAGIC + b"-fake-archive")

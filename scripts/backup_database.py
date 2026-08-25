@@ -143,6 +143,7 @@ import subprocess
 import sys
 import time
 import traceback
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -323,11 +324,9 @@ LIST_TABLES_SQL = (
 IDENTITY_SQL = "SELECT system_identifier FROM pg_control_system();"
 
 ROW_COUNT_NOTE = (
-    "Counted immediately after pg_dump finished, on a separate connection. If "
-    "the application wrote during the dump these can exceed what the archive "
-    "holds: an equal restored count is a pass, a count lower by a few rows on "
-    "a written-to table is explainable, and zero across the board is a failed "
-    "restore."
+    "Counted on the same REPEATABLE READ snapshot that pg_dump used "
+    "(pg_export_snapshot / --snapshot). Live writes during the dump do not "
+    "inflate these counts past what the archive holds."
 )
 
 
@@ -713,26 +712,7 @@ def _table_row_counts(container: str, *, timeout: int) -> dict[str, int]:
     tables = [line.strip() for line in raw.splitlines() if line.strip()]
     if not tables:
         return {}
-    branches = [
-        f"SELECT {_quote_literal(name)} AS t, count(*) AS n FROM public.{_quote_identifier(name)}"
-        for name in tables
-    ]
-    sql = " UNION ALL ".join(branches) + " ORDER BY t;"
-    counts: dict[str, int] = {}
-    for line in _psql(container, sql, timeout=timeout).splitlines():
-        if not line.strip():
-            continue
-        name, _, raw_count = line.rpartition("|")
-        # FIX: a malformed psql row used to raise a bare ValueError out of the
-        # whole process. Fail as a typed backup error with an exit code instead.
-        try:
-            counts[name] = int(raw_count)
-        except ValueError as exc:
-            raise BackupError(
-                EXIT_COMMAND_FAILED,
-                f"could not read a row count from psql output {line!r}: {exc}",
-            ) from exc
-    return counts
+    return _parse_counts_output(_psql(container, _count_sql_for_tables(tables), timeout=timeout))
 
 
 # ============================================================================
@@ -751,11 +731,14 @@ def _table_row_counts(container: str, *, timeout: int) -> dict[str, int]:
 #   - File: scripts/restore_database.py -> ``_restore_data`` is the pg_restore
 #     consumer of exactly this artifact.
 # ============================================================================
-def _dump_database(container: str, target: Path, *, timeout: int) -> None:
+def _dump_database(
+    container: str, target: Path, *, timeout: int, snapshot: str | None = None
+) -> None:
+    snapshot_flag = f" --snapshot={_shell_single_quote(snapshot)}" if snapshot else ""
     argv = _container_sh(
         container,
         'exec pg_dump -U "$POSTGRES_USER" -d "$POSTGRES_DB" '
-        "--format=custom --compress=6 --no-password",
+        f"--format=custom --compress=6 --no-password{snapshot_flag}",
     )
     completed = _run_to_file(argv, timeout=timeout, target=target)
     if completed.returncode != 0:
@@ -769,6 +752,136 @@ def _dump_database(container: str, target: Path, *, timeout: int) -> None:
             EXIT_ARTIFACT_INVALID,
             f"{target.name} does not start with the pg_dump custom-format magic",
         )
+
+
+def _shell_single_quote(value: str) -> str:
+    """Quote a value for embedding inside the container ``sh -c`` single-quoted body."""
+    if any(ch in value for ch in ("\n", "\r", "\x00")):
+        raise BackupError(EXIT_INTERNAL, "snapshot id contains illegal control characters")
+    return "'" + value.replace("'", "'\"'\"'") + "'"
+
+
+def _parse_counts_output(raw: str) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for line in raw.splitlines():
+        if not line.strip():
+            continue
+        name, _, raw_count = line.rpartition("|")
+        try:
+            counts[name] = int(raw_count)
+        except ValueError as exc:
+            raise BackupError(
+                EXIT_COMMAND_FAILED,
+                f"could not read a row count from psql output {line!r}: {exc}",
+            ) from exc
+    return counts
+
+
+def _count_sql_for_tables(tables: list[str]) -> str:
+    branches = [
+        f"SELECT {_quote_literal(name)} AS t, count(*) AS n FROM public.{_quote_identifier(name)}"
+        for name in tables
+    ]
+    return " UNION ALL ".join(branches) + " ORDER BY t;"
+
+
+# ============================================================================
+# Purpose: Hold one REPEATABLE READ session, export its snapshot for pg_dump
+#          --snapshot, then count every public table on that same session so
+#          the manifest cannot disagree with the archive under live writes.
+# Database/ORM: One long-lived psql inside the Postgres container.
+# Standards: Fail closed if snapshot export, dump, or counts fail; always
+#            COMMIT/close the holder so idle-in-transaction sessions do not
+#            accumulate.
+# Blast Radius: Manifest table_row_counts and restore verification.
+# ============================================================================
+@contextmanager
+def _held_repeatable_read_session(container: str, *, timeout: int):
+    """Yield ``(snapshot_id, run_sql)`` for one held REPEATABLE READ transaction."""
+    argv = _container_sh(
+        container,
+        'exec psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" '
+        "--no-password -v ON_ERROR_STOP=1 -Atq",
+    )
+    process = subprocess.Popen(
+        argv,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    assert process.stdin is not None
+    assert process.stdout is not None
+    assert process.stderr is not None
+
+    def run_sql(sql: str) -> str:
+        if process.poll() is not None:
+            err = process.stderr.read()
+            raise BackupError(
+                EXIT_COMMAND_FAILED,
+                f"snapshot holder psql exited early: {err.strip()}",
+            )
+        process.stdin.write(sql if sql.endswith("\n") else sql + "\n")
+        process.stdin.flush()
+        # Each statement's -At output ends when psql prints the row(s). For
+        # transactional control statements with no rows, we still need a
+        # marker. Append a sentinel SELECT so we can drain one line.
+        process.stdin.write("SELECT 'UMS_SNAP_OK';\n")
+        process.stdin.flush()
+        lines: list[str] = []
+        while True:
+            line = process.stdout.readline()
+            if line == "":
+                err = process.stderr.read()
+                raise BackupError(
+                    EXIT_COMMAND_FAILED,
+                    f"snapshot holder psql closed stdout: {err.strip()}",
+                )
+            text = line.rstrip("\n")
+            if text == "UMS_SNAP_OK":
+                break
+            lines.append(text)
+        return "\n".join(lines)
+
+    try:
+        run_sql("BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ;")
+        snapshot = run_sql("SELECT pg_export_snapshot();").strip()
+        if not snapshot:
+            raise BackupError(EXIT_COMMAND_FAILED, "pg_export_snapshot returned empty")
+        yield snapshot, run_sql
+        run_sql("COMMIT;")
+    except Exception:
+        try:
+            if process.poll() is None:
+                process.stdin.write("ROLLBACK;\n")
+                process.stdin.flush()
+        except OSError:
+            pass
+        raise
+    finally:
+        try:
+            process.stdin.close()
+        except OSError:
+            pass
+        try:
+            process.wait(timeout=min(30, timeout))
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=5)
+
+
+def _dump_database_and_count(container: str, target: Path, *, timeout: int) -> dict[str, int]:
+    """Dump the database and return row counts from the same snapshot."""
+    with _held_repeatable_read_session(container, timeout=timeout) as (snapshot, run_sql):
+        _dump_database(container, target, timeout=timeout, snapshot=snapshot)
+        raw_tables = run_sql(
+            "SELECT tablename FROM pg_catalog.pg_tables "
+            "WHERE schemaname = 'public' ORDER BY tablename;"
+        )
+        tables = [line.strip() for line in raw_tables.splitlines() if line.strip()]
+        if not tables:
+            return {}
+        return _parse_counts_output(run_sql(_count_sql_for_tables(tables)))
 
 
 # ============================================================================
@@ -1258,6 +1371,45 @@ def _read_watermark_file(out_dir: Path) -> tuple[dict[str, int], str | None]:
 #   - File: Docs/22_BACKUP_RESTORE_AND_REHEARSAL.md -> "what a green run does
 #     and does not guarantee".
 # ============================================================================
+# ============================================================================
+# Purpose: Serialize overlapping backup invocations on one --out-dir so two
+#          processes cannot load the same watermark, both publish, and race the
+#          final watermark write.
+# Database/ORM: None. Host filesystem lock directory only.
+# Standards: Atomic ``mkdir`` (works on Windows without flock). Fail closed on
+#            contention with EXIT_USAGE. Always release in finally.
+# Blast Radius: Backup watermark / identity bookkeeping only.
+# ============================================================================
+@contextmanager
+def _exclusive_backup_lock(out_dir: Path):
+    """Hold an exclusive lock directory under ``out_dir`` for one backup run."""
+    lock_dir = out_dir / ".backup.lock"
+    try:
+        lock_dir.mkdir()
+    except FileExistsError as exc:
+        raise BackupError(
+            EXIT_USAGE,
+            f"another backup is already running (lock {lock_dir}). "
+            "If no backup is running, remove that directory and retry.",
+        ) from exc
+    try:
+        yield
+    finally:
+        try:
+            lock_dir.rmdir()
+        except OSError:
+            pass
+
+
+def _restrict_run_dir_mode(path: Path) -> None:
+    """Best-effort owner-only mode for backup run directories (POSIX)."""
+    try:
+        os.chmod(path, 0o700)
+    except OSError:
+        # Windows ignores mkdir mode and may reject chmod on some paths.
+        pass
+
+
 def _load_watermark(out_dir: Path) -> Watermark:
     stored, reset_after = _read_watermark_file(out_dir)
     merged = dict(stored)
@@ -2175,7 +2327,8 @@ def run_backup(args: argparse.Namespace, out_dir: Path) -> BackupOutcome:
         raise BackupError(EXIT_USAGE, f"{rejected_dir} already exists")
     if staging.exists():
         shutil.rmtree(staging)
-    staging.mkdir(parents=True)
+    staging.mkdir(parents=True, mode=0o700)
+    _restrict_run_dir_mode(staging)
 
     watermark = _load_watermark(out_dir)
     expected_identity = _load_identity(out_dir)
@@ -2188,13 +2341,14 @@ def run_backup(args: argparse.Namespace, out_dir: Path) -> BackupOutcome:
             timeout=args.timeout,
             include_passwords=args.include_role_passwords,
         )
-        _dump_database(container, staging / DUMP_NAME, timeout=args.timeout)
+        counts = _dump_database_and_count(
+            container, staging / DUMP_NAME, timeout=args.timeout
+        )
         toc_entries = -1
         if args.verify_dump:
             toc_entries = _verify_dump_readable(
                 container, staging / DUMP_NAME, timeout=args.timeout
             )
-        counts = _table_row_counts(container, timeout=args.timeout)
         # Provenance is collected BEFORE the verdict, not after: the identity it
         # carries is one of the gate's inputs, and the manifest has to record the
         # same facts the gate judged.
@@ -2243,6 +2397,7 @@ def run_backup(args: argparse.Namespace, out_dir: Path) -> BackupOutcome:
         # looked like at 02:00, but lands outside RUN_DIR_RE.
         destination = final_dir if verdict.accepted else rejected_dir
         staging.rename(destination)
+        _restrict_run_dir_mode(destination)
         moved = True
     finally:
         if not moved:
@@ -2497,43 +2652,44 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _execute(args: argparse.Namespace, out_dir: Path, report: _RunReport, started: datetime) -> int:
-    outcome = run_backup(args, out_dir)
-    report.note_published(outcome.run_dir)
+    with _exclusive_backup_lock(out_dir):
+        outcome = run_backup(args, out_dir)
+        report.note_published(outcome.run_dir)
 
-    if not outcome.accepted:
-        # Retention invariant 6. A run that captured nothing gets no say over
-        # what is deleted, so the previous good backups are untouched however
-        # many empty nights follow one another.
-        _record_rejected(report, outcome, started)
-        return EXIT_NO_CONTENT
+        if not outcome.accepted:
+            # Retention invariant 6. A run that captured nothing gets no say over
+            # what is deleted, so the previous good backups are untouched however
+            # many empty nights follow one another.
+            _record_rejected(report, outcome, started)
+            return EXIT_NO_CONTENT
 
-    try:
-        _write_watermark(
-            out_dir,
-            outcome.next_watermark,
-            run=outcome.run_dir.name,
-            reset=outcome.watermark_reset,
-            now=_utc_now(),
-            identity=outcome.identity,
-        )
-    except OSError as exc:
-        _record_bookkeeping_failure(
-            report, outcome, started, f"could not write {WATERMARK_NAME}: {exc}"
-        )
-        return EXIT_BOOKKEEPING_FAILED
-
-    pruned = PruneOutcome()
-    if args.prune:
         try:
-            pruned = _prune(
-                out_dir, keep_days=args.keep_days, keep_min=args.keep_min, now=_utc_now()
+            _write_watermark(
+                out_dir,
+                outcome.next_watermark,
+                run=outcome.run_dir.name,
+                reset=outcome.watermark_reset,
+                now=_utc_now(),
+                identity=outcome.identity,
             )
         except OSError as exc:
-            _record_bookkeeping_failure(report, outcome, started, f"retention failed: {exc}")
+            _record_bookkeeping_failure(
+                report, outcome, started, f"could not write {WATERMARK_NAME}: {exc}"
+            )
             return EXIT_BOOKKEEPING_FAILED
 
-    _record_success(report, outcome, started, pruned)
-    return EXIT_OK
+        pruned = PruneOutcome()
+        if args.prune:
+            try:
+                pruned = _prune(
+                    out_dir, keep_days=args.keep_days, keep_min=args.keep_min, now=_utc_now()
+                )
+            except OSError as exc:
+                _record_bookkeeping_failure(report, outcome, started, f"retention failed: {exc}")
+                return EXIT_BOOKKEEPING_FAILED
+
+        _record_success(report, outcome, started, pruned)
+        return EXIT_OK
 
 
 def _record_failure(report: _RunReport, started: datetime, code: int, detail: str) -> None:
