@@ -909,10 +909,9 @@ RESTORE VERIFIED: every table matched the manifest row count.
 Exit `0` and that final line is the pass. Anything else — `MISSING`, `EXTRA`, `SHORT`,
 `OVER`, or exit `7` — is a failed rehearsal. Do not enter real data until it passes.
 
-The one benign mismatch: row counts are taken on a separate connection immediately
-after `pg_dump` finishes, so if the application wrote during the dump a restored count
-can legitimately be a few rows **lower** than the manifest on the table that was
-written. Everything at zero, or a whole table missing, is never benign.
+Repeatable-read snapshot counts and manifest verification share one holder transaction
+during backup, so a restored count lower than the manifest is a failed rehearsal, not a
+benign race. Everything at zero, or a whole table missing, is never acceptable.
 
 ### Step 4 — the concrete verification query
 

@@ -613,10 +613,10 @@ def _foreign_roles_in_roles_sql(body: str, *, superuser: str) -> list[str]:
     allowed = {superuser, *REQUIRED_ROLES}
     foreign: list[str] = []
     pattern = re.compile(
-        r'(?im)^\s*CREATE\s+(?:ROLE|USER)\s+(?:"([^"]+)"|(\S+))',
+        r'(?im)^\s*CREATE\s+(?:ROLE|USER)\s+(?:"([^"]+)"|([^\s;]+))',
     )
     for match in pattern.finditer(body):
-        name = match.group(1) or match.group(2)
+        name = (match.group(1) or match.group(2) or "").strip()
         if name not in allowed:
             foreign.append(name)
     return foreign

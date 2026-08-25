@@ -3352,3 +3352,44 @@ def test_lock_metadata_write_failure_removes_partial_directory(
         with backup._exclusive_backup_lock(tmp_path):
             pass  # pragma: no cover
     assert not (tmp_path / ".backup.lock").exists()
+
+
+def test_restore_roles_accepts_semicolon_terminated_create_role_lines(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Semicolon terminators on CREATE ROLE lines must not poison the allowlist."""
+    roles_path = tmp_path / restore.ROLES_NAME
+    roles_path.write_text(
+        "CREATE ROLE app_tenant;\nCREATE ROLE app_platform;\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(restore, "_psql", lambda *_a, **_k: "postgres\napp_platform\napp_tenant\n")
+    monkeypatch.setattr(
+        restore,
+        "_run_with_file",
+        lambda *_a, **_k: subprocess.CompletedProcess([], 0, "", ""),
+    )
+    present = restore._restore_roles("fake", roles_path, timeout=5)
+    assert "app_tenant" in present
+
+
+def test_backup_roles_rejects_foreign_cluster_roles(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Backup must refuse roles.sql that restore's allowlist would reject."""
+    target = tmp_path / backup.ROLES_NAME
+
+    def _extra_role_file(argv: list[str], *, timeout: int, target: Path):
+        """extra role file."""
+        target.write_text(
+            "CREATE ROLE app_tenant;\nCREATE ROLE app_platform;\nCREATE ROLE extra;\n",
+            encoding="utf-8",
+        )
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(backup, "_run_to_file", _extra_role_file)
+    monkeypatch.setattr(backup, "_psql", lambda *_a, **_k: "postgres")
+    with pytest.raises(backup.BackupError) as raised:
+        backup._dump_roles("fake", target, timeout=5, include_passwords=False)
+    assert raised.value.code == backup.EXIT_ARTIFACT_INVALID
+    assert "extra" in str(raised.value)

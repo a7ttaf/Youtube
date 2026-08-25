@@ -1072,6 +1072,20 @@ def _validate_dump_roles_covered(*, listing: str, roles_body: str) -> None:
 #   - File: backend/ums_smart_revenue/db/alembic/versions/20260608_0001_tenant_rls_enforcement.py
 #     -> ``_create_role`` (lines 92-113); grants at lines 300-333.
 # ============================================================================
+def _foreign_cluster_roles_in_roles_sql(body: str, *, superuser: str) -> list[str]:
+    """Return CREATE ROLE names outside the UMS backup/restore allowlist."""
+    allowed = {superuser, *REQUIRED_ROLES}
+    foreign: list[str] = []
+    pattern = re.compile(
+        r'(?im)^\s*CREATE\s+(?:ROLE|USER)\s+(?:"([^"]+)"|([^\s;]+))',
+    )
+    for match in pattern.finditer(body):
+        name = (match.group(1) or match.group(2) or "").strip()
+        if name not in allowed:
+            foreign.append(name)
+    return foreign
+
+
 def _role_declared_in_roles_sql(body: str, role: str) -> bool:
     r"""Return True when ``roles.sql`` declares exact CREATE ROLE ``role``.
 
@@ -1103,6 +1117,15 @@ def _dump_roles(
     if not target.exists() or target.stat().st_size == 0:
         raise BackupError(EXIT_ARTIFACT_INVALID, "pg_dumpall --roles-only produced an empty file")
     body = target.read_text(encoding="utf-8", errors="replace")
+    superuser = _psql(container, "SELECT current_user;", timeout=timeout).strip()
+    foreign = _foreign_cluster_roles_in_roles_sql(body, superuser=superuser)
+    if foreign:
+        raise BackupError(
+            EXIT_ARTIFACT_INVALID,
+            "roles.sql declares cluster roles outside the UMS backup allowlist: "
+            f"{', '.join(sorted(foreign))}. Restore into a dedicated UMS Postgres "
+            "container or regenerate roles.sql from the backup source cluster.",
+        )
     # FIX: Require exact CREATE ROLE identifiers, not substring/word-boundary hits
     # that accept hyphenated lookalikes such as app_tenant-backup.
     missing = [role for role in REQUIRED_ROLES if not _role_declared_in_roles_sql(body, role)]
@@ -1676,7 +1699,6 @@ def _lock_age_exceeds_bound(lock_dir: Path) -> bool:
 def _reclaim_stale_backup_lock(lock_dir: Path) -> bool:
     """Remove an abandoned ``.backup.lock``: owner dead, or lock over-age."""
     owner = lock_dir / LOCK_OWNER_NAME
-    owner_unreadable = False
     try:
         raw = owner.read_text(encoding="utf-8").strip()
         pid: int | None = int(raw)
@@ -1688,14 +1710,18 @@ def _reclaim_stale_backup_lock(lock_dir: Path) -> bool:
         pid = None
     except (OSError, ValueError):
         pid = None
-        owner_unreadable = True
+    if pid is not None and _pid_is_alive(pid):
+        return False
+    if pid is not None and not _pid_is_alive(pid):
+        try:
+            owner.unlink(missing_ok=True)
+            (lock_dir / LOCK_STARTED_NAME).unlink(missing_ok=True)
+            lock_dir.rmdir()
+        except OSError:
+            return False
+        return True
     if not _lock_age_exceeds_bound(lock_dir):
-        # FIX: an unreadable owner.pid used to wedge forever; now only until
-        # the age bound. Within the bound it still refuses, fail closed.
-        if owner_unreadable:
-            return False
-        if pid is not None and _pid_is_alive(pid):
-            return False
+        return False
     try:
         owner.unlink(missing_ok=True)
         (lock_dir / LOCK_STARTED_NAME).unlink(missing_ok=True)
@@ -2660,7 +2686,7 @@ def _retention_protected_names(
     and whatever --keep-min worked out to.
     """
     eligible = [run.name for run, has_content in classified if has_content is not False]
-    protected = set(eligible[-max(keep_min, 1) :])
+    protected = set(eligible[-keep_min :]) if keep_min >= 1 else set()
     newest_with_content = next(
         (run.name for run, has_content in reversed(classified) if has_content is True),
         None,
@@ -3372,6 +3398,12 @@ def main(argv: list[str] | None = None) -> int:
     if args.keep_days < 0:
         print(
             f"BACKUP FAILED (exit {EXIT_USAGE}): --keep-days must be >= 0, got {args.keep_days}",
+            file=sys.stderr,
+        )
+        return EXIT_USAGE
+    if args.keep_min < 1:
+        print(
+            f"BACKUP FAILED (exit {EXIT_USAGE}): --keep-min must be >= 1, got {args.keep_min}",
             file=sys.stderr,
         )
         return EXIT_USAGE
