@@ -2176,11 +2176,14 @@ def test_unexpected_roles_errors_are_rejected() -> None:
     assert restore._unexpected_roles_errors(
         'ERROR:  role "ums" already exists\n'
     ) == []
+    assert restore._unexpected_roles_errors(
+        'psql: :12: ERROR:  role "ums" already exists\n'
+    ) == []
     unexpected = restore._unexpected_roles_errors(
         'ERROR:  role "ums" already exists\n'
-        'ERROR:  permission denied to alter role\n'
+        'psql: :40: ERROR:  permission denied to alter role\n'
     )
-    assert unexpected == ['ERROR:  permission denied to alter role']
+    assert unexpected == ['psql: :40: ERROR:  permission denied to alter role']
 
 
 def test_overlapping_backup_lock_is_exclusive(tmp_path: Path) -> None:

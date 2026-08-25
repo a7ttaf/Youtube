@@ -454,13 +454,19 @@ _ROLE_ALREADY_EXISTS = re.compile(
 
 
 def _unexpected_roles_errors(stderr: str) -> list[str]:
-    """Return ERROR lines from roles.sql stderr that are not bootstrap duplicates."""
+    """Return ERROR lines from roles.sql stderr that are not bootstrap duplicates.
+
+    ``psql -f -`` often prefixes diagnostics as ``psql: :N: ERROR: ...``; extract
+    the ``ERROR:`` portion before classifying so prefixed lines are not skipped.
+    """
     unexpected: list[str] = []
     for line in stderr.splitlines():
         stripped = line.strip()
-        if not stripped.upper().startswith("ERROR:"):
+        marker = stripped.upper().find("ERROR:")
+        if marker < 0:
             continue
-        if _ROLE_ALREADY_EXISTS.match(stripped):
+        diagnostic = stripped[marker:]
+        if _ROLE_ALREADY_EXISTS.match(diagnostic):
             continue
         unexpected.append(stripped)
     return unexpected
