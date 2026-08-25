@@ -10,9 +10,10 @@
 # Standards: Every test runs under an autouse fixture that snapshots and
 #   restores the logging tree (root level plus every existing logger's level,
 #   handlers, propagate and disabled flags), because the uvicorn regression
-#   test applies a real dictConfig and configure_logging mutates
-#   process-global state. Without it this module would make the suite
-#   order-dependent, which is precisely the failure P0.6 must not introduce.
+#   test installs a production-shaped uvicorn.access logger and
+#   configure_logging mutates process-global state. Without it this module
+#   would make the suite order-dependent, which is precisely the failure P0.6
+#   must not introduce.
 # Blast Radius: Test-only.
 # Connections:
 #   - File: backend/ums_smart_revenue/config/logging_config.py -> the module
@@ -35,7 +36,6 @@ from __future__ import annotations
 import ast
 import io
 import logging
-import logging.config
 import re
 import sys
 import time
@@ -50,7 +50,6 @@ import httpx2
 import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
-from uvicorn.config import LOGGING_CONFIG as UVICORN_LOGGING_CONFIG
 
 from ums_smart_revenue.api.dependencies import (
     TrustedGatewayIdentity,
@@ -168,15 +167,15 @@ def isolated_logging_state() -> Iterator[None]:
             restored.propagate = state.propagate
             restored.disabled = state.disabled
             # FIX: `.parent` has to be restored with the rest, and it was not.
-            # Restoring loggerDict cannot undo a re-parenting. When a
-            # dictConfig materialises an intermediate node -- applying
-            # uvicorn's config turns the `uvicorn` PlaceHolder into a real
-            # Logger at INFO -- getLogger re-points every descendant at it.
-            # The dict restore then puts the PlaceHolder back and ORPHANS
-            # that Logger, but `uvicorn.error.parent` still references it, so
-            # `uvicorn.error` keeps resolving to INFO for the rest of the
-            # session. Measured before this line existed: after the uvicorn
-            # regression test's teardown, uvicorn.error own=NOTSET,
+            # Restoring loggerDict cannot undo a re-parenting. When the
+            # uvicorn-shape helper materialises an intermediate node -- turning
+            # the `uvicorn` PlaceHolder into a real Logger at INFO -- getLogger
+            # re-points every descendant at it. The dict restore then puts the
+            # PlaceHolder back and ORPHANS that Logger, but
+            # `uvicorn.error.parent` still references it, so `uvicorn.error`
+            # keeps resolving to INFO for the rest of the session. Measured
+            # before this line existed: after the uvicorn regression test's
+            # teardown, uvicorn.error own=NOTSET,
             # parent=<Logger uvicorn (INFO)>, effective=20 -- exactly the
             # order-dependence this fixture exists to prevent, and what
             # test_no_third_party_logger_in_the_process_is_info_enabled
@@ -216,6 +215,45 @@ def _probe(name: str = _PROBE_LOGGER) -> logging.Logger:
     logger.setLevel(logging.NOTSET)
     logger.propagate = True
     return logger
+
+
+# ============================================================================
+# Purpose: Install the production uvicorn access/error logger shape without
+#          calling logging.config.dictConfig (DeepSource PY-A6006).
+# Database/ORM: None.
+# Standards: Mirrors uvicorn's LOGGING_CONFIG outcomes that these regression
+#            tests assert: uvicorn.access has its own handler, propagate=False,
+#            and uvicorn.error exists as a sibling under the uvicorn parent.
+# Blast Radius: Test-only.
+# Connections:
+# - File: backend/ums_smart_revenue/config/logging_config.py -> must leave
+#   uvicorn.access handlers untouched.
+# ============================================================================
+def _install_uvicorn_logging_shape() -> None:
+    """Give uvicorn loggers the handler layout production uvicorn installs."""
+    root_like = logging.getLogger("uvicorn")
+    root_like.handlers.clear()
+    root_like.setLevel(logging.INFO)
+    root_like.propagate = False
+    root_like.disabled = False
+    error_handler = logging.StreamHandler(sys.stderr)
+    error_handler.setFormatter(logging.Formatter("%(levelname)s: %(message)s"))
+    root_like.addHandler(error_handler)
+
+    error = logging.getLogger("uvicorn.error")
+    error.handlers.clear()
+    error.setLevel(logging.INFO)
+    error.propagate = True
+    error.disabled = False
+
+    access = logging.getLogger("uvicorn.access")
+    access.handlers.clear()
+    access.setLevel(logging.INFO)
+    access.propagate = False
+    access.disabled = False
+    access_handler = logging.StreamHandler(sys.stderr)
+    access_handler.setFormatter(logging.Formatter("%(message)s"))
+    access.addHandler(access_handler)
 
 
 # ---------------------------------------------------------------------------
@@ -272,12 +310,12 @@ def test_configure_logging_leaves_the_uvicorn_access_logger_untouched():
     See uvicorn 0.52.4 ``protocols/http/h11_impl.py:57`` and
     ``httptools_impl.py:61``: ``self.access_log = self.access_logger
     .hasHandlers()``. ``uvicorn.access`` carries ``propagate=False``, so that
-    call sees only that logger's own handlers -- a ``dictConfig`` that
+    call sees only that logger's own handlers -- a config pass that
     disables existing loggers, or that names ``uvicorn`` at all, turns
     request logging off silently.
     """
     with production_shaped_root():
-        logging.config.dictConfig(UVICORN_LOGGING_CONFIG)
+        _install_uvicorn_logging_shape()
         access_logger = logging.getLogger("uvicorn.access")
         handlers_before = access_logger.handlers[:]
         assert access_logger.hasHandlers()
@@ -305,7 +343,7 @@ def test_configure_logging_still_emits_a_real_uvicorn_access_record():
     ums_output = io.StringIO()
 
     with production_shaped_root():
-        logging.config.dictConfig(UVICORN_LOGGING_CONFIG)
+        _install_uvicorn_logging_shape()
         access_logger = logging.getLogger("uvicorn.access")
         for handler in access_logger.handlers:
             assert isinstance(handler, logging.StreamHandler)

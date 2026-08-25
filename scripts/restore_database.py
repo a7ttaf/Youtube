@@ -148,11 +148,13 @@ def _quote_literal(value: str) -> str:
 
 def _count_sql_branch(name: str) -> str:
     """One UNION ALL branch that counts rows for a validated public table name."""
-    return (
-        "SELECT "
-        + _quote_literal(name)
-        + " AS t, count(*) AS n FROM public."
-        + _quote_identifier(name)
+    return "".join(
+        [
+            "SELECT ",
+            _quote_literal(name),
+            " AS t, count(*) AS n FROM public.",
+            _quote_identifier(name),
+        ]
     )
 
 
@@ -225,6 +227,76 @@ def _sha256(path: Path) -> str:
         return hashlib.file_digest(handle, "sha256").hexdigest()
 
 
+def _require_restorable_backup_dir(backup_dir: Path) -> None:
+    """Refuse non-directories, quarantined names, and incomplete run layouts."""
+    if not backup_dir.is_dir():
+        raise RestoreError(EXIT_USAGE, f"{backup_dir} is not a directory")
+    if backup_dir.name.endswith(REJECTED_SUFFIX):
+        raise RestoreError(
+            EXIT_USAGE,
+            f"{backup_dir.name} is a quarantined run, not a backup. The backup "
+            "script rejected it because it captured no application data. "
+            "Restoring it would replace the target with an empty database. Pick "
+            "an ums-backup-...Z directory instead.",
+        )
+    for name in (MANIFEST_NAME, ROLES_NAME, DUMP_NAME):
+        if not (backup_dir / name).is_file():
+            raise RestoreError(
+                EXIT_USAGE,
+                f"{backup_dir} is not a backup run: {name} is missing. A "
+                f"directory still named *.partial was never verified and must "
+                f"not be restored.",
+            )
+
+
+def _read_restore_manifest(manifest_path: Path) -> dict[str, object]:
+    """Load manifest.json as a JSON object or raise RestoreError."""
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise RestoreError(EXIT_USAGE, f"cannot read {manifest_path}: {exc}") from exc
+    if not isinstance(manifest, dict):
+        raise RestoreError(EXIT_USAGE, f"{manifest_path} is not a JSON object")
+    return manifest
+
+
+def _refuse_rejected_content_gate(manifest: dict[str, object], *, backup_name: str) -> None:
+    """Refuse manifests whose content_gate status is rejected."""
+    gate = manifest.get("content_gate")
+    if not (isinstance(gate, dict) and gate.get("status") == "rejected"):
+        return
+    reasons = gate.get("failures")
+    detail = "; ".join(str(item) for item in reasons) if isinstance(reasons, list) else ""
+    raise RestoreError(
+        EXIT_USAGE,
+        f"{backup_name} failed the backup content gate "
+        f"(tables={gate.get('tables')}, rows={gate.get('rows')}) and is not "
+        f"restorable: {detail or 'it captured no application data'}",
+    )
+
+
+def _verify_backup_artifact_digests(backup_dir: Path, manifest: dict[str, object]) -> None:
+    """Require sha256 digests for dump and roles and match on-disk bytes."""
+    artifacts = manifest.get("artifacts")
+    if not isinstance(artifacts, dict):
+        raise RestoreError(EXIT_USAGE, f"{backup_dir / MANIFEST_NAME} has no artifacts block")
+    for name in (DUMP_NAME, ROLES_NAME):
+        entry = artifacts.get(name)
+        expected = entry.get("sha256") if isinstance(entry, dict) else None
+        if not isinstance(expected, str) or not expected.strip():
+            raise RestoreError(
+                EXIT_ARTIFACT_INTEGRITY,
+                f"{name} has no sha256 in the manifest. Do not restore this run.",
+            )
+        actual = _sha256(backup_dir / name)
+        if actual != expected:
+            raise RestoreError(
+                EXIT_ARTIFACT_INTEGRITY,
+                f"{name} does not match the manifest sha256 "
+                f"(expected {expected}, got {actual}). Do not restore this run.",
+            )
+
+
 # ============================================================================
 # Purpose: Load and integrity-check the backup run before anything is applied
 #          to a database, so a corrupted or half-copied backup is discovered
@@ -247,59 +319,11 @@ def _sha256(path: Path) -> str:
 # ============================================================================
 def _load_backup(backup_dir: Path) -> dict[str, object]:
     """Load and integrity-check a backup run; return its manifest dict."""
-    if not backup_dir.is_dir():
-        raise RestoreError(EXIT_USAGE, f"{backup_dir} is not a directory")
-    if backup_dir.name.endswith(REJECTED_SUFFIX):
-        raise RestoreError(
-            EXIT_USAGE,
-            f"{backup_dir.name} is a quarantined run, not a backup. The backup "
-            "script rejected it because it captured no application data. "
-            "Restoring it would replace the target with an empty database. Pick "
-            "an ums-backup-...Z directory instead.",
-        )
+    _require_restorable_backup_dir(backup_dir)
     manifest_path = backup_dir / MANIFEST_NAME
-    for name in (MANIFEST_NAME, ROLES_NAME, DUMP_NAME):
-        if not (backup_dir / name).is_file():
-            raise RestoreError(
-                EXIT_USAGE,
-                f"{backup_dir} is not a backup run: {name} is missing. A "
-                f"directory still named *.partial was never verified and must "
-                f"not be restored.",
-            )
-    try:
-        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    except (OSError, ValueError) as exc:
-        raise RestoreError(EXIT_USAGE, f"cannot read {manifest_path}: {exc}") from exc
-    if not isinstance(manifest, dict):
-        raise RestoreError(EXIT_USAGE, f"{manifest_path} is not a JSON object")
-    gate = manifest.get("content_gate")
-    if isinstance(gate, dict) and gate.get("status") == "rejected":
-        reasons = gate.get("failures")
-        detail = "; ".join(str(item) for item in reasons) if isinstance(reasons, list) else ""
-        raise RestoreError(
-            EXIT_USAGE,
-            f"{manifest_path.parent.name} failed the backup content gate "
-            f"(tables={gate.get('tables')}, rows={gate.get('rows')}) and is not "
-            f"restorable: {detail or 'it captured no application data'}",
-        )
-    artifacts = manifest.get("artifacts")
-    if not isinstance(artifacts, dict):
-        raise RestoreError(EXIT_USAGE, f"{manifest_path} has no artifacts block")
-    for name in (DUMP_NAME, ROLES_NAME):
-        entry = artifacts.get(name)
-        expected = entry.get("sha256") if isinstance(entry, dict) else None
-        if not isinstance(expected, str) or not expected.strip():
-            raise RestoreError(
-                EXIT_ARTIFACT_INTEGRITY,
-                f"{name} has no sha256 in the manifest. Do not restore this run.",
-            )
-        actual = _sha256(backup_dir / name)
-        if actual != expected:
-            raise RestoreError(
-                EXIT_ARTIFACT_INTEGRITY,
-                f"{name} does not match the manifest sha256 "
-                f"(expected {expected}, got {actual}). Do not restore this run.",
-            )
+    manifest = _read_restore_manifest(manifest_path)
+    _refuse_rejected_content_gate(manifest, backup_name=manifest_path.parent.name)
+    _verify_backup_artifact_digests(backup_dir, manifest)
     return manifest
 
 
@@ -798,6 +822,94 @@ def _guard_empty(container: str, *, allow_nonempty: bool, timeout: int) -> None:
         )
 
 
+def _prepare_restore_target(
+    args: argparse.Namespace, manifest: dict[str, object]
+) -> tuple[str, str | None]:
+    """Resolve the restore container; return (container, throwaway_or_none)."""
+    if args.rehearse:
+        throwaway = _create_throwaway(manifest, timeout=args.docker_timeout)
+        print(f"rehearsal container: {throwaway}")
+        return throwaway, throwaway
+    container = _resolve_container(
+        explicit=args.container,
+        project=args.project,
+        service=args.service,
+        timeout=args.docker_timeout,
+    )
+    print(f"target container: {container}")
+    return container, None
+
+
+def _execute_restore(
+    container: str,
+    backup_dir: Path,
+    args: argparse.Namespace,
+    manifest: dict[str, object],
+) -> bool:
+    """Apply roles then dump and verify; return verification success."""
+    _await_postgres(container, wait_seconds=args.wait_for_postgres, timeout=args.docker_timeout)
+    # Emptiness is checked before roles.sql is applied: a target this run
+    # is going to refuse must not be modified at all, not even by an
+    # idempotent CREATE ROLE.
+    _guard_empty(container, allow_nonempty=args.allow_nonempty, timeout=args.timeout)
+    roles = _restore_roles(container, backup_dir / ROLES_NAME, timeout=args.timeout)
+    print(f"roles present after roles.sql: {', '.join(roles)}")
+    _restore_data(
+        container,
+        backup_dir / DUMP_NAME,
+        timeout=args.timeout,
+        clean=args.allow_nonempty,
+    )
+    print("pg_restore completed")
+    return _verify(container, manifest, timeout=args.timeout)
+
+
+def _cleanup_rehearsal_throwaway(
+    throwaway: str | None,
+    args: argparse.Namespace,
+    *,
+    code: int | None,
+    ok: bool,
+) -> int | None:
+    """Destroy or keep the rehearsal container; may promote exit on destroy fail."""
+    if not throwaway:
+        return code
+    if args.keep_throwaway:
+        print(f"rehearsal container left running: {throwaway}")
+        print(f"remove it with: docker rm --force --volumes {throwaway}")
+        return code
+    if _destroy_throwaway(throwaway, timeout=args.docker_timeout):
+        print(f"removed rehearsal container {throwaway}")
+        return code
+    print(
+        f"RESTORE WARNING: failed to remove rehearsal container "
+        f"{throwaway}. Remove it with: "
+        f"docker rm --force --volumes {throwaway}",
+        file=sys.stderr,
+    )
+    # Promote only when restore+verify would otherwise be success.
+    if code is None and ok:
+        return EXIT_CONTAINER_UNAVAILABLE
+    return code
+
+
+def _restore_process_exit(code: int | None, ok: bool) -> int:
+    """Map (exception code, verify ok) onto the documented restore exit codes."""
+    if code is not None and not ok:
+        return code
+    if not ok:
+        print(
+            "VERIFICATION FAILED: the restored row counts do not match the manifest.",
+            file=sys.stderr,
+        )
+        return EXIT_VERIFY_FAILED
+    print()
+    print("RESTORE VERIFIED: every table matched the manifest row count.")
+    if code is not None:
+        return code
+    return EXIT_OK
+
+
 # ============================================================================
 # Purpose: Drive one restore: integrity-check the run, resolve or create the
 #          target, apply roles, prove the roles landed, restore the data, then
@@ -827,33 +939,8 @@ def main(argv: list[str] | None = None) -> int:
     try:
         manifest = _load_backup(backup_dir)
         _require_docker(timeout=args.docker_timeout)
-        if args.rehearse:
-            throwaway = _create_throwaway(manifest, timeout=args.docker_timeout)
-            container = throwaway
-            print(f"rehearsal container: {container}")
-        else:
-            container = _resolve_container(
-                explicit=args.container,
-                project=args.project,
-                service=args.service,
-                timeout=args.docker_timeout,
-            )
-            print(f"target container: {container}")
-        _await_postgres(container, wait_seconds=args.wait_for_postgres, timeout=args.docker_timeout)
-        # Emptiness is checked before roles.sql is applied: a target this run
-        # is going to refuse must not be modified at all, not even by an
-        # idempotent CREATE ROLE.
-        _guard_empty(container, allow_nonempty=args.allow_nonempty, timeout=args.timeout)
-        roles = _restore_roles(container, backup_dir / ROLES_NAME, timeout=args.timeout)
-        print(f"roles present after roles.sql: {', '.join(roles)}")
-        _restore_data(
-            container,
-            backup_dir / DUMP_NAME,
-            timeout=args.timeout,
-            clean=args.allow_nonempty,
-        )
-        print("pg_restore completed")
-        ok = _verify(container, manifest, timeout=args.timeout)
+        container, throwaway = _prepare_restore_target(args, manifest)
+        ok = _execute_restore(container, backup_dir, args, manifest)
     except RestoreError as exc:
         print(f"RESTORE FAILED (exit {exc.code}): {exc}", file=sys.stderr)
         code = exc.code
@@ -871,36 +958,9 @@ def main(argv: list[str] | None = None) -> int:
         )
         code = EXIT_INTERNAL
     finally:
-        if throwaway and not args.keep_throwaway:
-            if _destroy_throwaway(throwaway, timeout=args.docker_timeout):
-                print(f"removed rehearsal container {throwaway}")
-            else:
-                print(
-                    f"RESTORE WARNING: failed to remove rehearsal container "
-                    f"{throwaway}. Remove it with: "
-                    f"docker rm --force --volumes {throwaway}",
-                    file=sys.stderr,
-                )
-                # Promote only when restore+verify would otherwise be success.
-                if code is None and ok:
-                    code = EXIT_CONTAINER_UNAVAILABLE
-        elif throwaway:
-            print(f"rehearsal container left running: {throwaway}")
-            print(f"remove it with: docker rm --force --volumes {throwaway}")
+        code = _cleanup_rehearsal_throwaway(throwaway, args, code=code, ok=ok)
 
-    if code is not None and not ok:
-        return code
-    if not ok:
-        print(
-            "VERIFICATION FAILED: the restored row counts do not match the manifest.",
-            file=sys.stderr,
-        )
-        return EXIT_VERIFY_FAILED
-    print()
-    print("RESTORE VERIFIED: every table matched the manifest row count.")
-    if code is not None:
-        return code
-    return EXIT_OK
+    return _restore_process_exit(code, ok)
 
 
 if __name__ == "__main__":

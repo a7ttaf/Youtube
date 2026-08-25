@@ -141,29 +141,52 @@ const skipBlockComment = (source: string, index: number): number => {
 const skipComment = (source: string, index: number): number =>
   source[index + 1] === "/" ? skipLineComment(source, index) : skipBlockComment(source, index);
 
+type RegexCharKind = "escape" | "stop" | "openClass" | "closeClass" | "other";
+
+/** Regex-body kinds when not inside a character class. */
+const REGEX_KIND_OUTSIDE: Record<string, RegexCharKind> = {
+  "\\": "escape",
+  "\n": "stop",
+  "/": "stop",
+  "[": "openClass",
+  "]": "closeClass",
+};
+
+/** Regex-body kinds inside a character class (`/` is ordinary). */
+const REGEX_KIND_IN_CLASS: Record<string, RegexCharKind> = {
+  "\\": "escape",
+  "\n": "stop",
+  "]": "closeClass",
+};
+
+/** Classify one regex-body character for the skipper. */
+const regexCharKind = (ch: string, inClass: boolean): RegexCharKind =>
+  (inClass ? REGEX_KIND_IN_CLASS : REGEX_KIND_OUTSIDE)[ch] ?? "other";
+
+/** Character-class membership after one non-escape, non-stop regex step. */
+const REGEX_CLASS_AFTER: Partial<Record<RegexCharKind, boolean>> = {
+  openClass: true,
+  closeClass: false,
+};
+
 /** One step through a regex literal body. */
 const stepRegexBody = (
   source: string,
   cursor: number,
   inClass: boolean,
 ): { cursor: number; inClass: boolean; stop: boolean } => {
-  const ch = source[cursor];
-  if (ch === "\\") {
+  const kind = regexCharKind(source[cursor] ?? "", inClass);
+  if (kind === "escape") {
     return { cursor: cursor + 2, inClass, stop: false };
   }
-  if (ch === "\n") {
+  if (kind === "stop") {
     return { cursor, inClass, stop: true };
   }
-  if (ch === "[") {
-    return { cursor: cursor + 1, inClass: true, stop: false };
-  }
-  if (ch === "]") {
-    return { cursor: cursor + 1, inClass: false, stop: false };
-  }
-  if (ch === "/" && !inClass) {
-    return { cursor, inClass, stop: true };
-  }
-  return { cursor: cursor + 1, inClass, stop: false };
+  return {
+    cursor: cursor + 1,
+    inClass: REGEX_CLASS_AFTER[kind] ?? inClass,
+    stop: false,
+  };
 };
 
 /** Skip a regex literal, honouring escapes and character classes. */
@@ -193,14 +216,85 @@ const appendLiteralChar = (
   return { index: index + 1, value: value + source[index] };
 };
 
+/** True when index starts a `${` interpolation inside a template literal. */
+const isTemplateInterpolation = (quote: string, source: string, index: number): boolean =>
+  quote === "`" && source[index] === "$" && source[index + 1] === "{";
+
+/** Advance past a `/` that starts a comment or a regex literal. */
+const advanceSlashToken = (
+  source: string,
+  index: number,
+  previousToken: string,
+  next: string,
+): { index: number; previousToken: string } | null => {
+  if ("/*".includes(next)) {
+    return { index: skipComment(source, index), previousToken };
+  }
+  if (startsRegex(previousToken)) {
+    return { index: skipRegex(source, index), previousToken: "/" };
+  }
+  return null;
+};
+
+type ScanAdvance = {
+  index: number;
+  depth: number;
+  previousToken: string;
+  done: boolean;
+};
+
+/** Enter one nested `{` while scanning a template interpolation. */
+const advanceOpenBrace = (index: number, depth: number, ch: string): ScanAdvance => ({
+  index: index + 1,
+  depth: depth + 1,
+  previousToken: ch,
+  done: false,
+});
+
+/** Leave one nested `}` while scanning a template interpolation. */
+const advanceCloseBrace = (index: number, depth: number, ch: string): ScanAdvance =>
+  depth === 0
+    ? { index: index + 1, depth, previousToken: ch, done: true }
+    : { index: index + 1, depth: depth - 1, previousToken: ch, done: false };
+
+/** Apply brace nesting rules when scanning inside a template interpolation. */
+const advanceBraceToken = (
+  ch: string,
+  index: number,
+  depth: number,
+  stopAtCloseBrace: boolean,
+): ScanAdvance | null => {
+  if (!stopAtCloseBrace) {
+    return null;
+  }
+  if (ch === "{") {
+    return advanceOpenBrace(index, depth, ch);
+  }
+  if (ch === "}") {
+    return advanceCloseBrace(index, depth, ch);
+  }
+  return null;
+};
+
+/** True when ``ch`` opens a string or template literal. */
+const isStringOpener = (ch: string): boolean => "'\"`".includes(ch);
+
+/** Advance one ordinary (non-special) character in a scan region. */
+const advancePlainToken = (
+  ch: string,
+  index: number,
+  depth: number,
+  previousToken: string,
+): ScanAdvance => ({
+  index: index + 1,
+  depth,
+  previousToken: isWhitespace(ch) ? previousToken : ch,
+  done: false,
+});
+
 /**
- * Read one string or template literal starting at its opening quote, recording
- * it, and return the index just past the closing quote. A `${...}` inside a
- * template is scanned as code — so literals nested in an interpolation are
- * collected too — and contributes a single placeholder to the literal's text.
- *
- * Held on a local object with scanRegion so mutual recursion does not hit the
- * Temporal Dead Zone and does not use module-scope `function` (JS-0067/0357).
+ * Held on one object so mutual recursion does not hit the Temporal Dead Zone
+ * and does not use module-scope `function` (JS-0067/0357).
  */
 const scanners: {
   readLiteral: (
@@ -215,13 +309,24 @@ const scanners: {
     stopAtCloseBrace: boolean,
     literals: ScannedLiteral[],
   ) => number;
+  advanceScanToken: (
+    source: string,
+    index: number,
+    previousToken: string,
+    stopAtCloseBrace: boolean,
+    depth: number,
+    literals: ScannedLiteral[],
+  ) => ScanAdvance;
 } = {
   readLiteral(source, openIndex, continuesExpression, literals) {
     const quote = source[openIndex];
     let index = openIndex + 1;
     let value = "";
-    while (index < source.length && source[index] !== quote) {
-      if (quote === "`" && source[index] === "$" && source[index + 1] === "{") {
+    while (index < source.length) {
+      if (source[index] === quote) {
+        break;
+      }
+      if (isTemplateInterpolation(quote, source, index)) {
         index = scanners.scanRegion(source, index + 2, true, literals);
         value += INTERPOLATION;
         continue;
@@ -237,7 +342,7 @@ const scanners: {
     let depth = 0;
     let previousToken = "";
     while (index < source.length) {
-      const advanced = advanceScanToken(
+      const advanced = scanners.advanceScanToken(
         source,
         index,
         previousToken,
@@ -254,64 +359,28 @@ const scanners: {
     }
     return index;
   },
-};
 
-/** Advance past a `/` that starts a comment or a regex literal. */
-const advanceSlashToken = (
-  source: string,
-  index: number,
-  previousToken: string,
-  next: string,
-): { index: number; previousToken: string } | null => {
-  if (next === "/" || next === "*") {
-    return { index: skipComment(source, index), previousToken };
-  }
-  if (startsRegex(previousToken)) {
-    return { index: skipRegex(source, index), previousToken: "/" };
-  }
-  return null;
-};
-
-/** Advance one token (comment, regex, literal, brace, or raw char) in a scan. */
-const advanceScanToken = (
-  source: string,
-  index: number,
-  previousToken: string,
-  stopAtCloseBrace: boolean,
-  depth: number,
-  literals: ScannedLiteral[],
-): { index: number; depth: number; previousToken: string; done: boolean } => {
-  const ch = source[index];
-  const next = source[index + 1] ?? "";
-  if (ch === "/") {
-    const slash = advanceSlashToken(source, index, previousToken, next);
-    if (slash !== null) {
-      return { ...slash, depth, done: false };
+  advanceScanToken(source, index, previousToken, stopAtCloseBrace, depth, literals) {
+    const ch = source[index];
+    if (ch === "/") {
+      const slash = advanceSlashToken(source, index, previousToken, source[index + 1] ?? "");
+      if (slash !== null) {
+        return { ...slash, depth, done: false };
+      }
     }
-  }
-  if (ch === '"' || ch === "'" || ch === "`") {
-    return {
-      index: scanners.readLiteral(source, index, previousToken === "+", literals),
-      depth,
-      previousToken: ch,
-      done: false,
-    };
-  }
-  if (stopAtCloseBrace && ch === "{") {
-    return { index: index + 1, depth: depth + 1, previousToken: ch, done: false };
-  }
-  if (stopAtCloseBrace && ch === "}") {
-    if (depth === 0) {
-      return { index: index + 1, depth, previousToken: ch, done: true };
+    if (isStringOpener(ch)) {
+      return {
+        index: scanners.readLiteral(source, index, previousToken === "+", literals),
+        depth,
+        previousToken: ch,
+        done: false,
+      };
     }
-    return { index: index + 1, depth: depth - 1, previousToken: ch, done: false };
-  }
-  return {
-    index: index + 1,
-    depth,
-    previousToken: isWhitespace(ch) ? previousToken : ch,
-    done: false,
-  };
+    return (
+      advanceBraceToken(ch, index, depth, stopAtCloseBrace) ??
+      advancePlainToken(ch, index, depth, previousToken)
+    );
+  },
 };
 
 /**

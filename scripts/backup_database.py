@@ -810,11 +810,13 @@ def _parse_counts_output(raw: str) -> dict[str, int]:
 
 def _count_sql_branch(name: str) -> str:
     """One UNION ALL branch that counts rows for a validated public table name."""
-    return (
-        "SELECT "
-        + _quote_literal(name)
-        + " AS t, count(*) AS n FROM public."
-        + _quote_identifier(name)
+    return "".join(
+        [
+            "SELECT ",
+            _quote_literal(name),
+            " AS t, count(*) AS n FROM public.",
+            _quote_identifier(name),
+        ]
     )
 
 
@@ -1576,44 +1578,88 @@ def _restrict_run_dir_mode(path: Path) -> None:
         pass
 
 
-def _load_watermark(out_dir: Path) -> Watermark:
-    """load watermark."""
-    stored, reset_after = _read_watermark_file(out_dir)
-    merged = dict(stored)
+def _sorted_out_dir_children(out_dir: Path) -> list[Path]:
+    """Immediate children of out_dir, sorted by name; empty on OSError."""
+    try:
+        return sorted(out_dir.iterdir(), key=lambda child: child.name)
+    except OSError:
+        return []
+
+
+def _watermark_child_stamp_status(name: str, *, now: datetime) -> str:
+    """Classify a run-dir name for watermark folding: ok, future, or skip.
+
+    Counted, not silently dropped: a future-dated directory is inert now, but
+    the operator still has to know it is there -- and on a night that gets no
+    further than the gate, ``_prune`` never runs to say so. See ``_run_stamp``
+    for why it is refused at all.
+    """
+    if _run_stamp(name, now=now) is not None:
+        return "ok"
+    if _parse_stamp(name) is not None:
+        return "future"
+    return "skip"
+
+
+# ============================================================================
+# Purpose: Accept only published, non-rejected run manifests whose counts clear
+#          the seed floor, for watermark folding.
+# Database/ORM: None. Reads manifest.json beside the run directory.
+# Standards: Fail closed on missing, rejected, unpublished, or below-floor counts.
+# Blast Radius: Watermark high-water mark; disaster recovery reference.
+# Connections:
+#   - File: scripts/backup_database.py -> ``_fold_accepted_run_counts`` merges these.
+# ============================================================================
+def _accepted_published_counts(child: Path) -> dict[str, int] | None:
+    """Return foldable table counts from one run dir, or None to skip it."""
+    manifest = _read_manifest(child)
+    if manifest is None:
+        return None
+    gate = manifest.get("content_gate")
+    if isinstance(gate, dict) and gate.get("status") == "rejected":
+        return None
+    if not _run_is_published_backup(child, manifest):
+        return None
+    counts = _manifest_table_counts(manifest)
+    if counts is None or not _counts_clear_floor(counts):
+        return None
+    return counts
+
+
+def _fold_accepted_run_counts(
+    out_dir: Path, merged: dict[str, int], reset_after: str | None
+) -> tuple[int, int]:
+    """Merge accepted run counts into merged; return (folded, ignored_future)."""
     folded = 0
     ignored_future = 0
     now = _utc_now()
-    try:
-        children = sorted(out_dir.iterdir(), key=lambda child: child.name)
-    except OSError:
-        children = []
-    for child in children:
+    for child in _sorted_out_dir_children(out_dir):
         if not child.is_dir():
             continue
-        if _run_stamp(child.name, now=now) is None:
-            # Counted, not silently dropped: a future-dated directory is inert
-            # now, but the operator still has to know it is there -- and on a
-            # night that gets no further than the gate, ``_prune`` never runs to
-            # say so. See ``_run_stamp`` for why it is refused at all.
-            if _parse_stamp(child.name) is not None:
-                ignored_future += 1
+        status = _watermark_child_stamp_status(child.name, now=now)
+        if status == "future":
+            ignored_future += 1
+            continue
+        if status != "ok":
             continue
         if reset_after is not None and child.name <= reset_after:
             continue
-        manifest = _read_manifest(child)
-        if manifest is None:
-            continue
-        gate = manifest.get("content_gate")
-        if isinstance(gate, dict) and gate.get("status") == "rejected":
-            continue
-        if not _run_is_published_backup(child, manifest):
-            continue
-        counts = _manifest_table_counts(manifest)
-        if counts is None or not _counts_clear_floor(counts):
+        counts = _accepted_published_counts(child)
+        if counts is None:
             continue
         folded += 1
         for name, value in counts.items():
             merged[name] = max(merged.get(name, 0), value)
+    return folded, ignored_future
+
+
+def _watermark_source_label(
+    merged: dict[str, int],
+    stored: dict[str, int],
+    folded: int,
+    ignored_future: int,
+) -> str:
+    """Human-readable provenance string for the folded watermark."""
     if not merged:
         source = f"none: no {WATERMARK_NAME} and no accepted run in this directory"
     elif stored and folded:
@@ -1624,6 +1670,15 @@ def _load_watermark(out_dir: Path) -> Watermark:
         source = f"rebuilt from {folded} accepted run manifest(s); {WATERMARK_NAME} was absent"
     if ignored_future:
         source += f"; {ignored_future} future-dated directory(ies) ignored"
+    return source
+
+
+def _load_watermark(out_dir: Path) -> Watermark:
+    """load watermark."""
+    stored, reset_after = _read_watermark_file(out_dir)
+    merged = dict(stored)
+    folded, ignored_future = _fold_accepted_run_counts(out_dir, merged, reset_after)
+    source = _watermark_source_label(merged, stored, folded, ignored_future)
     return Watermark(tables=merged, source=source, reset_after=reset_after)
 
 
@@ -1800,6 +1855,301 @@ def _next_watermark(
     return merged, reset
 
 
+def _absolute_content_failures(counts: dict[str, int], *, toc_entries: int) -> list[str]:
+    """Tier-1 absolute refusals from schema/seed shape and empty TOC."""
+    absolute: list[str] = []
+    tables = len(counts)
+    if tables < MIN_TABLES:
+        absolute.append(
+            "schema public has no tables, so this run captured no application "
+            "data at all. A migrated UMS database always has tables. This is what "
+            "a backup fired against a dropped schema -- or against a container "
+            "brought up empty for a restore -- produces."
+        )
+    else:
+        absolute.extend(_seed_floor_failures(counts))
+    if toc_entries == 0:
+        absolute.append(
+            "pg_restore read the archive successfully and it holds no "
+            "table-of-contents entries at all, so the dump describes an empty "
+            "database. The archive is not corrupt; there was nothing to dump."
+        )
+    return absolute
+
+
+def _seed_floor_failures(counts: dict[str, int]) -> list[str]:
+    """Absolute refusals when SEED_TABLES are missing or drained."""
+    failures: list[str] = []
+    absent = [name for name in SEED_TABLES if name not in counts]
+    drained = [name for name in SEED_TABLES if name in counts and counts[name] == 0]
+    if absent:
+        failures.append(
+            f"seed table(s) {', '.join(absent)} do not exist in schema public. "
+            "Every UMS migration path creates and populates them, so this dump "
+            "is not of a migrated UMS database."
+        )
+    if drained:
+        failures.append(
+            f"seed table(s) {', '.join(drained)} exist but hold 0 rows. A virgin "
+            "'alembic upgrade head' leaves alembic_version, currencies and "
+            "tenants populated, so an empty one means this database was "
+            "truncated or restored from nothing -- total loss of application "
+            "data with the schema left standing."
+        )
+    return failures
+
+
+def _append_disappeared_tables(
+    counts: dict[str, int],
+    watermark: Watermark,
+    relative: list[str],
+    rebaseline: set[str],
+) -> None:
+    """Record tables that held rows at the mark but are gone tonight."""
+    disappeared = [
+        name for name, mark in watermark.tables.items() if mark > 0 and name not in counts
+    ]
+    if not disappeared:
+        return
+    relative.append(
+        f"{len(disappeared)} table(s) that held rows at their high-water mark "
+        f"no longer exist: {_name_tables(disappeared)}. Tables do not "
+        "disappear on their own."
+    )
+    rebaseline.update(disappeared)
+
+
+def _append_emptied_tables(
+    counts: dict[str, int],
+    watermark: Watermark,
+    relative: list[str],
+    rebaseline: set[str],
+) -> None:
+    """Record tables that held rows at the mark but are empty tonight."""
+    emptied = [
+        name
+        for name, mark in watermark.tables.items()
+        if mark > 0 and counts.get(name, 0) == 0 and name in counts
+    ]
+    if not emptied:
+        return
+    relative.append(
+        f"{len(emptied)} table(s) that held rows at their high-water mark are "
+        f"now empty: {_name_tables(emptied)}."
+    )
+    rebaseline.update(emptied)
+
+
+def _append_shrunk_seed_tables(
+    counts: dict[str, int],
+    watermark: Watermark,
+    relative: list[str],
+    rebaseline: set[str],
+) -> None:
+    """Record SEED_TABLES that fell below their exact high-water mark.
+
+    Seeded lookup and bootstrap tables do not shrink in normal operation:
+    currencies is a frozen ISO snapshot, alembic_version is a single stamp
+    row, and a tenant row is referenced ON DELETE RESTRICT from everywhere.
+    Holding them to their exact high-water mark closes the one case a
+    fraction cannot see -- a wipe whose entire lost dataset was extra rows in
+    a seeded table leaves the total within 2% of the mark and every other
+    table untouched, so nothing else fires. Measured: tenants 4 -> 1 after
+    `down -v` plus an auto-migrate used to publish exit 0.
+    """
+    seeds_shrunk = [
+        name
+        for name in SEED_TABLES
+        if watermark.tables.get(name, 0) > 0
+        and 0 < counts.get(name, 0) < watermark.tables[name]
+    ]
+    if not seeds_shrunk:
+        return
+    relative.append(
+        "seed table(s) fell below their high-water mark: "
+        + "; ".join(
+            f"{name} {watermark.tables[name]}->{counts.get(name, 0)}" for name in seeds_shrunk
+        )
+        + ". Seeded lookup and bootstrap tables do not shrink on their own."
+    )
+    rebaseline.update(seeds_shrunk)
+
+
+def _append_collapsed_tables(
+    counts: dict[str, int],
+    watermark: Watermark,
+    relative: list[str],
+    rebaseline: set[str],
+) -> None:
+    """Record tables that fell below COLLAPSE_ROW_FRACTION of their mark."""
+    shrunk = [
+        name
+        for name, mark in watermark.tables.items()
+        if mark >= TABLE_COLLAPSE_MIN_ROWS
+        and 0 < counts.get(name, 0) < mark * COLLAPSE_ROW_FRACTION
+    ]
+    if not shrunk:
+        return
+    relative.append(
+        f"{len(shrunk)} table(s) fell below {COLLAPSE_ROW_FRACTION:.0%} of their "
+        f"high-water mark: "
+        + "; ".join(
+            f"{name} {watermark.tables[name]}->{counts.get(name, 0)}"
+            for name in sorted(shrunk)[:MAX_NAMED_TABLES]
+        )
+        + "."
+    )
+    rebaseline.update(shrunk)
+
+
+def _append_directory_floor_failure(
+    counts: dict[str, int],
+    watermark: Watermark,
+    *,
+    rows: int,
+    relative: list[str],
+    rebaseline: set[str],
+) -> None:
+    """Whole-directory floor check; subsumed under current constants but kept.
+
+    SUBSUMED, and deliberately kept. Under the current constants this can
+    never be the SOLE reason a run is refused: a table that escapes the
+    per-table rule keeps at least COLLAPSE_ROW_FRACTION of its mark, and a
+    table below TABLE_COLLAPSE_MIN_ROWS keeps at least one row of at most
+    nine, which is 11%. Summing those minima gives rows >= floor whenever
+    every per-table rule passed. It stays because that subsumption is a
+    property of the two constants, not of the design -- raise
+    COLLAPSE_ROW_FRACTION above 1/(TABLE_COLLAPSE_MIN_ROWS - 1) and this
+    becomes the only rule that sees the loss. A mutation matrix found no
+    test could kill it; ``test_the_whole_directory_floor_is_subsumed``
+    pins the arithmetic instead of pretending otherwise.
+    """
+    floor = watermark.total_rows * COLLAPSE_ROW_FRACTION
+    if not (watermark.total_rows > 0 and rows < floor):
+        return
+    relative.append(
+        f"the row count is {rows}, below the {COLLAPSE_ROW_FRACTION:.0%} floor "
+        f"of {floor:.0f} for this directory's {watermark.total_rows}-row "
+        f"high-water mark ({watermark.source}). The mark is a maximum over "
+        "history, not last night's run, so a drain cannot walk it down."
+    )
+    rebaseline.update(
+        name for name, mark in watermark.tables.items() if mark > counts.get(name, 0)
+    )
+
+
+def _relative_content_failures(
+    counts: dict[str, int], watermark: Watermark, *, rows: int
+) -> tuple[list[str], set[str]]:
+    """Watermark-relative refusals and the tables an override may rebaseline."""
+    relative: list[str] = []
+    rebaseline: set[str] = set()
+    if watermark.is_empty:
+        return relative, rebaseline
+    _append_disappeared_tables(counts, watermark, relative, rebaseline)
+    _append_emptied_tables(counts, watermark, relative, rebaseline)
+    _append_shrunk_seed_tables(counts, watermark, relative, rebaseline)
+    _append_collapsed_tables(counts, watermark, relative, rebaseline)
+    _append_directory_floor_failure(
+        counts, watermark, rows=rows, relative=relative, rebaseline=rebaseline
+    )
+    return relative, rebaseline
+
+
+def _first_run_empty_establish_note(tables: int, rows: int, seed_names: str) -> str:
+    """Tier 3b message when --establish-watermark meets an empty non-seed DB."""
+    return (
+        "--establish-watermark was passed, but every table outside "
+        f"{seed_names} is EMPTY: {tables} tables, {rows} rows, all of them "
+        "seeded lookup and bootstrap data. Establishing here would make an "
+        "empty database this directory's permanent reference, and every later "
+        "run would be judged against nothing. This is the exact state left by "
+        "'docker compose down -v' plus an auto-migrate. If the database was "
+        "lost, RESTORE it first (Docs/22_BACKUP_RESTORE_AND_REHEARSAL.md) and "
+        "back up the restored database. If this really is a brand-new install "
+        "with nothing entered yet, re-run with "
+        "--this-database-is-intentionally-empty as well."
+    )
+
+
+def _apply_first_run_content_gate(
+    failures: list[str],
+    overridden: list[str],
+    *,
+    establish: bool,
+    accept_empty: bool,
+    tables: int,
+    rows: int,
+    non_seed: int,
+    seed_names: str,
+) -> None:
+    """Fold tier-3 / 3b first-run decisions into failures or overridden."""
+    if not establish:
+        failures.append(_first_run_refusal(tables, rows, non_seed, seed_names))
+        return
+    if non_seed != 0:
+        return
+    empty_note = _first_run_empty_establish_note(tables, rows, seed_names)
+    if accept_empty:
+        overridden.append(f"[--this-database-is-intentionally-empty] {empty_note}")
+    else:
+        failures.append(empty_note)
+
+
+def _apply_relative_or_first_run_gate(
+    failures: list[str],
+    overridden: list[str],
+    *,
+    first_run: bool,
+    establish: bool,
+    accept_empty: bool,
+    accept_drop: bool,
+    relative: list[str],
+    tables: int,
+    rows: int,
+    non_seed: int,
+    seed_names: str,
+) -> None:
+    """Apply first-run acknowledgement or relative watermark overrides."""
+    if first_run:
+        _apply_first_run_content_gate(
+            failures,
+            overridden,
+            establish=establish,
+            accept_empty=accept_empty,
+            tables=tables,
+            rows=rows,
+            non_seed=non_seed,
+            seed_names=seed_names,
+        )
+        return
+    if not relative:
+        return
+    if accept_drop:
+        overridden.extend(f"[--accept-content-drop] {note}" for note in relative)
+    else:
+        failures.extend(relative)
+
+
+def _apply_identity_content_gate(
+    failures: list[str],
+    overridden: list[str],
+    *,
+    expected_identity: Identity | None,
+    observed_identity: Identity | None,
+    adopt_database: bool,
+) -> str | None:
+    """Tier 1b identity binding; returns the note when a mismatch was handled."""
+    identity_note = _identity_refusal(expected_identity, observed_identity)
+    if identity_note is None:
+        return None
+    if adopt_database:
+        overridden.append(f"[--adopt-database] {identity_note}")
+    else:
+        failures.append(identity_note)
+    return identity_note
+
+
 # ============================================================================
 # Purpose: Decide whether what this run captured is a backup at all, using an
 #          absolute seed floor that is always right, a persistent watermark that
@@ -1882,167 +2232,31 @@ def _evaluate_content(
     rows = sum(counts.values())
     non_seed = _non_seed_rows(counts)
     seed_names = ", ".join(SEED_TABLES)
-    absolute: list[str] = []
-    relative: list[str] = []
-    rebaseline: set[str] = set()
-
-    if tables < MIN_TABLES:
-        absolute.append(
-            "schema public has no tables, so this run captured no application "
-            "data at all. A migrated UMS database always has tables. This is what "
-            "a backup fired against a dropped schema -- or against a container "
-            "brought up empty for a restore -- produces."
-        )
-    else:
-        absent = [name for name in SEED_TABLES if name not in counts]
-        drained = [name for name in SEED_TABLES if name in counts and counts[name] == 0]
-        if absent:
-            absolute.append(
-                f"seed table(s) {', '.join(absent)} do not exist in schema public. "
-                "Every UMS migration path creates and populates them, so this dump "
-                "is not of a migrated UMS database."
-            )
-        if drained:
-            absolute.append(
-                f"seed table(s) {', '.join(drained)} exist but hold 0 rows. A virgin "
-                "'alembic upgrade head' leaves alembic_version, currencies and "
-                "tenants populated, so an empty one means this database was "
-                "truncated or restored from nothing -- total loss of application "
-                "data with the schema left standing."
-            )
-    if toc_entries == 0:
-        absolute.append(
-            "pg_restore read the archive successfully and it holds no "
-            "table-of-contents entries at all, so the dump describes an empty "
-            "database. The archive is not corrupt; there was nothing to dump."
-        )
-
+    absolute = _absolute_content_failures(counts, toc_entries=toc_entries)
+    relative, rebaseline = _relative_content_failures(counts, watermark, rows=rows)
     first_run = watermark.is_empty
-    if not first_run:
-        disappeared = [
-            name for name, mark in watermark.tables.items() if mark > 0 and name not in counts
-        ]
-        if disappeared:
-            relative.append(
-                f"{len(disappeared)} table(s) that held rows at their high-water mark "
-                f"no longer exist: {_name_tables(disappeared)}. Tables do not "
-                "disappear on their own."
-            )
-            rebaseline.update(disappeared)
-        emptied = [
-            name
-            for name, mark in watermark.tables.items()
-            if mark > 0 and counts.get(name, 0) == 0 and name in counts
-        ]
-        if emptied:
-            relative.append(
-                f"{len(emptied)} table(s) that held rows at their high-water mark are "
-                f"now empty: {_name_tables(emptied)}."
-            )
-            rebaseline.update(emptied)
-        # Seeded lookup and bootstrap tables do not shrink in normal operation:
-        # currencies is a frozen ISO snapshot, alembic_version is a single stamp
-        # row, and a tenant row is referenced ON DELETE RESTRICT from everywhere.
-        # Holding them to their exact high-water mark closes the one case a
-        # fraction cannot see -- a wipe whose entire lost dataset was extra rows in
-        # a seeded table leaves the total within 2% of the mark and every other
-        # table untouched, so nothing else fires. Measured: tenants 4 -> 1 after
-        # `down -v` plus an auto-migrate used to publish exit 0.
-        seeds_shrunk = [
-            name
-            for name in SEED_TABLES
-            if watermark.tables.get(name, 0) > 0
-            and 0 < counts.get(name, 0) < watermark.tables[name]
-        ]
-        if seeds_shrunk:
-            relative.append(
-                "seed table(s) fell below their high-water mark: "
-                + "; ".join(
-                    f"{name} {watermark.tables[name]}->{counts.get(name, 0)}"
-                    for name in seeds_shrunk
-                )
-                + ". Seeded lookup and bootstrap tables do not shrink on their own."
-            )
-            rebaseline.update(seeds_shrunk)
-        shrunk = [
-            name
-            for name, mark in watermark.tables.items()
-            if mark >= TABLE_COLLAPSE_MIN_ROWS
-            and 0 < counts.get(name, 0) < mark * COLLAPSE_ROW_FRACTION
-        ]
-        if shrunk:
-            relative.append(
-                f"{len(shrunk)} table(s) fell below {COLLAPSE_ROW_FRACTION:.0%} of their "
-                f"high-water mark: "
-                + "; ".join(
-                    f"{name} {watermark.tables[name]}->{counts.get(name, 0)}"
-                    for name in sorted(shrunk)[:MAX_NAMED_TABLES]
-                )
-                + "."
-            )
-            rebaseline.update(shrunk)
-        # SUBSUMED, and deliberately kept. Under the current constants this can
-        # never be the SOLE reason a run is refused: a table that escapes the
-        # per-table rule keeps at least COLLAPSE_ROW_FRACTION of its mark, and a
-        # table below TABLE_COLLAPSE_MIN_ROWS keeps at least one row of at most
-        # nine, which is 11%. Summing those minima gives rows >= floor whenever
-        # every per-table rule passed. It stays because that subsumption is a
-        # property of the two constants, not of the design -- raise
-        # COLLAPSE_ROW_FRACTION above 1/(TABLE_COLLAPSE_MIN_ROWS - 1) and this
-        # becomes the only rule that sees the loss. A mutation matrix found no
-        # test could kill it; ``test_the_whole_directory_floor_is_subsumed``
-        # pins the arithmetic instead of pretending otherwise.
-        floor = watermark.total_rows * COLLAPSE_ROW_FRACTION
-        if watermark.total_rows > 0 and rows < floor:
-            relative.append(
-                f"the row count is {rows}, below the {COLLAPSE_ROW_FRACTION:.0%} floor "
-                f"of {floor:.0f} for this directory's {watermark.total_rows}-row "
-                f"high-water mark ({watermark.source}). The mark is a maximum over "
-                "history, not last night's run, so a drain cannot walk it down."
-            )
-            rebaseline.update(
-                name for name, mark in watermark.tables.items() if mark > counts.get(name, 0)
-            )
-
     failures = list(absolute)
     overridden: list[str] = []
-    if first_run:
-        if not establish:
-            failures.append(_first_run_refusal(tables, rows, non_seed, seed_names))
-        elif non_seed == 0:
-            # Tier 3b. The one first-run state that IS decidable, and the one the
-            # tier-3 remediation line used to walk the operator straight into.
-            empty_note = (
-                "--establish-watermark was passed, but every table outside "
-                f"{seed_names} is EMPTY: {tables} tables, {rows} rows, all of them "
-                "seeded lookup and bootstrap data. Establishing here would make an "
-                "empty database this directory's permanent reference, and every later "
-                "run would be judged against nothing. This is the exact state left by "
-                "'docker compose down -v' plus an auto-migrate. If the database was "
-                "lost, RESTORE it first (Docs/22_BACKUP_RESTORE_AND_REHEARSAL.md) and "
-                "back up the restored database. If this really is a brand-new install "
-                "with nothing entered yet, re-run with "
-                "--this-database-is-intentionally-empty as well."
-            )
-            if accept_empty:
-                overridden.append(f"[--this-database-is-intentionally-empty] {empty_note}")
-            else:
-                failures.append(empty_note)
-    elif relative:
-        if accept_drop:
-            overridden.extend(f"[--accept-content-drop] {note}" for note in relative)
-        else:
-            failures.extend(relative)
-
-    # Tier 1b, outside the first-run branch: an established directory can be
-    # pointed at a different database on any night, not only the first.
-    identity_note = _identity_refusal(expected_identity, observed_identity)
-    if identity_note is not None:
-        if adopt_database:
-            overridden.append(f"[--adopt-database] {identity_note}")
-        else:
-            failures.append(identity_note)
-
+    _apply_relative_or_first_run_gate(
+        failures,
+        overridden,
+        first_run=first_run,
+        establish=establish,
+        accept_empty=accept_empty,
+        accept_drop=accept_drop,
+        relative=relative,
+        tables=tables,
+        rows=rows,
+        non_seed=non_seed,
+        seed_names=seed_names,
+    )
+    identity_note = _apply_identity_content_gate(
+        failures,
+        overridden,
+        expected_identity=expected_identity,
+        observed_identity=observed_identity,
+        adopt_database=adopt_database,
+    )
     return ContentVerdict(
         accepted=not failures,
         tables=tables,
@@ -2190,62 +2404,140 @@ def _classify_unusable(
 #     three-valued classification; ``_run_stamp`` supplies invariants 4 and 5.
 #   - File: Docs/22_BACKUP_RESTORE_AND_REHEARSAL.md -> retention defaults.
 # ============================================================================
-def _prune(out_dir: Path, *, keep_days: int, keep_min: int, now: datetime) -> PruneOutcome:
-    """prune."""
-    skipped: list[str] = []
-    future: list[str] = []
+def _collect_dated_backup_runs(
+    out_dir: Path,
+    *,
+    now: datetime,
+    skipped: list[str],
+    future: list[str],
+) -> list[tuple[Path, datetime]]:
+    """Collect RUN_DIR_RE children with parseable stamps; classify unusable names."""
     runs: list[tuple[Path, datetime]] = []
     for child in sorted(out_dir.iterdir(), key=lambda item: item.name):
         if not child.is_dir():
             continue
-        if RUN_DIR_RE.match(child.name) is not None:
-            # ``now`` rather than the wall clock, so every decision this pass
-            # makes is judged against ONE clock reading.
-            stamped = _run_stamp(child.name, now=now)
-            if stamped is None:
-                _classify_unusable(child.name, RUN_DIR_RE, skipped=skipped, future=future)
-                continue
-            runs.append((child, stamped))
-    classified = [(run, _run_has_content(run)) for run, _ in runs]
-    # Invariant 2: proven-empty runs are filtered out BEFORE the --keep-min slice
-    # is taken, so they cannot occupy a protection slot. Slicing first and
-    # filtering after would leave the original defect intact -- seven empty runs
-    # would still fill the window and evict the run that holds the data.
-    # Invariant 3 keeps `None` (unknown) in the eligible list.
+        if RUN_DIR_RE.match(child.name) is None:
+            continue
+        # ``now`` rather than the wall clock, so every decision this pass
+        # makes is judged against ONE clock reading.
+        stamped = _run_stamp(child.name, now=now)
+        if stamped is None:
+            _classify_unusable(child.name, RUN_DIR_RE, skipped=skipped, future=future)
+            continue
+        runs.append((child, stamped))
+    return runs
+
+
+def _retention_protected_names(
+    classified: list[tuple[Path, bool | None]],
+    *,
+    keep_min: int,
+) -> set[str]:
+    """Names protected by --keep-min eligibility and newest-with-content pin.
+
+    Invariant 2: proven-empty runs are filtered out BEFORE the --keep-min slice
+    is taken, so they cannot occupy a protection slot. Slicing first and
+    filtering after would leave the original defect intact -- seven empty runs
+    would still fill the window and evict the run that holds the data.
+    Invariant 3 keeps `None` (unknown) in the eligible list.
+    Invariant 1: pin the newest run that proves it holds data, whatever its age
+    and whatever --keep-min worked out to.
+    """
     eligible = [run.name for run, has_content in classified if has_content is not False]
     protected = set(eligible[-max(keep_min, 1) :])
-    # Invariant 1: pin the newest run that proves it holds data, whatever its age
-    # and whatever --keep-min worked out to.
     newest_with_content = next(
-        (run.name for run, has_content in reversed(classified) if has_content is True), None
+        (run.name for run, has_content in reversed(classified) if has_content is True),
+        None,
     )
     if newest_with_content is not None:
         protected.add(newest_with_content)
+    return protected
 
-    cutoff = now - timedelta(days=max(keep_days, 0))
+
+def _delete_expired_dated_runs(
+    runs: list[tuple[Path, datetime]],
+    *,
+    protected: set[str],
+    cutoff: datetime,
+) -> list[str]:
+    """Remove unprotected dated runs older than cutoff; return removed names."""
     removed: list[str] = []
     for run, stamped in runs:
         if run.name in protected or stamped >= cutoff:
             continue
         shutil.rmtree(run)
         removed.append(run.name)
+    return removed
+
+
+def _prune_rejected_or_partial_child(
+    child: Path,
+    *,
+    now: datetime,
+    cutoff: datetime,
+    skipped: list[str],
+    future: list[str],
+    removed: list[str],
+) -> None:
+    """Age-prune one rejected or partial sibling directory, if applicable."""
+    if REJECTED_RE.match(child.name) is not None:
+        # Quarantined runs are tiny and are kept for the same window as real
+        # runs so a week of empty nights stays visible in the directory.
+        stamped_or_none = _run_stamp(child.name, REJECTED_RE, now=now)
+        if stamped_or_none is None:
+            _classify_unusable(child.name, REJECTED_RE, skipped=skipped, future=future)
+        elif stamped_or_none < cutoff:
+            shutil.rmtree(child)
+            removed.append(child.name)
+        return
+    if PARTIAL_RE.match(child.name) is None:
+        return
+    age = now - datetime.fromtimestamp(child.stat().st_mtime, tz=UTC)
+    if age > timedelta(days=1):
+        shutil.rmtree(child)
+        removed.append(child.name)
+
+
+def _prune_side_run_directories(
+    out_dir: Path,
+    *,
+    now: datetime,
+    cutoff: datetime,
+    skipped: list[str],
+    future: list[str],
+    removed: list[str],
+) -> None:
+    """Prune rejected and stale partial directories beside dated runs."""
     for child in out_dir.iterdir():
         if not child.is_dir():
             continue
-        if REJECTED_RE.match(child.name) is not None:
-            # Quarantined runs are tiny and are kept for the same window as real
-            # runs so a week of empty nights stays visible in the directory.
-            stamped_or_none = _run_stamp(child.name, REJECTED_RE, now=now)
-            if stamped_or_none is None:
-                _classify_unusable(child.name, REJECTED_RE, skipped=skipped, future=future)
-            elif stamped_or_none < cutoff:
-                shutil.rmtree(child)
-                removed.append(child.name)
-        elif PARTIAL_RE.match(child.name):
-            age = now - datetime.fromtimestamp(child.stat().st_mtime, tz=UTC)
-            if age > timedelta(days=1):
-                shutil.rmtree(child)
-                removed.append(child.name)
+        _prune_rejected_or_partial_child(
+            child,
+            now=now,
+            cutoff=cutoff,
+            skipped=skipped,
+            future=future,
+            removed=removed,
+        )
+
+
+def _prune(out_dir: Path, *, keep_days: int, keep_min: int, now: datetime) -> PruneOutcome:
+    """prune."""
+    skipped: list[str] = []
+    future: list[str] = []
+    runs = _collect_dated_backup_runs(out_dir, now=now, skipped=skipped, future=future)
+    classified = [(run, _run_has_content(run)) for run, _ in runs]
+    protected = _retention_protected_names(classified, keep_min=keep_min)
+    cutoff = now - timedelta(days=max(keep_days, 0))
+    removed = _delete_expired_dated_runs(runs, protected=protected, cutoff=cutoff)
+    _prune_side_run_directories(
+        out_dir,
+        now=now,
+        cutoff=cutoff,
+        skipped=skipped,
+        future=future,
+        removed=removed,
+    )
     return PruneOutcome(removed=removed, skipped=sorted(set(skipped)), future=sorted(set(future)))
 
 

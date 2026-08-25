@@ -527,6 +527,62 @@ def _docstring_constants(tree: ast.Module) -> set[int]:
     return ids
 
 
+def _inline_sa_table_name(first: ast.AST) -> str | None:
+    """Table name from an inline ``sa.table("name", ...)`` call argument."""
+    if not isinstance(first, ast.Call):
+        return None
+    if not (isinstance(first.func, ast.Attribute) and first.func.attr == "table"):
+        return None
+    if not first.args or not isinstance(first.args[0], ast.Constant):
+        return None
+    value = first.args[0].value
+    if isinstance(value, str):
+        return value
+    return None
+
+
+def _bulk_insert_seed_table(node: ast.AST, bound: dict[str, str]) -> str | None:
+    """Table name from ``op.bulk_insert(<table>, ...)``, or None if not that call."""
+    if not isinstance(node, ast.Call):
+        return None
+    if not (isinstance(node.func, ast.Attribute) and node.func.attr == "bulk_insert"):
+        return None
+    if not node.args:
+        return None
+    first = node.args[0]
+    if isinstance(first, ast.Name) and first.id in bound:
+        return bound[first.id]
+    return _inline_sa_table_name(first)
+
+
+def _collect_insert_literal_seeds(node: ast.AST, prose: set[int], seeded: set[str]) -> bool:
+    """Harvest INSERT INTO names from a non-docstring string constant.
+
+    Returns True when ``node`` was a string Constant (handled either way), so
+    callers can skip further idioms for that node.
+    """
+    if not (isinstance(node, ast.Constant) and isinstance(node.value, str)):
+        return False
+    if id(node) not in prose:
+        seeded.update(match.lower() for match in _INSERT_INTO.findall(node.value))
+    return True
+
+
+def _seed_tables_in_migration(path: Path) -> set[str]:
+    """Tables seeded by one Alembic revision file."""
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    bound = _sa_table_bindings(tree)
+    prose = _docstring_constants(tree)
+    seeded: set[str] = set()
+    for node in ast.walk(tree):
+        if _collect_insert_literal_seeds(node, prose, seeded):
+            continue
+        name = _bulk_insert_seed_table(node, bound)
+        if name is not None:
+            seeded.add(name)
+    return seeded
+
+
 def _tables_seeded_by_migrations() -> set[str]:
     """Every table an Alembic revision writes rows into, read out of the sources.
 
@@ -547,32 +603,7 @@ def _tables_seeded_by_migrations() -> set[str]:
     """
     seeded: set[str] = set()
     for path in sorted(MIGRATIONS_DIR.glob("*.py")):
-        tree = ast.parse(path.read_text(encoding="utf-8"))
-        bound = _sa_table_bindings(tree)
-        prose = _docstring_constants(tree)
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Constant) and isinstance(node.value, str):
-                if id(node) not in prose:
-                    seeded.update(match.lower() for match in _INSERT_INTO.findall(node.value))
-                continue
-            if not isinstance(node, ast.Call):
-                continue
-            if not (isinstance(node.func, ast.Attribute) and node.func.attr == "bulk_insert"):
-                continue
-            if not node.args:
-                continue
-            first = node.args[0]
-            if isinstance(first, ast.Name) and first.id in bound:
-                seeded.add(bound[first.id])
-            elif (
-                isinstance(first, ast.Call)
-                and isinstance(first.func, ast.Attribute)
-                and first.func.attr == "table"
-                and first.args
-                and isinstance(first.args[0], ast.Constant)
-                and isinstance(first.args[0].value, str)
-            ):
-                seeded.add(first.args[0].value)
+        seeded.update(_seed_tables_in_migration(path))
     return seeded
 
 
