@@ -292,6 +292,23 @@ const advancePlainToken = (
   done: false,
 });
 
+/** Try to consume a `/` comment or regex at the current index. */
+const tryAdvanceSlash = (
+  source: string,
+  index: number,
+  previousToken: string,
+  depth: number,
+): ScanAdvance | null => {
+  if (source[index] !== "/") {
+    return null;
+  }
+  const slash = advanceSlashToken(source, index, previousToken, source[index + 1] ?? "");
+  if (slash === null) {
+    return null;
+  }
+  return { ...slash, depth, done: false };
+};
+
 /**
  * Held on one object so mutual recursion does not hit the Temporal Dead Zone
  * and does not use module-scope `function` (JS-0067/0357).
@@ -309,6 +326,13 @@ const scanners: {
     stopAtCloseBrace: boolean,
     literals: ScannedLiteral[],
   ) => number;
+  tryAdvanceString: (
+    source: string,
+    index: number,
+    previousToken: string,
+    depth: number,
+    literals: ScannedLiteral[],
+  ) => ScanAdvance | null;
   advanceScanToken: (
     source: string,
     index: number,
@@ -360,23 +384,24 @@ const scanners: {
     return index;
   },
 
+  tryAdvanceString(source, index, previousToken, depth, literals) {
+    const ch = source[index];
+    if (!isStringOpener(ch)) {
+      return null;
+    }
+    return {
+      index: scanners.readLiteral(source, index, previousToken === "+", literals),
+      depth,
+      previousToken: ch,
+      done: false,
+    };
+  },
+
   advanceScanToken(source, index, previousToken, stopAtCloseBrace, depth, literals) {
     const ch = source[index];
-    if (ch === "/") {
-      const slash = advanceSlashToken(source, index, previousToken, source[index + 1] ?? "");
-      if (slash !== null) {
-        return { ...slash, depth, done: false };
-      }
-    }
-    if (isStringOpener(ch)) {
-      return {
-        index: scanners.readLiteral(source, index, previousToken === "+", literals),
-        depth,
-        previousToken: ch,
-        done: false,
-      };
-    }
     return (
+      tryAdvanceSlash(source, index, previousToken, depth) ??
+      scanners.tryAdvanceString(source, index, previousToken, depth, literals) ??
       advanceBraceToken(ch, index, depth, stopAtCloseBrace) ??
       advancePlainToken(ch, index, depth, previousToken)
     );
