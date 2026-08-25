@@ -109,7 +109,10 @@ restore = _load("restore_database")
 
 
 def _backup_superuser_psql(superuser: str = "ums"):
+    """Return a psql stub that reports ``superuser`` as ``current_user``."""
+
     def fake_psql(_container: str, _sql: str, *, timeout: int) -> str:
+        """Report the configured superuser for backup role validation."""
         _ = (_container, _sql, timeout)
         return superuser
 
@@ -117,9 +120,11 @@ def _backup_superuser_psql(superuser: str = "ums"):
 
 
 def _restore_psql(*, superuser: str = "ums", present: list[str] | None = None):
+    """Return a psql stub for restore tests with superuser and role-catalog answers."""
     roles = list(restore.REQUIRED_ROLES) if present is None else list(present)
 
     def fake_psql(_container: str, sql: str, *, timeout: int) -> str:
+        """Answer ``current_user`` or the configured required-role catalog."""
         _ = (_container, timeout)
         if "current_user" in sql:
             return superuser
@@ -2862,6 +2867,7 @@ def test_no_verify_dump_skips_pg_restore_list(
     called = {"n": 0}
 
     def _forbidden(*_a: object, **_k: object) -> str:
+        """Fail the test if pg_restore --list runs under --no-verify-dump."""
         called["n"] += 1
         raise AssertionError("pg_restore --list must not run when --no-verify-dump is set")
 

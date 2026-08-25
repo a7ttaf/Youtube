@@ -1620,6 +1620,40 @@ if sys.platform == "win32":
     )
     _KERNEL32.CloseHandle.restype = ctypes.c_int
     _KERNEL32.CloseHandle.argtypes = (ctypes.c_void_p,)
+    from ctypes import wintypes
+
+    _FILE_FLAG_BACKUP_SEMANTICS = 0x02000000
+    _OPEN_EXISTING = 3
+    _KERNEL32.CreateFileW.restype = wintypes.HANDLE
+    _KERNEL32.CreateFileW.argtypes = (
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.HANDLE,
+    )
+    _KERNEL32.FlushFileBuffers.restype = wintypes.BOOL
+    _KERNEL32.FlushFileBuffers.argtypes = (wintypes.HANDLE,)
+
+    def _flush_directory_entry(path: Path) -> None:
+        """Flush one directory entry via ``FlushFileBuffers`` on Windows."""
+        handle = _KERNEL32.CreateFileW(
+            str(path),
+            0,
+            0,
+            None,
+            _OPEN_EXISTING,
+            _FILE_FLAG_BACKUP_SEMANTICS,
+            None,
+        )
+        if handle == wintypes.HANDLE(-1).value:
+            return
+        try:
+            _KERNEL32.FlushFileBuffers(handle)
+        finally:
+            _KERNEL32.CloseHandle(handle)
 
     def _exit_code_says_alive(handle: int) -> bool:
         """``GetExitCodeProcess`` fallback: STILL_ACTIVE (259) reads as alive.
@@ -1669,6 +1703,10 @@ if sys.platform == "win32":
             _KERNEL32.CloseHandle(handle)
 
 else:
+
+    def _flush_directory_entry(path: Path) -> None:
+        """No-op on POSIX; ``_fsync_directory`` uses ``os.fsync`` on the directory fd."""
+        _ = path
 
     def _pid_is_alive(pid: int) -> bool:
         """Return True when ``pid`` is a live process on this host. Signal-free."""
@@ -2890,25 +2928,7 @@ def _fsync_directory(path: Path) -> None:
     """Durably flush one directory entry when the platform supports it."""
     try:
         if os.name == "nt":
-            import ctypes
-            from ctypes import wintypes
-
-            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-            handle = kernel32.CreateFileW(
-                str(path),
-                0,
-                0,
-                None,
-                3,
-                0x02000000,
-                None,
-            )
-            if handle == wintypes.HANDLE(-1).value:
-                return
-            try:
-                kernel32.FlushFileBuffers(handle)
-            finally:
-                kernel32.CloseHandle(handle)
+            _flush_directory_entry(path)
             return
         directory_fd = os.open(path, os.O_RDONLY)
         try:
