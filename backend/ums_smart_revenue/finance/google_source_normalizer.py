@@ -9,6 +9,7 @@ SqlAlchemyRevenueFactRepository.record_fact().
 See: Docs/superpowers/specs/2026-05-25-spec-c1-google-source-normalizer-design.md
 """
 
+import hashlib
 import logging
 from collections import Counter
 from collections.abc import Mapping
@@ -171,6 +172,11 @@ class _NormalizationWork:
 def _channel_scope_label(channel_ids: set[str] | None) -> str:
     """Return the stable scope label used by normalizer logging."""
     return "all" if channel_ids is None else f"n_channels={len(channel_ids)}"
+
+
+def _actor_log_label(actor_user_id: str) -> str:
+    """Return a non-reversible fingerprint of the acting user's UUID."""
+    return hashlib.sha256(actor_user_id.encode("utf-8")).hexdigest()[:12]
 
 
 def _scoped_source_rows(
@@ -488,12 +494,17 @@ class GoogleSourceNormalizer:
             set(channel_ids) if channel_ids is not None else None
         )
 
+        # FIX: UMS_LOG_LEVEL defaults to INFO, so this first-party INFO line
+        # reaches the retained Docker logs; emitting the raw triggering user's
+        # UUID there leaked a private user identifier (PR #210 review). The log
+        # carries a short SHA-256 fingerprint instead -- the persisted audit
+        # rows remain the attribution source of record.
         logger.info(
-            "normalize_month start tenant_id=%s month=%s channel_scope=%s actor_user_id=%s",
+            "normalize_month start tenant_id=%s month=%s channel_scope=%s actor_fp=%s",
             self._tenant_id,
             month,
             _channel_scope_label(normalized_channel_ids),
-            actor_user_id,
+            _actor_log_label(actor_user_id),
         )
 
         close_row = get_or_create_month_close_row(

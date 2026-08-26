@@ -1,5 +1,6 @@
 """Logging contract: counts/distribution logged; PII / finance values redacted."""
 
+import hashlib
 import logging
 from datetime import date
 from decimal import Decimal
@@ -140,6 +141,13 @@ def test_normalize_month_logging_redacts_payload_amount_channel_id_source_row_id
         assert "rep-log-001" not in log_text  # source_report_id (provenance, not log-worthy)
         assert "DO_NOT_LOG" not in log_text  # raw_payload contents
         assert "UC_test_log_42" not in log_text  # individual channel id
+
+        # PR #210 review: the raw triggering user's UUID must never reach the
+        # retained Docker logs at the default UMS_LOG_LEVEL=INFO; only its
+        # non-reversible SHA-256 fingerprint may appear.
+        assert ACTOR_USER_ID not in log_text
+        expected_fp = hashlib.sha256(ACTOR_USER_ID.encode("utf-8")).hexdigest()[:12]
+        assert f"actor_fp={expected_fp}" in log_text
         # source_row_id UUIDs are never emitted as individual values.
         for row_entry in SqlAlchemyGoogleRevenueSourceRowRepository(session).list(
             tenant_id,
