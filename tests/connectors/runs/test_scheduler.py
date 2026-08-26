@@ -323,6 +323,7 @@ def test_tick_isolates_one_tenant_failure(tmp_path: Path, monkeypatch: pytest.Mo
 
     @contextmanager
     def _flaky_ctx(tenant_id: UUID, *, session: Session | None = None) -> Iterator[None]:
+        """Fail tenant A's context so per-tenant fault isolation is observable."""
         if tenant_id == TENANT_A:
             raise RuntimeError("boom for tenant A")
         with real_ctx(tenant_id, session=session):
@@ -359,7 +360,8 @@ def test_tick_skips_activation_for_in_flight_owner(tmp_path: Path) -> None:
 
 def test_in_flight_debug_log_fingerprints_the_owner(tmp_path: Path, caplog) -> None:
     """DEBUG output never carries the raw guarded CMS content-owner id; README
-    presents UMS_LOG_LEVEL=DEBUG as operator-safe (PR #210 review round 5)."""
+    presents UMS_LOG_LEVEL=DEBUG as operator-safe (PR #210 review round 5).
+    """
     factory = _seeded_factory(tmp_path)
     fake = _RecordingExecutor(in_flight=frozenset({(TENANT_A, OWNER_A_ACTIVE)}))
     scheduler = _scheduler(factory, fake)
@@ -384,6 +386,7 @@ def test_tick_safely_swallows_enumeration_failure() -> None:
     """tick() itself raises on a broken session_factory; _tick_safely swallows it."""
 
     def _boom_factory() -> Session:
+        """Stand in for a session factory wired to an unavailable database."""
         raise RuntimeError("db unavailable")
 
     scheduler = scheduler_module.GroupSyncScheduler(

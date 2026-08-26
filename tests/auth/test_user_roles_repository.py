@@ -26,6 +26,7 @@ DEFAULT_ACTOR_USER_ID = UUID("00000000-0000-0000-0000-000000095003")
 
 
 def _build_db(tmp_path) -> str:
+    """Create a throwaway SQLite engine database for the repository under test."""
     url = f"sqlite+pysqlite:///{(tmp_path / 'repo.db').as_posix()}"
     engine = create_engine(url)
     SecurityBase.metadata.create_all(engine)
@@ -33,6 +34,7 @@ def _build_db(tmp_path) -> str:
 
 
 def _tenant(tenant_id: UUID = OTHER_TENANT_ID) -> Tenant:
+    """Build the ACTIVE tenant fixture the ambient tenant context carries."""
     now = datetime.now(UTC)
     return Tenant(
         id=tenant_id,
@@ -47,6 +49,7 @@ def _tenant(tenant_id: UUID = OTHER_TENANT_ID) -> Tenant:
 
 
 def _seed_user(session: Session, user_id: UUID, tenant_id: UUID) -> None:
+    """Insert one user row so actor/target foreign keys resolve."""
     session.add(
         UserORM(
             id=user_id,
@@ -58,6 +61,8 @@ def _seed_user(session: Session, user_id: UUID, tenant_id: UUID) -> None:
 
 
 def test_assign_role_uses_ambient_tenant_context(tmp_path):
+    """The assignment must be written under the ambient tenant context, not
+    guessed from parameters."""
     url = _build_db(tmp_path)
     engine = create_engine(url)
     with Session(engine) as setup:
@@ -107,6 +112,7 @@ def test_assign_role_adds_the_row_inside_its_savepoint(tmp_path):
         original_begin_nested = session.begin_nested
 
         def _record_pending(*args, **kwargs):
+            """Count pending assignment rows at the moment a savepoint opens."""
             pending_assignments_at_savepoint_open.append(
                 sum(
                     isinstance(obj, UserRoleAssignmentORM)
@@ -135,6 +141,7 @@ def test_assign_role_adds_the_row_inside_its_savepoint(tmp_path):
 
 
 def test_assign_role_rejects_actor_user_from_another_tenant(tmp_path):
+    """An actor outside the assignment's tenant fails closed."""
     url = _build_db(tmp_path)
     engine = create_engine(url)
     with Session(engine) as setup:
@@ -159,9 +166,11 @@ def test_assign_role_rejects_actor_user_from_another_tenant(tmp_path):
 
 
 def test_get_or_create_scope_concurrent_insert_race_is_recovered(tmp_path):
-    """When a concurrent writer inserts the same scope between our SELECT and INSERT,
-    _get_or_create_scope must catch the IntegrityError and return the existing row
-    instead of propagating an unhandled IntegrityError (which would cause a 500)."""
+    """When a concurrent writer inserts the same scope between our SELECT and
+    INSERT, _get_or_create_scope must catch the IntegrityError and return the
+    existing row instead of propagating an unhandled IntegrityError (which
+    would cause a 500).
+    """
     url = _build_db(tmp_path)
     engine = create_engine(url)
 
@@ -184,6 +193,7 @@ def test_get_or_create_scope_concurrent_insert_race_is_recovered(tmp_path):
         call_count = [0]
 
         def intercept(stmt, *args, **kwargs):
+            """Feed the race window: hide pre-existing rows from early reads."""
             call_count[0] += 1
             if call_count[0] == 1:
                 # Simulate the race window: our existence check ran before

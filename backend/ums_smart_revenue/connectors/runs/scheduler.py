@@ -226,6 +226,7 @@ class GroupSyncScheduler:
             return True
 
         def _detached_loop() -> None:
+            """Run ticks off-thread until close(); stop promptly on the flag."""
             while not stop.wait(interval_seconds):
                 if not _tick_once():
                     return
