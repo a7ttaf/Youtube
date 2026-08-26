@@ -3944,6 +3944,22 @@ def test_windows_dacl_parser_fail_closed() -> None:
     secure_listing = "\n".join(["accepted-run", "desktop\\winuser:(F)"])
     assert backup._windows_dacl_problems(secure_listing, "winuser") == []
 
+    # A stranger carrying Full control (not just a restricted ACE) must hit
+    # the dedicated non-owner refusal, and the missing owner grant stays
+    # reported alongside it.
+    stranger_listing = "\n".join(["accepted-run", "desktop\\svc_backup:(F)"])
+    stranger_problems = backup._windows_dacl_problems(stranger_listing, "winuser")
+    assert any(
+        problem.startswith("unexpected non-owner principal")
+        and "desktop\\svc_backup" in problem
+        and "full control" in problem
+        for problem in stranger_problems
+    )
+    assert any(
+        problem.startswith("no explicit Full-control grant")
+        for problem in stranger_problems
+    )
+
 
 def test_validate_dump_roles_covered_refuses_privileged_app_roles() -> None:
     """SUPERUSER/BYPASSRLS/LOGIN drift on app_tenant/app_platform refuses

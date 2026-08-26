@@ -2111,73 +2111,102 @@ _WINDOWS_DACLS_ALLOWED_PRINCIPALS = (
 )
 
 
+# ============================================================================
+# Purpose: Decompose the owner-only NTFS DACL verification into small,
+#   testable pieces -- listing-line parsing, infrastructure-principal
+#   allowlisting, and owner matching -- so the fail-closed decision loop in
+#   _windows_dacl_problems stays low-complexity.
+# Database/ORM: None.
+# Standards: Pure functions over icacls stdout; no I/O; fail-closed semantics
+#   preserved (inherited markers, unknown principals, and a missing owner
+#   Full-control grant are always reported as problems).
+# Blast Radius: None detected. Parser-only refactor; emitted messages are
+#   byte-identical, and _windows_enforce_owner_only_acl still raises on any
+#   reported problem.
+# Connections:
+#   - File: scripts/backup_database.py -> _windows_enforce_owner_only_acl
+#     consumes _windows_dacl_problems output to refuse insecure destinations.
+#   - File: tests/scripts/test_backup_content_gate.py ->
+#     test_windows_dacl_parser_fail_closed pins the allowlist behavior.
+# ============================================================================
+def _parse_icacls_listing_line(
+    raw_line: str,
+) -> tuple[str, str, str, set[str]] | None:
+    """Split one icacls listing line into (display, key, rights-text, codes).
+
+    Returns None for blank lines without a ``<principal>:<rights>`` shape.
+    """
+    line = raw_line.strip()
+    if not line or ":" not in line:
+        return None
+    # FIX: this box renders one line as "<full path> <principal>:<rights>",
+    # so split on the LAST colon -- everything before it (which includes
+    # the drive-letter colon of any merged path) belongs to the principal.
+    principal, _, rights = line.rpartition(":")
+    display = principal.strip()
+    right_codes: set[str] = set()
+    for token in re.findall(r"\(([A-Z]+(?:\s+[A-Z]+)*)\)", rights.upper()):
+        right_codes.update(token.split())
+    return display, display.lower(), rights.strip(), right_codes
+
+
+def _is_allowlisted_principal(principal_key: str) -> bool:
+    """Match principals that legitimately persist after /inheritance:r.
+
+    A principal qualifies by its tail name after the last backslash OR by its
+    full identity; see _WINDOWS_DACLS_ALLOWED_PRINCIPALS.
+    """
+    short_name = principal_key.rsplit("\\", 1)[-1]
+    return (
+        short_name in _WINDOWS_DACLS_ALLOWED_PRINCIPALS
+        or principal_key in {"system", "builtin\\administrators"}
+        or principal_key.endswith(
+            ("nt authority\\system", "builtin\\administrators")
+        )
+    )
+
+
+def _principal_matches_owner(principal_key: str, owner_key: str) -> bool:
+    """Match USERNAME with or without its machine/domain prefix."""
+    return bool(owner_key) and (
+        principal_key == owner_key or principal_key.endswith("\\" + owner_key)
+    )
+
+
 def _windows_dacl_problems(icacls_output: str, current_user: str) -> list[str]:
     r"""List reasons the icacls output is NOT an owner-only grant.
 
     Fail-closed allowlist semantics: only the current user (matched with or
     without its machine/domain prefix, since icacls prints e.g.
-    ``DESKTOP\\winuser`` while USERNAME reads ``winuser``), SYSTEM and
-    BUILTIN\\Administrators may hold grants. Inherited markers ('(I)'), any
-    other principal, or the absence of an explicit full-control grant for the
-    current user are all problems.
+    ``DESKTOP\\winuser`` while USERNAME reads ``winuser``) and the
+    infrastructure principals accepted by ``_is_allowlisted_principal`` may
+    hold grants. Inherited markers ('(I)'), any other principal, or the
+    absence of an explicit full-control grant for the current user are all
+    problems.
     """
     problems: list[str] = []
     owner_key = current_user.strip().lower()
-    allowed_principals = {"system", "builtin\\administrators"}
-    allowed_suffixes = ("nt authority\\system", "builtin\\administrators")
     owner_grant_seen = False
     for raw_line in icacls_output.splitlines():
-        line = raw_line.strip()
-        if not line or ":" not in line:
+        parsed = _parse_icacls_listing_line(raw_line)
+        if parsed is None:
             continue
-        # FIX: this box renders one line as "<full path> <principal>:<rights>",
-        # so split on the LAST colon -- everything before it (which includes
-        # the drive-letter colon of any merged path) belongs to the principal.
-        principal, _, rights = line.rpartition(":")
-        principal_key = principal.strip().lower()
-        rights_tokens = set(re.findall(r"\(([A-Z]+(?:\s+[A-Z]+)*)\)", rights.upper()))
-        flattened_tokens: set[str] = set()
-        for token in rights_tokens:
-            flattened_tokens.update(token.split())
-        if "I" in flattened_tokens:
-            problems.append(f"inherited access remains for {principal.strip()}")
+        principal, principal_key, rights, right_codes = parsed
+        if "I" in right_codes:
+            problems.append(f"inherited access remains for {principal}")
             continue
-        # FIX: infrastructure principals are matched by their FULL identity
-        # (so a domain account merely *named* SYSTEM, e.g. CORP\SYSTEM:(R), is
-        # rejected like any other stranger) and every other non-owner
-        # principal is flagged regardless of which rights it carries.
-        # Infrastructure grants persist here even after /inheritance:r, so
-        # they stay silently accepted; anything outside the allowlist is what
-        # the operator-class refusal cares about.
-        is_infrastructure = False
-        short_name = principal_key.rsplit("\\", 1)[-1]
-        if (
-            short_name in _WINDOWS_DACLS_ALLOWED_PRINCIPALS
-            or principal_key in allowed_principals
-            or principal_key.endswith(allowed_suffixes)
-        ):
+        if _is_allowlisted_principal(principal_key):
             continue
-        if "F" in flattened_tokens:
-            is_owner = (
-                principal_key == owner_key or principal_key.endswith("\\" + owner_key)
-            ) and bool(owner_key)
-            if is_owner:
+        if "F" in right_codes:
+            if _principal_matches_owner(principal_key, owner_key):
                 owner_grant_seen = True
-            elif is_infrastructure:
-                problems.append(
-                    f"infrastructure principal {principal.strip()} holds full "
-                    "control; revoke and rely on the owner grant"
-                )
             else:
                 problems.append(
-                    f"unexpected non-owner principal {principal.strip()} holds "
+                    f"unexpected non-owner principal {principal} holds "
                     "full control"
                 )
-            continue
-        if not is_infrastructure:
-            problems.append(
-                f"unexpected ACE for {principal.strip()}: {rights.strip()}"
-            )
+        else:
+            problems.append(f"unexpected ACE for {principal}: {rights}")
     if not owner_grant_seen:
         problems.append(
             f"no explicit Full-control grant for {current_user!r} was found"
