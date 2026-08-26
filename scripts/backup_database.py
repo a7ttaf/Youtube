@@ -1089,30 +1089,22 @@ def _roles_referenced_in_dump_listing(listing: str) -> set[str]:
     ``pg_restore --list`` ACL lines end with the TOC entry *owner*, not the
     GRANT/REVOKE grantees. Grantees are collected separately via
     ``ACL_GRANTEE_SQL`` on the dump snapshot.
+
+    FIX: the previous marker allowlist enumerated only common object types and
+    missed COLLATION, OPERATOR CLASS/FAMILY, CONVERSION, TEXT SEARCH * and
+    CONSTRAINT owners, so a backup could publish whose archive still referenced
+    a dropped role and later roll back part-way through pg_restore. Every TOC
+    entry's final field is its owning role (``-`` when none), so collect that
+    from every entry instead of matching markers.
     """
     roles: set[str] = set()
-    owner_markers = (
-        " TABLE ",
-        " SEQUENCE ",
-        " SCHEMA ",
-        " INDEX ",
-        " VIEW ",
-        " MATERIALIZED VIEW ",
-        " FUNCTION ",
-        " TYPE ",
-        " DOMAIN ",
-        " AGGREGATE ",
-        " FOREIGN TABLE ",
-        " ACL ",
-    )
     for line in listing.splitlines():
         stripped = line.strip()
         if not stripped or stripped.startswith(";") or not stripped[0].isdigit():
             continue
-        if any(marker in stripped for marker in owner_markers):
-            owner = stripped.rsplit(None, 1)[-1]
-            if owner != "-":
-                roles.add(owner)
+        owner = stripped.rsplit(None, 1)[-1]
+        if owner != "-":
+            roles.add(owner)
     return roles
 
 
@@ -1684,6 +1676,8 @@ if sys.platform == "win32":
 
     _FILE_FLAG_BACKUP_SEMANTICS = 0x02000000
     _OPEN_EXISTING = 3
+    # FlushFileBuffers requires a write-access handle; see its call below.
+    _GENERIC_WRITE = 0x40000000
     _KERNEL32.CreateFileW.restype = wintypes.HANDLE
     _KERNEL32.CreateFileW.argtypes = (
         wintypes.LPCWSTR,
@@ -1701,7 +1695,10 @@ if sys.platform == "win32":
         """Flush one directory entry via ``FlushFileBuffers`` on Windows."""
         handle = _KERNEL32.CreateFileW(
             str(path),
-            0,
+            # FIX: FlushFileBuffers requires a handle opened with write access;
+            # dwDesiredAccess=0 always failed with ERROR_ACCESS_DENIED, which
+            # the previously ignored BOOL result concealed.
+            _GENERIC_WRITE,
             0,
             None,
             _OPEN_EXISTING,
@@ -1709,9 +1706,22 @@ if sys.platform == "win32":
             None,
         )
         if handle == wintypes.HANDLE(-1).value:
-            return
+            # FIX: an INVALID_HANDLE_VALUE return was swallowed before, so a
+            # backup disk that refused the open looked durable with no flush
+            # ever attempted.
+            raise OSError(
+                ctypes.get_last_error(),
+                f"CreateFileW could not open {path} to flush its directory entry",
+            )
         try:
-            _KERNEL32.FlushFileBuffers(handle)
+            # FIX: FlushFileBuffers' BOOL result was ignored, so retention kept
+            # pruning older runs on the strength of an unflushed rename.
+            if not _KERNEL32.FlushFileBuffers(handle):
+                err = ctypes.get_last_error()
+                raise OSError(
+                    err,
+                    f"FlushFileBuffers failed for {path}: directory entry not durable",
+                )
         finally:
             _KERNEL32.CloseHandle(handle)
 
@@ -3019,19 +3029,20 @@ def _fsync_file(path: Path) -> None:
 
 
 def _fsync_directory(path: Path) -> None:
-    """Durably flush one directory entry when the platform supports it."""
-    try:
-        if os.name == "nt":
-            _flush_directory_entry(path)
-            return
-        directory_fd = os.open(path, os.O_RDONLY)
-        try:
-            os.fsync(directory_fd)
-        finally:
-            os.close(directory_fd)
-    except OSError:
-        # Directory-entry durability is best-effort on network/AV-backed paths.
+    """Durably flush one directory entry when the platform supports it.
+
+    Raises OSError on failure instead of absorbing it: publication and
+    retention prune older runs on this guarantee, so a directory entry that
+    cannot be flushed must stop the backup (PR #210 review round 2).
+    """
+    if os.name == "nt":
+        _flush_directory_entry(path)
         return
+    directory_fd = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
 
 
 def _sync_staging_before_publication(staging: Path) -> None:
@@ -3399,10 +3410,21 @@ def run_backup(args: argparse.Namespace, out_dir: Path) -> BackupOutcome:
         # artifacts and its verdict so the operator can see what the database
         # looked like at 02:00, but lands outside RUN_DIR_RE.
         destination = final_dir if verdict.accepted else rejected_dir
-        _sync_staging_before_publication(staging)
-        staging.rename(destination)
-        _restrict_run_dir_mode(destination, out_dir)
-        _sync_parent_directory_entry(out_dir)
+        # FIX: publication used to proceed when the staging or publication
+        # directory entries could not be flushed -- an unsupported or
+        # network-backed backup disk then looked durable and retention pruned
+        # older runs against it. Refuse the run instead of publishing.
+        try:
+            _sync_staging_before_publication(staging)
+            staging.rename(destination)
+            _restrict_run_dir_mode(destination, out_dir)
+            _sync_parent_directory_entry(out_dir)
+        except OSError as exc:
+            raise BackupError(
+                EXIT_ARTIFACT_INVALID,
+                f"backup destination {destination.parent} is not durably writable: "
+                f"{exc}; refusing to publish or prune",
+            ) from exc
         moved = True
     finally:
         if not moved:

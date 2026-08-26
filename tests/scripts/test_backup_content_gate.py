@@ -3433,6 +3433,60 @@ def test_validate_dump_roles_covered_ignores_empty_acl_grantee_set() -> None:
     assert "stale_owner" in str(raised.value)
 
 
+def test_dump_listing_owner_collection_covers_every_owned_toc_entry() -> None:
+    """Owner must come from every owned TOC entry, not a marker allowlist.
+
+    Collations, operator classes/families, conversions, text-search objects,
+    constraints, extended statistics, and sequence-set lines were all missed by
+    the previous marker list, so an archive still referencing a role that had
+    been reassigned and dropped could publish and then roll back part-way
+    through pg_restore (PR #210 review round 2).
+    """
+    listing = "\n".join(
+        [
+            "; comment lines are skipped",
+            "215; 129 16523 COLLATION public de_de coll_owner",
+            "216; 2612 16524 OPERATOR CLASS public int8_ops btree opclass_owner",
+            "217; 2745 16525 OPERATOR FAMILY public int_ops opfam_owner",
+            "218; 2610 16526 CONVERSION public iso8859_to_utf8 conv_owner",
+            "220; 3777 16528 TEXT SEARCH CONFIGURATION public websearch tsconfig_owner",
+            "221; 3778 16529 TEXT SEARCH DICTIONARY public simple tsdict_owner",
+            "222; 3779 16530 TEXT SEARCH PARSER public default_tsparser tsparser_owner",
+            "223; 3780 16531 TEXT SEARCH TEMPLATE public snowball tstemplate_owner",
+            "224; 2606 16532 CONSTRAINT public tenants_pkey constraint_owner",
+            "230; 3490 16533 STATISTICS public s1 stats_owner",
+            "12; 1259 16421 TABLE DATA public channels data_owner",
+            "4001; 0 16556 SEQUENCE SET public channels_id_seq seqset_owner",
+            "5000; 0 0 BLOB -",
+            "not-a-numbered TOC line stays out entirely",
+        ]
+    )
+    assert backup._roles_referenced_in_dump_listing(listing) == {
+        "coll_owner",
+        "opclass_owner",
+        "opfam_owner",
+        "conv_owner",
+        "tsconfig_owner",
+        "tsdict_owner",
+        "tsparser_owner",
+        "tstemplate_owner",
+        "constraint_owner",
+        "stats_owner",
+        "data_owner",
+        "seqset_owner",
+    }
+
+
+def test_validate_dump_roles_covered_rejects_collation_owner() -> None:
+    """A collation owner missing from roles.sql must refuse publication."""
+    listing = "215; 129 16523 COLLATION public de_de ghost_collation_owner\n"
+    roles_body = "CREATE ROLE app_tenant;\nCREATE ROLE app_platform;\n"
+    with pytest.raises(backup.BackupError) as raised:
+        backup._validate_dump_roles_covered(listing=listing, roles_body=roles_body)
+    assert raised.value.code == backup.EXIT_ARTIFACT_INVALID
+    assert "ghost_collation_owner" in str(raised.value)
+
+
 def test_parse_role_name_lines_skips_blank() -> None:
     """ACL grantee parser ignores blank lines from psql -At output."""
     assert backup._parse_role_name_lines("app_tenant\n\napp_platform\n") == {
@@ -3573,6 +3627,95 @@ def test_sync_staging_before_publication_fsyncs_every_artifact(
         backup.MANIFEST_NAME,
         "staging/",
     ]
+
+
+def test_fsync_directory_does_not_absorb_flush_failures(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A directory entry that cannot be flushed must stop the backup, not be
+    swallowed as best-effort -- retention prunes older runs on this guarantee."""
+    if sys.platform == "win32":
+        monkeypatch.setattr(
+            backup,
+            "_flush_directory_entry",
+            lambda path: (_ for _ in ()).throw(OSError(13, "directory flush refused")),
+        )
+    else:
+        real_open = backup.os.open
+
+        def _fake_fs_sync(fd: int) -> None:
+            """Fail the flush after the directory fd opened normally."""
+            raise OSError(13, "directory flush refused")
+
+        fd = real_open(tmp_path, backup.os.O_RDONLY)
+        monkeypatch.setattr(backup.os, "open", lambda *a, **k: fd)
+        monkeypatch.setattr(backup.os, "fsync", _fake_fs_sync)
+
+    with pytest.raises(OSError):
+        backup._fsync_directory(tmp_path)
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="FlushFileBuffers path is Windows-only")
+def test_windows_directory_flush_api_failures_raise(monkeypatch: pytest.MonkeyPatch) -> None:
+    """CreateFileW's INVALID_HANDLE_VALUE and FlushFileBuffers' BOOL result must
+    both surface as OSError instead of reading as a silent success (PR #210
+    review round 2)."""
+    from ctypes import wintypes
+
+    invalid_handle = wintypes.HANDLE(-1).value
+    calls = {"close": 0}
+
+    class _FakeKernel32:
+        def __init__(self, *, open_ok: bool, flush_ok: bool) -> None:
+            self._open_ok = open_ok
+            self._flush_ok = flush_ok
+
+        def CreateFileW(self, *_a: object, **_k: object) -> int:  # noqa: N802
+            return 4242 if self._open_ok else invalid_handle
+
+        def FlushFileBuffers(self, _handle: int) -> int:  # noqa: N802
+            return 1 if self._flush_ok else 0
+
+        def CloseHandle(self, _handle: int) -> int:  # noqa: N802
+            calls["close"] += 1
+            return 1
+
+    some_path = Path("staging")
+
+    monkeypatch.setattr(backup, "_KERNEL32", _FakeKernel32(open_ok=False, flush_ok=True))
+    with pytest.raises(OSError) as open_failed:
+        backup._flush_directory_entry(some_path)
+    assert "CreateFileW" in str(open_failed.value)
+    assert calls["close"] == 0, "a failed open owns no handle to close"
+
+    monkeypatch.setattr(backup, "_KERNEL32", _FakeKernel32(open_ok=True, flush_ok=False))
+    with pytest.raises(OSError) as flush_failed:
+        backup._flush_directory_entry(some_path)
+    assert "FlushFileBuffers" in str(flush_failed.value)
+    assert calls["close"] == 1, "the handle is still released on flush failure"
+
+    monkeypatch.setattr(backup, "_KERNEL32", _FakeKernel32(open_ok=True, flush_ok=True))
+    backup._flush_directory_entry(some_path)
+    assert calls["close"] == 2
+
+
+def test_run_backup_refuses_publication_when_directory_flush_fails(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, clock: _Clock
+) -> None:
+    """A non-durable output directory stops the run before publication and
+    before retention bookkeeping ever sees it (exit 6, nothing pruned)."""
+
+    def _flush_refused(path: Path) -> None:
+        """Simulate a disk whose directory entries cannot be flushed."""
+        raise OSError(13, "directory flush refused")
+
+    monkeypatch.setattr(backup, "_sync_staging_before_publication", _flush_refused)
+
+    code = _run_cli(monkeypatch, tmp_path, REAL, "--establish-watermark")
+
+    assert code == backup.EXIT_ARTIFACT_INVALID
+    assert _run_dirs(tmp_path) == []
+    assert not (tmp_path / backup.WATERMARK_NAME).is_file()
 
 
 def test_run_backup_syncs_before_and_after_publication_rename(
