@@ -3711,22 +3711,26 @@ def test_windows_directory_flush_api_failures_raise(monkeypatch: pytest.MonkeyPa
 def test_windows_directory_open_requests_normal_sharing(monkeypatch) -> None:
     """dwShareMode=0 turned any concurrent reader of the directory (Explorer,
     indexer, antivirus) into ERROR_SHARING_VIOLATION; the durability open must
-    request full sharing so benign co-readers cannot kill the nightly backup."""
+    request full sharing so benign co-readers cannot kill the nightly backup.
+    """
     seen = {"share": None}
 
     class _SharingKernel32:
         """Stub whose only job is to record the dwShareMode we ask for."""
 
-        def CreateFileW(self, _path, _access, share, *_a, **_k):  # noqa: N802
+        @staticmethod
+        def CreateFileW(_path, _access, share, *_a, **_k):  # noqa: N802
             """Record dwShareMode and hand back a live handle."""
             seen["share"] = share
             return 4242
 
-        def FlushFileBuffers(self, _handle: int) -> int:  # noqa: N802
+        @staticmethod
+        def FlushFileBuffers(_handle: int) -> int:  # noqa: N802
             """Report a successful flush."""
             return 1
 
-        def CloseHandle(self, _handle: int) -> int:  # noqa: N802
+        @staticmethod
+        def CloseHandle(_handle: int) -> int:  # noqa: N802
             """Release the handle."""
             return 1
 
@@ -3793,8 +3797,8 @@ def test_run_backup_quarantines_destination_when_post_rename_flush_fails(
 ) -> None:
     """A parent flush that fails after the rename must move the published run
     into the .rejected namespace instead of leaving an explicitly non-durable
-    directory in the accepted set where later runs fold it into the watermark."""
-
+    directory in the accepted set where later runs fold it into the watermark.
+    """
     real_restrict = backup._restrict_run_dir_mode
     state = {"published": False, "sync_attempts": 0}
 

@@ -3300,6 +3300,53 @@ class _RunReport:
 #   - File: scripts/backup_database.py -> ``_evaluate_content`` supplies the
 #     verdict this function acts on; ``main`` persists ``next_watermark``.
 # ============================================================================
+# ============================================================================
+# Purpose: Durably publish one staged run under its final name. Pre-rename
+#   failures leave staging untouched for the caller's cleanup; a failure AFTER
+#   the rename quarantines the already-published directory into the ``.rejected``
+#   namespace so an explicitly non-durable run can never sit in the accepted
+#   set, fold into the watermark, or steer retention.
+# Database/ORM: None.
+# Standards: Typed BackupError(EXIT_ARTIFACT_INVALID) at both failure points;
+#   the quarantine is best-effort and reports when it too fails.
+# Blast Radius: Disaster recovery publication and retention semantics (PR #210
+#   review round 4).
+# Connections:
+#   - File: scripts/backup_database.py -> run_backup calls this with the
+#     accepted-or-quarantined destination it computed from the content gate.
+# ============================================================================
+def _publish_staging_run(staging: Path, destination: Path, out_dir: Path) -> None:
+    """Move ``staging`` to ``destination`` only if the move can be made durable."""
+    try:
+        _sync_staging_before_publication(staging)
+        staging.rename(destination)
+    except OSError as exc:
+        raise BackupError(
+            EXIT_ARTIFACT_INVALID,
+            f"backup destination {destination.parent} is not durably writable: "
+            f"{exc}; refusing to publish or prune",
+        ) from exc
+    try:
+        _restrict_run_dir_mode(destination, out_dir)
+        _sync_parent_directory_entry(out_dir)
+    except OSError as exc:
+        quarantined = destination.with_name(destination.name + REJECTED_SUFFIX)
+        quarantine_error = ""
+        try:
+            destination.rename(quarantined)
+            _sync_parent_directory_entry(quarantined.parent)
+        except OSError as quarantine_exc:
+            quarantine_error = (
+                f"; additionally could not quarantine to "
+                f"{quarantined.name}: {quarantine_exc}"
+            )
+        raise BackupError(
+            EXIT_ARTIFACT_INVALID,
+            f"published backup {destination.name} could not be made durable: "
+            f"{exc}{quarantine_error}; it was moved out of the accepted set",
+        ) from exc
+
+
 def run_backup(args: argparse.Namespace, out_dir: Path) -> BackupOutcome:
     """Dump the Postgres container into a timestamped run under ``out_dir``.
 
@@ -3433,43 +3480,7 @@ def run_backup(args: argparse.Namespace, out_dir: Path) -> BackupOutcome:
         # artifacts and its verdict so the operator can see what the database
         # looked like at 02:00, but lands outside RUN_DIR_RE.
         destination = final_dir if verdict.accepted else rejected_dir
-        # FIX: publication used to proceed when the staging or publication
-        # directory entries could not be flushed -- an unsupported or
-        # network-backed backup disk then looked durable and retention pruned
-        # older runs against it. Refuse the run instead of publishing.
-        try:
-            _sync_staging_before_publication(staging)
-            staging.rename(destination)
-        except OSError as exc:
-            raise BackupError(
-                EXIT_ARTIFACT_INVALID,
-                f"backup destination {destination.parent} is not durably writable: "
-                f"{exc}; refusing to publish or prune",
-            ) from exc
-        try:
-            _restrict_run_dir_mode(destination, out_dir)
-            _sync_parent_directory_entry(out_dir)
-        except OSError as exc:
-            # FIX: when the post-rename flush failed, the accepted run already
-            # sat under its final ums-backup-...Z name while cleanup removed
-            # only the now-absent staging path -- so the next run folded an
-            # explicitly non-durable run into the watermark and retention.
-            # Quarantine the published directory before refusing.
-            quarantined = destination.with_name(destination.name + REJECTED_SUFFIX)
-            quarantine_error = ""
-            try:
-                destination.rename(quarantined)
-                _sync_parent_directory_entry(quarantined.parent)
-            except OSError as quarantine_exc:
-                quarantine_error = (
-                    f"; additionally could not quarantine to "
-                    f"{quarantined.name}: {quarantine_exc}"
-                )
-            raise BackupError(
-                EXIT_ARTIFACT_INVALID,
-                f"published backup {destination.name} could not be made durable: "
-                f"{exc}{quarantine_error}; it was moved out of the accepted set",
-            ) from exc
+        _publish_staging_run(staging, destination, out_dir)
         moved = True
     finally:
         if not moved:
