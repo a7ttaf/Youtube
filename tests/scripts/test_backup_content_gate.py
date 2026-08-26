@@ -3707,6 +3707,35 @@ def test_windows_directory_flush_api_failures_raise(monkeypatch: pytest.MonkeyPa
     assert calls["close"] == 2
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="FlushFileBuffers path is Windows-only")
+def test_windows_directory_open_requests_normal_sharing(monkeypatch) -> None:
+    """dwShareMode=0 turned any concurrent reader of the directory (Explorer,
+    indexer, antivirus) into ERROR_SHARING_VIOLATION; the durability open must
+    request full sharing so benign co-readers cannot kill the nightly backup."""
+    seen = {"share": None}
+
+    class _SharingKernel32:
+        """Stub whose only job is to record the dwShareMode we ask for."""
+
+        def CreateFileW(self, _path, _access, share, *_a, **_k):  # noqa: N802
+            """Record dwShareMode and hand back a live handle."""
+            seen["share"] = share
+            return 4242
+
+        def FlushFileBuffers(self, _handle: int) -> int:  # noqa: N802
+            """Report a successful flush."""
+            return 1
+
+        def CloseHandle(self, _handle: int) -> int:  # noqa: N802
+            """Release the handle."""
+            return 1
+
+    monkeypatch.setattr(backup, "_KERNEL32", _SharingKernel32())
+    backup._flush_directory_entry(Path("staging"))
+
+    assert seen["share"] == backup._FILE_SHARE_READWRITEDELETE
+
+
 def test_run_backup_refuses_publication_when_directory_flush_fails(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, clock: _Clock
 ) -> None:
@@ -3724,6 +3753,73 @@ def test_run_backup_refuses_publication_when_directory_flush_fails(
 
     assert code == backup.EXIT_ARTIFACT_INVALID
     assert _run_dirs(tmp_path) == []
+    assert not (tmp_path / backup.WATERMARK_NAME).is_file()
+
+
+def test_acl_grantee_sql_covers_every_dumped_acl_catalog() -> None:
+    """Grantee collection must span every ACL catalog pg_dump expands.
+
+    Large objects, procedural languages, foreign-data wrappers and foreign
+    servers were missing from the union, so a grantee dropped between the two
+    captures could sit in a GRANT the archive replays while roles.sql lacked
+    it -- validation passed, restore failed part-way (PR #210 review round 4).
+    """
+    sql = backup.ACL_GRANTEE_SQL
+    for fragment in (
+        "pg_catalog.pg_class c",
+        "c.relacl",
+        "pg_catalog.pg_namespace n",
+        "n.nspacl",
+        "pg_catalog.pg_proc p",
+        "p.proacl",
+        "pg_catalog.pg_type t",
+        "t.typacl",
+        "pg_catalog.pg_default_acl d",
+        "d.defaclacl",
+        "pg_catalog.pg_language l",
+        "l.lanacl",
+        "pg_catalog.pg_foreign_data_wrapper f",
+        "f.fdwacl",
+        "pg_catalog.pg_foreign_server s",
+        "s.srvacl",
+        "pg_catalog.pg_largeobject_metadata lm",
+        "lm.lomacl",
+    ):
+        assert fragment in sql, fragment
+
+
+def test_run_backup_quarantines_destination_when_post_rename_flush_fails(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, clock: _Clock
+) -> None:
+    """A parent flush that fails after the rename must move the published run
+    into the .rejected namespace instead of leaving an explicitly non-durable
+    directory in the accepted set where later runs fold it into the watermark."""
+
+    real_restrict = backup._restrict_run_dir_mode
+    state = {"published": False, "sync_attempts": 0}
+
+    def _restrict_then_mark(destination: Path, out_dir: Path) -> None:
+        """Mark that the accepted name exists once the rename has landed."""
+        real_restrict(destination, out_dir)
+        state["published"] = True
+
+    def _flush_refused_after_publish(parent: Path) -> None:
+        """Fail only the first durability sync after publication."""
+        if state["published"] and state["sync_attempts"] == 0:
+            state["sync_attempts"] += 1
+            raise OSError(13, "directory flush refused")
+
+    monkeypatch.setattr(backup, "_restrict_run_dir_mode", _restrict_then_mark)
+    monkeypatch.setattr(backup, "_sync_parent_directory_entry", _flush_refused_after_publish)
+
+    code = _run_cli(monkeypatch, tmp_path, REAL, "--establish-watermark")
+
+    assert code == backup.EXIT_ARTIFACT_INVALID
+    dirs = _run_dirs(tmp_path)
+    assert dirs, "the run happened and left an artifact"
+    assert all(name.endswith(backup.REJECTED_SUFFIX) for name in dirs), (
+        "the non-durable run must not remain in the accepted namespace"
+    )
     assert not (tmp_path / backup.WATERMARK_NAME).is_file()
 
 

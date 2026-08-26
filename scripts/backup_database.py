@@ -1005,6 +1005,22 @@ FROM (
   UNION ALL
   SELECT (aclexplode(d.defaclacl)).grantee
   FROM pg_catalog.pg_default_acl d
+  UNION ALL
+  SELECT (aclexplode(l.lanacl)).grantee
+  FROM pg_catalog.pg_language l
+  WHERE l.lanacl IS NOT NULL
+  UNION ALL
+  SELECT (aclexplode(f.fdwacl)).grantee
+  FROM pg_catalog.pg_foreign_data_wrapper f
+  WHERE f.fdwacl IS NOT NULL
+  UNION ALL
+  SELECT (aclexplode(s.srvacl)).grantee
+  FROM pg_catalog.pg_foreign_server s
+  WHERE s.srvacl IS NOT NULL
+  UNION ALL
+  SELECT (aclexplode(lm.lomacl)).grantee
+  FROM pg_catalog.pg_largeobject_metadata lm
+  WHERE lm.lomacl IS NOT NULL
 ) g
 JOIN pg_catalog.pg_roles r ON r.oid = g.gid
 WHERE g.gid <> 0
@@ -1678,6 +1694,10 @@ if sys.platform == "win32":
     _OPEN_EXISTING = 3
     # FlushFileBuffers requires a write-access handle; see its call below.
     _GENERIC_WRITE = 0x40000000
+    # Zero share mode makes any concurrent reader (Explorer, indexer,
+    # antivirus) turn this durability open into ERROR_SHARING_VIOLATION; allow
+    # normal sharing -- FlushFileBuffers needs only our write access.
+    _FILE_SHARE_READWRITEDELETE = 0x7
     _KERNEL32.CreateFileW.restype = wintypes.HANDLE
     _KERNEL32.CreateFileW.argtypes = (
         wintypes.LPCWSTR,
@@ -1699,7 +1719,10 @@ if sys.platform == "win32":
             # dwDesiredAccess=0 always failed with ERROR_ACCESS_DENIED, which
             # the previously ignored BOOL result concealed.
             _GENERIC_WRITE,
-            0,
+            # FIX: a zero dwShareMode turned any concurrent open of the
+            # directory into ERROR_SHARING_VIOLATION, rejecting otherwise
+            # valid nightly backups behind benign co-readers.
+            _FILE_SHARE_READWRITEDELETE,
             None,
             _OPEN_EXISTING,
             _FILE_FLAG_BACKUP_SEMANTICS,
@@ -3417,13 +3440,35 @@ def run_backup(args: argparse.Namespace, out_dir: Path) -> BackupOutcome:
         try:
             _sync_staging_before_publication(staging)
             staging.rename(destination)
-            _restrict_run_dir_mode(destination, out_dir)
-            _sync_parent_directory_entry(out_dir)
         except OSError as exc:
             raise BackupError(
                 EXIT_ARTIFACT_INVALID,
                 f"backup destination {destination.parent} is not durably writable: "
                 f"{exc}; refusing to publish or prune",
+            ) from exc
+        try:
+            _restrict_run_dir_mode(destination, out_dir)
+            _sync_parent_directory_entry(out_dir)
+        except OSError as exc:
+            # FIX: when the post-rename flush failed, the accepted run already
+            # sat under its final ums-backup-...Z name while cleanup removed
+            # only the now-absent staging path -- so the next run folded an
+            # explicitly non-durable run into the watermark and retention.
+            # Quarantine the published directory before refusing.
+            quarantined = destination.with_name(destination.name + REJECTED_SUFFIX)
+            quarantine_error = ""
+            try:
+                destination.rename(quarantined)
+                _sync_parent_directory_entry(quarantined.parent)
+            except OSError as quarantine_exc:
+                quarantine_error = (
+                    f"; additionally could not quarantine to "
+                    f"{quarantined.name}: {quarantine_exc}"
+                )
+            raise BackupError(
+                EXIT_ARTIFACT_INVALID,
+                f"published backup {destination.name} could not be made durable: "
+                f"{exc}{quarantine_error}; it was moved out of the accepted set",
             ) from exc
         moved = True
     finally:
