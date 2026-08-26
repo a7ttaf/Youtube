@@ -354,8 +354,23 @@ def _write_run(
             "superuser": "ums",
             "system_identifier": identity.system_identifier,
         }
-    if recorded_bytes is not None:
-        body["artifacts"] = {name: {"bytes": size} for name, size in recorded_bytes.items()}
+    if artifacts:
+        # Production manifests always record byte sizes and sha256 digests for
+        # both artifacts; the fixture mirrors that so _run_is_published_backup
+        # -- which now REQUIRES the metadata -- keeps judging these runs valid.
+        artifact_entries = {
+            name: {
+                "bytes": (run / name).stat().st_size,
+                "sha256": backup._sha256(run / name),
+            }
+            for name in (backup.DUMP_NAME, backup.ROLES_NAME)
+        }
+        if recorded_bytes is not None:
+            # Legacy override knob: deliberately lying sizes exercise the
+            # mismatch refusals below.
+            for name, size in recorded_bytes.items():
+                artifact_entries[name]["bytes"] = size
+        body["artifacts"] = artifact_entries
     if counts is not None:
         body["table_row_counts"] = counts
         body["content_gate"] = {
@@ -2219,7 +2234,9 @@ def test_a_transient_lock_is_retried_rather_than_failing_the_run(tmp_path: Path)
     attempts = {"n": 0}
     real_open = Path.open
 
-    def flaky_open(self: Path, *args: object, **kwargs: object):  # type: ignore[no-untyped-def]
+    def flaky_open(
+        self: Path, *args: object, **kwargs: object
+    ) -> object:
         """flaky open."""
         if self == target:
             attempts["n"] += 1
@@ -2549,7 +2566,7 @@ def test_restore_roles_tolerates_bootstrap_duplicate_nonzero(
     roles_path = tmp_path / restore.ROLES_NAME
     roles_path.write_text("CREATE ROLE ums;\nCREATE ROLE app_tenant;\n", encoding="utf-8")
 
-    def fake_run_with_file(*_a, **_k):
+    def fake_run_with_file(*_a: object, **_k: object) -> int:
         """fake run with file."""
         return subprocess.CompletedProcess(
             args=[],
@@ -2574,7 +2591,7 @@ def test_restore_roles_rejects_unexpected_error_line(
     roles_path = tmp_path / restore.ROLES_NAME
     roles_path.write_text("CREATE ROLE app_tenant;\n", encoding="utf-8")
 
-    def fake_run_with_file(*_a, **_k):
+    def fake_run_with_file(*_a: object, **_k: object) -> int:
         """fake run with file."""
         return subprocess.CompletedProcess(
             args=[],
@@ -2600,7 +2617,7 @@ def test_restore_roles_rejects_nonzero_without_allowed_error(
     roles_path = tmp_path / restore.ROLES_NAME
     roles_path.write_text("CREATE ROLE app_tenant;\n", encoding="utf-8")
 
-    def fake_run_with_file(*_a, **_k):
+    def fake_run_with_file(*_a: object, **_k: object) -> int:
         """fake run with file."""
         return subprocess.CompletedProcess(
             args=[],
@@ -2623,7 +2640,7 @@ def test_restore_roles_rejects_fatal_even_after_allowed_duplicate(
     roles_path = tmp_path / restore.ROLES_NAME
     roles_path.write_text("CREATE ROLE app_tenant;\n", encoding="utf-8")
 
-    def fake_run_with_file(*_a, **_k):
+    def fake_run_with_file(*_a: object, **_k: object) -> int:
         """fake run with file."""
         return subprocess.CompletedProcess(
             args=[],
@@ -3797,6 +3814,147 @@ def test_publish_staging_run_quarantine_survives_a_taken_rejected_name(
     assert "could not quarantine to" in message
 
 
+def test_run_is_published_backup_requires_artifact_metadata(tmp_path: Path) -> None:
+    """Two nonempty artifact files alone must not read as a published backup;
+    hand-planted manifests without recorded bytes/sha256 previously poisoned
+    the watermark through _accepted_published_counts (PR #210 review round 8).
+    """
+    run = tmp_path / "ums-backup-20260826T000000Z"
+    run.mkdir()
+    dump_bytes = b"PGDMP-" * 16
+    roles_bytes = b"CREATE ROLE app_tenant;"
+    (run / backup.DUMP_NAME).write_bytes(dump_bytes)
+    (run / backup.ROLES_NAME).write_bytes(roles_bytes)
+    manifest = {
+        "schema": backup.MANIFEST_SCHEMA,
+        "artifacts": {
+            backup.DUMP_NAME: {
+                "bytes": len(dump_bytes),
+                "sha256": backup._sha256(run / backup.DUMP_NAME),
+            },
+            backup.ROLES_NAME: {
+                "bytes": len(roles_bytes),
+                "sha256": backup._sha256(run / backup.ROLES_NAME),
+            },
+        },
+        "table_row_counts": {"public.channels": 1},
+    }
+    assert backup._run_is_published_backup(run, manifest) is True
+
+    del manifest["artifacts"]
+    assert backup._run_is_published_backup(run, manifest) is False
+
+    manifest["artifacts"] = {
+        name: {} for name in (backup.DUMP_NAME, backup.ROLES_NAME)
+    }
+    assert backup._run_is_published_backup(run, manifest) is False
+
+    bad_size = dict(manifest["artifacts"][backup.DUMP_NAME])
+    bad_size["bytes"] = len(dump_bytes) + 1
+    manifest["artifacts"][backup.DUMP_NAME] = bad_size
+    assert backup._run_is_published_backup(run, manifest) is False
+
+
+def test_execute_restore_clears_target_only_when_allow_nonempty(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The destructive schema rebuild must run exactly on --allow-nonempty and
+    land between the emptiness guard and the roles apply (round-8 P1).
+    """
+    from types import SimpleNamespace
+
+    order: list[str] = []
+    monkeypatch.setattr(restore, "_await_postgres", lambda *a, **k: None)
+    monkeypatch.setattr(
+        restore, "_guard_empty", lambda *a, **k: order.append("guard")
+    )
+    monkeypatch.setattr(
+        restore,
+        "_clear_target_user_objects",
+        lambda container, timeout: order.append("clear"),
+    )
+    monkeypatch.setattr(
+        restore,
+        "_restore_roles",
+        lambda container, path, timeout: order.append("roles") or set(),
+    )
+    monkeypatch.setattr(
+        restore, "_restore_data", lambda *a, **k: order.append("data")
+    )
+    monkeypatch.setattr(restore, "_verify", lambda *a, **k: True)
+
+    def _run(*, allow_nonempty: bool) -> bool:
+        order.clear()
+        args = SimpleNamespace(
+            timeout=5,
+            allow_nonempty=allow_nonempty,
+            wait_for_postgres=60,
+            docker_timeout=5,
+        )
+        return restore._execute_restore("container", tmp_path, args, {})
+
+    assert _run(allow_nonempty=True) is True
+    assert order.index("guard") < order.index("clear") < order.index("roles")
+
+    assert _run(allow_nonempty=False) is True
+    assert "clear" not in order
+
+
+def test_windows_dacl_parser_fail_closed() -> None:
+    """icacls parsing must treat inheritance and group principals as failures
+    while accepting an explicit owner-only full-control grant."""
+    listing = "\n".join(
+        [
+            "accepted-run NT AUTHORITY\\SYSTEM:(I)(F)",
+            "BUILTIN\\Users:(I)(RX)",
+            "desktop\\winuser:(F)",
+        ]
+    )
+    problems = backup._windows_dacl_problems(listing, "winuser")
+
+    assert any("inherited access" in problem for problem in problems)
+    assert any("group/Well-Known principal" in problem for problem in problems)
+    assert not any(
+        problem.startswith("no explicit Full-control") for problem in problems
+    )
+
+    secure_listing = "\n".join(["accepted-run", "desktop\\winuser:(F)"])
+    assert backup._windows_dacl_problems(secure_listing, "winuser") == []
+
+
+def test_validate_dump_roles_covered_refuses_privileged_app_roles() -> None:
+    """SUPERUSER/BYPASSRLS/LOGIN drift on app_tenant/app_platform refuses
+    publication: the restore replays these attributes before the archive and
+    no migration reruns afterwards (round-8 P1)."""
+    clean = (
+        "CREATE ROLE app_tenant WITH NOSUPERUSER NOBYPASSRLS NOLOGIN;\n"
+        "CREATE ROLE app_platform WITH NOSUPERUSER NOBYPASSRLS NOLOGIN;\n"
+    )
+    empty_listing = ""
+    backup._validate_dump_roles_covered(listing=empty_listing, roles_body=clean)
+
+    with pytest.raises(backup.BackupError) as superuser_drift:
+        backup._validate_dump_roles_covered(
+            listing="3; 2615 16384 TABLE public tenants app_tenant\n",
+            roles_body=(
+                "CREATE ROLE app_tenant WITH SUPERUSER;\n"
+                "CREATE ROLE app_platform;\n"
+            ),
+        )
+    assert "SUPERUSER" in str(superuser_drift.value)
+
+    with pytest.raises(backup.BackupError) as bypassrls_login:
+        backup._validate_dump_roles_covered(
+            listing="215; 129 16523 COLLATION public de_de app_tenant\n",
+            roles_body=(
+                "CREATE ROLE app_tenant WITH LOGIN BYPASSRLS;\n"
+                "ALTER ROLE app_platform WITH LOGIN;\n"
+            ),
+        )
+    assert "BYPASSRLS" in str(bypassrls_login.value)
+    assert "LOGIN" in str(bypassrls_login.value)
+
+
 def test_acl_grantee_sql_covers_every_dumped_acl_catalog() -> None:
     """Grantee collection must span every ACL catalog pg_dump expands.
 
@@ -3845,9 +4003,11 @@ def test_run_backup_quarantines_destination_when_post_rename_flush_fails(
     real_restrict = backup._restrict_run_dir_mode
     state = {"published": False, "sync_attempts": 0}
 
-    def _restrict_then_mark(destination: Path, out_dir: Path) -> None:
+    def _restrict_then_mark(
+        destination: Path, out_dir: Path, *, strict: bool = False
+    ) -> None:
         """Mark that the accepted name exists once the rename has landed."""
-        real_restrict(destination, out_dir)
+        real_restrict(destination, out_dir, strict=strict)
         state["published"] = True
 
     def _flush_refused_after_publish(parent: Path) -> None:

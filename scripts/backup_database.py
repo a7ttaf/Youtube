@@ -134,6 +134,7 @@ Usage::
 from __future__ import annotations
 
 import argparse
+import getpass
 import hashlib
 import json
 import os
@@ -145,6 +146,7 @@ import threading
 import time
 import traceback
 import uuid
+from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -1129,10 +1131,68 @@ def _roles_referenced_in_dump_listing(listing: str) -> set[str]:
     return roles
 
 
+_REQUIRED_UNPRIVILEGED_ROLES = ("app_tenant", "app_platform")
+_PRIVILEGED_ATTRIBUTE_TOKENS = frozenset({"LOGIN", "SUPERUSER", "BYPASSRLS"})
+
+
+def _collect_role_attribute_tokens(roles_body: str) -> dict[str, set[str]]:
+    """Map each role name to the uppercase attribute tokens pg_dumpall emitted."""
+    tokens_by_role: dict[str, set[str]] = {}
+    for statement in roles_body.split(";"):
+        statement = statement.strip()
+        if not statement:
+            continue
+        match = re.match(
+            r"(?:CREATE|ALTER)\s+ROLE\s+(\"?[A-Za-z0-9_]+\"?)\s*(?:WITH)?\s*(.*)",
+            statement,
+            re.IGNORECASE | re.DOTALL,
+        )
+        if not match:
+            continue
+        role_name = match.group(1).strip('"').lower()
+        tail = re.sub(r"\s+", " ", match.group(2)).upper()
+        tokens = {token for token in tail.split(" ") if token.isalpha()}
+        tokens_by_role.setdefault(role_name, set()).update(tokens)
+    return tokens_by_role
+
+
+def _role_privilege_drift_problems(roles_body: str) -> list[str]:
+    """Detect drifted privileges on app roles (AGENTS.md L53-L54).
+
+    pg_dumpall records positive deviations; a roles.sql that carries LOGIN,
+    SUPERUSER or BYPASSRLS for either application role means the restore's
+    ALTER ROLE replay would grant RLS-bypassing sessions that the migration
+    history (already at head) will never clean up again.
+    """
+    problems: list[str] = []
+    tokens_by_role = _collect_role_attribute_tokens(roles_body)
+    for role in _REQUIRED_UNPRIVILEGED_ROLES:
+        tokens = tokens_by_role.get(role)
+        if tokens is None:
+            problems.append(f"{role}: no CREATE ROLE statement in roles.sql")
+            continue
+        enabled = sorted(tokens & _PRIVILEGED_ATTRIBUTE_TOKENS)
+        if enabled:
+            problems.append(
+                f"{role}: privileged attributes {', '.join(enabled)} must be revoked"
+            )
+    return problems
+
+
 def _validate_dump_roles_covered(
     *, listing: str, roles_body: str, acl_grantees: set[str] | None = None
 ) -> None:
     """Refuse a backup when the archive references roles absent from roles.sql."""
+    drift = _role_privilege_drift_problems(roles_body)
+    if drift:
+        raise BackupError(
+            EXIT_ARTIFACT_INVALID,
+            "roles.sql grants dangerous privileges to protected roles: "
+            + "; ".join(drift)
+            + ". The restore replays these attributes before loading the "
+            "archive and the migration history will not rerun to clear them; "
+            "refusing to publish.",
+        )
     referenced = _roles_referenced_in_dump_listing(listing)
     if acl_grantees:
         referenced |= acl_grantees
@@ -1475,9 +1535,16 @@ def _non_seed_rows(counts: dict[str, int]) -> int:
 #     before restoring, which is the stronger check at the point it matters.
 # ============================================================================
 def _run_is_published_backup(run: Path, manifest: dict[str, object]) -> bool:
-    """run is published backup."""
+    """Decide whether ``run`` is a published backup worth trusting structurally.
+
+    Hand-planted or half-copied directories are untrusted, so both artifact
+    entries must exist with mandatory metadata -- a nonempty ``database.dump``
+    and ``roles.sql`` on disk alone prove nothing.
+    """
     raw_artifacts = manifest.get("artifacts")
-    artifacts = raw_artifacts if isinstance(raw_artifacts, dict) else {}
+    if not isinstance(raw_artifacts, dict):
+        return False
+    artifacts = raw_artifacts
     for name in (DUMP_NAME, ROLES_NAME):
         path = run / name
         try:
@@ -1489,13 +1556,21 @@ def _run_is_published_backup(run: Path, manifest: dict[str, object]) -> bool:
         if size == 0:
             return False
         entry = artifacts.get(name)
-        if isinstance(entry, dict) and "bytes" in entry:
-            try:
-                recorded = int(entry["bytes"])
-            except (TypeError, ValueError):
-                return False
-            if recorded != size:
-                return False
+        if not isinstance(entry, dict):
+            # FIX: missing metadata used to skip the size cross-check, so two
+            # one-byte dummy files plus an accepted manifest folded invented
+            # counts into the watermark; the entries are now mandatory.
+            return False
+        recorded_bytes = entry.get("bytes")
+        if isinstance(recorded_bytes, bool) or not isinstance(recorded_bytes, int):
+            return False
+        if recorded_bytes != size:
+            return False
+        digest = entry.get("sha256")
+        if not isinstance(digest, str) or len(digest) != 64:
+            return False
+        if any(character not in "0123456789abcdef" for character in digest.lower()):
+            return False
     return True
 
 
@@ -1906,7 +1981,7 @@ def _reclaim_stale_backup_lock(lock_dir: Path) -> bool:
 #     this lock; ``_append_log`` carries the release-failure warning.
 # ============================================================================
 @contextmanager
-def _exclusive_backup_lock(out_dir: Path):
+def _exclusive_backup_lock(out_dir: Path) -> Iterator[None]:
     """Hold an exclusive lock directory under ``out_dir`` for one backup run."""
     lock_dir = out_dir / LOCK_DIR_NAME
     owner = lock_dir / LOCK_OWNER_NAME
@@ -1969,24 +2044,134 @@ def _exclusive_backup_lock(out_dir: Path):
             print(f"WARNING: {line}", file=sys.stderr)
 
 
-def _restrict_run_dir_mode(path: Path, out_dir: Path) -> None:
-    """Best-effort owner-only mode for backup run directories (POSIX).
+def _restrict_run_dir_mode(
+    path: Path, out_dir: Path, *, strict: bool = False
+) -> None:
+    """Restrict a backup-related directory to owner-only access.
 
-    Stays best-effort (the run's verdict never hinges on a mode bit), but a
-    refused chmod lands on the durable record and stderr instead of vanishing:
-    the operator must hear that a backup directory kept broader permissions.
+    POSIX stays best-effort either way -- a refused chmod lands on the durable
+    record and stderr instead of vanishing.
+
+    ``strict`` (Windows publish-time NTFS DACL check) makes an unenforceable
+    or permissive ACL raise instead of warn: a published run's verdict hinges
+    on it. The pre-dump staging call uses the lenient default.
     """
     try:
         os.chmod(path, 0o700)
     except OSError as chmod_exc:
-        # Windows ignores mkdir mode and may reject chmod on some paths.
         line = (
             f"{_utc_now().isoformat()} WARNING could not restrict {path} to "
             f"owner-only permissions: {chmod_exc}; the directory keeps the "
             "filesystem's default mode"
         )
+        if os.name == "nt" and strict:
+            # FIX: on NTFS the chmod above proves nothing -- an operator-readable
+            # backup directory must be refused, not warned about.
+            raise BackupError(
+                EXIT_ARTIFACT_INVALID,
+                f"could not restrict {path} to owner-only permissions: {chmod_exc}; "
+                "refusing to publish to an insecure destination",
+            ) from chmod_exc
         _append_log(out_dir, line)
         print(f"WARNING: {line}", file=sys.stderr)
+    if os.name == "nt":
+        if strict:
+            _windows_enforce_owner_only_acl(path)
+
+
+# Only principals signalling BROAD operator/group access are defects here;
+# SYSTEM and BUILTIN\Administrators grants are standard Windows behavior even
+# after inheritance is stripped, and refusing on them would reject healthy
+# nightly backups.
+_WINDOWS_DACLS_FORBIDDEN_PRINCIPALS = (
+    "everyone",
+    "users",
+    "authenticated users",
+    "builtin\\users",
+)
+
+
+def _windows_dacl_problems(icacls_output: str, current_user: str) -> list[str]:
+    """List reasons the icacls output is NOT an owner-only grant.
+
+    Fail-closed: inherited grants ('(I)'), grants to groups/Well-Known
+    principals, or the absence of any explicit full-control grant for the
+    current user (matched with or without its machine/domain prefix, since
+    icacls prints e.g. ``DESKTOP\\winuser`` while USERNAME reads ``winuser``)
+    are all problems.
+    """
+    problems: list[str] = []
+    owner_key = current_user.strip().lower()
+    owner_grant_seen = False
+    for raw_line in icacls_output.splitlines():
+        line = raw_line.strip()
+        if not line or ":" not in line:
+            continue
+        # FIX: this box renders one line as "<full path> <principal>:<rights>",
+        # so split on the LAST colon -- everything before it (which includes
+        # the drive-letter colon of any merged path) belongs to the principal.
+        principal, _, rights = line.rpartition(":")
+        principal_key = principal.strip().lower()
+        rights_tokens = set(re.findall(r"\(([A-Z]+(?:\s+[A-Z]+)*)\)", rights.upper()))
+        flattened_tokens: set[str] = set()
+        for token in rights_tokens:
+            flattened_tokens.update(token.split())
+        if "I" in flattened_tokens:
+            problems.append(f"inherited access remains for {principal.strip()}")
+        if principal_key in _WINDOWS_DACLS_FORBIDDEN_PRINCIPALS:
+            problems.append(f"group/Well-Known principal {principal.strip()} has access")
+            continue
+        if "F" in flattened_tokens:
+            is_owner = (
+                principal_key == owner_key or principal_key.endswith("\\" + owner_key)
+            ) and bool(owner_key)
+            if is_owner:
+                owner_grant_seen = True
+    if not owner_grant_seen:
+        problems.append(
+            f"no explicit Full-control grant for {current_user!r} was found"
+        )
+    return problems
+
+
+def _windows_enforce_owner_only_acl(path: Path) -> None:
+    """Apply and verify an owner-only NTFS DACL, refusing anything else."""
+    user = os.environ.get("USERNAME", "").strip() or getpass.getuser()
+    apply_command = ["icacls", str(path), "/inheritance:r"]
+    if user:
+        apply_command += ["/grant:r", f"{user}:(OI)(CI)F"]
+    try:
+        applied = subprocess.run(
+            apply_command, capture_output=True, text=True, timeout=60, check=False
+        )
+        listed = subprocess.run(
+            ["icacls", str(path)],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise BackupError(
+            EXIT_ARTIFACT_INVALID,
+            f"could not verify the NTFS ACL on {path}: {exc}; refusing to "
+            "publish to an insecure destination",
+        ) from exc
+    if applied.returncode != 0:
+        raise BackupError(
+            EXIT_ARTIFACT_INVALID,
+            f"icacls /inheritance:r failed on {path} "
+            f"(exit {applied.returncode}): {applied.stderr.strip()}; refusing to "
+            "publish to an insecure destination",
+        )
+    problems = _windows_dacl_problems(listed.stdout, user)
+    if problems:
+        raise BackupError(
+            EXIT_ARTIFACT_INVALID,
+            f"{path} does not have an owner-only NTFS DACL: "
+            + "; ".join(problems)
+            + "; refusing to publish to an insecure destination",
+        )
 
 
 def _sorted_out_dir_children(out_dir: Path) -> list[Path]:
@@ -3116,6 +3301,28 @@ def _append_log(out_dir: Path, line: str) -> bool:
 #     successful run to EXIT_BOOKKEEPING_FAILED when this returns False.
 #   - File: Docs/22_BACKUP_RESTORE_AND_REHEARSAL.md -> last-run.json contract.
 # ============================================================================
+def _last_run_holds_newer_completed_verdict(out_dir: Path, started: datetime) -> bool:
+    """True when last-run.json holds a COMPLETED verdict started AFTER ours.
+
+    main() starts the report before the exclusive lock is held, so lock
+    contention can interleave an older invocation's terminal write after a
+    newer attempt's failure. last-run.json documents the MOST RECENT attempt;
+    overwriting a newer completed verdict with an older one breaks that
+    contract, so this guard is what lets ``finalise`` refuse to replace it.
+    """
+    try:
+        payload = json.loads((out_dir / LAST_RUN_NAME).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    if not isinstance(payload, dict) or payload.get("status") == "RUNNING":
+        return False
+    try:
+        recorded_started = datetime.fromisoformat(str(payload["started_utc"]))
+    except (KeyError, ValueError):
+        return False
+    return recorded_started > started
+
+
 def _write_last_run(
     out_dir: Path, payload: dict[str, object], *, sidecar_stamp: str | None = None
 ) -> bool:
@@ -3239,6 +3446,19 @@ class _RunReport:
         self._final = True
         if not _append_log(self._out_dir, line):
             self._undelivered.append(f"{LOG_NAME} could not be appended to")
+        # FIX: main() starts the report before the exclusive lock is held, so a
+        # contending invocation can record FAILED while we are still running;
+        # letting our older START write overwrite that newer COMPLETED verdict
+        # would hide the lock-contention failure from the at-a-glance file.
+        if _last_run_holds_newer_completed_verdict(self._out_dir, self._started):
+            note = (
+                f"{LAST_RUN_NAME} already holds a COMPLETED verdict from a run "
+                f"started after this one ({self._started.isoformat()}); it will "
+                "not be overwritten"
+            )
+            self._undelivered.append(note)
+            print(f"WARNING: {note}.", file=sys.stderr)
+            return
         if not _write_last_run(self._out_dir, payload, sidecar_stamp=self._stamp):
             self._undelivered.append(f"{LAST_RUN_NAME} could not be replaced")
 
@@ -3332,7 +3552,7 @@ def _publish_staging_run(staging: Path, destination: Path, out_dir: Path) -> Non
             f"{exc}; refusing to publish or prune",
         ) from exc
     try:
-        _restrict_run_dir_mode(destination, out_dir)
+        _restrict_run_dir_mode(destination, out_dir, strict=True)
         _sync_parent_directory_entry(out_dir)
     except OSError as exc:
         # FIX: a failed durability sync must leave NOTHING discoverable under

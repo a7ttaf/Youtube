@@ -971,6 +971,34 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
+# ============================================================================
+# Purpose: Remove every target-only user object before a destructive
+#          --allow-nonempty apply. pg_restore --clean drops only the objects
+#          the archive itself describes, so target-only enums, functions and
+#          views would survive into the "restored" database and table-only
+#          verification could not see them; recreating the public schema
+#          guarantees an exact match with the backup.
+# Database/ORM: None in-process. Runs psql inside the target container.
+# Standards: RestoreError on failure; initdb-equivalent grants are reapplied so
+#            the dump's own GRANT statements keep their parents.
+# Blast Radius: Destructive -- deletes every user object in public on demand.
+# Connections:
+#   - File: scripts/restore_database.py -> _execute_restore calls this only
+#     when --allow-nonempty was passed.
+# ============================================================================
+_CLEAR_TARGET_OBJECTS_SQL = (
+    "DROP SCHEMA IF EXISTS public CASCADE;\n"
+    "CREATE SCHEMA public;\n"
+    "GRANT USAGE ON SCHEMA public TO PUBLIC;\n"
+    "GRANT CREATE ON SCHEMA public TO PUBLIC;\n"
+)
+
+
+def _clear_target_user_objects(container: str, *, timeout: int) -> None:
+    """Recreate the public schema so no target-only object survives restore."""
+    _psql(container, _CLEAR_TARGET_OBJECTS_SQL, timeout=timeout)
+
+
 def _guard_empty(container: str, *, allow_nonempty: bool, timeout: int) -> None:
     """Refuse a non-empty target database unless --allow-nonempty was passed."""
     raw = _psql(container, USER_OBJECT_COUNT_SQL, timeout=timeout).strip()
@@ -1038,6 +1066,13 @@ def _execute_restore(
     # is going to refuse must not be modified at all, not even by an
     # idempotent CREATE ROLE.
     _guard_empty(container, allow_nonempty=args.allow_nonempty, timeout=args.timeout)
+    if args.allow_nonempty:
+        # FIX: pg_restore --clean removes only archived objects, so an
+        # --allow-nonempty target kept its own stray enums/functions/views
+        # while verification over tables alone still printed RESTORE VERIFIED.
+        # Clearing the schema first makes the restored database match the
+        # backup exactly (PR #210 review round 8).
+        _clear_target_user_objects(container, timeout=args.timeout)
     roles = _restore_roles(container, backup_dir / ROLES_NAME, timeout=args.timeout)
     print(f"roles present after roles.sql: {', '.join(roles)}")
     _restore_data(
