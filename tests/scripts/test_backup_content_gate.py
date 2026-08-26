@@ -3870,8 +3870,15 @@ def test_execute_restore_clears_target_only_when_allow_nonempty(
     )
     monkeypatch.setattr(
         restore,
-        "_clear_target_user_objects",
-        lambda container, timeout: order.append("clear"),
+        "_current_database",
+        lambda container, timeout: order.append("dbname") or "appdb",
+    )
+    monkeypatch.setattr(
+        restore,
+        "_recreate_target_database",
+        lambda container, target_db, timeout: order.append(
+            f"recreate:{target_db}"
+        ),
     )
     monkeypatch.setattr(
         restore,
@@ -3895,10 +3902,15 @@ def test_execute_restore_clears_target_only_when_allow_nonempty(
         return restore._execute_restore("container", tmp_path, args, {})
 
     assert _run(allow_nonempty=True) is True
-    assert order.index("guard") < order.index("clear") < order.index("roles")
+    assert (
+        order.index("guard")
+        < order.index("dbname")
+        < order.index("recreate:appdb")
+        < order.index("roles")
+    )
 
     assert _run(allow_nonempty=False) is True
-    assert "clear" not in order
+    assert "recreate:appdb" not in order and "dbname" not in order
 
 
 def test_windows_dacl_parser_fail_closed() -> None:
@@ -4279,3 +4291,37 @@ def test_watermark_write_crash_leaves_previous_record_intact(
             identity=None,
         )
     assert (tmp_path / backup.WATERMARK_NAME).read_text(encoding="utf-8") == before
+
+
+def test_load_backup_rejects_nonce_quarantine_names(tmp_path: Path) -> None:
+    """The backup-side unique .rejected-<nonce> fallback names must be refused
+    by restore exactly like the plain .rejected form (round-8 review P2)."""
+    run = tmp_path / "ums-backup-20260826T120000Z.rejected-1a2b3c4d"
+    run.mkdir()
+    dump = run / backup.DUMP_NAME
+    roles = run / backup.ROLES_NAME
+    dump.write_bytes(b"PGDMP-placeholder")
+    roles.write_text("CREATE ROLE app_tenant;", encoding="utf-8")
+    (run / backup.MANIFEST_NAME).write_text(
+        json.dumps({"schema": backup.MANIFEST_SCHEMA}), encoding="utf-8"
+    )
+    with pytest.raises(restore.RestoreError) as caught:
+        restore._load_backup(run)
+    assert caught.value.code == restore.EXIT_USAGE
+    assert "quarantined" in str(caught.value)
+
+
+def test_manifest_counts_reject_coercible_shapes_round8() -> None:
+    """Watermark folding shares the restore-side strict count rule."""
+    for bad in (-1, True, 1.9, "7"):
+        assert (
+            backup._manifest_table_counts(
+                {"table_row_counts": {"public.channels": bad}}
+            )
+            is None
+        ), bad
+    # An empty mapping stays meaningful here: it is how retention recognizes
+    # a legitimately-empty run (restore-side refusals are separate and stricter).
+    assert backup._manifest_table_counts({"table_row_counts": {}}) == {}
+    good = {"table_row_counts": {"public.channels": 12}}
+    assert backup._manifest_table_counts(good) == {"public.channels": 12}

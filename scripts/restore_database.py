@@ -238,12 +238,24 @@ def _container_sh(container: str, body: str) -> list[str]:
     return ["docker", "exec", "-i", container, "sh", "-c", _SH_PREFIX + body]
 
 
-def _psql(container: str, sql: str, *, timeout: int, stop_on_error: bool = True) -> str:
-    """Run SQL via psql inside the container and return stdout."""
+def _psql(
+    container: str,
+    sql: str,
+    *,
+    timeout: int,
+    stop_on_error: bool = True,
+    dbname: str | None = None,
+) -> str:
+    """Run SQL via psql inside the container and return stdout.
+
+    ``dbname`` targets a specific database (single quoted identifier handled
+    by the caller); the container default ``$POSTGRES_DB`` is used otherwise.
+    """
     stop = "1" if stop_on_error else "0"
+    target = f'-d "{dbname}" ' if dbname else '-d "$POSTGRES_DB" '
     argv = _container_sh(
         container,
-        'exec psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" '
+        f'exec psql -U "$POSTGRES_USER" {target}'
         f"--no-password -v ON_ERROR_STOP={stop} -Atq -f -",
     )
     completed = _run_with_input(argv, timeout=timeout, stdin_text=sql)
@@ -273,7 +285,7 @@ def _require_restorable_backup_dir(backup_dir: Path) -> None:
             f"{backup_dir.name} is still marked .partial (publish never finished). "
             "Do not restore an unpublished staging directory.",
         )
-    if backup_dir.name.endswith(REJECTED_SUFFIX):
+    if backup_dir.name.endswith(REJECTED_SUFFIX) or REJECTED_SUFFIX + "-" in backup_dir.name:
         raise RestoreError(
             EXIT_USAGE,
             f"{backup_dir.name} is a quarantined run, not a backup. The backup "
@@ -972,31 +984,64 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
 
 
 # ============================================================================
-# Purpose: Remove every target-only user object before a destructive
-#          --allow-nonempty apply. pg_restore --clean drops only the objects
-#          the archive itself describes, so target-only enums, functions and
-#          views would survive into the "restored" database and table-only
-#          verification could not see them; recreating the public schema
-#          guarantees an exact match with the backup.
-# Database/ORM: None in-process. Runs psql inside the target container.
-# Standards: RestoreError on failure; initdb-equivalent grants are reapplied so
-#            the dump's own GRANT statements keep their parents.
-# Blast Radius: Destructive -- deletes every user object in public on demand.
+# Purpose: Recreate the whole target database on demand so an
+#          --allow-nonempty restore starts from a genuinely fresh cluster
+#          shell instead of dropping objects piecemeal.
+# Database/ORM: None in-process. Runs psql -d postgres inside the container.
+# Standards: RestoreError(EXIT_USAGE) when asked to drop the maintenance
+#            database itself; identifier/literal quoting everywhere; the fresh
+#            database is created BEFORE any roles or data are applied.
+# Blast Radius: Destructive by design under --allow-nonempty -- the operator
+#               explicitly accepted replacing that database's contents, and a
+#               failed apply afterwards leaves a pristine empty database rather
+#               than a half-cleared original.
 # Connections:
-#   - File: scripts/restore_database.py -> _execute_restore calls this only
-#     when --allow-nonempty was passed.
+#   - File: scripts/restore_database.py -> _execute_restore calls these only
+#     when --allow-nonempty was passed; pg_restore later targets the fresh db.
 # ============================================================================
-_CLEAR_TARGET_OBJECTS_SQL = (
-    "DROP SCHEMA IF EXISTS public CASCADE;\n"
-    "CREATE SCHEMA public;\n"
-    "GRANT USAGE ON SCHEMA public TO PUBLIC;\n"
-    "GRANT CREATE ON SCHEMA public TO PUBLIC;\n"
-)
+def _current_database(container: str, *, timeout: int) -> str:
+    """Return the database psql lands in by default inside the container."""
+    raw = _psql(
+        container,
+        "SELECT current_catalog;",
+        timeout=timeout,
+        dbname="postgres",
+    ).strip()
+    return raw.splitlines()[0].strip() if raw else ""
 
 
-def _clear_target_user_objects(container: str, *, timeout: int) -> None:
-    """Recreate the public schema so no target-only object survives restore."""
-    _psql(container, _CLEAR_TARGET_OBJECTS_SQL, timeout=timeout)
+def _recreate_target_database(container: str, target_db: str, *, timeout: int) -> None:
+    """Drop and recreate ``target_db``, leaving an empty shell to restore."""
+    if target_db.lower() == "postgres":
+        raise RestoreError(
+            EXIT_USAGE,
+            "--allow-nonempty cannot drop the maintenance database itself; "
+            "point POSTGRES_DB at the application database to be replaced.",
+        )
+    quoted_db = _quote_identifier(target_db)
+    terminate_sql = (
+        "SELECT pg_terminate_backend(pid) FROM pg_catalog.pg_stat_activity "
+        f"WHERE datname = {_quote_literal(target_db)} "
+        "AND pid <> pg_backend_pid();"
+    )
+    drop_create_sql = (
+        f"DROP DATABASE IF EXISTS {quoted_db};\n"
+        f"CREATE DATABASE {quoted_db};\n"
+    )
+    try:
+        int(_psql(
+            container,
+            terminate_sql,
+            timeout=timeout,
+            dbname="postgres",
+        ).strip() or "0")
+    except ValueError as exc:
+        raise RestoreError(
+            EXIT_RESTORE_FAILED,
+            f"could not terminate connections for {target_db!r}: {exc}",
+        ) from exc
+    _psql(container, drop_create_sql, timeout=timeout, dbname="postgres")
+
 
 
 def _guard_empty(container: str, *, allow_nonempty: bool, timeout: int) -> None:
@@ -1067,12 +1112,15 @@ def _execute_restore(
     # idempotent CREATE ROLE.
     _guard_empty(container, allow_nonempty=args.allow_nonempty, timeout=args.timeout)
     if args.allow_nonempty:
-        # FIX: pg_restore --clean removes only archived objects, so an
-        # --allow-nonempty target kept its own stray enums/functions/views
-        # while verification over tables alone still printed RESTORE VERIFIED.
-        # Clearing the schema first makes the restored database match the
-        # backup exactly (PR #210 review round 8).
-        _clear_target_user_objects(container, timeout=args.timeout)
+        # FIX(round-8 review): a piecemeal schema clear ran outside the restore
+        # transaction, so any later failure erased the original database while
+        # its "leave untouched on failure" guarantee held elsewhere. Dropping
+        # and recreating the TARGET DATABASE limits destruction to what the
+        # operator explicitly consented to replace, and a failed apply leaves
+        # only that pristine shell behind. It also drops the blanket PUBLIC
+        # CREATE grant the previous CREATE SCHEMA path re-introduced on PG18.
+        target_db = _current_database(container, timeout=args.timeout)
+        _recreate_target_database(container, target_db, timeout=args.timeout)
     roles = _restore_roles(container, backup_dir / ROLES_NAME, timeout=args.timeout)
     print(f"roles present after roles.sql: {', '.join(roles)}")
     _restore_data(

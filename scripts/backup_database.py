@@ -1457,16 +1457,22 @@ def _read_manifest(run: Path) -> dict[str, object] | None:
 
 
 def _manifest_table_counts(manifest: dict[str, object]) -> dict[str, int] | None:
-    """Return a manifest's per-table counts, or None if it records none usable."""
+    """Return a manifest's per-table counts, or None if it records none usable.
+
+    FIX: int() accepted booleans as 0/1 and truncated fractional or
+    numeric-string counts, so an edited or foreign manifest could fold invented
+    values into the persistent watermark. The mapping must be non-empty and
+    hold exact nonnegative JSON integers. An EMPTY mapping is returned as-is
+    because it is how a legitimately-empty run proves its emptiness.
+    """
     raw = manifest.get("table_row_counts")
     if not isinstance(raw, dict):
         return None
     counts: dict[str, int] = {}
     for name, value in raw.items():
-        try:
-            counts[str(name)] = int(value)
-        except (TypeError, ValueError):
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
             return None
+        counts[str(name)] = value
     return counts
 
 
