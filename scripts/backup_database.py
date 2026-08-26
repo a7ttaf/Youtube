@@ -2074,9 +2074,8 @@ def _restrict_run_dir_mode(
             ) from chmod_exc
         _append_log(out_dir, line)
         print(f"WARNING: {line}", file=sys.stderr)
-    if os.name == "nt":
-        if strict:
-            _windows_enforce_owner_only_acl(path)
+    if os.name == "nt" and strict:
+        _windows_enforce_owner_only_acl(path)
 
 
 # Only principals signalling BROAD operator/group access are defects here;
@@ -2092,7 +2091,7 @@ _WINDOWS_DACLS_FORBIDDEN_PRINCIPALS = (
 
 
 def _windows_dacl_problems(icacls_output: str, current_user: str) -> list[str]:
-    """List reasons the icacls output is NOT an owner-only grant.
+    r"""List reasons the icacls output is NOT an owner-only grant.
 
     Fail-closed: inherited grants ('(I)'), grants to groups/Well-Known
     principals, or the absence of any explicit full-control grant for the
@@ -2137,7 +2136,17 @@ def _windows_dacl_problems(icacls_output: str, current_user: str) -> list[str]:
 def _windows_enforce_owner_only_acl(path: Path) -> None:
     """Apply and verify an owner-only NTFS DACL, refusing anything else."""
     user = os.environ.get("USERNAME", "").strip() or getpass.getuser()
-    apply_command = ["icacls", str(path), "/inheritance:r"]
+    # FIX: resolve the absolute executable (DeepSource B607) and fail closed
+    # when the ACL tooling is absent -- publishing without verification is not
+    # an option on this platform.
+    icacls_path = shutil.which("icacls")
+    if not icacls_path:
+        raise BackupError(
+            EXIT_ARTIFACT_INVALID,
+            f"icacls was not found on PATH; cannot verify an owner-only NTFS "
+            f"DACL for {path}; refusing to publish to an insecure destination",
+        )
+    apply_command = [icacls_path, str(path), "/inheritance:r"]
     if user:
         apply_command += ["/grant:r", f"{user}:(OI)(CI)F"]
     try:
@@ -2145,7 +2154,7 @@ def _windows_enforce_owner_only_acl(path: Path) -> None:
             apply_command, capture_output=True, text=True, timeout=60, check=False
         )
         listed = subprocess.run(
-            ["icacls", str(path)],
+            [icacls_path, str(path)],
             capture_output=True,
             text=True,
             timeout=60,

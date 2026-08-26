@@ -3884,6 +3884,7 @@ def test_execute_restore_clears_target_only_when_allow_nonempty(
     monkeypatch.setattr(restore, "_verify", lambda *a, **k: True)
 
     def _run(*, allow_nonempty: bool) -> bool:
+        """Drive one CLI invocation and return its exit code."""
         order.clear()
         args = SimpleNamespace(
             timeout=5,
@@ -3902,7 +3903,8 @@ def test_execute_restore_clears_target_only_when_allow_nonempty(
 
 def test_windows_dacl_parser_fail_closed() -> None:
     """icacls parsing must treat inheritance and group principals as failures
-    while accepting an explicit owner-only full-control grant."""
+    while accepting an explicit owner-only full-control grant.
+    """
     listing = "\n".join(
         [
             "accepted-run NT AUTHORITY\\SYSTEM:(I)(F)",
@@ -3925,7 +3927,8 @@ def test_windows_dacl_parser_fail_closed() -> None:
 def test_validate_dump_roles_covered_refuses_privileged_app_roles() -> None:
     """SUPERUSER/BYPASSRLS/LOGIN drift on app_tenant/app_platform refuses
     publication: the restore replays these attributes before the archive and
-    no migration reruns afterwards (round-8 P1)."""
+    no migration reruns afterwards (round-8 P1).
+    """
     clean = (
         "CREATE ROLE app_tenant WITH NOSUPERUSER NOBYPASSRLS NOLOGIN;\n"
         "CREATE ROLE app_platform WITH NOSUPERUSER NOBYPASSRLS NOLOGIN;\n"
