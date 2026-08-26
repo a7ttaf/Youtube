@@ -36,10 +36,12 @@ _ACTOR_ENV = "UMS_GOOGLE_CONNECTOR_SERVICE_ACTOR_ID"
 
 
 def _sqlite_url(tmp_path) -> str:
+    """Build a per-test SQLite URL under tmp_path."""
     return f"sqlite+pysqlite:///{(tmp_path / 'app.db').as_posix()}"
 
 
 def _clear_envs() -> None:
+    """Clear schedule/executor/actor env vars and settings cache."""
     os.environ.pop(_SCHEDULE_ENV, None)
     os.environ.pop(_EXECUTOR_ENV, None)
     os.environ.pop(_ACTOR_ENV, None)
