@@ -399,3 +399,13 @@ def _tenant(tenant_id: UUID, *, slug: str) -> Tenant:
         created_at=CREATED_AT,
         updated_at=CREATED_AT,
     )
+
+
+def test_connection_invalidated_is_not_retryable() -> None:
+    """A dead connection must never be retried at savepoint granularity."""
+    from sqlalchemy.exc import DBAPIError
+
+    from ums_smart_revenue.auth.users import _is_retryable_user_storage_error
+
+    exc = DBAPIError("SELECT 1", {}, Exception("connection lost"), connection_invalidated=True)
+    assert _is_retryable_user_storage_error(exc) is False

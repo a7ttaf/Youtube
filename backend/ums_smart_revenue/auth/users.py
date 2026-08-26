@@ -700,6 +700,21 @@ def _is_email_constraint_violation(exc: IntegrityError) -> bool:
     )
 
 
+# ============================================================================
+# Purpose: Classify which SQLAlchemy storage failures may be retried inside
+#   ``UserAccountRepository._run_with_storage_retries`` (savepoint granularity).
+# Database/ORM: None directly; consults ``DBAPIError.connection_invalidated`` and
+#   transient OperationalError / DisconnectionError / TimeoutError types.
+# Standards: Fail closed — ``connection_invalidated`` is NEVER retryable here
+#   because the Session/transaction envelope is dead; only the owning caller
+#   (e.g. bootstrap) may open a fresh session. Integrity conflicts are handled
+#   before this helper is consulted.
+# Blast Radius: Authorization account writes; incorrect True would retry on a
+#   dead connection and mis-report storage availability.
+# Connections:
+#   - File: backend/ums_smart_revenue/auth/users.py -> ``_run_with_storage_retries``.
+#   - File: scripts/bootstrap_operator.py -> owning transaction that must retry.
+# ============================================================================
 def _is_retryable_user_storage_error(exc: SQLAlchemyError) -> bool:
     """Return whether a storage exception is safe to retry within the request."""
     if isinstance(exc, DBAPIError) and exc.connection_invalidated:

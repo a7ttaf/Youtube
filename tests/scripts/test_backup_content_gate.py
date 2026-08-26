@@ -2460,6 +2460,7 @@ def test_restore_still_accepts_a_manifest_written_before_the_gate_existed(
                     backup.DUMP_NAME: {"sha256": restore._sha256(dump)},
                     backup.ROLES_NAME: {"sha256": restore._sha256(roles)},
                 },
+                "table_row_counts": {},
             }
         ),
         encoding="utf-8",
@@ -3442,7 +3443,7 @@ def test_guard_empty_refuses_non_public_user_objects(monkeypatch: pytest.MonkeyP
         """Return a non-zero user-object count for guard-empty tests."""
         _ = (_container, timeout)
         assert "pg_catalog.pg_class" in sql
-        assert "typtype = 'e'" in sql
+        assert "typtype IN ('b', 'c', 'd', 'e', 'r', 'm')" in sql
         assert "pg_catalog.pg_proc" in sql
         assert "nspname <> 'public'" in sql
         return "2\n"
@@ -3589,3 +3590,198 @@ def test_run_backup_syncs_before_and_after_publication_rename(
     assert code == backup.EXIT_OK
     assert any(item.startswith("staging:") for item in calls)
     assert any(item.startswith("parent:") for item in calls)
+
+
+def test_user_object_count_sql_covers_domain_and_composite_types() -> None:
+    """Empty-guard SQL must count domains/composites/ranges, not only enums."""
+    sql = restore.USER_OBJECT_COUNT_SQL
+    assert "typtype IN ('b', 'c', 'd', 'e', 'r', 'm')" in sql
+    assert "pg_catalog.pg_type" in sql
+    assert "pg_catalog.pg_proc" in sql
+
+
+def test_restore_refuses_partial_staging_directory(tmp_path: Path) -> None:
+    """A *.partial run with all three files must still be refused by name."""
+    run = tmp_path / "ums-backup-20260824T222105Z.partial"
+    run.mkdir()
+    dump = run / backup.DUMP_NAME
+    roles = run / backup.ROLES_NAME
+    dump.write_bytes(b"PGDMP-placeholder")
+    roles.write_text("CREATE ROLE app_tenant;\n", encoding="utf-8")
+    (run / backup.MANIFEST_NAME).write_text(
+        json.dumps(
+            {
+                "schema": backup.MANIFEST_SCHEMA,
+                "artifacts": {
+                    backup.DUMP_NAME: {"sha256": restore._sha256(dump)},
+                    backup.ROLES_NAME: {"sha256": restore._sha256(roles)},
+                },
+                "table_row_counts": {"public.channels": 1},
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(restore.RestoreError) as caught:
+        restore._load_backup(run)
+    assert caught.value.code == restore.EXIT_USAGE
+    assert ".partial" in str(caught.value)
+
+
+def test_load_backup_rejects_missing_table_row_counts(tmp_path: Path) -> None:
+    """Missing table_row_counts must fail before roles/data apply."""
+    run = tmp_path / "ums-backup-20260824T222105Z"
+    run.mkdir()
+    dump = run / backup.DUMP_NAME
+    roles = run / backup.ROLES_NAME
+    dump.write_bytes(b"PGDMP-placeholder")
+    roles.write_text("CREATE ROLE app_tenant;\n", encoding="utf-8")
+    (run / backup.MANIFEST_NAME).write_text(
+        json.dumps(
+            {
+                "schema": backup.MANIFEST_SCHEMA,
+                "artifacts": {
+                    backup.DUMP_NAME: {"sha256": restore._sha256(dump)},
+                    backup.ROLES_NAME: {"sha256": restore._sha256(roles)},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(restore.RestoreError) as caught:
+        restore._load_backup(run)
+    assert caught.value.code == restore.EXIT_USAGE
+    assert "table_row_counts" in str(caught.value)
+
+
+def test_load_backup_rejects_non_numeric_table_row_counts(tmp_path: Path) -> None:
+    """Non-numeric table_row_counts values fail closed at load time."""
+    run = tmp_path / "ums-backup-20260824T222106Z"
+    run.mkdir()
+    dump = run / backup.DUMP_NAME
+    roles = run / backup.ROLES_NAME
+    dump.write_bytes(b"PGDMP-placeholder")
+    roles.write_text("CREATE ROLE app_tenant;\n", encoding="utf-8")
+    (run / backup.MANIFEST_NAME).write_text(
+        json.dumps(
+            {
+                "schema": backup.MANIFEST_SCHEMA,
+                "artifacts": {
+                    backup.DUMP_NAME: {"sha256": restore._sha256(dump)},
+                    backup.ROLES_NAME: {"sha256": restore._sha256(roles)},
+                },
+                "table_row_counts": {"public.channels": "n/a"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(restore.RestoreError) as caught:
+        restore._load_backup(run)
+    assert caught.value.code == restore.EXIT_USAGE
+    assert "row count" in str(caught.value)
+
+
+def test_resolve_rehearsal_image_falls_back_when_id_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pruned local image_id must fall back to the pullable source.image."""
+    monkeypatch.setattr(restore, "_docker_image_exists", lambda *_a, **_k: False)
+    chosen = restore._resolve_rehearsal_image(
+        image_id="sha256:deadbeef",
+        image="postgres:18-alpine@sha256:abc",
+        timeout=5,
+    )
+    assert chosen == "postgres:18-alpine@sha256:abc"
+
+
+def test_resolve_rehearsal_image_prefers_local_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When the recorded config ID is still local, prefer it."""
+    monkeypatch.setattr(restore, "_docker_image_exists", lambda *_a, **_k: True)
+    chosen = restore._resolve_rehearsal_image(
+        image_id="sha256:deadbeef",
+        image="postgres:18-alpine@sha256:abc",
+        timeout=5,
+    )
+    assert chosen == "sha256:deadbeef"
+
+
+def test_create_throwaway_warns_when_timeout_cleanup_fails(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A docker-run timeout whose rm also fails must surface a WARNING."""
+    def boom(*_a, **_k):
+        raise subprocess.TimeoutExpired(cmd=["docker", "run"], timeout=1)
+
+    monkeypatch.setattr(restore, "_resolve_rehearsal_image", lambda **_k: "postgres:18")
+    monkeypatch.setattr(restore, "_run", boom)
+    monkeypatch.setattr(restore, "_destroy_throwaway", lambda *_a, **_k: False)
+    with pytest.raises(restore.RestoreError) as caught:
+        restore._create_throwaway(
+            {
+                "source": {
+                    "image": "postgres:18",
+                    "database": "ums",
+                    "superuser": "ums",
+                }
+            },
+            timeout=1,
+        )
+    assert caught.value.code == restore.EXIT_CONTAINER_UNAVAILABLE
+    assert "WARNING" in capsys.readouterr().out
+
+
+def test_watermark_write_crash_leaves_previous_record_intact(tmp_path: Path) -> None:
+    """Atomic watermark replace must preserve the prior record on mid-write crash."""
+    backup._write_watermark(
+        tmp_path,
+        {"public.channels": 10},
+        run="ums-backup-old",
+        reset={},
+        now=NOW,
+        identity=None,
+    )
+    before = (tmp_path / backup.WATERMARK_NAME).read_text(encoding="utf-8")
+    real_open = Path.open
+
+    class _DiesAfterOneByte:
+        def __init__(self, handle: object) -> None:
+            self._handle = handle
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc: object) -> None:
+            closer = getattr(self._handle, "close")
+            closer()
+
+        def write(self, body: str) -> int:
+            writer = getattr(self._handle, "write")
+            flusher = getattr(self._handle, "flush")
+            writer(body[:1])
+            flusher()
+            raise OSError("simulated crash mid-write")
+
+    def _crashy_open(self: Path, *args: object, **kwargs: object) -> object:
+        mode = str(kwargs.pop("mode", args[0] if args else "r"))
+        rest = args[1:] if args else ()
+        handle = real_open(self, mode, *rest, **kwargs)
+        if "w" in mode and self.parent == tmp_path and self.name.startswith(
+            backup.WATERMARK_NAME + "."
+        ):
+            return _DiesAfterOneByte(handle)
+        return handle
+
+    with pytest.MonkeyPatch.context() as crash_zone:
+        crash_zone.setattr(Path, "open", _crashy_open)
+        with pytest.raises(OSError, match="simulated crash"):
+            backup._write_watermark(
+                tmp_path,
+                {"public.channels": 1},
+                run="ums-backup-new",
+                reset={},
+                now=NOW,
+                identity=None,
+            )
+
+    assert (tmp_path / backup.WATERMARK_NAME).read_text(encoding="utf-8") == before

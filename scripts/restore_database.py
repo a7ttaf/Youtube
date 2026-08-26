@@ -130,19 +130,28 @@ _USER_NSP = (
     "AND n.nspname NOT LIKE 'pg\\_temp\\_%' ESCAPE '\\' "
     "AND n.nspname NOT LIKE 'pg\\_toast\\_temp\\_%' ESCAPE '\\'"
 )
+# Constant catalog filter only — never operator input (BAN-B608-safe concat).
 USER_OBJECT_COUNT_SQL = (
     "SELECT ("
     " (SELECT count(*) FROM pg_catalog.pg_class c "
     "  JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace "
-    f" WHERE {_USER_NSP} AND c.relkind IN ('r', 'p', 'v', 'm', 'S', 'f'))"
+    " WHERE "
+    + _USER_NSP
+    + " AND c.relkind IN ('r', 'p', 'v', 'm', 'S', 'f'))"
     " + (SELECT count(*) FROM pg_catalog.pg_type t "
     "  JOIN pg_catalog.pg_namespace n ON n.oid = t.typnamespace "
-    f" WHERE {_USER_NSP} AND t.typtype = 'e')"
+    " WHERE "
+    + _USER_NSP
+    + " AND t.typtype IN ('b', 'c', 'd', 'e', 'r', 'm'))"
     " + (SELECT count(*) FROM pg_catalog.pg_proc p "
     "  JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace "
-    f" WHERE {_USER_NSP})"
+    " WHERE "
+    + _USER_NSP
+    + ")"
     " + (SELECT count(*) FROM pg_catalog.pg_namespace n "
-    f" WHERE {_USER_NSP} AND n.nspname <> 'public')"
+    " WHERE "
+    + _USER_NSP
+    + " AND n.nspname <> 'public')"
     ")::bigint;"
 )
 LIST_TABLES_SQL = (
@@ -254,6 +263,14 @@ def _require_restorable_backup_dir(backup_dir: Path) -> None:
     """Refuse non-directories, quarantined names, and incomplete run layouts."""
     if not backup_dir.is_dir():
         raise RestoreError(EXIT_USAGE, f"{backup_dir} is not a directory")
+    # FIX: a staging dir left as *.partial can hold all three files after an
+    # interrupted publish; refuse the name before trusting the layout.
+    if backup_dir.name.endswith(".partial"):
+        raise RestoreError(
+            EXIT_USAGE,
+            f"{backup_dir.name} is still marked .partial (publish never finished). "
+            "Do not restore an unpublished staging directory.",
+        )
     if backup_dir.name.endswith(REJECTED_SUFFIX):
         raise RestoreError(
             EXIT_USAGE,
@@ -340,6 +357,30 @@ def _verify_backup_artifact_digests(backup_dir: Path, manifest: dict[str, object
 #     digests for database.dump and roles.sql, and the content_gate block plus
 #     the ``.rejected`` naming this function refuses.
 # ============================================================================
+def _require_manifest_table_row_counts(manifest: dict[str, object]) -> dict[str, int]:
+    """Require a well-formed table_row_counts map before any restore apply.
+
+    FIX: malformed or missing counts used to surface only in ``_verify`` after
+    ``pg_restore --single-transaction`` committed — with ``--allow-nonempty``
+    that replaced the target and then failed, implying the original state was
+    intact. Validate before roles or data are applied.
+    """
+    expected_raw = manifest.get("table_row_counts")
+    if not isinstance(expected_raw, dict):
+        raise RestoreError(
+            EXIT_USAGE,
+            "manifest.table_row_counts is missing or not a JSON object; "
+            "refusing to apply an unverifiable backup",
+        )
+    try:
+        return {str(k): int(v) for k, v in expected_raw.items()}
+    except (TypeError, ValueError) as exc:
+        raise RestoreError(
+            EXIT_USAGE,
+            f"manifest.table_row_counts holds a value that is not a row count: {exc}",
+        ) from exc
+
+
 def _load_backup(backup_dir: Path) -> dict[str, object]:
     """Load and integrity-check a backup run; return its manifest dict."""
     _require_restorable_backup_dir(backup_dir)
@@ -347,6 +388,7 @@ def _load_backup(backup_dir: Path) -> dict[str, object]:
     manifest = _read_restore_manifest(manifest_path)
     _refuse_rejected_content_gate(manifest, backup_name=manifest_path.parent.name)
     _verify_backup_artifact_digests(backup_dir, manifest)
+    _require_manifest_table_row_counts(manifest)
     return manifest
 
 
@@ -472,14 +514,36 @@ def _await_postgres(container: str, *, wait_seconds: int, timeout: int) -> None:
 #   - File: scripts/backup_database.py -> records source.image,
 #     source.database and source.superuser in manifest.json.
 # ============================================================================
+
+def _docker_image_exists(reference: str, *, timeout: int) -> bool:
+    """Return whether ``docker image inspect`` finds ``reference`` locally."""
+    if not reference:
+        return False
+    completed = _run(
+        ["docker", "image", "inspect", "--format", "{{.Id}}", reference],
+        timeout=timeout,
+    )
+    return completed.returncode == 0 and bool(completed.stdout.strip())
+
+
+def _resolve_rehearsal_image(*, image_id: str, image: str, timeout: int) -> str:
+    """Pick a runnable rehearsal image: local config ID, else pullable tag/digest."""
+    if image_id and _docker_image_exists(image_id, timeout=timeout):
+        return image_id
+    if image:
+        return image
+    return image_id
+
 def _create_throwaway(manifest: dict[str, object], *, timeout: int) -> str:
     """Start a disposable Postgres container from the backup manifest source."""
     source = manifest.get("source")
     if not isinstance(source, dict):
         raise RestoreError(EXIT_USAGE, "manifest has no source block")
-    image = str(source.get("image") or "")
+    image = str(source.get("image") or "").strip()
     image_id = str(source.get("image_id") or "").strip()
-    run_image = image_id or image
+    # FIX: prefer a still-local image_id, else fall back to the pullable digest/tag
+    # recorded as source.image after prune/upgrade removed the config ID.
+    run_image = _resolve_rehearsal_image(image_id=image_id, image=image, timeout=timeout)
     database = str(source.get("database") or "")
     superuser = str(source.get("superuser") or "")
     if not run_image or not database or not superuser:
@@ -515,7 +579,12 @@ def _create_throwaway(manifest: dict[str, object], *, timeout: int) -> str:
             timeout=timeout,
         )
     except subprocess.TimeoutExpired as exc:
-        _destroy_throwaway(name, timeout=timeout)
+        if not _destroy_throwaway(name, timeout=timeout):
+            print(
+                f"WARNING: timed out starting {name!r} and cleanup also failed; "
+                "remove the container and its anonymous volume manually.",
+                flush=True,
+            )
         raise RestoreError(
             EXIT_CONTAINER_UNAVAILABLE,
             f"timed out starting throwaway container from {run_image} after {timeout}s",
@@ -777,19 +846,7 @@ def _table_row_counts(container: str, *, timeout: int) -> dict[str, int]:
 # ============================================================================
 def _verify(container: str, manifest: dict[str, object], *, timeout: int) -> bool:
     """Compare restored public table row counts to the manifest; True if all match."""
-    expected_raw = manifest.get("table_row_counts")
-    expected: dict[str, int] = {}
-    if isinstance(expected_raw, dict):
-        # FIX: a manifest carrying a non-numeric count raised TypeError/ValueError
-        # out of the process. A manifest this script cannot read is a usage
-        # failure with an exit code, not a crash.
-        try:
-            expected = {str(k): int(v) for k, v in expected_raw.items()}
-        except (TypeError, ValueError) as exc:
-            raise RestoreError(
-                EXIT_USAGE,
-                f"manifest.table_row_counts holds a value that is not a row count: {exc}",
-            ) from exc
+    expected = _require_manifest_table_row_counts(manifest)
     actual = _table_row_counts(container, timeout=timeout)
     names = sorted(set(expected) | set(actual))
     if not names:
