@@ -125,34 +125,37 @@ ROLES_PRESENT_SQL = (
 # Count user objects across every non-system schema so a database that only
 # has tables/enums/functions/empty custom schemas cannot look empty and
 # bypass --allow-nonempty.
-_USER_NSP = (
-    "n.nspname NOT IN ('pg_catalog', 'information_schema', 'pg_toast') "
-    "AND n.nspname NOT LIKE 'pg\\_temp\\_%' ESCAPE '\\' "
-    "AND n.nspname NOT LIKE 'pg\\_toast\\_temp\\_%' ESCAPE '\\'"
-)
-USER_OBJECT_COUNT_SQL = (
-    "SELECT ("
-    " (SELECT count(*) FROM pg_catalog.pg_class c "
-    "  JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace "
-    " WHERE "
-    + _USER_NSP
-    + " AND c.relkind IN ('r', 'p', 'v', 'm', 'S', 'f'))"
-    " + (SELECT count(*) FROM pg_catalog.pg_type t "
-    "  JOIN pg_catalog.pg_namespace n ON n.oid = t.typnamespace "
-    " WHERE "
-    + _USER_NSP
-    + " AND t.typtype IN ('b', 'c', 'd', 'e', 'r', 'm'))"
-    " + (SELECT count(*) FROM pg_catalog.pg_proc p "
-    "  JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace "
-    " WHERE "
-    + _USER_NSP
-    + ")"
-    " + (SELECT count(*) FROM pg_catalog.pg_namespace n "
-    " WHERE "
-    + _USER_NSP
-    + " AND n.nspname <> 'public')"
-    ")::bigint;"
-)
+#
+# FIX: This statement is assembled as ONE static raw literal on purpose --
+# DeepSource BAN-B608 (and bandit) treat runtime `+` assembly of an executed
+# query as a string-built SQL vector, even when every fragment is constant.
+# Nothing here interpolates runtime data; do not reintroduce concatenation.
+USER_OBJECT_COUNT_SQL = r"""
+    SELECT (
+        (SELECT count(*) FROM pg_catalog.pg_class c
+         JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+         WHERE n.nspname NOT IN ('pg_catalog', 'information_schema', 'pg_toast')
+           AND n.nspname NOT LIKE 'pg\_temp\_%' ESCAPE '\'
+           AND n.nspname NOT LIKE 'pg\_toast\_temp\_%' ESCAPE '\'
+           AND c.relkind IN ('r', 'p', 'v', 'm', 'S', 'f'))
+      + (SELECT count(*) FROM pg_catalog.pg_type t
+         JOIN pg_catalog.pg_namespace n ON n.oid = t.typnamespace
+         WHERE n.nspname NOT IN ('pg_catalog', 'information_schema', 'pg_toast')
+           AND n.nspname NOT LIKE 'pg\_temp\_%' ESCAPE '\'
+           AND n.nspname NOT LIKE 'pg\_toast\_temp\_%' ESCAPE '\'
+           AND t.typtype IN ('b', 'c', 'd', 'e', 'r', 'm'))
+      + (SELECT count(*) FROM pg_catalog.pg_proc p
+         JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace
+         WHERE n.nspname NOT IN ('pg_catalog', 'information_schema', 'pg_toast')
+           AND n.nspname NOT LIKE 'pg\_temp\_%' ESCAPE '\'
+           AND n.nspname NOT LIKE 'pg\_toast\_temp\_%' ESCAPE '\')
+      + (SELECT count(*) FROM pg_catalog.pg_namespace n
+         WHERE n.nspname NOT IN ('pg_catalog', 'information_schema', 'pg_toast')
+           AND n.nspname NOT LIKE 'pg\_temp\_%' ESCAPE '\'
+           AND n.nspname NOT LIKE 'pg\_toast\_temp\_%' ESCAPE '\'
+           AND n.nspname <> 'public')
+    )::bigint;
+"""
 LIST_TABLES_SQL = (
     "SELECT tablename FROM pg_catalog.pg_tables WHERE schemaname = 'public' ORDER BY tablename;"
 )
@@ -371,13 +374,28 @@ def _require_manifest_table_row_counts(manifest: dict[str, object]) -> dict[str,
             "manifest.table_row_counts is missing or not a JSON object; "
             "refusing to apply an unverifiable backup",
         )
-    try:
-        return {str(k): int(v) for k, v in expected_raw.items()}
-    except (TypeError, ValueError) as exc:
+    # FIX: int() accepted booleans as 0/1 and truncated fractional counts, and
+    # an empty mapping verified trivially -- so --allow-nonempty could commit
+    # the destructive single-transaction replacement and only discover the
+    # mismatch, or coincidentally match, during verification. Require a
+    # non-empty mapping of exact nonnegative JSON integers up front.
+    if not expected_raw:
         raise RestoreError(
             EXIT_USAGE,
-            f"manifest.table_row_counts holds a value that is not a row count: {exc}",
-        ) from exc
+            "manifest.table_row_counts holds no table row counts (empty object); "
+            "refusing to apply a backup whose table populations cannot be verified",
+        )
+    expected: dict[str, int] = {}
+    for key, value in expected_raw.items():
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise RestoreError(
+                EXIT_USAGE,
+                f"manifest.table_row_counts holds a row count that is not an "
+                f"exact nonnegative integer at {key!r}: {value!r} "
+                "(booleans, floats, strings, negatives refused)",
+            )
+        expected[str(key)] = value
+    return expected
 
 
 def _load_backup(backup_dir: Path) -> dict[str, object]:

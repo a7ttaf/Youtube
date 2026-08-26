@@ -2460,7 +2460,11 @@ def test_restore_still_accepts_a_manifest_written_before_the_gate_existed(
                     backup.DUMP_NAME: {"sha256": restore._sha256(dump)},
                     backup.ROLES_NAME: {"sha256": restore._sha256(roles)},
                 },
-                "table_row_counts": {},
+                # PR #210 review round: an empty table_row_counts object is now
+                # refused before any destructive apply, so the legacy-compat
+                # fixture records real counts to keep this test pointed at its
+                # actual subject -- a manifest with no content_gate verdict.
+                "table_row_counts": {"public.channels": 1},
             }
         ),
         encoding="utf-8",
@@ -3678,6 +3682,61 @@ def test_load_backup_rejects_non_numeric_table_row_counts(tmp_path: Path) -> Non
         restore._load_backup(run)
     assert caught.value.code == restore.EXIT_USAGE
     assert "row count" in str(caught.value)
+
+
+@pytest.mark.parametrize(
+    ("counts", "shape_label"),
+    [
+        ({}, "empty mapping"),
+        ({"public.channels": -1}, "negative integer"),
+        ({"public.channels": True}, "JSON boolean"),
+        ({"public.channels": 1.9}, "fractional number"),
+        ({"public.channels": "3"}, "numeric string"),
+    ],
+)
+def test_load_backup_rejects_coercible_table_row_count_shapes(
+    tmp_path: Path, counts: object, shape_label: str
+) -> None:
+    """int() coercion used to pass {}, -1, true and truncate 1.9 before the
+    destructive single-transaction replace committed; a coerced value could
+    even coincide with reality and print RESTORE VERIFIED. Each shape must be
+    refused at load time, before roles or data are applied."""
+    run = tmp_path / "ums-backup-20260824T222107Z"
+    run.mkdir()
+    dump = run / backup.DUMP_NAME
+    roles = run / backup.ROLES_NAME
+    dump.write_bytes(b"PGDMP-placeholder")
+    roles.write_text("CREATE ROLE app_tenant;\n", encoding="utf-8")
+    (run / backup.MANIFEST_NAME).write_text(
+        json.dumps(
+            {
+                "schema": backup.MANIFEST_SCHEMA,
+                "artifacts": {
+                    backup.DUMP_NAME: {"sha256": restore._sha256(dump)},
+                    backup.ROLES_NAME: {"sha256": restore._sha256(roles)},
+                },
+                "table_row_counts": counts,
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(restore.RestoreError) as caught:
+        restore._load_backup(run)
+    assert caught.value.code == restore.EXIT_USAGE, shape_label
+    assert "row count" in str(caught.value)
+
+
+def test_require_manifest_table_row_counts_accepts_exact_nonnegative_integers() -> None:
+    """Exact nonnegative JSON integers -- including zero -- keep passing."""
+    assert (
+        restore._require_manifest_table_row_counts(
+            {"table_row_counts": {"public.channels": 0}}
+        )
+        == {"public.channels": 0}
+    )
+    assert restore._require_manifest_table_row_counts(
+        {"table_row_counts": {"public.channels": 12, "public.revenue_facts": 3456}}
+    ) == {"public.channels": 12, "public.revenue_facts": 3456}
 
 
 def test_resolve_rehearsal_image_falls_back_when_id_missing(
