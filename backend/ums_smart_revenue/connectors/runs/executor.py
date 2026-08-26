@@ -759,9 +759,9 @@ class ConnectorJobExecutor:
             ChannelGroupOwnerReassignmentError,
         ) as exc:
             logger.exception(
-                "Scheduled group sync failed (tenant=%s owner=%s)",
+                "Scheduled group sync failed (tenant=%s error_class=%s)",
                 tenant_id,
-                content_owner_id,
+                type(exc).__name__,
             )
             self._audit_group_sync_failure(
                 tenant_id=tenant_id,
@@ -769,11 +769,13 @@ class ConnectorJobExecutor:
                 error_class=type(exc).__name__,
                 actor_identity=actor_identity,
             )
-        except Exception:  # noqa: BLE001 — fail-closed: never escape the thread
+        except Exception as unexpected_error:
+            # Worker boundary: typed Google/group failures are handled above;
+            # anything else must stay inside the thread so the pool keeps running.
             logger.exception(
-                "Scheduled group sync worker raised (tenant=%s owner=%s)",
+                "Scheduled group sync worker raised (tenant=%s error_class=%s)",
                 tenant_id,
-                content_owner_id,
+                type(unexpected_error).__name__,
             )
         finally:
             self._deregister(key)
@@ -809,9 +811,9 @@ class ConnectorJobExecutor:
             if outcome != GroupSyncOutcome.UNCHANGED.value
         )
         if not changed:
-            logger.info(
-                "Scheduled group sync converged with no changes (owner=%s)", content_owner_id
-            )
+            # FIX: Do not log raw content_owner_id at INFO (retained Docker logs);
+            # audit details still carry the identifier when the apply changes state.
+            logger.info("Scheduled group sync converged with no changes")
             return
         record_audit_event(
             sink=sink,

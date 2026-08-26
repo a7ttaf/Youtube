@@ -344,9 +344,21 @@ Delete the local payload file after the upload succeeds. (gcloud flag syntax nee
 confirmation against current Google docs.)
 
 **Step 2 — GCP auth for the resolver (the missing fourth piece).**
-`gcloud auth application-default login` (or `GOOGLE_APPLICATION_CREDENTIALS` pointing at
-a service-account key). The identity needs `roles/secretmanager.secretAccessor`.
-Without this, both scripts exit 2 with `SecretFetchError`.
+
+*Host CLI path (Steps 2/4):* `gcloud auth application-default login` on the
+Windows host, or set host `GOOGLE_APPLICATION_CREDENTIALS` to a service-account
+key. The identity needs `roles/secretmanager.secretAccessor`. Without this, the
+host credential probe exits 2 with `SecretFetchError`.
+
+*Compose `app` / in-process jobs:* host ADC is **not** visible inside the
+container. `docker-compose.yml` does not mount ADC or forward
+`GOOGLE_APPLICATION_CREDENTIALS`. Before treating Step 2 as sufficient for
+Compose live runs, mount a service-account key (or ADC directory) into `app`
+and set `GOOGLE_APPLICATION_CREDENTIALS` via an untracked
+`docker-compose.override.yml` (same override pattern as
+[Supplying the service actor under `docker compose`](#supplying-the-service-actor-under-docker-compose)).
+Otherwise the host probe can pass while API credential tests and connector jobs
+fail with `SecretFetchError` inside the container.
 
 **Step 3 — the credential row** (superuser SQL bypasses RLS deliberately; the audited
 alternative is `POST /connectors/credentials` per the Setup sequence above):
@@ -374,9 +386,15 @@ live-run gate for roughly one hour. Exit-2 first lines map to causes:
 `MalformedSecretPayloadError` → payload JSON; `OAuthRefreshError` → Step 0's token;
 `CredentialNotFoundError` → Step 3.
 
-**Step 5 — service actor (live runs only).** Set
-`UMS_GOOGLE_CONNECTOR_SERVICE_ACTOR_ID` to the UUID `bootstrap_operator.py` printed —
-never the public `.env.example` placeholder.
+**Step 5 — service actor (live runs only).** Provision a dedicated service
+account (not a human operator): Super Owner `POST /users` with
+`is_service_account: true`, grant `connectors.run_jobs`, then set
+`UMS_GOOGLE_CONNECTOR_SERVICE_ACTOR_ID` to that UUID. Do **not** reuse the UUID
+printed by `bootstrap_operator.py` — that helper creates
+`is_service_account=False` humans, and using it would attribute unattended
+connector audit rows to the operator. Never use the public `.env.example`
+placeholder. Under Compose, supply the UUID via the override documented in
+[Supplying the service actor under `docker compose`](#supplying-the-service-actor-under-docker-compose).
 
 **Step 6 — optional dry-run.** Costs the same ~54 API calls as a live run.
 ⚠️ *Not* free of side effects: the dry-run performs the full credential resolve, and a

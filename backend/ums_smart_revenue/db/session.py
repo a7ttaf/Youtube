@@ -195,7 +195,12 @@ def _enable_sqlite_transactional_savepoints(engine: Engine) -> None:
     def _release_writer_lock_on_reset(
         _dbapi_connection: Any, _connection_record: Any, _reset_state: Any
     ) -> None:
-        """StaticPool resets in place; reset is the release point when checkin does not fire."""
+        """Release on reset: StaticPool can reset without a following checkin.
+
+        Keep this alongside checkin release (idempotent via ``lock_held``).
+        Checkin-only release deadlocked concurrent StaticPool writers in
+        ``test_sqlite_overlapping_sessions_serialize_instead_of_colliding_begin``.
+        """
         _release_writer_lock()
 
     dialect = engine.dialect
@@ -210,11 +215,10 @@ def _enable_sqlite_transactional_savepoints(engine: Engine) -> None:
         """Roll back on the DBAPI connection; lock release waits for pool check-in."""
         original_do_rollback(dbapi_connection)
 
-    # Deliberate instance-level monkeypatch: the writer lock must release AFTER
-    # SQLAlchemy finishes after_commit/reset and returns the connection to the
-    # pool. Connection events and do_commit alone fire too early on StaticPool.
-    dialect.do_commit = _do_commit  # type: ignore[method-assign]
-    dialect.do_rollback = _do_rollback  # type: ignore[method-assign]
+    # Deliberate instance-level monkeypatch via setattr (avoids method-assign
+    # type suppressions). Lock release remains on reset+checkin listeners above.
+    setattr(dialect, "do_commit", _do_commit)
+    setattr(dialect, "do_rollback", _do_rollback)
 
 
 # ============================================================================
