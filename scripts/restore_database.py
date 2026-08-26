@@ -1024,10 +1024,6 @@ def _recreate_target_database(container: str, target_db: str, *, timeout: int) -
         f"WHERE datname = {_quote_literal(target_db)} "
         "AND pid <> pg_backend_pid();"
     )
-    drop_create_sql = (
-        f"DROP DATABASE IF EXISTS {quoted_db};\n"
-        f"CREATE DATABASE {quoted_db};\n"
-    )
     try:
         int(_psql(
             container,
@@ -1040,8 +1036,16 @@ def _recreate_target_database(container: str, target_db: str, *, timeout: int) -
             EXIT_RESTORE_FAILED,
             f"could not terminate connections for {target_db!r}: {exc}",
         ) from exc
-    _psql(container, drop_create_sql, timeout=timeout, dbname="postgres")
-
+    drop_create_lines = [
+        f"DROP DATABASE IF EXISTS {quoted_db};",
+        f"CREATE DATABASE {quoted_db};",
+    ]
+    _psql(
+        container,
+        "\n".join(drop_create_lines),
+        timeout=timeout,
+        dbname="postgres",
+    )
 
 
 def _guard_empty(container: str, *, allow_nonempty: bool, timeout: int) -> None:
