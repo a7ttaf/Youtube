@@ -85,6 +85,55 @@ def test_assign_role_uses_ambient_tenant_context(tmp_path):
         assert row.tenant_id == OTHER_TENANT_ID
 
 
+def test_assign_role_adds_the_row_inside_its_savepoint(tmp_path):
+    """The assignment must be pending-not-yet-flushed when BEGIN NESTED opens.
+
+    Opening a savepoint flushes pending session state into the OUTER
+    transaction, so an add left outside let a losing concurrent INSERT abort
+    the whole bootstrap transaction (PendingRollbackError) instead of surfacing
+    the typed conflict here (PR #210 review round 5).
+    """
+    url = _build_db(tmp_path)
+    engine = create_engine(url)
+    with Session(engine) as setup:
+        _seed_user(setup, TARGET_USER_ID, OTHER_TENANT_ID)
+        _seed_user(setup, ACTOR_USER_ID, OTHER_TENANT_ID)
+        setup.commit()
+
+    pending_assignments_at_savepoint_open: list[int] = []
+
+    with Session(engine) as session:
+        token = TENANT_CTX.set(_tenant())
+        original_begin_nested = session.begin_nested
+
+        def _record_pending(*args, **kwargs):
+            pending_assignments_at_savepoint_open.append(
+                sum(
+                    isinstance(obj, UserRoleAssignmentORM)
+                    for obj in list(session.new)
+                )
+            )
+            return original_begin_nested(*args, **kwargs)
+
+        try:
+            with patch.object(session, "begin_nested", side_effect=_record_pending):
+                entry = SqlAlchemyUserRoleAssignmentRepository(session).assign_role(
+                    user_id=str(TARGET_USER_ID),
+                    role_key="assistant_analyst",
+                    scope_type="company",
+                    scope_id="company-tv-a",
+                    assigned_by=str(ACTOR_USER_ID),
+                    reason="Savepoint-ordering contract",
+                )
+            session.commit()
+        finally:
+            TENANT_CTX.reset(token)
+
+    assert UUID(entry.id)
+    assert pending_assignments_at_savepoint_open, "a savepoint was expected to open"
+    assert max(pending_assignments_at_savepoint_open) == 0
+
+
 def test_assign_role_rejects_actor_user_from_another_tenant(tmp_path):
     url = _build_db(tmp_path)
     engine = create_engine(url)

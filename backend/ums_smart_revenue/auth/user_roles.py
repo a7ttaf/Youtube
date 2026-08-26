@@ -141,9 +141,16 @@ class SqlAlchemyUserRoleAssignmentRepository:
             reason=normalized_reason,
             active=True,
         )
-        self._session.add(row)
         try:
             with self._session.begin_nested():
+                # FIX: the add must sit INSIDE the savepoint -- opening
+                # begin_nested() flushes pending session state, so an add left
+                # outside let a concurrent duplicate INSERT abort the OUTER
+                # transaction; this handler then saw PendingRollbackError
+                # instead of being able to raise the typed conflict, and the
+                # idempotent bootstrap exited with a database failure rather
+                # than its EXISTING outcome.
+                self._session.add(row)
                 self._session.flush()
         except IntegrityError as exc:
             duplicate = self._session.scalars(

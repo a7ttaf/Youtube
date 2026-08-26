@@ -61,6 +61,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import threading
 import weakref
@@ -126,6 +127,13 @@ _CLOSE_JOIN_TIMEOUT_SECONDS = 10.0
 #     submit_group_sync_if_absent / activate / cancel_reservation.
 #   - File: backend/ums_smart_revenue/app.py -> boot wiring + lifespan close.
 # ============================================================================
+
+
+def _owner_log_label(account_id: str) -> str:
+    """Return a non-reversible fingerprint of a CMS content-owner id for logs."""
+    return hashlib.sha256(account_id.encode("utf-8")).hexdigest()[:12]
+
+
 class GroupSyncScheduler:
     """Tick a background thread that submits CMS group-sync jobs for ACTIVE tenants.
 
@@ -378,10 +386,13 @@ class GroupSyncScheduler:
                     # it can never be the cause here; see group_sync.py's
                     # concurrency note). Debug, not info: expected steady-
                     # state noise on a short interval, not an operator signal.
+                    # FIX: the guarded CMS content-owner id went out raw; the
+                    # README presents DEBUG as safe for operators, so only the
+                    # SHA-256 fingerprint is logged now.
                     logger.debug(
-                        "group-sync tick: sync already in flight (tenant=%s owner=%s)",
+                        "group-sync tick: sync already in flight (tenant=%s owner_fp=%s)",
                         tenant_id,
-                        entry.account_id,
+                        _owner_log_label(entry.account_id),
                     )
                     in_flight_skipped += 1
                     continue
