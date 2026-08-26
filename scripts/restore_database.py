@@ -122,10 +122,15 @@ ROLES_PRESENT_SQL = (
     "SELECT rolname FROM pg_catalog.pg_roles "
     "WHERE rolname IN ('app_tenant', 'app_platform') ORDER BY rolname;"
 )
-PUBLIC_TABLE_COUNT_SQL = (
+# Count user objects across every non-system schema so a database that only
+# has tables outside ``public`` cannot look empty and bypass --allow-nonempty.
+USER_OBJECT_COUNT_SQL = (
     "SELECT count(*) FROM pg_catalog.pg_class c "
     "JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace "
-    "WHERE n.nspname = 'public' AND c.relkind = 'r';"
+    "WHERE n.nspname NOT IN ('pg_catalog', 'information_schema', 'pg_toast') "
+    "AND n.nspname NOT LIKE 'pg\\_temp\\_%' ESCAPE '\\' "
+    "AND n.nspname NOT LIKE 'pg\\_toast\\_temp\\_%' ESCAPE '\\' "
+    "AND c.relkind IN ('r', 'p', 'v', 'm', 'S', 'f');"
 )
 LIST_TABLES_SQL = (
     "SELECT tablename FROM pg_catalog.pg_tables WHERE schemaname = 'public' ORDER BY tablename;"
@@ -879,21 +884,23 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
 
 
 def _guard_empty(container: str, *, allow_nonempty: bool, timeout: int) -> None:
-    """Refuse a non-empty public schema unless --allow-nonempty was passed."""
-    raw = _psql(container, PUBLIC_TABLE_COUNT_SQL, timeout=timeout).strip()
+    """Refuse a non-empty target database unless --allow-nonempty was passed."""
+    raw = _psql(container, USER_OBJECT_COUNT_SQL, timeout=timeout).strip()
     try:
         existing = int(raw or "0")
     except ValueError as exc:
         raise RestoreError(
             EXIT_RESTORE_FAILED,
-            f"could not read the public table count from psql output {raw!r}: {exc}",
+            f"could not read the user-object count from psql output {raw!r}: {exc}",
         ) from exc
     if existing and not allow_nonempty:
         raise RestoreError(
             EXIT_USAGE,
-            f"the target database already has {existing} tables in public. "
-            "Restore into an empty database (recreate the container/volume), or "
-            "pass --allow-nonempty to DROP and replace the existing objects.",
+            f"the target database already has {existing} user objects outside "
+            "system catalogs. Restore into an empty database (recreate the "
+            "container/volume), or pass --allow-nonempty to DROP and replace "
+            "existing objects in the dump's schemas (foreign schemas are not "
+            "removed).",
         )
 
 

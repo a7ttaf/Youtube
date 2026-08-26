@@ -897,30 +897,33 @@ def _held_repeatable_read_session(container: str, *, timeout: int):
     assert process.stdin is not None
     assert process.stdout is not None
     assert process.stderr is not None
+    stdin = process.stdin
+    stdout = process.stdout
+    stderr = process.stderr
 
     def run_sql(sql: str) -> str:
         """run sql."""
         deadline = time.monotonic() + max(1, timeout)
         if process.poll() is not None:
-            err = process.stderr.read()
+            err = stderr.read()
             raise BackupError(
                 EXIT_COMMAND_FAILED,
                 f"snapshot holder psql exited early: {err.strip()}",
             )
-        process.stdin.write(sql if sql.endswith("\n") else sql + "\n")
-        process.stdin.flush()
+        stdin.write(sql if sql.endswith("\n") else sql + "\n")
+        stdin.flush()
         # Each statement's -At output ends when psql prints the row(s). For
         # transactional control statements with no rows, we still need a
         # marker. Append a sentinel SELECT so we can drain one line.
-        process.stdin.write("SELECT 'UMS_SNAP_OK';\n")
-        process.stdin.flush()
+        stdin.write("SELECT 'UMS_SNAP_OK';\n")
+        stdin.flush()
         lines: list[str] = []
         while True:
             # FIX: Bound every readline against --timeout. process.wait() alone
             # never runs while a blocked snapshot/count query holds stdout.
-            line = _readline_with_deadline(process.stdout, deadline)
+            line = _readline_with_deadline(stdout, deadline)
             if line == "":
-                err = process.stderr.read()
+                err = stderr.read()
                 raise BackupError(
                     EXIT_COMMAND_FAILED,
                     f"snapshot holder psql closed stdout: {err.strip()}",
@@ -944,14 +947,14 @@ def _held_repeatable_read_session(container: str, *, timeout: int):
     except Exception:
         try:
             if process.poll() is None:
-                process.stdin.write("ROLLBACK;\n")
-                process.stdin.flush()
+                stdin.write("ROLLBACK;\n")
+                stdin.flush()
         except OSError:
             pass
         raise
     finally:
         try:
-            process.stdin.close()
+            stdin.close()
         except OSError:
             pass
         try:
@@ -961,18 +964,69 @@ def _held_repeatable_read_session(container: str, *, timeout: int):
             process.wait(timeout=5)
 
 
-def _dump_database_and_count(container: str, target: Path, *, timeout: int) -> dict[str, int]:
-    """Dump the database and return row counts from the same snapshot."""
+def _parse_role_name_lines(raw: str) -> set[str]:
+    """Parse one-role-per-line psql -At output into a role name set."""
+    return {line.strip() for line in raw.splitlines() if line.strip()}
+
+
+# Snapshot-time ACL grantees for roles.sql coverage. pg_restore --list ACL TOC
+# lines end with the *object owner*, not GRANT targets; grantees live in ACL
+# bodies / catalogs. Collect them on the held REPEATABLE READ snapshot so a
+# DROP ROLE between dump and roles capture cannot hide a missing CREATE ROLE.
+ACL_GRANTEE_SQL = """
+SELECT DISTINCT r.rolname
+FROM (
+  SELECT (aclexplode(c.relacl)).grantee AS gid
+  FROM pg_catalog.pg_class c
+  JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+  WHERE c.relacl IS NOT NULL
+    AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+    AND n.nspname NOT LIKE 'pg\\_temp\\_%' ESCAPE '\\'
+    AND n.nspname NOT LIKE 'pg\\_toast\\_temp\\_%' ESCAPE '\\'
+  UNION ALL
+  SELECT (aclexplode(n.nspacl)).grantee
+  FROM pg_catalog.pg_namespace n
+  WHERE n.nspacl IS NOT NULL
+    AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+    AND n.nspname NOT LIKE 'pg\\_temp\\_%' ESCAPE '\\'
+    AND n.nspname NOT LIKE 'pg\\_toast\\_temp\\_%' ESCAPE '\\'
+  UNION ALL
+  SELECT (aclexplode(p.proacl)).grantee
+  FROM pg_catalog.pg_proc p
+  JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace
+  WHERE p.proacl IS NOT NULL
+    AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+  UNION ALL
+  SELECT (aclexplode(t.typacl)).grantee
+  FROM pg_catalog.pg_type t
+  JOIN pg_catalog.pg_namespace n ON n.oid = t.typnamespace
+  WHERE t.typacl IS NOT NULL
+    AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+  UNION ALL
+  SELECT (aclexplode(d.defaclacl)).grantee
+  FROM pg_catalog.pg_default_acl d
+) g
+JOIN pg_catalog.pg_roles r ON r.oid = g.gid
+WHERE g.gid <> 0
+ORDER BY 1;
+""".strip()
+
+
+def _dump_database_and_count(
+    container: str, target: Path, *, timeout: int
+) -> tuple[dict[str, int], set[str]]:
+    """Dump the database; return row counts and ACL grantees from the same snapshot."""
     with _held_repeatable_read_session(container, timeout=timeout) as (snapshot, run_sql):
         _dump_database(container, target, timeout=timeout, snapshot=snapshot)
+        acl_grantees = _parse_role_name_lines(run_sql(ACL_GRANTEE_SQL))
         raw_tables = run_sql(
             "SELECT tablename FROM pg_catalog.pg_tables "
             "WHERE schemaname = 'public' ORDER BY tablename;"
         )
         tables = [line.strip() for line in raw_tables.splitlines() if line.strip()]
         if not tables:
-            return {}
-        return _parse_counts_output(run_sql(_count_sql_for_tables(tables)))
+            return {}, acl_grantees
+        return _parse_counts_output(run_sql(_count_sql_for_tables(tables))), acl_grantees
 
 
 # ============================================================================
@@ -1030,7 +1084,12 @@ def _pg_restore_list(container: str, dump_path: Path, *, timeout: int) -> str:
 
 
 def _roles_referenced_in_dump_listing(listing: str) -> set[str]:
-    """Return cluster role names referenced as ACL grantees or object owners."""
+    """Return cluster role names that own TOC objects (including ACL entries).
+
+    ``pg_restore --list`` ACL lines end with the TOC entry *owner*, not the
+    GRANT/REVOKE grantees. Grantees are collected separately via
+    ``ACL_GRANTEE_SQL`` on the dump snapshot.
+    """
     roles: set[str] = set()
     owner_markers = (
         " TABLE ",
@@ -1044,13 +1103,11 @@ def _roles_referenced_in_dump_listing(listing: str) -> set[str]:
         " DOMAIN ",
         " AGGREGATE ",
         " FOREIGN TABLE ",
+        " ACL ",
     )
     for line in listing.splitlines():
         stripped = line.strip()
         if not stripped or stripped.startswith(";") or not stripped[0].isdigit():
-            continue
-        if " ACL " in stripped:
-            roles.add(stripped.rsplit(None, 1)[-1])
             continue
         if any(marker in stripped for marker in owner_markers):
             owner = stripped.rsplit(None, 1)[-1]
@@ -1059,12 +1116,15 @@ def _roles_referenced_in_dump_listing(listing: str) -> set[str]:
     return roles
 
 
-def _validate_dump_roles_covered(*, listing: str, roles_body: str) -> None:
+def _validate_dump_roles_covered(
+    *, listing: str, roles_body: str, acl_grantees: set[str] | None = None
+) -> None:
     """Refuse a backup when the archive references roles absent from roles.sql."""
+    referenced = _roles_referenced_in_dump_listing(listing)
+    if acl_grantees:
+        referenced |= acl_grantees
     missing = sorted(
-        role
-        for role in _roles_referenced_in_dump_listing(listing)
-        if not _role_declared_in_roles_sql(roles_body, role)
+        role for role in referenced if not _role_declared_in_roles_sql(roles_body, role)
     )
     if missing:
         raise BackupError(
@@ -3173,7 +3233,27 @@ class _RunReport:
 #     verdict this function acts on; ``main`` persists ``next_watermark``.
 # ============================================================================
 def run_backup(args: argparse.Namespace, out_dir: Path) -> BackupOutcome:
-    """run backup."""
+    """Dump the Postgres container into a timestamped run under ``out_dir``.
+
+    Waits for Docker/Postgres, writes ``database.dump`` (custom ``pg_dump``) and
+    ``roles.sql`` (``pg_dumpall --roles-only``) under a ``.partial`` staging
+    directory, optionally verifies the archive, applies the content gate, then
+    publishes the run or renames it ``*.rejected``. Does not back up Docker
+    volumes such as ``app-data`` — only database dump artifacts on the host.
+
+    Args:
+        args: Parsed CLI options (container lookup, timeouts, verify flags,
+            content-gate / watermark / identity overrides).
+        out_dir: Host directory that will hold the published or rejected run.
+
+    Returns:
+        ``BackupOutcome`` for the finished run. Callers persist
+        ``next_watermark`` and map a rejected verdict to exit 8.
+
+    Raises:
+        BackupError: Docker/container/Postgres unavailable, dump or verify
+            failure, missing database identity, or a colliding run directory.
+    """
     started = _utc_now()
     docker_version = _await_docker(args.wait_for_docker, timeout=args.docker_timeout)
     container = _resolve_container(
@@ -3205,7 +3285,11 @@ def run_backup(args: argparse.Namespace, out_dir: Path) -> BackupOutcome:
         # Capture the archive first, then roles.sql. Role DDL committed after a
         # pre-dump roles capture but before the snapshot would otherwise leave
         # ACL/owner references in database.dump with no matching CREATE ROLE.
-        counts = _dump_database_and_count(container, staging / DUMP_NAME, timeout=args.timeout)
+        # FIX: Collect ACL grantees on the dump snapshot; TOC ACL lines only
+        # name the object owner, so a dropped grantee still fails closed here.
+        counts, acl_grantees = _dump_database_and_count(
+            container, staging / DUMP_NAME, timeout=args.timeout
+        )
         roles = _dump_roles(
             container,
             staging / ROLES_NAME,
@@ -3219,6 +3303,7 @@ def run_backup(args: argparse.Namespace, out_dir: Path) -> BackupOutcome:
             _validate_dump_roles_covered(
                 listing=dump_listing,
                 roles_body=(staging / ROLES_NAME).read_text(encoding="utf-8", errors="replace"),
+                acl_grantees=acl_grantees,
             )
             toc_entries = len(
                 [

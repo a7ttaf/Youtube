@@ -115,10 +115,10 @@ power-cut run leaves something that can never be mistaken for a backup.
 ### What is *not* in it
 
 - **Export artifacts and connector blobs.** Those are plan item P0.2. They now have a
-  named compose volume (`app-data`), whose comment in `docker-compose.yml` states that
-  they belong in the backup set alongside `postgres-data` — **and this backup does not
-  cover them.** `scripts/backup_database.py` backs up the database only. Closing that
-  gap is a separate piece of work; see [Open items](#open-items-this-does-not-close).
+  named compose volume (`app-data`). The volume comment in `docker-compose.yml` states
+  that `scripts/backup_database.py` does **not** cover it today (Postgres-only) —
+  `docker compose down -v` still destroys it. Closing that gap is a separate piece of
+  work; see [Open items](#open-items-this-does-not-close).
 - **Role passwords.** `--no-role-passwords` is the default so SCRAM verifiers never
   land in a plaintext file on the operator's disk. Nothing is lost: `app_tenant` and
   `app_platform` are `NOLOGIN`, and the beta's login role is recreated by the Postgres
@@ -1457,14 +1457,14 @@ otherwise have surfaced during a real incident on a freshly recreated container.
   without that matrix is how a test ends up ratifying the hole it was written to close.
   Do this before a **seventh** name is added to `SEED_TABLES`.
 - **The `app-data` volume is not backed up.** P0.2 gave export artifacts and connector
-  blobs a named volume, and the comment on that volume in `docker-compose.yml` says it
-  *"belongs in the backup set alongside postgres-data"*. It is not in this backup set.
-  `docker compose down -v` still destroys it, and no rehearsal covers it. The clean
-  extension is a `--include-volume` streaming `tar` beside the dump, plus the matching
-  restore side and its own rehearsal; that is a piece of work, not a flag, and it is
-  deliberately not smuggled into P0.1. **Until it exists, an artifact re-request is the
-  only recovery** — `request_export` has no dedup on scope+month
-  (`reports/exports.py:383-433`), so the operator can simply ask for the export again.
+  blobs a named volume. Compose and the README warn that `-v` destroys it and that the
+  database backup does not protect it. It is not in this backup set, and no rehearsal
+  covers it. The clean extension is a `--include-volume` streaming `tar` beside the
+  dump, plus the matching restore side and its own rehearsal; that is a piece of work,
+  not a flag, and it is deliberately not smuggled into P0.1. **Until it exists, an
+  artifact re-request is the only recovery** — `request_export` has no dedup on
+  scope+month (`reports/exports.py:383-433`), so the operator can simply ask for the
+  export again.
 - **Off-machine copy.** This writes to a host directory on the same PC. A disk failure
   or a ransomware event takes the database and its backups together. Point
   `UMS_BACKUP_DIR` at a second physical disk at minimum, and copy run directories to

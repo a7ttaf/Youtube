@@ -24,11 +24,12 @@
 #     Plain `docker compose down` is the non-destructive teardown and is what
 #     you want ~always; containers are recreated from the image on the next
 #     `up` and the data volumes are reattached untouched. Only use `-v` when
-#     you deliberately want an empty database, and only after a verified backup
-#     AND a rehearsed restore — note that `pg_dump` alone does not capture the
-#     `app_tenant` / `app_platform` roles the RLS policies depend on, so a
-#     roles-only dump has to exist too — see P0.1 in
-#     Docs/21_BETA_IMPLEMENTATION_PLAN.md.
+#     you deliberately want empty volumes (postgres-data AND app-data), and
+#     only after a verified *database* backup AND a rehearsed restore for
+#     postgres-data. That backup does not protect app-data — see Docs/22.
+#     Note that `pg_dump` alone does not capture the `app_tenant` /
+#     `app_platform` roles the RLS policies depend on, so a roles-only dump
+#     has to exist too — see P0.1 in Docs/21_BETA_IMPLEMENTATION_PLAN.md.
 #
 # `app` is the FastAPI service running with --reload disabled by default.
 # For interactive dev with hot reload, use the `dev` override profile:
@@ -446,9 +447,11 @@ services:
 volumes:
   postgres-data:
   redis-data:
-  # Export artifacts + connector blobs. See the x-app-storage-env note above;
-  # this is real evidence behind real revenue rows, so it belongs in the backup
-  # set alongside postgres-data, and `docker compose down -v` destroys it.
+  # Export artifacts + connector blobs (see x-app-storage-env). Survives
+  # container recreate; `docker compose down -v` destroys it. NOT covered by
+  # scripts/backup_database.py (Postgres-only today). See Docs/22 "What is
+  # *not* in it" — until an app-data backup exists, recovery is re-request
+  # export (connector blobs may be unrecoverable).
   app-data:
 
 networks:

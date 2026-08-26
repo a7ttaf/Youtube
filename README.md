@@ -235,8 +235,11 @@ docker compose down                     # stop + remove containers, KEEP the dat
 > ⚠️ **`docker compose down -v` is not an ordinary teardown.** `-v` deletes the named
 > volumes — `postgres-data` (every revenue fact, audit row, tenant and role grant),
 > `app-data` (every export artifact and connector blob) and `redis-data`. No prompt, no
-> undo. Take a verified backup and rehearse a restore first:
+> undo. A verified **database** backup + restore rehearsal protects **`postgres-data`
+> only** — see
 > [`Docs/22_BACKUP_RESTORE_AND_REHEARSAL.md`](Docs/22_BACKUP_RESTORE_AND_REHEARSAL.md).
+> **`app-data` is not in that backup.** Losing it means re-requesting exports; connector
+> blobs may be gone. Do not use `-v` unless you accept wiping both volumes.
 
 > ⚠️ **`.env.example` is not yet a complete template for compose.** It predates the
 > database variables, so `docker compose --env-file .env.example config` exits 1 on

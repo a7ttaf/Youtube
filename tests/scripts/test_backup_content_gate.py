@@ -2795,11 +2795,11 @@ class _FakeContainer:
 
     def _dump_database_and_count(
         self, _container: str, target: Path, *, timeout: int
-    ) -> dict[str, int]:
+    ) -> tuple[dict[str, int], set[str]]:
         """dump database and count."""
         _ = timeout
         target.write_bytes(backup.CUSTOM_FORMAT_MAGIC + b"-fake-archive")
-        return dict(self.counts)
+        return dict(self.counts), set()
 
     def _pg_restore_list(self, _container: str, _dump_path: Path, *, timeout: int) -> str:
         """Return a minimal pg_restore listing for fake CLI archives."""
@@ -3365,7 +3365,7 @@ def test_an_empty_roles_file_is_refused(monkeypatch: pytest.MonkeyPatch, tmp_pat
 
 
 def test_validate_dump_roles_covered_rejects_archive_only_role() -> None:
-    """An ACL role present in database.dump but absent from roles.sql is refused."""
+    """An ACL TOC owner present in database.dump but absent from roles.sql is refused."""
     listing = "123; 2606 0 ACL public TABLE tenants orphan_role\n"
     roles_body = "CREATE ROLE app_tenant;\nCREATE ROLE app_platform;\n"
     with pytest.raises(backup.BackupError) as raised:
@@ -3375,13 +3375,79 @@ def test_validate_dump_roles_covered_rejects_archive_only_role() -> None:
 
 
 def test_validate_dump_roles_covered_rejects_table_owner_only_role() -> None:
-    """TABLE owners must be covered, not only ACL grantees."""
+    """TABLE owners must be covered, not only ACL TOC owners."""
     listing = "3; 2615 16384 TABLE public tenants stale_owner\n"
     roles_body = "CREATE ROLE app_tenant;\nCREATE ROLE app_platform;\n"
     with pytest.raises(backup.BackupError) as raised:
         backup._validate_dump_roles_covered(listing=listing, roles_body=roles_body)
     assert raised.value.code == backup.EXIT_ARTIFACT_INVALID
     assert "stale_owner" in str(raised.value)
+
+
+def test_validate_dump_roles_covered_rejects_snapshot_acl_grantee() -> None:
+    """Snapshot ACL grantees must be declared even when absent from TOC owners."""
+    listing = "3; 2615 16384 TABLE public tenants app_tenant\n"
+    roles_body = "CREATE ROLE app_tenant;\nCREATE ROLE app_platform;\n"
+    with pytest.raises(backup.BackupError) as raised:
+        backup._validate_dump_roles_covered(
+            listing=listing,
+            roles_body=roles_body,
+            acl_grantees={"ghost_grantee"},
+        )
+    assert raised.value.code == backup.EXIT_ARTIFACT_INVALID
+    assert "ghost_grantee" in str(raised.value)
+
+
+def test_validate_dump_roles_covered_ignores_empty_acl_grantee_set() -> None:
+    """An empty snapshot grantee set does not weaken TOC owner coverage."""
+    listing = "3; 2615 16384 TABLE public tenants stale_owner\n"
+    roles_body = "CREATE ROLE app_tenant;\nCREATE ROLE app_platform;\n"
+    with pytest.raises(backup.BackupError) as raised:
+        backup._validate_dump_roles_covered(
+            listing=listing,
+            roles_body=roles_body,
+            acl_grantees=set(),
+        )
+    assert raised.value.code == backup.EXIT_ARTIFACT_INVALID
+    assert "stale_owner" in str(raised.value)
+
+
+def test_parse_role_name_lines_skips_blank() -> None:
+    """ACL grantee parser ignores blank lines from psql -At output."""
+    assert backup._parse_role_name_lines("app_tenant\n\napp_platform\n") == {
+        "app_tenant",
+        "app_platform",
+    }
+
+
+def test_guard_empty_refuses_non_public_user_objects(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Tables outside public still block restore without --allow-nonempty."""
+
+    def _psql(_container: str, sql: str, *, timeout: int) -> str:
+        _ = (_container, timeout)
+        assert "NOT IN ('pg_catalog'" in sql
+        assert "relkind IN ('r', 'p', 'v', 'm', 'S', 'f')" in sql
+        return "2\n"
+
+    monkeypatch.setattr(restore, "_psql", _psql)
+    with pytest.raises(restore.RestoreError) as raised:
+        restore._guard_empty("fake", allow_nonempty=False, timeout=5)
+    assert raised.value.code == restore.EXIT_USAGE
+    assert "user objects" in str(raised.value)
+
+
+def test_guard_empty_allows_zero_user_objects(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An empty target (no user objects in any non-system schema) is allowed."""
+
+    monkeypatch.setattr(restore, "_psql", lambda *a, **k: "0\n")
+    restore._guard_empty("fake", allow_nonempty=False, timeout=5)
+
+
+def test_guard_empty_allows_nonempty_with_flag(monkeypatch: pytest.MonkeyPatch) -> None:
+    """--allow-nonempty bypasses the user-object emptiness refusal."""
+
+    monkeypatch.setattr(restore, "_psql", lambda *a, **k: "9\n")
+    restore._guard_empty("fake", allow_nonempty=True, timeout=5)
 
 
 def test_restore_roles_rejects_dynamic_do_block(
