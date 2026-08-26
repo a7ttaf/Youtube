@@ -107,6 +107,23 @@ _CLOSE_JOIN_TIMEOUT_SECONDS = 10.0
 
 
 # ============================================================================
+# Purpose: Non-reversible log label for a guarded YouTube CMS content-owner
+#   id, so DEBUG-level steady-state lines cannot leak the identifier that
+#   THIRD_PARTY_LOG_LEVEL handling keeps out at other levels.
+# Database/ORM: None.
+# Standards: Short deterministic SHA-256 prefix; mirrors the normalizer's
+#   actor fingerprint treatment for guarded identifiers in logs.
+# Blast Radius: Log content only.
+# Connections:
+#   - File: backend/ums_smart_revenue/connectors/runs/scheduler.py -> the
+#     already-in-flight tick debug record (README documents DEBUG as safe).
+# ============================================================================
+def _owner_log_label(account_id: str) -> str:
+    """Return a non-reversible fingerprint of a CMS content-owner id for logs."""
+    return hashlib.sha256(account_id.encode("utf-8")).hexdigest()[:12]
+
+
+# ============================================================================
 # Purpose: Daemon-thread scheduler that ticks once per interval and submits a
 #   CMS group-sync reservation for every ACTIVE tenant's active
 #   youtube-analytics credential, so grouping converges without an operator
@@ -127,13 +144,6 @@ _CLOSE_JOIN_TIMEOUT_SECONDS = 10.0
 #     submit_group_sync_if_absent / activate / cancel_reservation.
 #   - File: backend/ums_smart_revenue/app.py -> boot wiring + lifespan close.
 # ============================================================================
-
-
-def _owner_log_label(account_id: str) -> str:
-    """Return a non-reversible fingerprint of a CMS content-owner id for logs."""
-    return hashlib.sha256(account_id.encode("utf-8")).hexdigest()[:12]
-
-
 class GroupSyncScheduler:
     """Tick a background thread that submits CMS group-sync jobs for ACTIVE tenants.
 

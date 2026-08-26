@@ -1,3 +1,20 @@
+# ============================================================================
+# Purpose: Tenant-scoped role-assignment repository: create assignments with
+#   actor validation, savepoint-isolated duplicate handling, and a typed
+#   conflict contract; plus read and lifecycle operations over them.
+# Database/ORM: UserRoleAssignmentORM + AccessScopeORM (SecurityBase) through
+#   the caller's SQLAlchemy session; ambient TENANT_CTX supplies tenancy.
+# Standards: Typed UserRoleAssignment*Error exceptions; every write inside a
+#   begin_nested() savepoint so concurrent duplicates surface as the typed
+#   conflict instead of poisoning the outer transaction.
+# Blast Radius: Authorization state -- global/company role grants feed policy
+#   decisions everywhere; failures here are fail-closed.
+# Connections:
+#   - File: scripts/bootstrap_operator.py -> idempotent first-run caller whose
+#     EXISTING outcome depends on the conflict mapping below.
+#   - File: backend/ums_smart_revenue/auth/users.py -> sibling account
+#     repository sharing the storage-retry/savepoint pattern.
+# ============================================================================
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from uuid import UUID, uuid4

@@ -3760,6 +3760,42 @@ def test_run_backup_refuses_publication_when_directory_flush_fails(
     assert not (tmp_path / backup.WATERMARK_NAME).is_file()
 
 
+def test_publish_staging_run_quarantine_survives_a_taken_rejected_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """If the plain .rejected name is already taken the unique-nonce fallback
+    must still move the non-durable run out of the accepted namespace; it can
+    never stay discoverable under its published name."""
+    staging = tmp_path / "accepted-run.partial"
+    staging.mkdir()
+    for name in (backup.DUMP_NAME, backup.ROLES_NAME, backup.MANIFEST_NAME):
+        (staging / name).write_bytes(b"x")
+
+    destination = tmp_path / "accepted-run"
+    blocked = tmp_path / ("accepted-run" + backup.REJECTED_SUFFIX)
+    blocked.mkdir()
+
+    def _flush_refused(parent: Path) -> None:
+        """Every durability sync after publication fails on this disk."""
+        raise OSError(13, "directory flush refused")
+
+    monkeypatch.setattr(backup, "_sync_parent_directory_entry", _flush_refused)
+
+    with pytest.raises(backup.BackupError) as caught:
+        backup._publish_staging_run(staging, destination, tmp_path)
+
+    assert caught.value.code == backup.EXIT_ARTIFACT_INVALID
+    message = str(caught.value)
+    assert "could not make durable" in message or "could not be made durable" in message
+    assert not destination.exists(), "the accepted name must not survive"
+    nonce_fallbacks = [
+        p for p in tmp_path.iterdir() if ".rejected-" in p.name and p.is_dir()
+    ]
+    assert len(nonce_fallbacks) == 1, "the run landed under exactly one fallback name"
+    assert (nonce_fallbacks[0] / backup.DUMP_NAME).is_file(), "artifacts preserved"
+    assert "could not quarantine to" in message
+
+
 def test_acl_grantee_sql_covers_every_dumped_acl_catalog() -> None:
     """Grantee collection must span every ACL catalog pg_dump expands.
 

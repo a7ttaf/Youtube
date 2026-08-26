@@ -3330,20 +3330,44 @@ def _publish_staging_run(staging: Path, destination: Path, out_dir: Path) -> Non
         _restrict_run_dir_mode(destination, out_dir)
         _sync_parent_directory_entry(out_dir)
     except OSError as exc:
-        quarantined = destination.with_name(destination.name + REJECTED_SUFFIX)
-        quarantine_error = ""
-        try:
-            destination.rename(quarantined)
-            _sync_parent_directory_entry(quarantined.parent)
-        except OSError as quarantine_exc:
-            quarantine_error = (
-                f"; additionally could not quarantine to "
-                f"{quarantined.name}: {quarantine_exc}"
-            )
+        # FIX: a failed durability sync must leave NOTHING discoverable under
+        # the accepted name -- restore, watermark folding and retention all
+        # take that name as valid. First try the plain ``.rejected``
+        # quarantine; if even that name cannot be taken fall back to a unique
+        # ``.rejected-<nonce>``; and only if the directory cannot be moved at
+        # all remove it outright so it can never ride into retention.
+        quarantined_candidates = [
+            destination.with_name(destination.name + REJECTED_SUFFIX),
+            destination.with_name(
+                f"{destination.name}{REJECTED_SUFFIX}-{uuid.uuid4().hex[:8]}"
+            ),
+        ]
+        quarantine_note = ""
+        quarantined_to = ""
+        for candidate in quarantined_candidates:
+            try:
+                destination.rename(candidate)
+                _sync_parent_directory_entry(candidate.parent)
+                quarantined_to = candidate.name
+                break
+            except OSError as quarantine_exc:
+                quarantine_note += (
+                    f"; could not quarantine to {candidate.name}: {quarantine_exc}"
+                )
+        if not quarantined_to:
+            try:
+                shutil.rmtree(destination)
+                quarantine_note += "; non-durable run deleted instead of left publishable"
+            except OSError as removal_exc:
+                quarantine_note += (
+                    f"; non-durable run STILL PRESENT at {destination.name}: "
+                    f"{removal_exc}"
+                )
         raise BackupError(
             EXIT_ARTIFACT_INVALID,
             f"published backup {destination.name} could not be made durable: "
-            f"{exc}{quarantine_error}; it was moved out of the accepted set",
+            f"{exc}{quarantine_note}"
+            + (f"; quarantined to {quarantined_to}" if quarantined_to else ""),
         ) from exc
 
 
@@ -3699,7 +3723,19 @@ def _resolve_out_dir(raw: str | None) -> Path:
 #   - File: scripts/backup_database.py -> ``_prune`` holds invariants 1-5.
 # ============================================================================
 def main(argv: list[str] | None = None) -> int:
-    """main."""
+    """Run one CLI backup invocation and map failures onto documented exits.
+
+    Args:
+        argv: Argument vector without the program name; defaults to
+            ``sys.argv[1:]``.
+
+    Returns:
+        ``EXIT_OK`` on success, otherwise the documented exit code of the first
+        fatal condition -- usage (2), docker unavailable (3), container
+        unavailable (4), command failure (5), artifact invalidity (6),
+        bookkeeping failure (7), no content (8), or an unexpected internal
+        error (9).
+    """
     args = _parse_args(argv if argv is not None else sys.argv[1:])
     if args.keep_days < 0:
         print(

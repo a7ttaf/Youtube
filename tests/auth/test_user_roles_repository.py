@@ -1,10 +1,22 @@
+# ============================================================================
+# Purpose: Contract tests for SqlAlchemyUserRoleAssignmentRepository --
+#   ambient-tenant scoping, actor validation, savepoint isolation for
+#   concurrent duplicates, and scope race recovery.
+# Database/ORM: SecurityBase tables on throwaway SQLite engines; no Postgres.
+# Standards: Repo-standard suite (tmp_path engine per test); monkeypatched
+#   session plumbing documents concurrency windows deterministically.
+# Blast Radius: None beyond the per-test database file in tmp_path.
+# Connections:
+#   - File: backend/ums_smart_revenue/auth/user_roles.py -> the repository
+#     under test, including its begin_nested ordering contract.
+# ============================================================================
 from datetime import UTC, datetime
 from unittest.mock import MagicMock, patch
 from uuid import UUID, uuid4
 
 import pytest
 from sqlalchemy import create_engine
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, SessionTransaction
 
 from ums_smart_revenue.auth.user_roles import (
     SqlAlchemyUserRoleAssignmentRepository,
@@ -112,7 +124,9 @@ def test_assign_role_adds_the_row_inside_its_savepoint(tmp_path):
         token = TENANT_CTX.set(_tenant())
         original_begin_nested = session.begin_nested
 
-        def _record_pending(*args, **kwargs):
+        def _record_pending(
+            *args: object, **kwargs: object
+        ) -> SessionTransaction:
             """Count pending assignment rows at the moment a savepoint opens."""
             pending_assignments_at_savepoint_open.append(
                 sum(
