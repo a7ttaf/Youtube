@@ -36,10 +36,12 @@ _ACTOR_ENV = "UMS_GOOGLE_CONNECTOR_SERVICE_ACTOR_ID"
 
 
 def _sqlite_url(tmp_path) -> str:
+    """Build a per-test SQLite URL under tmp_path."""
     return f"sqlite+pysqlite:///{(tmp_path / 'app.db').as_posix()}"
 
 
 def _clear_envs() -> None:
+    """Clear schedule/executor/actor env vars and reload settings cache."""
     os.environ.pop(_SCHEDULE_ENV, None)
     os.environ.pop(_EXECUTOR_ENV, None)
     os.environ.pop(_ACTOR_ENV, None)
@@ -102,15 +104,17 @@ def test_schedule_enabled_builds_scheduler_and_closes_in_order(tmp_path) -> None
         real_executor_close = app.state.connector_job_executor.close
 
         def _spy_scheduler_close() -> None:
+            """Record scheduler close order and delegate to the real close()."""
             close_order.append("scheduler")
             real_scheduler_close()
 
         def _spy_executor_close() -> None:
+            """Record executor close order and delegate to the real close()."""
             close_order.append("executor")
             real_executor_close()
 
-        scheduler.close = _spy_scheduler_close  # type: ignore[method-assign]
-        app.state.connector_job_executor.close = _spy_executor_close  # type: ignore[method-assign]
+        setattr(scheduler, "close", _spy_scheduler_close)
+        setattr(app.state.connector_job_executor, "close", _spy_executor_close)
 
         with TestClient(app):
             # The scheduler is started inside create_app (not deferred to the

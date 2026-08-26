@@ -27,7 +27,7 @@ from uuid import uuid4
 from alembic.migration import MigrationContext
 from alembic.operations import Operations
 from sqlalchemy import create_engine, func, select, text
-from sqlalchemy.engine import Connection
+from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.orm import Session
 
 from ums_smart_revenue.auth.permissions import PERMISSION_DEFINITIONS, Permission
@@ -78,7 +78,7 @@ def _bind_operations(module: ModuleType, connection: Connection) -> None:
     module.op = Operations(MigrationContext.configure(connection))
 
 
-def _security_engine():
+def _security_engine() -> Engine:
     """Return an in-memory SQLite engine carrying the security schema."""
     engine = create_engine("sqlite+pysqlite:///:memory:")
     SecurityBase.metadata.create_all(engine)

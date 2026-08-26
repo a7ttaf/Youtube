@@ -2166,10 +2166,24 @@ def _write_watermark(
         "tables": dict(sorted(tables.items())),
         "resets": previous_resets[-WATERMARK_RESET_HISTORY:],
     }
-    (out_dir / WATERMARK_NAME).write_text(
-        json.dumps(payload, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
+    # FIX: Atomic replace so a mid-write crash cannot leave torn watermark.json
+    # that folds every old manifest back into the next run's gate.
+    body = json.dumps(payload, indent=2, sort_keys=True) + "\n"
+    target = out_dir / WATERMARK_NAME
+    aside = out_dir / f"{WATERMARK_NAME}.{uuid.uuid4().hex}.tmp"
+    try:
+        with aside.open("w", encoding="utf-8") as handle:
+            handle.write(body)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(aside, target)
+        _fsync_directory(out_dir)
+    except OSError:
+        try:
+            aside.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
 
 
 def _name_tables(names: list[str]) -> str:

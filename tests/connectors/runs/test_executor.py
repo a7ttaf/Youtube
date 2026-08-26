@@ -1,3 +1,11 @@
+# ============================================================================
+# Purpose: Unit tests for ConnectorJobExecutor worker + registry semantics.
+# Database/ORM: In-memory SQLite session factories for executor workers.
+# Standards: Fail-closed worker boundaries; no suppressions.
+# Blast Radius: Test-only.
+# Connections:
+#   - File: backend/ums_smart_revenue/connectors/runs/executor.py -> subject.
+# ============================================================================
 """Unit tests for the in-process ConnectorJobExecutor worker + registry."""
 
 from __future__ import annotations

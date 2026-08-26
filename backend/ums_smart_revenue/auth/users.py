@@ -1,3 +1,15 @@
+# ============================================================================
+# Purpose: Tenant-bound user account repository — create/list/update/disable
+#   accounts and role/permission grants with fail-closed storage retries.
+# Database/ORM: UserORM, UserRoleAssignmentORM, UserPermissionGrantORM via
+#   SQLAlchemy Session; nested savepoints for shared bootstrap transactions.
+# Standards: Typed domain errors; connection-invalidated escapes to the owning
+#   transaction; no suppressions; repository owns DB access.
+# Blast Radius: Authorization account lifecycle and operator bootstrap.
+# Connections:
+#   - File: scripts/bootstrap_operator.py -> shared-session multi-account create.
+#   - File: backend/ums_smart_revenue/db/session.py -> SQLite BEGIN/SAVEPOINT.
+# ============================================================================
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -465,16 +477,19 @@ class SqlAlchemyUserAccountRepository:
                 # SQLAlchemy), so typed conflicts propagate without a useless
                 # `except: raise` (PYL-W0706).
                 # Nested savepoint already rolled back on exit from begin_nested.
-                if (
-                    attempt_index + 1 >= USER_ACCOUNT_STORAGE_ATTEMPTS
-                    or not _is_retryable_user_storage_error(exc)
-                ):
-                    raise UserAccountStorageError("User account storage unavailable") from exc
+                # FIX: connection_invalidated cannot be retried inside this
+                # savepoint loop — the Session is dead. Roll back and escape so
+                # the owning transaction (bootstrap) can open a fresh session.
                 if isinstance(exc, DBAPIError) and exc.connection_invalidated:
                     self._session.rollback()
                     raise UserAccountStorageError(
                         "User account storage unavailable"
                     ) from exc
+                if (
+                    attempt_index + 1 >= USER_ACCOUNT_STORAGE_ATTEMPTS
+                    or not _is_retryable_user_storage_error(exc)
+                ):
+                    raise UserAccountStorageError("User account storage unavailable") from exc
                 logger.warning("Retrying user account storage operation after transient failure")
         raise RuntimeError("unreachable user account retry state")
 
@@ -678,10 +693,14 @@ def _is_email_constraint_violation(exc: IntegrityError) -> bool:
 
 
 def _is_retryable_user_storage_error(exc: SQLAlchemyError) -> bool:
-    """Return whether a storage exception is safe to retry within the request."""
-    if isinstance(exc, (DisconnectionError, OperationalError, SQLAlchemyTimeoutError)):
-        return True
-    return isinstance(exc, DBAPIError) and exc.connection_invalidated
+    """Return whether a storage exception is safe to retry inside a savepoint.
+
+    ``connection_invalidated`` is intentionally excluded: the Session is dead
+    and only the owning transaction (e.g. bootstrap) can open a fresh session.
+    """
+    if isinstance(exc, DBAPIError) and exc.connection_invalidated:
+        return False
+    return isinstance(exc, (DisconnectionError, OperationalError, SQLAlchemyTimeoutError))
 
 
 def _resolve_tenant_id(tenant_id: UUID | str | None) -> UUID:

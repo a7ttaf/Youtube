@@ -1,3 +1,13 @@
+# ============================================================================
+# Purpose: Session factory tenant-lane / platform-lane hooks and SQLite
+#   StaticPool writer-lock serialization.
+# Database/ORM: SQLite StaticPool engines; optional disposable Postgres via
+#   UMS_TEST_DATABASE_URL for RLS role assertions.
+# Standards: Fail-closed lock release; no suppressions.
+# Blast Radius: Test-only.
+# Connections:
+#   - File: backend/ums_smart_revenue/db/session.py -> subject.
+# ============================================================================
 import sqlalchemy as sa
 from alembic import command
 from alembic.config import Config

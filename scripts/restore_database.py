@@ -123,14 +123,27 @@ ROLES_PRESENT_SQL = (
     "WHERE rolname IN ('app_tenant', 'app_platform') ORDER BY rolname;"
 )
 # Count user objects across every non-system schema so a database that only
-# has tables outside ``public`` cannot look empty and bypass --allow-nonempty.
-USER_OBJECT_COUNT_SQL = (
-    "SELECT count(*) FROM pg_catalog.pg_class c "
-    "JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace "
-    "WHERE n.nspname NOT IN ('pg_catalog', 'information_schema', 'pg_toast') "
+# has tables/enums/functions/empty custom schemas cannot look empty and
+# bypass --allow-nonempty.
+_USER_NSP = (
+    "n.nspname NOT IN ('pg_catalog', 'information_schema', 'pg_toast') "
     "AND n.nspname NOT LIKE 'pg\\_temp\\_%' ESCAPE '\\' "
-    "AND n.nspname NOT LIKE 'pg\\_toast\\_temp\\_%' ESCAPE '\\' "
-    "AND c.relkind IN ('r', 'p', 'v', 'm', 'S', 'f');"
+    "AND n.nspname NOT LIKE 'pg\\_toast\\_temp\\_%' ESCAPE '\\'"
+)
+USER_OBJECT_COUNT_SQL = (
+    "SELECT ("
+    " (SELECT count(*) FROM pg_catalog.pg_class c "
+    "  JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace "
+    f" WHERE {_USER_NSP} AND c.relkind IN ('r', 'p', 'v', 'm', 'S', 'f'))"
+    " + (SELECT count(*) FROM pg_catalog.pg_type t "
+    "  JOIN pg_catalog.pg_namespace n ON n.oid = t.typnamespace "
+    f" WHERE {_USER_NSP} AND t.typtype = 'e')"
+    " + (SELECT count(*) FROM pg_catalog.pg_proc p "
+    "  JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace "
+    f" WHERE {_USER_NSP})"
+    " + (SELECT count(*) FROM pg_catalog.pg_namespace n "
+    f" WHERE {_USER_NSP} AND n.nspname <> 'public')"
+    ")::bigint;"
 )
 LIST_TABLES_SQL = (
     "SELECT tablename FROM pg_catalog.pg_tables WHERE schemaname = 'public' ORDER BY tablename;"

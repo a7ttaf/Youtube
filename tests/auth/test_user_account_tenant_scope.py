@@ -1,3 +1,11 @@
+# ============================================================================
+# Purpose: Tenant-bound user account repository behaviour tests.
+# Database/ORM: In-memory SQLAlchemy Session with SecurityBase schema.
+# Standards: Typed domain errors; tenant isolation assertions.
+# Blast Radius: Test-only.
+# Connections:
+#   - File: backend/ums_smart_revenue/auth/users.py -> subject.
+# ============================================================================
 """Tenant-bound user account repository behaviour tests."""
 
 from datetime import UTC, datetime

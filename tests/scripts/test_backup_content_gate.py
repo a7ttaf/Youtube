@@ -1,3 +1,17 @@
+# ============================================================================
+# Purpose: Regression suite for backup content-gate, watermark, retention, and
+#   last-run status contracts — every defect here was found against a live
+#   database and is reproduced without one from pure inputs + CLI drives.
+# Database/ORM: None required for the pure-function cases; CLI tests exercise
+#   scripts/backup_database.py against temp directories / fakes.
+# Standards: Fail-closed gates; no suppressions; fixtures derived from migration
+#   seed reality rather than assumed literals.
+# Blast Radius: Disaster-recovery operator CLIs only. No authz or finance math.
+# Connections:
+#   - File: scripts/backup_database.py -> content gate, prune, watermark, status.
+#   - File: scripts/restore_database.py -> consumers of gated backup runs.
+# ============================================================================
+
 """Content-gate, watermark, retention and status tests for the backup CLI.
 
 Every defect reproduced here was found against a live database and is
@@ -50,20 +64,6 @@ be deleted with the whole file still green, because nothing here drove the CLI.
 The "the CLI" section at the end of this file runs ``backup.main`` end to end
 against a faked container and asserts the PROCESS outcome.
 """
-
-# ============================================================================
-# Purpose: Regression suite for backup content-gate, watermark, retention, and
-#   last-run status contracts — every defect here was found against a live
-#   database and is reproduced without one from pure inputs + CLI drives.
-# Database/ORM: None required for the pure-function cases; CLI tests exercise
-#   scripts/backup_database.py against temp directories / fakes.
-# Standards: Fail-closed gates; no suppressions; fixtures derived from migration
-#   seed reality rather than assumed literals.
-# Blast Radius: Disaster-recovery operator CLIs only. No authz or finance math.
-# Connections:
-#   - File: scripts/backup_database.py -> content gate, prune, watermark, status.
-#   - File: scripts/restore_database.py -> consumers of gated backup runs.
-# ============================================================================
 
 from __future__ import annotations
 
@@ -3425,8 +3425,10 @@ def test_guard_empty_refuses_non_public_user_objects(monkeypatch: pytest.MonkeyP
     def _psql(_container: str, sql: str, *, timeout: int) -> str:
         """Return a non-zero user-object count for guard-empty tests."""
         _ = (_container, timeout)
-        assert "NOT IN ('pg_catalog'" in sql
-        assert "relkind IN ('r', 'p', 'v', 'm', 'S', 'f')" in sql
+        assert "pg_catalog.pg_class" in sql
+        assert "typtype = 'e'" in sql
+        assert "pg_catalog.pg_proc" in sql
+        assert "nspname <> 'public'" in sql
         return "2\n"
 
     monkeypatch.setattr(restore, "_psql", _psql)
