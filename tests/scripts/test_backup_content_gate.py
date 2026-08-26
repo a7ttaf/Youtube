@@ -3700,7 +3700,8 @@ def test_load_backup_rejects_coercible_table_row_count_shapes(
     """int() coercion used to pass {}, -1, true and truncate 1.9 before the
     destructive single-transaction replace committed; a coerced value could
     even coincide with reality and print RESTORE VERIFIED. Each shape must be
-    refused at load time, before roles or data are applied."""
+    refused at load time, before roles or data are applied.
+    """
     run = tmp_path / "ums-backup-20260824T222107Z"
     run.mkdir()
     dump = run / backup.DUMP_NAME

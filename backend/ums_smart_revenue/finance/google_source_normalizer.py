@@ -50,6 +50,8 @@ logger = logging.getLogger(__name__)
 
 
 class SkipReason(StrEnum):
+    """Why one canonical source row produced no revenue fact this run."""
+
     NON_USD_CURRENCY = "non_usd_currency"
     MISSING_CHANNEL_ID = "missing_channel_id"
     UNSUPPORTED_VALUE_KIND = "unsupported_value_kind"
@@ -60,12 +62,16 @@ class SkipReason(StrEnum):
 
 @dataclass(frozen=True)
 class SkippedSourceRow:
+    """One skipped row: its source id and the SkipReason that excluded it."""
+
     source_row_id: str
     reason: SkipReason
 
 
 @dataclass(frozen=True)
 class NormalizationResult:
+    """Outcome of a normalize_month run, partitioned per canonical row."""
+
     created: list[RevenueFactEntry]
     updated: list[RevenueFactEntry]
     unchanged: list[RevenueFactEntry]
@@ -489,6 +495,18 @@ class GoogleSourceNormalizer:
         channel_ids: list[str] | None = None,
         actor_user_id: str,
     ) -> NormalizationResult:
+        """Normalize one report month into revenue facts, audit-attributed.
+
+        Args:
+            month: Report month in ``YYYY-MM`` form.
+            channel_ids: Optional scope restriction; ``None`` normalizes all
+                tenant channels.
+            actor_user_id: Triggering user's UUID for audit attribution and
+                the run-start log fingerprint; never logged verbatim.
+
+        Returns:
+            The :class:`NormalizationResult` partition for this run.
+        """
         _validate_month(month)
         normalized_channel_ids: set[str] | None = (
             set(channel_ids) if channel_ids is not None else None

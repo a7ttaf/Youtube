@@ -29,6 +29,8 @@ ACTOR_USER_ID = "00000000-0000-0000-0000-000000010001"
 def test_normalize_month_logging_redacts_payload_amount_channel_id_source_row_id(  # noqa: N802
     caplog,
 ):
+    """INFO output carries aggregates only; amounts, ids, payloads and the
+    raw triggering user UUID stay out of retained Docker logs."""
     from datetime import UTC, datetime
 
     engine = create_engine("sqlite+pysqlite:///:memory:")
