@@ -3422,8 +3422,8 @@ def test_parse_role_name_lines_skips_blank() -> None:
 
 def test_guard_empty_refuses_non_public_user_objects(monkeypatch: pytest.MonkeyPatch) -> None:
     """Tables outside public still block restore without --allow-nonempty."""
-
     def _psql(_container: str, sql: str, *, timeout: int) -> str:
+        """Return a non-zero user-object count for guard-empty tests."""
         _ = (_container, timeout)
         assert "NOT IN ('pg_catalog'" in sql
         assert "relkind IN ('r', 'p', 'v', 'm', 'S', 'f')" in sql
@@ -3438,14 +3438,12 @@ def test_guard_empty_refuses_non_public_user_objects(monkeypatch: pytest.MonkeyP
 
 def test_guard_empty_allows_zero_user_objects(monkeypatch: pytest.MonkeyPatch) -> None:
     """An empty target (no user objects in any non-system schema) is allowed."""
-
     monkeypatch.setattr(restore, "_psql", lambda *a, **k: "0\n")
     restore._guard_empty("fake", allow_nonempty=False, timeout=5)
 
 
 def test_guard_empty_allows_nonempty_with_flag(monkeypatch: pytest.MonkeyPatch) -> None:
     """--allow-nonempty bypasses the user-object emptiness refusal."""
-
     monkeypatch.setattr(restore, "_psql", lambda *a, **k: "9\n")
     restore._guard_empty("fake", allow_nonempty=True, timeout=5)
 
