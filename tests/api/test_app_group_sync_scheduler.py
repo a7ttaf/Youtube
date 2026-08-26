@@ -105,9 +105,12 @@ def test_schedule_enabled_builds_scheduler_and_closes_in_order(tmp_path) -> None
             close_order.append("scheduler")
             real_scheduler_close()
 
-        def _spy_executor_close() -> None:
+        def _spy_executor_close() -> bool:
             close_order.append("executor")
-            real_executor_close()
+            # close() now reports drain health; the lifespan skips the logging
+            # restore on a falsy return, so the spy must forward the real value
+            # or this test leaks the app's root handler into the whole suite.
+            return real_executor_close()
 
         scheduler.close = _spy_scheduler_close  # type: ignore[method-assign]
         app.state.connector_job_executor.close = _spy_executor_close  # type: ignore[method-assign]
