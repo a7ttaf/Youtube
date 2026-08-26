@@ -3765,7 +3765,8 @@ def test_publish_staging_run_quarantine_survives_a_taken_rejected_name(
 ) -> None:
     """If the plain .rejected name is already taken the unique-nonce fallback
     must still move the non-durable run out of the accepted namespace; it can
-    never stay discoverable under its published name."""
+    never stay discoverable under its published name.
+    """
     staging = tmp_path / "accepted-run.partial"
     staging.mkdir()
     for name in (backup.DUMP_NAME, backup.ROLES_NAME, backup.MANIFEST_NAME):
