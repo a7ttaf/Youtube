@@ -1492,6 +1492,22 @@ def test_a_failed_lock_release_is_a_durable_warning_not_a_silent_pass(
     intruder.unlink()
 
 
+def test_a_refused_run_dir_chmod_is_a_durable_warning_not_a_silent_pass(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A chmod the filesystem refuses used to vanish into ``except OSError: pass``.
+
+    The mode stays best-effort -- the run's verdict never hinges on it -- but
+    a backup directory that kept broader permissions must be visible to the
+    operator. The failure here is real, not mocked: chmod on a path that does
+    not exist raises OSError on every platform.
+    """
+    backup._restrict_run_dir_mode(tmp_path / "never-created", tmp_path)
+    assert "could not restrict" in capsys.readouterr().err
+    log = (tmp_path / backup.LOG_NAME).read_text(encoding="utf-8")
+    assert "WARNING could not restrict" in log
+
+
 def test_a_status_write_that_dies_midway_leaves_the_old_record_intact(
     tmp_path: Path,
 ) -> None:

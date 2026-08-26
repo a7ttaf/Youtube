@@ -36,12 +36,10 @@ _ACTOR_ENV = "UMS_GOOGLE_CONNECTOR_SERVICE_ACTOR_ID"
 
 
 def _sqlite_url(tmp_path) -> str:
-    """Build a per-test SQLite URL under tmp_path."""
     return f"sqlite+pysqlite:///{(tmp_path / 'app.db').as_posix()}"
 
 
 def _clear_envs() -> None:
-    """Clear schedule/executor/actor env vars and reload settings cache."""
     os.environ.pop(_SCHEDULE_ENV, None)
     os.environ.pop(_EXECUTOR_ENV, None)
     os.environ.pop(_ACTOR_ENV, None)
@@ -108,10 +106,13 @@ def test_schedule_enabled_builds_scheduler_and_closes_in_order(tmp_path) -> None
             close_order.append("scheduler")
             real_scheduler_close()
 
-        def _spy_executor_close() -> None:
+        def _spy_executor_close() -> bool:
             """Record executor close order and delegate to the real close()."""
             close_order.append("executor")
-            real_executor_close()
+            # close() now reports drain health; the lifespan skips the logging
+            # restore on a falsy return, so the spy must forward the real value
+            # or this test leaks the app's root handler into the whole suite.
+            return real_executor_close()
 
         setattr(scheduler, "close", _spy_scheduler_close)
         setattr(app.state.connector_job_executor, "close", _spy_executor_close)
