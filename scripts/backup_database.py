@@ -1931,13 +1931,24 @@ def _exclusive_backup_lock(out_dir: Path):
             print(f"WARNING: {line}", file=sys.stderr)
 
 
-def _restrict_run_dir_mode(path: Path) -> None:
-    """Best-effort owner-only mode for backup run directories (POSIX)."""
+def _restrict_run_dir_mode(path: Path, out_dir: Path) -> None:
+    """Best-effort owner-only mode for backup run directories (POSIX).
+
+    Stays best-effort (the run's verdict never hinges on a mode bit), but a
+    refused chmod lands on the durable record and stderr instead of vanishing:
+    the operator must hear that a backup directory kept broader permissions.
+    """
     try:
         os.chmod(path, 0o700)
-    except OSError:
+    except OSError as chmod_exc:
         # Windows ignores mkdir mode and may reject chmod on some paths.
-        pass
+        line = (
+            f"{_utc_now().isoformat()} WARNING could not restrict {path} to "
+            f"owner-only permissions: {chmod_exc}; the directory keeps the "
+            "filesystem's default mode"
+        )
+        _append_log(out_dir, line)
+        print(f"WARNING: {line}", file=sys.stderr)
 
 
 def _sorted_out_dir_children(out_dir: Path) -> list[Path]:
@@ -3275,7 +3286,7 @@ def run_backup(args: argparse.Namespace, out_dir: Path) -> BackupOutcome:
     if staging.exists():
         shutil.rmtree(staging)
     staging.mkdir(parents=True, mode=0o700)
-    _restrict_run_dir_mode(staging)
+    _restrict_run_dir_mode(staging, out_dir)
 
     watermark = _load_watermark(out_dir)
     expected_identity = _load_identity(out_dir)
@@ -3367,7 +3378,7 @@ def run_backup(args: argparse.Namespace, out_dir: Path) -> BackupOutcome:
         destination = final_dir if verdict.accepted else rejected_dir
         _sync_staging_before_publication(staging)
         staging.rename(destination)
-        _restrict_run_dir_mode(destination)
+        _restrict_run_dir_mode(destination, out_dir)
         _sync_parent_directory_entry(out_dir)
         moved = True
     finally:
