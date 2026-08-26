@@ -1,3 +1,26 @@
+# ============================================================================
+# Purpose: Guarded user-account lifecycle repository — create, lookup, list,
+#   and update tenant-scoped accounts with normalized inputs and typed domain
+#   errors (conflict / not-found / validation / storage) at the API boundary.
+# Database/ORM: UserORM (users) via an injected Session; every query is pinned
+#   to the resolved tenant id.
+# Standards: each storage attempt runs in its own SAVEPOINT so a failed flush
+#   never discards a shared session's earlier writes; transient failures retry
+#   once and everything else fails closed as UserAccountStorageError; an
+#   invalidated connection is never retried at this granularity (the owning
+#   transaction must retry).
+# Blast Radius: Authorization (account lifecycle, service-account status) and
+#   audit attribution. No finance math.
+# Connections:
+#   - File: backend/ums_smart_revenue/db/session.py -> SQLite BEGIN/SAVEPOINT
+#     recipe the savepoint-per-attempt contract depends on.
+#   - File: scripts/bootstrap_operator.py -> shared-session multi-account
+#     create that must survive one account's failure.
+#   - File: backend/ums_smart_revenue/api/users.py -> route layer mapping the
+#     typed errors to HTTP statuses.
+# ============================================================================
+"""Tenant-scoped user account repository with typed lifecycle errors."""
+
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -469,12 +492,12 @@ class SqlAlchemyUserAccountRepository:
                     attempt_index + 1 >= USER_ACCOUNT_STORAGE_ATTEMPTS
                     or not _is_retryable_user_storage_error(exc)
                 ):
+                    if isinstance(exc, DBAPIError) and exc.connection_invalidated:
+                        # The dead connection left the transaction unusable;
+                        # roll back so the caller's error handling can still
+                        # use the session after catching the typed error.
+                        self._session.rollback()
                     raise UserAccountStorageError("User account storage unavailable") from exc
-                if isinstance(exc, DBAPIError) and exc.connection_invalidated:
-                    self._session.rollback()
-                    raise UserAccountStorageError(
-                        "User account storage unavailable"
-                    ) from exc
                 logger.warning("Retrying user account storage operation after transient failure")
         raise RuntimeError("unreachable user account retry state")
 
@@ -679,9 +702,15 @@ def _is_email_constraint_violation(exc: IntegrityError) -> bool:
 
 def _is_retryable_user_storage_error(exc: SQLAlchemyError) -> bool:
     """Return whether a storage exception is safe to retry within the request."""
-    if isinstance(exc, (DisconnectionError, OperationalError, SQLAlchemyTimeoutError)):
-        return True
-    return isinstance(exc, DBAPIError) and exc.connection_invalidated
+    if isinstance(exc, DBAPIError) and exc.connection_invalidated:
+        # FIX: a lost connection discards the caller's whole transaction
+        # envelope — including earlier flushed writes in a shared bootstrap
+        # session — so a savepoint-granular retry would silently continue
+        # without them. Never retryable here; only the owning transaction can
+        # retry safely. (Checked first: OperationalError is a DBAPIError
+        # subclass and can carry connection_invalidated too.)
+        return False
+    return isinstance(exc, (DisconnectionError, OperationalError, SQLAlchemyTimeoutError))
 
 
 def _resolve_tenant_id(tenant_id: UUID | str | None) -> UUID:

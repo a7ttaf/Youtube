@@ -2177,10 +2177,19 @@ def _write_watermark(
         "tables": dict(sorted(tables.items())),
         "resets": previous_resets[-WATERMARK_RESET_HISTORY:],
     }
-    (out_dir / WATERMARK_NAME).write_text(
+    # FIX: this was an in-place write_text(): a disk-full or crash mid-write
+    # left watermark.json TORN, the next run read the torn JSON as absent and
+    # folded every old manifest back in — and after --accept-content-drop the
+    # lost reset_after resurrected the pre-reset high-water counts, rejecting
+    # every subsequent scheduled backup. Route through the atomic write-aside
+    # helper (old record or new record on disk, never half of either) and make
+    # the published name durable before retention bookkeeping begins.
+    _write_status_file(
+        out_dir / WATERMARK_NAME,
         json.dumps(payload, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
+        append=False,
     )
+    _sync_parent_directory_entry(out_dir)
 
 
 def _name_tables(names: list[str]) -> str:
@@ -2925,11 +2934,16 @@ def _prune(out_dir: Path, *, keep_days: int, keep_min: int, now: datetime) -> Pr
 #            longer is a real problem the operator has to see.
 # Blast Radius: Operator contract.
 # Connections:
-#   - File: scripts/backup_database.py -> ``_append_log`` and
-#     ``_write_last_run`` are its only callers.
+#   - File: scripts/backup_database.py -> ``_append_log``, ``_write_last_run``
+#     and ``_write_watermark`` are its only callers.
 # ============================================================================
 def _write_status_file(path: Path, body: str, *, append: bool) -> None:
-    """write status file."""
+    """Write one status file: append in place, or atomically replace whole.
+
+    Retries the transient Windows share-mode lock a bounded number of times,
+    then raises the ``OSError`` — the caller decides what an undeliverable
+    status record means for the run's exit code.
+    """
     for attempt in range(1, STATUS_WRITE_ATTEMPTS + 1):
         try:
             if append:
@@ -2964,6 +2978,12 @@ def _replace_status_file(path: Path, body: str) -> None:
     try:
         with aside.open("w", encoding="utf-8") as handle:
             handle.write(body)
+            # Flush the bytes to stable storage BEFORE the rename publishes
+            # the name: without this a power cut after os.replace could leave
+            # the new name pointing at unwritten content — torn again, just
+            # via a different window.
+            handle.flush()
+            os.fsync(handle.fileno())
         os.replace(aside, path)
     except OSError:
         try:
