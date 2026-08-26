@@ -3633,7 +3633,8 @@ def test_fsync_directory_does_not_absorb_flush_failures(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A directory entry that cannot be flushed must stop the backup, not be
-    swallowed as best-effort -- retention prunes older runs on this guarantee."""
+    swallowed as best-effort -- retention prunes older runs on this guarantee.
+    """
     if sys.platform == "win32":
         monkeypatch.setattr(
             backup,
@@ -3659,24 +3660,31 @@ def test_fsync_directory_does_not_absorb_flush_failures(
 def test_windows_directory_flush_api_failures_raise(monkeypatch: pytest.MonkeyPatch) -> None:
     """CreateFileW's INVALID_HANDLE_VALUE and FlushFileBuffers' BOOL result must
     both surface as OSError instead of reading as a silent success (PR #210
-    review round 2)."""
+    review round 2).
+    """
     from ctypes import wintypes
 
     invalid_handle = wintypes.HANDLE(-1).value
     calls = {"close": 0}
 
     class _FakeKernel32:
+        """Duck-typed kernel32 whose results the test controls per case."""
+
         def __init__(self, *, open_ok: bool, flush_ok: bool) -> None:
             self._open_ok = open_ok
             self._flush_ok = flush_ok
 
         def CreateFileW(self, *_a: object, **_k: object) -> int:  # noqa: N802
+            """Return a live handle or INVALID_HANDLE_VALUE per the scenario."""
             return 4242 if self._open_ok else invalid_handle
 
         def FlushFileBuffers(self, _handle: int) -> int:  # noqa: N802
+            """Report flush success or failure per the scenario."""
             return 1 if self._flush_ok else 0
 
-        def CloseHandle(self, _handle: int) -> int:  # noqa: N802
+        @staticmethod
+        def CloseHandle(_handle: int) -> int:  # noqa: N802
+            """Record the close so ownership hygiene is observable."""
             calls["close"] += 1
             return 1
 
@@ -3703,7 +3711,8 @@ def test_run_backup_refuses_publication_when_directory_flush_fails(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, clock: _Clock
 ) -> None:
     """A non-durable output directory stops the run before publication and
-    before retention bookkeeping ever sees it (exit 6, nothing pruned)."""
+    before retention bookkeeping ever sees it (exit 6, nothing pruned).
+    """
 
     def _flush_refused(path: Path) -> None:
         """Simulate a disk whose directory entries cannot be flushed."""
