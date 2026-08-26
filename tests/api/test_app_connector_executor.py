@@ -49,9 +49,12 @@ def test_lifespan_shutdown_closes_executor(tmp_path) -> None:
         # itself (the attribute we are about to replace).
         real_close = app.state.connector_job_executor.close
 
-        def _spy() -> None:
+        def _spy() -> bool:
             closed["count"] += 1
-            real_close()
+            # close() now reports drain health; the lifespan skips the logging
+            # restore on a falsy return, so the spy must forward the real value
+            # or this test leaks the app's root handler into the whole suite.
+            return real_close()
 
         app.state.connector_job_executor.close = _spy  # type: ignore[method-assign]
         with TestClient(app):
