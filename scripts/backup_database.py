@@ -1021,6 +1021,11 @@ FROM (
   SELECT (aclexplode(lm.lomacl)).grantee
   FROM pg_catalog.pg_largeobject_metadata lm
   WHERE lm.lomacl IS NOT NULL
+  UNION ALL
+  SELECT u.role_oid::oid
+  FROM pg_catalog.pg_policy p,
+       unnest(p.polroles) AS u(role_oid)
+  WHERE p.polroles IS NOT NULL
 ) g
 JOIN pg_catalog.pg_roles r ON r.oid = g.gid
 WHERE g.gid <> 0

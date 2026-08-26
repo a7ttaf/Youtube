@@ -3825,6 +3825,12 @@ def test_acl_grantee_sql_covers_every_dumped_acl_catalog() -> None:
         "s.srvacl",
         "pg_catalog.pg_largeobject_metadata lm",
         "lm.lomacl",
+        # RLS policy target roles: TOC lines expose only the policy OWNER, so
+        # without this arm a role renamed away from an altered policy could be
+        # dropped before roles.sql was captured and restore would fail.
+        "pg_catalog.pg_policy p",
+        "p.polroles",
+        "u.role_oid::oid",
     ):
         assert fragment in sql, fragment
 
