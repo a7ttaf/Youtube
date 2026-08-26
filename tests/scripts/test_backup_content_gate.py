@@ -3914,20 +3914,29 @@ def test_execute_restore_clears_target_only_when_allow_nonempty(
 
 
 def test_windows_dacl_parser_fail_closed() -> None:
-    """icacls parsing must treat inheritance and group principals as failures
-    while accepting an explicit owner-only full-control grant.
+    """icacls parsing must allowlist only SYSTEM/Administrators/owner; every
+    other principal (e.g. DOMAIN\\BackupReaders), inheritance markers, or a
+    missing owner grant is a failure.
     """
     listing = "\n".join(
         [
             "accepted-run NT AUTHORITY\\SYSTEM:(I)(F)",
-            "BUILTIN\\Users:(I)(RX)",
+            "DOMAIN\\BackupReaders:(R)",
+            "BUILTIN\\Users:(RX)",
             "desktop\\winuser:(F)",
         ]
     )
     problems = backup._windows_dacl_problems(listing, "winuser")
 
     assert any("inherited access" in problem for problem in problems)
-    assert any("group/Well-Known principal" in problem for problem in problems)
+    assert any(
+        "unexpected ACE" in problem and "DOMAIN\\BackupReaders" in problem
+        for problem in problems
+    )
+    assert any(
+        "unexpected ACE" in problem and "BUILTIN\\Users" in problem
+        for problem in problems
+    )
     assert not any(
         problem.startswith("no explicit Full-control") for problem in problems
     )

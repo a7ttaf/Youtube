@@ -2088,25 +2088,39 @@ def _restrict_run_dir_mode(
 # SYSTEM and BUILTIN\Administrators grants are standard Windows behavior even
 # after inheritance is stripped, and refusing on them would reject healthy
 # nightly backups.
-_WINDOWS_DACLS_FORBIDDEN_PRINCIPALS = (
+_WINDOWS_DACLS_UNEXPECTED_GROUPS = (
     "everyone",
-    "users",
     "authenticated users",
     "builtin\\users",
+    "nt authority\\authenticated users",
+)
+
+
+# Only these infra principals may hold access besides the current user;
+# anything else (incl. Everyone/Users/Authenticated Users/domain readers)
+# fails the owner-only verification below.
+_WINDOWS_DACLS_ALLOWED_PRINCIPALS = (
+    "system",
+    r"nt authority\system",
+    "builtin\administrators",
+    "owner rights",
 )
 
 
 def _windows_dacl_problems(icacls_output: str, current_user: str) -> list[str]:
     r"""List reasons the icacls output is NOT an owner-only grant.
 
-    Fail-closed: inherited grants ('(I)'), grants to groups/Well-Known
-    principals, or the absence of any explicit full-control grant for the
-    current user (matched with or without its machine/domain prefix, since
-    icacls prints e.g. ``DESKTOP\\winuser`` while USERNAME reads ``winuser``)
-    are all problems.
+    Fail-closed allowlist semantics: only the current user (matched with or
+    without its machine/domain prefix, since icacls prints e.g.
+    ``DESKTOP\\winuser`` while USERNAME reads ``winuser``), SYSTEM and
+    BUILTIN\\Administrators may hold grants. Inherited markers ('(I)'), any
+    other principal, or the absence of an explicit full-control grant for the
+    current user are all problems.
     """
     problems: list[str] = []
     owner_key = current_user.strip().lower()
+    allowed_principals = {"system", "builtin\\administrators"}
+    allowed_suffixes = ("nt authority\\system", "builtin\\administrators")
     owner_grant_seen = False
     for raw_line in icacls_output.splitlines():
         line = raw_line.strip()
@@ -2123,8 +2137,13 @@ def _windows_dacl_problems(icacls_output: str, current_user: str) -> list[str]:
             flattened_tokens.update(token.split())
         if "I" in flattened_tokens:
             problems.append(f"inherited access remains for {principal.strip()}")
-        if principal_key in _WINDOWS_DACLS_FORBIDDEN_PRINCIPALS:
-            problems.append(f"group/Well-Known principal {principal.strip()} has access")
+            continue
+        short_name = principal_key.rsplit("\\", 1)[-1]
+        if (
+            short_name in _WINDOWS_DACLS_ALLOWED_PRINCIPALS
+            or principal_key in allowed_principals
+            or principal_key.endswith(allowed_suffixes)
+        ):
             continue
         if "F" in flattened_tokens:
             is_owner = (
@@ -2132,6 +2151,13 @@ def _windows_dacl_problems(icacls_output: str, current_user: str) -> list[str]:
             ) and bool(owner_key)
             if is_owner:
                 owner_grant_seen = True
+            else:
+                problems.append(
+                    f"unexpected non-owner principal {principal.strip()} holds "
+                    "full control"
+                )
+            continue
+        problems.append(f"unexpected ACE for {principal.strip()}: {rights.strip()}")
     if not owner_grant_seen:
         problems.append(
             f"no explicit Full-control grant for {current_user!r} was found"
