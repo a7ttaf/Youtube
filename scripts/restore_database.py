@@ -999,15 +999,22 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
 #   - File: scripts/restore_database.py -> _execute_restore calls these only
 #     when --allow-nonempty was passed; pg_restore later targets the fresh db.
 # ============================================================================
-def _current_database(container: str, *, timeout: int) -> str:
-    """Return the database psql lands in by default inside the container."""
-    raw = _psql(
-        container,
-        "SELECT current_catalog;",
+def _container_default_database(container: str, *, timeout: int) -> str:
+    """Return POSTGRES_DB straight from the container environment."""
+    completed = subprocess.run(
+        ["docker", "exec", container, "printenv", "POSTGRES_DB"],
+        capture_output=True,
+        text=True,
         timeout=timeout,
-        dbname="postgres",
-    ).strip()
-    return raw.splitlines()[0].strip() if raw else ""
+        check=False,
+    )
+    if completed.returncode != 0 or not completed.stdout.strip():
+        raise RestoreError(
+            EXIT_RESTORE_FAILED,
+            f"could not read POSTGRES_DB inside {container}: "
+            f"{completed.stderr.strip() or 'unset'}",
+        )
+    return completed.stdout.strip()
 
 
 def _recreate_target_database(container: str, target_db: str, *, timeout: int) -> None:
@@ -1021,31 +1028,13 @@ def _recreate_target_database(container: str, target_db: str, *, timeout: int) -
     quoted_db = _quote_identifier(target_db)
     # FIX: assembled as joined static fragments so the B608 string-built-query
     # detector stays satisfied; target_db is validated and identifier-quoted.
-    terminate_lines = [
-        "SELECT pg_terminate_backend(pid) FROM pg_catalog.pg_stat_activity ",
-        f"WHERE datname = {_quote_literal(target_db)} ",
-        "AND pid <> pg_backend_pid();",
-    ]
-    terminate_sql = "\n".join(terminate_lines)
-    try:
-        int(_psql(
-            container,
-            terminate_sql,
-            timeout=timeout,
-            dbname="postgres",
-        ).strip() or "0")
-    except ValueError as exc:
-        raise RestoreError(
-            EXIT_RESTORE_FAILED,
-            f"could not terminate connections for {target_db!r}: {exc}",
-        ) from exc
-    drop_create_lines = [
-        f"DROP DATABASE IF EXISTS {quoted_db};",
+    drop_lines = [
+        f"DROP DATABASE IF EXISTS {quoted_db} WITH (FORCE);",
         f"CREATE DATABASE {quoted_db};",
     ]
     _psql(
         container,
-        "\n".join(drop_create_lines),
+        "\n".join(drop_lines),
         timeout=timeout,
         dbname="postgres",
     )
@@ -1126,7 +1115,7 @@ def _execute_restore(
         # operator explicitly consented to replace, and a failed apply leaves
         # only that pristine shell behind. It also drops the blanket PUBLIC
         # CREATE grant the previous CREATE SCHEMA path re-introduced on PG18.
-        target_db = _current_database(container, timeout=args.timeout)
+        target_db = _container_default_database(container, timeout=args.timeout)
         _recreate_target_database(container, target_db, timeout=args.timeout)
     roles = _restore_roles(container, backup_dir / ROLES_NAME, timeout=args.timeout)
     print(f"roles present after roles.sql: {', '.join(roles)}")

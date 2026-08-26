@@ -3855,11 +3855,11 @@ def test_run_is_published_backup_requires_artifact_metadata(tmp_path: Path) -> N
     assert backup._run_is_published_backup(run, manifest) is False
 
 
-def test_execute_restore_clears_target_only_when_allow_nonempty(
+def test_execute_restore_recreates_target_only_when_allow_nonempty(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The destructive schema rebuild must run exactly on --allow-nonempty and
-    land between the emptiness guard and the roles apply (round-8 P1).
+    """--allow-nonempty must recreate the whole target database before roles
+    or data apply, so failures leave only a pristine empty shell behind.
     """
     from types import SimpleNamespace
 
@@ -3870,7 +3870,7 @@ def test_execute_restore_clears_target_only_when_allow_nonempty(
     )
     monkeypatch.setattr(
         restore,
-        "_current_database",
+        "_container_default_database",
         lambda container, timeout: order.append("dbname") or "appdb",
     )
     monkeypatch.setattr(
