@@ -62,7 +62,8 @@ def _seed_user(session: Session, user_id: UUID, tenant_id: UUID) -> None:
 
 def test_assign_role_uses_ambient_tenant_context(tmp_path):
     """The assignment must be written under the ambient tenant context, not
-    guessed from parameters."""
+    guessed from parameters.
+    """
     url = _build_db(tmp_path)
     engine = create_engine(url)
     with Session(engine) as setup:
