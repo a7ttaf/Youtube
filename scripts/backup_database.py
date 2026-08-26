@@ -1028,6 +1028,10 @@ FROM (
   FROM pg_catalog.pg_policy p,
        unnest(p.polroles) AS u(role_oid)
   WHERE p.polroles IS NOT NULL
+  UNION ALL
+  SELECT m.umuser::oid
+  FROM pg_catalog.pg_user_mapping m
+  WHERE m.umuser IS NOT NULL AND m.umuser <> 0
 ) g
 JOIN pg_catalog.pg_roles r ON r.oid = g.gid
 WHERE g.gid <> 0
@@ -2138,6 +2142,14 @@ def _windows_dacl_problems(icacls_output: str, current_user: str) -> list[str]:
         if "I" in flattened_tokens:
             problems.append(f"inherited access remains for {principal.strip()}")
             continue
+        # FIX: infrastructure principals are matched by their FULL identity
+        # (so a domain account merely *named* SYSTEM, e.g. CORP\SYSTEM:(R), is
+        # rejected like any other stranger) and every other non-owner
+        # principal is flagged regardless of which rights it carries.
+        # Infrastructure grants persist here even after /inheritance:r, so
+        # they stay silently accepted; anything outside the allowlist is what
+        # the operator-class refusal cares about.
+        is_infrastructure = False
         short_name = principal_key.rsplit("\\", 1)[-1]
         if (
             short_name in _WINDOWS_DACLS_ALLOWED_PRINCIPALS
@@ -2151,13 +2163,21 @@ def _windows_dacl_problems(icacls_output: str, current_user: str) -> list[str]:
             ) and bool(owner_key)
             if is_owner:
                 owner_grant_seen = True
+            elif is_infrastructure:
+                problems.append(
+                    f"infrastructure principal {principal.strip()} holds full "
+                    "control; revoke and rely on the owner grant"
+                )
             else:
                 problems.append(
                     f"unexpected non-owner principal {principal.strip()} holds "
                     "full control"
                 )
             continue
-        problems.append(f"unexpected ACE for {principal.strip()}: {rights.strip()}")
+        if not is_infrastructure:
+            problems.append(
+                f"unexpected ACE for {principal.strip()}: {rights.strip()}"
+            )
     if not owner_grant_seen:
         problems.append(
             f"no explicit Full-control grant for {current_user!r} was found"
@@ -3361,6 +3381,11 @@ def _last_run_holds_newer_completed_verdict(out_dir: Path, started: datetime) ->
         recorded_started = datetime.fromisoformat(str(payload["started_utc"]))
     except (KeyError, ValueError):
         return False
+    if recorded_started.tzinfo is None:
+        # FIX: a legacy or manually recovered writer stored an offset-less
+        # timestamp; comparing it against our aware clock raised TypeError
+        # after publication instead of safely allowing the overwrite.
+        return False
     return recorded_started > started
 
 
@@ -3595,7 +3620,7 @@ def _publish_staging_run(staging: Path, destination: Path, out_dir: Path) -> Non
     try:
         _restrict_run_dir_mode(destination, out_dir, strict=True)
         _sync_parent_directory_entry(out_dir)
-    except OSError as exc:
+    except (BackupError, OSError) as failure:
         # FIX: a failed durability sync must leave NOTHING discoverable under
         # the accepted name -- restore, watermark folding and retention all
         # take that name as valid. First try the plain ``.rejected``
@@ -3632,9 +3657,9 @@ def _publish_staging_run(staging: Path, destination: Path, out_dir: Path) -> Non
         raise BackupError(
             EXIT_ARTIFACT_INVALID,
             f"published backup {destination.name} could not be made durable: "
-            f"{exc}{quarantine_note}"
+            f"{failure}{quarantine_note}"
             + (f"; quarantined to {quarantined_to}" if quarantined_to else ""),
-        ) from exc
+        ) from failure
 
 
 def run_backup(args: argparse.Namespace, out_dir: Path) -> BackupOutcome:
@@ -3701,15 +3726,17 @@ def run_backup(args: argparse.Namespace, out_dir: Path) -> BackupOutcome:
             timeout=args.timeout,
             include_passwords=args.include_role_passwords,
         )
-        dump_listing = ""
+        # Authorization-relevant checks can never depend on whether deep TOC
+        # verification runs: skipping them would let LOGIN/SUPERUSER/BYPASSRLS
+        # drift reach restore under --no-verify-dump (round-9 review P1).
+        dump_listing = _pg_restore_list(container, staging / DUMP_NAME, timeout=args.timeout)
+        _validate_dump_roles_covered(
+            listing=dump_listing,
+            roles_body=(staging / ROLES_NAME).read_text(encoding="utf-8", errors="replace"),
+            acl_grantees=acl_grantees,
+        )
         toc_entries = -1
         if args.verify_dump:
-            dump_listing = _pg_restore_list(container, staging / DUMP_NAME, timeout=args.timeout)
-            _validate_dump_roles_covered(
-                listing=dump_listing,
-                roles_body=(staging / ROLES_NAME).read_text(encoding="utf-8", errors="replace"),
-                acl_grantees=acl_grantees,
-            )
             toc_entries = len(
                 [
                     line
