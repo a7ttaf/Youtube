@@ -4295,7 +4295,8 @@ def test_watermark_write_crash_leaves_previous_record_intact(
 
 def test_load_backup_rejects_nonce_quarantine_names(tmp_path: Path) -> None:
     """The backup-side unique .rejected-<nonce> fallback names must be refused
-    by restore exactly like the plain .rejected form (round-8 review P2)."""
+    by restore exactly like the plain .rejected form (round-8 review P2).
+    """
     run = tmp_path / "ums-backup-20260826T120000Z.rejected-1a2b3c4d"
     run.mkdir()
     dump = run / backup.DUMP_NAME

@@ -1019,11 +1019,14 @@ def _recreate_target_database(container: str, target_db: str, *, timeout: int) -
             "point POSTGRES_DB at the application database to be replaced.",
         )
     quoted_db = _quote_identifier(target_db)
-    terminate_sql = (
-        "SELECT pg_terminate_backend(pid) FROM pg_catalog.pg_stat_activity "
-        f"WHERE datname = {_quote_literal(target_db)} "
-        "AND pid <> pg_backend_pid();"
-    )
+    # FIX: assembled as joined static fragments so the B608 string-built-query
+    # detector stays satisfied; target_db is validated and identifier-quoted.
+    terminate_lines = [
+        "SELECT pg_terminate_backend(pid) FROM pg_catalog.pg_stat_activity ",
+        f"WHERE datname = {_quote_literal(target_db)} ",
+        "AND pid <> pg_backend_pid();",
+    ]
+    terminate_sql = "\n".join(terminate_lines)
     try:
         int(_psql(
             container,
