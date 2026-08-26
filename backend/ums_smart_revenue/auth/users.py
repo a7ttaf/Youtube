@@ -295,7 +295,15 @@ class SqlAlchemyUserAccountRepository:
     #     the identical normalized-email predicate for the conflict check.
     # ============================================================================
     def get_user_by_email(self, *, email: str) -> UserAccountEntry | None:
-        """Return the tenant's account for ``email``, or ``None`` when absent."""
+        """Return the tenant's account for ``email``, or ``None`` when absent.
+
+        Raises:
+            UserAccountValidationError: If ``email`` fails normalization.
+            UserAccountConflictError: When the lookup's savepoint flush hits a
+                constraint violation inside the storage-retry wrapper.
+            UserAccountStorageError: If transient storage failures exhaust the
+                retry budget.
+        """
         normalized_email = _normalize_email(email)
 
         def operation() -> UserAccountEntry | None:
