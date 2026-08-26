@@ -77,6 +77,7 @@ import argparse
 import hashlib
 import json
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -1001,8 +1002,15 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
 # ============================================================================
 def _container_default_database(container: str, *, timeout: int) -> str:
     """Return POSTGRES_DB straight from the container environment."""
+    docker_path = shutil.which("docker")
+    if not docker_path:
+        raise RestoreError(
+            EXIT_DOCKER_UNAVAILABLE,
+            f"docker CLI not found on PATH; cannot read POSTGRES_DB inside "
+            f"{container}",
+        )
     completed = subprocess.run(
-        ["docker", "exec", container, "printenv", "POSTGRES_DB"],
+        [docker_path, "exec", container, "printenv", "POSTGRES_DB"],
         capture_output=True,
         text=True,
         timeout=timeout,
