@@ -130,7 +130,6 @@ _USER_NSP = (
     "AND n.nspname NOT LIKE 'pg\\_temp\\_%' ESCAPE '\\' "
     "AND n.nspname NOT LIKE 'pg\\_toast\\_temp\\_%' ESCAPE '\\'"
 )
-# Constant catalog filter only — never operator input (BAN-B608-safe concat).
 USER_OBJECT_COUNT_SQL = (
     "SELECT ("
     " (SELECT count(*) FROM pg_catalog.pg_class c "
@@ -533,6 +532,7 @@ def _resolve_rehearsal_image(*, image_id: str, image: str, timeout: int) -> str:
     if image:
         return image
     return image_id
+
 
 def _create_throwaway(manifest: dict[str, object], *, timeout: int) -> str:
     """Start a disposable Postgres container from the backup manifest source."""

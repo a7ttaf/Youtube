@@ -3711,6 +3711,7 @@ def test_create_throwaway_warns_when_timeout_cleanup_fails(
 ) -> None:
     """A docker-run timeout whose rm also fails must surface a WARNING."""
     def boom(*_a, **_k):
+        """Raise TimeoutExpired as if docker run stalled."""
         raise subprocess.TimeoutExpired(cmd=["docker", "run"], timeout=1)
 
     monkeypatch.setattr(restore, "_resolve_rehearsal_image", lambda **_k: "postgres:18")
@@ -3731,8 +3732,10 @@ def test_create_throwaway_warns_when_timeout_cleanup_fails(
     assert "WARNING" in capsys.readouterr().out
 
 
-def test_watermark_write_crash_leaves_previous_record_intact(tmp_path: Path) -> None:
-    """Atomic watermark replace must preserve the prior record on mid-write crash."""
+def test_watermark_write_crash_leaves_previous_record_intact(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Atomic watermark replace must preserve the prior record if rename crashes."""
     backup._write_watermark(
         tmp_path,
         {"public.channels": 10},
@@ -3742,46 +3745,19 @@ def test_watermark_write_crash_leaves_previous_record_intact(tmp_path: Path) -> 
         identity=None,
     )
     before = (tmp_path / backup.WATERMARK_NAME).read_text(encoding="utf-8")
-    real_open = Path.open
 
-    class _DiesAfterOneByte:
-        def __init__(self, handle: object) -> None:
-            self._handle = handle
+    def _crash_replace(src: object, dst: object) -> None:
+        """Fail the publish rename after the aside file is already durable."""
+        raise OSError("simulated crash after aside write")
 
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_exc: object) -> None:
-            closer = getattr(self._handle, "close")
-            closer()
-
-        def write(self, body: str) -> int:
-            writer = getattr(self._handle, "write")
-            flusher = getattr(self._handle, "flush")
-            writer(body[:1])
-            flusher()
-            raise OSError("simulated crash mid-write")
-
-    def _crashy_open(self: Path, *args: object, **kwargs: object) -> object:
-        mode = str(kwargs.pop("mode", args[0] if args else "r"))
-        rest = args[1:] if args else ()
-        handle = real_open(self, mode, *rest, **kwargs)
-        if "w" in mode and self.parent == tmp_path and self.name.startswith(
-            backup.WATERMARK_NAME + "."
-        ):
-            return _DiesAfterOneByte(handle)
-        return handle
-
-    with pytest.MonkeyPatch.context() as crash_zone:
-        crash_zone.setattr(Path, "open", _crashy_open)
-        with pytest.raises(OSError, match="simulated crash"):
-            backup._write_watermark(
-                tmp_path,
-                {"public.channels": 1},
-                run="ums-backup-new",
-                reset={},
-                now=NOW,
-                identity=None,
-            )
-
+    monkeypatch.setattr(backup.os, "replace", _crash_replace)
+    with pytest.raises(OSError, match="simulated crash"):
+        backup._write_watermark(
+            tmp_path,
+            {"public.channels": 1},
+            run="ums-backup-new",
+            reset={},
+            now=NOW,
+            identity=None,
+        )
     assert (tmp_path / backup.WATERMARK_NAME).read_text(encoding="utf-8") == before

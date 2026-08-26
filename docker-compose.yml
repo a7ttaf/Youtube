@@ -271,7 +271,7 @@ x-app-env: &app-env
 x-app-storage-env: &app-storage-env
   UMS_EXPORT_ARTIFACT_DIR: /var/lib/ums/artifacts
   UMS_BLOB_BACKEND: ${UMS_BLOB_BACKEND:-file-store}
-  UMS_GCS_BUCKET: ${UMS_GCS_BUCKET:-}
+  UMS_GCS_BUCKET: ${UMS_GCS_BUCKET:-ums-smart-revenue-raw}
   UMS_LOCAL_STORE_ROOT: /var/lib/ums/blobs
   UMS_LOCAL_BLOB_BUCKET: ${UMS_LOCAL_BLOB_BUCKET:-local}
 

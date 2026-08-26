@@ -2985,6 +2985,9 @@ def _replace_status_file(path: Path, body: str) -> None:
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(aside, path)
+        # FIX: fsync the parent dir so the rename itself is durable (last-run /
+        # watermark name survives power loss immediately after replace).
+        _sync_parent_directory_entry(path.parent)
     except OSError:
         try:
             aside.unlink(missing_ok=True)
