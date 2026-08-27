@@ -1074,13 +1074,17 @@ might still need, take a backup of it **before** running with `--allow-nonempty`
 Before the drop runs, the script read-only preflights the live target and
 refuses (changing nothing) when: an application role already carries a cluster
 membership or a privileged attribute a clean `roles.sql` would not clear
-(exit `5`), or another user still holds sessions on the target database
+(exit `5`), or any client still holds a session on the target database
 (exit `2`) — `DROP DATABASE ... WITH (FORCE)` disconnects them, but Compose
 restart policies reconnect their pools mid-restore and the verification would
-then pass over mutated data. Stop the application and scheduler containers
-first (e.g. `docker compose stop app app-dev`) and keep them stopped until the
-restore exits `0`; the script re-checks after verification and fails the run
-(exit `7`) if a client reconnected during the restore window.
+then pass over mutated data. The count includes pools that authenticate as
+the same database user as the restore: the standard Compose stack configures
+both the application and `POSTGRES_USER` from `UMS_DB_USER`, so the guard
+excludes only its own connection. Stop the application and scheduler
+containers first (e.g. `docker compose stop app app-dev`) and keep them
+stopped until the restore exits `0`; the script re-checks after verification
+and fails the run (exit `7`) if a client reconnected during the restore
+window.
 
 Restore exit codes:
 

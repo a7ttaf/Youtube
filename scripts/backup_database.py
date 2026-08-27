@@ -2114,17 +2114,42 @@ def _bootstrap_role_lockout_problems(body: str, superuser: str) -> list[str]:
     database and a cluster needing out-of-band superuser recovery. Genuine
     pg_dumpall output never disables the bootstrap role, so any
     NOLOGIN/NOSUPERUSER on it is refused on both sides of the round trip.
+
+    FIX(codex round-25 P1): ``DROP ROLE <superuser>;`` walked the same gap
+    from the other side -- the DROP arm of the role gate protects only the
+    application roles, so preflight approved the file and the target was
+    destroyed before the replay failed on "cannot drop the current user".
+    pg_dumpall --roles-only emits no DROP of any kind.
     """
+    problems: list[str] = []
     tokens = _collect_role_attribute_tokens(body).get(superuser)
-    if tokens is None:
-        return []
-    lockouts = sorted(tokens & _BOOTSTRAP_LOCKOUT_ATTRIBUTE_TOKENS)
-    if not lockouts:
-        return []
-    return [
-        f"{superuser}: attributes {', '.join(lockouts)} would lock the "
-        "bootstrap identity out of the cluster"
-    ]
+    if tokens is not None:
+        lockouts = sorted(tokens & _BOOTSTRAP_LOCKOUT_ATTRIBUTE_TOKENS)
+        if lockouts:
+            problems.append(
+                f"{superuser}: attributes {', '.join(lockouts)} would lock the "
+                "bootstrap identity out of the cluster"
+            )
+    for statement in _scan_role_sql(body):
+        if statement.startswith("\\"):
+            continue
+        statement_tokens = _role_sql_tokens(statement)
+        if len(statement_tokens) < 3:
+            continue
+        if statement_tokens[0][0] != "word" or statement_tokens[0][1].upper() != "DROP":
+            continue
+        if (
+            statement_tokens[1][0] != "word"
+            or statement_tokens[1][1].upper() not in _ROLE_SQL_ROLE_NOUNS
+        ):
+            continue
+        dropped = {_role_sql_identifier(t) for t in statement_tokens[2:]}
+        if superuser in dropped:
+            problems.append(
+                f"{superuser}: DROP would remove the bootstrap identity the "
+                "restore itself connects as"
+            )
+    return problems
 
 
 def _created_role_names(body: str) -> list[str]:

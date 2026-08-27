@@ -180,16 +180,18 @@ ROLE_PRIVILEGED_ATTRIBUTES_SQL = (
     "OR rolcreatedb OR rolreplication) "
     "ORDER BY rolname;"
 )
-# FIX(round-23): a live application pool survives DROP DATABASE ... WITH
+# FIX(round-25 P1 x2): a live application pool survives DROP DATABASE ... WITH
 # (FORCE) -- the disconnect is momentary and restart-policies reconnect the
 # moment the recreated database exists, so writers can mutate the target
-# between pg_restore and _verify. Any session on the target database that is
-# neither this psql connection nor the bootstrap superuser is such a writer.
+# between pg_restore and _verify. Any session on the target database other
+# than the querying backend is such a writer: the standard Compose stack
+# configures the APPLICATION from the same UMS_DB_USER as POSTGRES_USER
+# (docker-compose.yml), so filtering by usename excluded every default app
+# pool from the count. Only the guard query's own backend PID is excluded.
 FOREIGN_WRITER_SESSIONS_SQL = (
     "SELECT count(*) FROM pg_catalog.pg_stat_activity "
     "WHERE datname = current_database() "
-    "AND pid <> pg_backend_pid() "
-    "AND usename <> current_user;"
+    "AND pid <> pg_backend_pid();"
 )
 # Count user objects across every non-system schema so a database that only
 # has tables/enums/functions/empty custom schemas cannot look empty and
@@ -1704,17 +1706,42 @@ def _bootstrap_role_lockout_problems(body: str, superuser: str) -> list[str]:
     database and a cluster needing out-of-band superuser recovery. Genuine
     pg_dumpall output never disables the bootstrap role, so any
     NOLOGIN/NOSUPERUSER on it is refused on both sides of the round trip.
+
+    FIX(codex round-25 P1): ``DROP ROLE <superuser>;`` walked the same gap
+    from the other side -- the DROP arm of the role gate protects only the
+    application roles, so preflight approved the file and the target was
+    destroyed before the replay failed on "cannot drop the current user".
+    pg_dumpall --roles-only emits no DROP of any kind.
     """
+    problems: list[str] = []
     tokens = _collect_role_attribute_tokens(body).get(superuser)
-    if tokens is None:
-        return []
-    lockouts = sorted(tokens & _BOOTSTRAP_LOCKOUT_ATTRIBUTE_TOKENS)
-    if not lockouts:
-        return []
-    return [
-        f"{superuser}: attributes {', '.join(lockouts)} would lock the "
-        "bootstrap identity out of the cluster"
-    ]
+    if tokens is not None:
+        lockouts = sorted(tokens & _BOOTSTRAP_LOCKOUT_ATTRIBUTE_TOKENS)
+        if lockouts:
+            problems.append(
+                f"{superuser}: attributes {', '.join(lockouts)} would lock the "
+                "bootstrap identity out of the cluster"
+            )
+    for statement in _scan_role_sql(body):
+        if statement.startswith("\\"):
+            continue
+        statement_tokens = _role_sql_tokens(statement)
+        if len(statement_tokens) < 3:
+            continue
+        if statement_tokens[0][0] != "word" or statement_tokens[0][1].upper() != "DROP":
+            continue
+        if (
+            statement_tokens[1][0] != "word"
+            or statement_tokens[1][1].upper() not in _ROLE_SQL_ROLE_NOUNS
+        ):
+            continue
+        dropped = {_role_sql_identifier(t) for t in statement_tokens[2:]}
+        if superuser in dropped:
+            problems.append(
+                f"{superuser}: DROP would remove the bootstrap identity the "
+                "restore itself connects as"
+            )
+    return problems
 
 
 def _created_role_names(body: str) -> list[str]:
@@ -2536,11 +2563,13 @@ def _execute_restore(
             raise RestoreError(
                 EXIT_USAGE,
                 f"the target database has {live_writers} live client "
-                "session(s) from other users. DROP DATABASE ... WITH (FORCE) "
-                "disconnects them, but their pools reconnect while the "
-                "restore runs and the verification can then pass over "
-                "mutated data. Stop the application and scheduler containers "
-                "first (e.g. `docker compose stop app app-dev`), then re-run.",
+                "session(s). DROP DATABASE ... WITH (FORCE) disconnects them, "
+                "but their pools reconnect while the restore runs -- including "
+                "pools that authenticate as the same database user, which the "
+                "standard Compose stack configures from UMS_DB_USER -- and the "
+                "verification can then pass over mutated data. Stop the "
+                "application and scheduler containers first (e.g. `docker "
+                "compose stop app app-dev`), then re-run.",
             )
         target_db = _container_default_database(container, timeout=args.timeout)
         _recreate_target_database(container, target_db, timeout=args.timeout)
@@ -2637,7 +2666,25 @@ def _restore_process_exit(code: int | None, ok: bool) -> int:
 #     handler so neither CLI can exit on an undocumented code.
 # ============================================================================
 def main(argv: list[str] | None = None) -> int:
-    """Run one restore (or rehearsal) and return a documented exit code."""
+    """Run one restore (or rehearsal) and return the documented exit code.
+
+    Args:
+        argv: CLI argument list to parse. ``None`` reads ``sys.argv[1:]`` so
+            the shell invocation and any test/wrapper drive the same parser.
+
+    Returns:
+        0 restored and verified. 2 usage / malformed backup directory /
+        non-empty target without --allow-nonempty / live client sessions on
+        the target. 3 Docker daemon unavailable. 4 target container
+        unavailable or could not be created. 5 roles restore failed or the
+        required roles are absent/compromised after replay. 6 pg_restore
+        failed. 7 post-restore verification mismatch, or a client reconnected
+        during the restore window. 8 backup artifacts failed their sha256
+        integrity check. 9 unexpected internal error (traceback printed).
+        Handled failures print a stable ``RESTORE FAILED (exit N)`` line on
+        stderr and never raise; ``--rehearse`` destroys its throwaway
+        container on every path.
+    """
     args = _parse_args(argv if argv is not None else sys.argv[1:])
     backup_dir = Path(args.backup_dir).expanduser()
     throwaway: str | None = None

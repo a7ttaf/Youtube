@@ -6009,17 +6009,22 @@ def test_bootstrap_role_lockout_is_refused_on_both_sides(
             "ALTER ROLE ums WITH NOLOGIN;\n",
             "ALTER ROLE ums WITH NOSUPERUSER;\n",
             "CREATE ROLE ums WITH NOLOGIN;\n",
+            "DROP ROLE ums;\n",
+            'DROP USER "ums";\n',
         ):
             problems = module._bootstrap_role_lockout_problems(base + hostile, "ums")
-            assert problems and "lock the bootstrap identity out" in problems[0], (
-                module.__name__,
-                hostile,
-            )
-        # Genuine pg_dumpall shapes for the bootstrap role keep passing.
+            assert problems and (
+                "lock the bootstrap identity out" in problems[0]
+                or "DROP would remove the bootstrap identity" in problems[0]
+            ), (module.__name__, hostile, problems)
+        # Genuine pg_dumpall shapes for the bootstrap role keep passing; a
+        # drop of some OTHER role is the protected-role gate's business, not
+        # the lockout gate's.
         for genuine in (
             "CREATE ROLE ums WITH SUPERUSER INHERIT LOGIN;\n",
             "ALTER ROLE ums WITH PASSWORD 'SCRAM-SHA-256$4096:ab==$cd:ef';\n",
             "ALTER ROLE app_tenant WITH NOLOGIN;\n",
+            "DROP ROLE someone_else;\n",
         ):
             assert module._bootstrap_role_lockout_problems(base + genuine, "ums") == []
 
@@ -6274,3 +6279,34 @@ def test_staging_directory_gets_the_strict_owner_only_lockdown(
         "every staging lockdown must be strict: secrets are written there "
         "moments after it is created"
     )
+
+
+def test_writer_session_guard_counts_same_user_pools() -> None:
+    """The guard must not exclude sessions by username (round-25 P1 x2).
+
+    The standard Compose stack configures the APPLICATION from the same
+    UMS_DB_USER as POSTGRES_USER, so `usename <> current_user` excluded
+    every default app pool from the count and both quiesce checks reported
+    zero while the app mutated the recreated database. Only the guard's own
+    backend PID may be excluded.
+    """
+    sql = restore.FOREIGN_WRITER_SESSIONS_SQL
+    assert "pg_backend_pid()" in sql
+    assert "usename" not in sql, (
+        "a usename filter blinds the guard to pools that authenticate as "
+        "the same database user -- the shipped Compose default"
+    )
+
+
+def test_restore_main_docstring_documents_the_cli_contract() -> None:
+    """The public restore entrypoint must document argv and exit codes."""
+    doc = restore.main.__doc__ or ""
+    for required in (
+        "argv",
+        "sys.argv[1:]",
+        "Returns:",
+        "0 restored and verified",
+        "7 post-restore verification mismatch",
+        "9 unexpected internal error",
+    ):
+        assert required in doc, required

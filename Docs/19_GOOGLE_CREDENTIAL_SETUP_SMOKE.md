@@ -364,8 +364,13 @@ fail with `SecretFetchError` inside the container.
 alternative is `POST /connectors/credentials` per the Setup sequence above):
 
 ```powershell
-docker compose exec postgres psql -U <UMS_DB_USER> -d <UMS_DB_NAME> -c "INSERT INTO api_connector_credentials (tenant_id, connector_key, account_id, encrypted_secret_ref) VALUES ('00000000-0000-0000-0000-000000000001', 'youtube-analytics', '<CONTENT_OWNER_ID>', 'gcp-secret-manager://projects/<project>/secrets/ums-google-oauth/versions/latest');"
+docker compose exec postgres psql -U "<UMS_DB_USER>" -d "<UMS_DB_NAME>" -c "INSERT INTO api_connector_credentials (tenant_id, connector_key, account_id, encrypted_secret_ref) VALUES ('00000000-0000-0000-0000-000000000001', 'youtube-analytics', '<CONTENT_OWNER_ID>', 'gcp-secret-manager://projects/<project>/secrets/ums-google-oauth/versions/latest');"
 ```
+
+(The `-U`/`-d` placeholders are quoted: unquoted angle brackets are parsed by
+PowerShell as redirection operators, so the command failed before psql ever
+ran. The placeholders inside the SQL string are safe — PowerShell does not
+parse the contents of a quoted argument.)
 
 Expected `INSERT 0 1`; a re-run fails on the unique constraint (correct — rotate the ref
 with `UPDATE`, not a second `INSERT`).
