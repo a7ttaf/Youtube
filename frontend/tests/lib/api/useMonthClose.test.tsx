@@ -97,6 +97,32 @@ describe("useMonthClose", () => {
     expect(result.current.data).toBeNull();
     expect(result.current.error).toMatchObject({ name: "ApiError", status: 403 });
   });
+
+  it("maps a 404 to NO DATA and NO ERROR — the month has no close row yet", async () => {
+    // get_finance_month_close 404s for any month without a finance_month_close
+    // row, and rows only appear once a finance write touches the month — so the
+    // rolling current-month default the views open on 404s by construction.
+    // That is an absence, not a failure: data null, error null.
+    fetchMock().mockResolvedValue(
+      jsonResponse({ detail: "Finance month close record not found" }, 404),
+    );
+    const { result } = renderHook(() => useMonthClose({ month: "2026-03" }), {
+      wrapper,
+    });
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    expect(result.current.data).toBeNull();
+    expect(result.current.error).toBeNull();
+  });
+
+  it("still surfaces a 500 as a typed ApiError — only 404 is remapped", async () => {
+    fetchMock().mockResolvedValue(jsonResponse({ detail: "boom" }, 500));
+    const { result } = renderHook(() => useMonthClose({ month: "2026-03" }), {
+      wrapper,
+    });
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    expect(result.current.data).toBeNull();
+    expect(result.current.error).toMatchObject({ name: "ApiError", status: 500 });
+  });
 });
 
 describe("useMonthCloseReadiness", () => {
@@ -112,6 +138,20 @@ describe("useMonthCloseReadiness", () => {
     expect(result.current.data?.blockers[0]?.blocker_type).toBe(
       "PENDING_MANUAL_OVERRIDES",
     );
+  });
+
+  it("does NOT inherit the status hook's 404 remap", async () => {
+    // The readiness endpoint computes a verdict for any month, so a 404 from it
+    // is a real failure and must stay one. Guards against widening the status
+    // hook's "no close row yet" mapping to the whole module.
+    fetchMock().mockResolvedValue(jsonResponse({ detail: "Not Found" }, 404));
+    const { result } = renderHook(
+      () => useMonthCloseReadiness({ month: "2026-03" }),
+      { wrapper },
+    );
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    expect(result.current.data).toBeNull();
+    expect(result.current.error).toMatchObject({ name: "ApiError", status: 404 });
   });
 });
 

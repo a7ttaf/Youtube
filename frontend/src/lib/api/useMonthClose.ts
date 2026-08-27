@@ -1,6 +1,6 @@
 import { useCallback, useMemo } from "react";
 
-import { useApiClient } from "@/lib/api/client";
+import { ApiError, useApiClient } from "@/lib/api/client";
 import type {
   FinanceCloseReadinessResponse,
   FinanceMonthCloseMutationResponse,
@@ -12,6 +12,13 @@ export type MonthCloseQuery = {
   month: string;
 };
 
+/**
+ * The status GET's 404: this month has no finance_month_close row yet. Close
+ * rows are created by finance writes, so an untouched month legitimately has
+ * none — that is an ABSENCE, not a failure.
+ */
+const CLOSE_RECORD_NOT_FOUND = 404;
+
 // ============================================================================
 // Purpose: Typed fetch hook for a finance month's close STATUS (OPEN/LOCKED +
 //   lock/unlock actor/timestamps). Builds GET /finance-close/{month} on the
@@ -20,22 +27,44 @@ export type MonthCloseQuery = {
 // Database/ORM: None (frontend) — reads the backend finance-close GET endpoint.
 // Standards: month is path-encoded; the request closure is memoized so useAsync
 //   does not refetch on every render. Timestamps stay ISO strings.
-// Blast Radius: None detected (read-only finance close display).
+//   404 IS NOT AN ERROR HERE. get_finance_month_close raises 404 whenever the
+//   month has no close row, and close rows only ever appear once a finance
+//   write touches the month — so the rolling CURRENT-month default the views
+//   open on is exactly such a month. Surfacing that as an error made the Close
+//   screen replace its whole summary with "Request failed (404)" on its own
+//   default month. This hook resolves that ONE status to `null` data with a
+//   null error, so the settled (data=null, error=null) pair means "no close
+//   record yet" and the view renders its honest not-started state. EVERY other
+//   status (403, 5xx, network) still rejects and still reaches `error`
+//   untouched, and the sibling readiness read is not remapped at all.
+// Blast Radius: None detected (read-only finance close display). It never
+//   invents a close status: the caller still sees no record, and lock/unlock
+//   remain gated by the backend.
 // Connections:
 //   - File: frontend/src/lib/api/client.ts -> useApiClient() GET + X-UMS-Tenant.
-//   - File: backend/ums_smart_revenue/api/finance_close.py -> get_finance_month_close.
+//   - File: backend/ums_smart_revenue/api/finance_close.py:104
+//     get_finance_month_close -> raises the 404 this maps to "no record".
+//   - File: frontend/src/components/srcc/views/CloseView.tsx ->
+//     CloseStatusSummary renders the (data=null, error=null) not-started state.
 // ============================================================================
 export const useMonthClose = (
   query: MonthCloseQuery,
-): AsyncState<FinanceMonthCloseStatus> => {
+  // The `| null` on the data type is deliberate: a SETTLED read with data null
+  // and error null is the "no close record yet" verdict, and the type says so.
+): AsyncState<FinanceMonthCloseStatus | null> => {
   const client = useApiClient();
   const { month } = query;
 
   const run = useCallback(
-    () =>
-      client.get<FinanceMonthCloseStatus>(
-        `/finance-close/${encodeURIComponent(month)}`,
-      ),
+    (): Promise<FinanceMonthCloseStatus | null> =>
+      client
+        .get<FinanceMonthCloseStatus>(`/finance-close/${encodeURIComponent(month)}`)
+        .catch((caught: unknown) => {
+          if (caught instanceof ApiError && caught.status === CLOSE_RECORD_NOT_FOUND) {
+            return null;
+          }
+          throw caught;
+        }),
     [client, month],
   );
 

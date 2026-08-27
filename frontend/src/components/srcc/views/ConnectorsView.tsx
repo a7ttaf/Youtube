@@ -23,9 +23,9 @@ import {
 import { useConnectorRuns } from "@/lib/api/useConnectorRuns";
 import { useConnectorTest } from "@/lib/api/useConnectorTest";
 import type { Severity } from "@/lib/mock/data";
+import { lastCompleteMonthKey } from "@/lib/months";
 import {
   Badge,
-  DEFAULT_MONTH,
   Dot,
   financeDisplay,
   formatTimestamp,
@@ -1558,7 +1558,15 @@ export const ConnectorsView = ({
   canViewFinance: boolean;
   canViewConnectorHealth: boolean;
 }) => {
-  const [month, setMonth] = useState<string>(DEFAULT_MONTH);
+  // FIX: this screen's month state is a WRITE default, not just a filter — it
+  // becomes the connector run's report_month and the AdSense payment row's
+  // month. The Google clients pull a whole calendar month and the backend only
+  // validates the "YYYY-MM" format, so seeding the IN-PROGRESS month (the
+  // rolling DEFAULT_MONTH the read views open on) would ingest a partial month
+  // as if it were final. Seed the last COMPLETE month instead; the selector
+  // still offers every MONTH_OPTIONS entry, current month included, so this
+  // changes the default and not the operator's choice.
+  const [month, setMonth] = useState<string>(lastCompleteMonthKey);
   const [reason, setReason] = useState<string>("");
   const [dryRun, setDryRun] = useState<boolean>(false);
   // Nonce bumped after a successful executing-path submit so the run-history feed

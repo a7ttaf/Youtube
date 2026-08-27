@@ -476,9 +476,27 @@ const ReconciliationPanel = () => {
   );
 };
 
-/** The Status tile's footnote: LOCKED allows exports, anything else is open for edits. */
-const closeStatusNote = (statusValue: string | undefined): string =>
-  statusValue === "LOCKED" ? "Exports allowed" : "Open for edits";
+// A month with no finance_month_close row is honestly OPEN: nothing has locked
+// it, and the backend only creates the row once a finance write touches the
+// month. This is not a UI invention — the backend itself already resolves a
+// missing close row to "OPEN" (backend/ums_smart_revenue/api/revenue.py:1742
+// and :3060, `close.status if close else "OPEN"`), which is the same verdict
+// this screen now states. useMonthClose maps that GET's 404 to
+// (data=null, error=null), so these two strings are what the summary shows for
+// a month nobody has closed yet — the state the rolling CURRENT-month default
+// lands on.
+const NO_CLOSE_RECORD_STATUS = "OPEN";
+const NO_CLOSE_RECORD_NOTE = "No close record yet";
+
+/** The Status tile's value: the close row's status, or OPEN when no row exists yet. */
+const closeStatusValue = (status: FinanceMonthCloseStatus | null): string =>
+  status?.status ?? NO_CLOSE_RECORD_STATUS;
+
+/** The Status tile's footnote: LOCKED allows exports; no row means not started. */
+const closeStatusNote = (status: FinanceMonthCloseStatus | null): string => {
+  if (!status) return NO_CLOSE_RECORD_NOTE;
+  return status.status === "LOCKED" ? "Exports allowed" : "Open for edits";
+};
 
 /** The Readiness tile value: Ready/Blocked once readiness has loaded, an em dash before. */
 const readinessTileValue = (readiness: FinanceCloseReadinessResponse | null): string => {
@@ -492,11 +510,18 @@ const blockerCountLabel = (blockerCount: number): string =>
     ? `${blockerCount} blocker${blockerCount === 1 ? "" : "s"}`
     : "No blockers";
 
-/** The loaded month/status/readiness/allocation summary tiles. */
+/**
+ * The loaded month/status/readiness/allocation summary tiles. Reached only once
+ * the status read has SETTLED without an error, so a null `status` here means
+ * the month simply has no close record yet (the mapped 404) — it falls back to
+ * the selected `month` and the honest not-started copy rather than em dashes.
+ */
 const CloseSummaryTiles = ({
+  month,
   status,
   readiness,
 }: {
+  month: string;
   status: FinanceMonthCloseStatus | null;
   readiness: FinanceCloseReadinessResponse | null;
 }) => {
@@ -505,13 +530,13 @@ const CloseSummaryTiles = ({
     <div className="view-summary" aria-label="Month close summary">
       <article className="summary-tile">
         <span>Month</span>
-        <strong>{status?.month ?? "—"}</strong>
+        <strong>{status?.month ?? month}</strong>
         <small>Finance close control</small>
       </article>
       <article className="summary-tile">
         <span>Status</span>
-        <strong>{status?.status ?? "—"}</strong>
-        <small>{closeStatusNote(status?.status)}</small>
+        <strong>{closeStatusValue(status)}</strong>
+        <small>{closeStatusNote(status)}</small>
       </article>
       <article className="summary-tile">
         <span>Readiness</span>
@@ -530,13 +555,20 @@ const CloseSummaryTiles = ({
 /**
  * Top summary tiles for the close screen: month, status, readiness, and allocation
  * method, with explicit error and initial-loading states mirroring CommandView.
+ *
+ * Branch order is load-bearing. `error` still wins, so a 403/5xx/network failure
+ * keeps its role="alert" tile exactly as before; useMonthClose has already
+ * turned the "no close row yet" 404 into (status=null, error=null), which falls
+ * through to the tiles and their not-started copy instead of an error banner.
  */
 const CloseStatusSummary = ({
+  month,
   status,
   loading,
   error,
   readiness,
 }: {
+  month: string;
   status: FinanceMonthCloseStatus | null;
   loading: boolean;
   error: ApiError | Error | null;
@@ -567,7 +599,7 @@ const CloseStatusSummary = ({
     );
   }
 
-  return <CloseSummaryTiles status={status} readiness={readiness} />;
+  return <CloseSummaryTiles month={month} status={status} readiness={readiness} />;
 };
 
 /** True while the readiness fetch is in flight with nothing loaded yet. */
@@ -832,6 +864,7 @@ const CloseView = ({
   return (
     <section className="view-page" aria-labelledby="closeViewTitle">
       <CloseStatusSummary
+        month={month}
         status={status}
         loading={statusLoading}
         error={statusError}

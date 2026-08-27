@@ -4,6 +4,7 @@ import { DEFAULT_MONTH, MONTH_OPTIONS } from "@/components/srcc/shared";
 import {
   MONTH_WINDOW_SIZE,
   currentMonthKey,
+  lastCompleteMonthKey,
   monthKey,
   monthKeyLabel,
   rollingMonthWindow,
@@ -93,6 +94,38 @@ describe("currentMonthKey", () => {
     expect(currentMonthKey(new Date(2026, 8, 5))).toBe("2026-09");
     expect(currentMonthKey(new Date(2026, 9, 5))).toBe("2026-10");
     expect(currentMonthKey(new Date(2026, 11, 5))).toBe("2026-12");
+  });
+});
+
+describe("lastCompleteMonthKey", () => {
+  it("steps back across the YEAR boundary: January yields the previous December", () => {
+    // now = 9 Jan 2027 (local). The last COMPLETE month is December 2026 — the
+    // case a naive `month - 1` on the same year would render as "2027-00".
+    expect(lastCompleteMonthKey(new Date(2027, 0, 9))).toBe("2026-12");
+    // The boundary holds at both local edges of January, so no UTC offset can
+    // shift the answer into the current month.
+    expect(lastCompleteMonthKey(new Date(2027, 0, 1, 0, 0, 0, 0))).toBe("2026-12");
+    expect(lastCompleteMonthKey(new Date(2027, 0, 31, 23, 59, 59, 999))).toBe("2026-12");
+  });
+
+  it("is the month BEFORE the current one, mid-year and zero-padded", () => {
+    expect(lastCompleteMonthKey(new Date(2026, 7, 27))).toBe("2026-07");
+    expect(lastCompleteMonthKey(new Date(2026, 9, 1))).toBe("2026-09");
+    // Never the in-progress month: that is the whole point of the write default.
+    const now = new Date(2026, 4, 15);
+    expect(lastCompleteMonthKey(now)).not.toBe(currentMonthKey(now));
+  });
+
+  it("is always a SELECTABLE option — MONTH_OPTIONS[1] by construction", () => {
+    // The write default must be offered by the same <select> the read views
+    // list, or the seeded value would not match any <option>.
+    expect(MONTH_OPTIONS).toContain(lastCompleteMonthKey());
+    expect(lastCompleteMonthKey()).toBe(MONTH_OPTIONS[1]);
+    // Same relationship on a pinned clock, independent of when the module loaded.
+    const now = new Date(2026, 0, 4);
+    expect(lastCompleteMonthKey(now)).toBe(
+      rollingMonthWindow(MONTH_WINDOW_SIZE, now)[1],
+    );
   });
 });
 

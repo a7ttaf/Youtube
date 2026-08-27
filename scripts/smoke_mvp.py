@@ -17,7 +17,9 @@ wired dashboard screens consume, plus the production session-hydration path
 4. Prints a per-endpoint PASS/FAIL table and exits non-zero on any failure.
 5. Cleans up the throwaway database.
 
-Run: ``python scripts/smoke_mvp.py``  (optionally ``--month 2026-03``).
+Run: ``python scripts/smoke_mvp.py`` — it defaults to the CURRENT calendar month
+(the month the dashboard's selector opens on); pass ``--month YYYY-MM`` to probe
+a different one.
 
 This is a verification harness, NOT a product feature: it imports + drives the
 existing seed and app and never reimplements finance math or auth.
@@ -31,13 +33,13 @@ import sys
 import tempfile
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
+from datetime import date
 from pathlib import Path
 from typing import Any
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[1]
 _BACKEND_PATH = str(_PROJECT_ROOT / "backend")
 
-_DEFAULT_MONTH = "2026-03"
 # A throwaway, never-shared token: the smoke run sets it in its OWN process env
 # and sends the same value in the demo headers, so the real trusted-gateway
 # check (compare_digest) is exercised without weakening anything.
@@ -55,6 +57,34 @@ _DEMO_USER_EMAIL = "demo-seed@ums.local"
 # is the smoke harness exercising the full read surface, not an auth change.
 _DEMO_ROLE = "super_owner"
 _FIRST_DEMO_CHANNEL = "demo-channel-alpha"
+
+
+# ============================================================================
+# Purpose: Resolve the smoke run's DEFAULT --month at RUN TIME instead of
+#   freezing a literal. The dashboard's selector now derives from the clock and
+#   opens on the CURRENT calendar month, so a frozen "2026-03" default probed a
+#   month the UI never lands on — the smoke passed while the screens an operator
+#   actually opens went unexercised.
+# Database/ORM: None — a CLI default string; the month itself is seeded into a
+#   throwaway SQLite db by scripts/seed_demo_month.py.
+# Standards: LOCAL civil date (``date.today()``), matching the dashboard's own
+#   local-date derivation in frontend/src/lib/months.ts, so the smoke and the UI
+#   agree on "this month". Zero-padded "YYYY-MM". ``--month`` still overrides.
+# Blast Radius: The smoke harness's default target month only. No production
+#   data path, no finance math.
+# Connections:
+#   - File: scripts/seed_demo_month.py -> _default_month, the same derivation
+#     (this harness shells the seed with whatever month it resolves).
+#   - File: frontend/src/lib/months.ts -> currentMonthKey, the UI derivation.
+# ============================================================================
+def _default_month(today: date | None = None) -> str:
+    """Return the CURRENT calendar month as ``YYYY-MM`` from the local date.
+
+    ``today`` is injectable so a caller can pin the date; it defaults to the
+    machine's local civil date, the same basis the dashboard selector uses.
+    """
+    current = today if today is not None else date.today()
+    return f"{current.year:04d}-{current.month:02d}"
 
 
 def _ensure_backend_path() -> None:
@@ -556,8 +586,11 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     )
     parser.add_argument(
         "--month",
-        default=_DEFAULT_MONTH,
-        help=f"Finance month YYYY-MM to seed + probe (default {_DEFAULT_MONTH}).",
+        default=_default_month(),
+        help=(
+            "Finance month YYYY-MM to seed + probe (default: the CURRENT calendar"
+            " month, which is the month the dashboard's selector opens on)."
+        ),
     )
     return parser.parse_args(argv)
 

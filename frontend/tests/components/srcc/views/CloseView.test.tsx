@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { DEFAULT_MONTH } from "@/components/srcc/shared";
@@ -206,6 +206,59 @@ describe("CloseView wired to finance-close", () => {
     await waitFor(() =>
       expect(screen.getAllByText("No permission").length).toBeGreaterThan(0),
     );
+  });
+
+  it("renders the honest not-started state when the month has no close row (404)", async () => {
+    // The rolling default opens on the CURRENT calendar month, which has no
+    // finance_month_close row until a finance write creates one — so its status
+    // GET 404s by construction. That must read as "not started", never as
+    // "Request failed (404)" over the whole summary.
+    fetchMock().mockImplementation(
+      routeFetch({
+        status: () =>
+          jsonResponse({ detail: "Finance month close record not found" }, 404),
+        readiness: () => jsonResponse(READINESS_BLOCKED),
+      }),
+    );
+    renderCloseView();
+
+    await waitFor(() =>
+      expect(screen.getByText("No close record yet")).toBeInTheDocument(),
+    );
+    const summary = screen.getByLabelText("Month close summary");
+    expect(within(summary).getByText("OPEN")).toBeInTheDocument();
+    // The Month tile falls back to the month the view is on, not an em dash.
+    expect(within(summary).getByText(DEFAULT_MONTH)).toBeInTheDocument();
+    // No error tile anywhere, and nothing claiming the request failed.
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(screen.queryByText(/request failed/i)).toBeNull();
+    // The readiness panel keeps rendering from its own 200 response.
+    expect(within(summary).getByText("Blocked")).toBeInTheDocument();
+    expect(within(summary).getByText("2 blockers")).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "2 pending manual overrides require approval before locking 2026-03.",
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it("still replaces the summary with the error tile on a 500 status read", async () => {
+    // Only 404 is remapped; every other failure keeps today's role="alert" tile.
+    fetchMock().mockImplementation(
+      routeFetch({
+        status: () => jsonResponse({ detail: "close lookup exploded" }, 500),
+        readiness: () => jsonResponse(READINESS_READY),
+      }),
+    );
+    renderCloseView();
+
+    await waitFor(() =>
+      expect(screen.getByText("Request failed (500)")).toBeInTheDocument(),
+    );
+    const summary = screen.getByLabelText("Month close summary");
+    expect(summary).toHaveAttribute("role", "alert");
+    expect(within(summary).getByText("close lookup exploded")).toBeInTheDocument();
+    expect(screen.queryByText("No close record yet")).toBeNull();
   });
 
   it("disables Lock for a viewer without close permission", async () => {

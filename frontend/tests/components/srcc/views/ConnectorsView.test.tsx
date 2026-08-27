@@ -2,8 +2,9 @@ import { fireEvent, render, screen, waitFor, within } from "@testing-library/rea
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { DEFAULT_MONTH } from "@/components/srcc/shared";
+import { DEFAULT_MONTH, MONTH_OPTIONS } from "@/components/srcc/shared";
 import { ConnectorsView } from "@/components/srcc/views/ConnectorsView";
+import { lastCompleteMonthKey } from "@/lib/months";
 import type {
   AdsensePaymentListResponse,
   ConnectorCredentialHealthResponse,
@@ -256,6 +257,24 @@ const renderConnectorsView = (
 };
 
 describe("ConnectorsView wired to the connector + AdSense endpoints", () => {
+  it("opens on the last COMPLETE month, with the current month still offered", async () => {
+    fetchMock().mockImplementation(routeBoth(() => null));
+    renderConnectorsView();
+
+    const monthSelect =
+      await screen.findByLabelText<HTMLSelectElement>("AdSense month");
+    // The screen's month state is a WRITE default (connector report_month +
+    // AdSense payment month) and the Google clients pull a WHOLE calendar
+    // month, so it must not open on the in-progress month.
+    expect(monthSelect.value).toBe(lastCompleteMonthKey());
+    expect(monthSelect.value).not.toBe(DEFAULT_MONTH);
+    // The default changed, not the choice: every rolling option is still there,
+    // current month included, and the seeded value is one of them.
+    expect(Array.from(monthSelect.options).map((option) => option.value)).toEqual([
+      ...MONTH_OPTIONS,
+    ]);
+  });
+
   it("renders the configured data sources (credentials) list", async () => {
     fetchMock().mockImplementation(routeBoth(() => null));
     renderConnectorsView();
@@ -662,9 +681,12 @@ describe("ConnectorsView wired to the connector + AdSense endpoints", () => {
     const body = JSON.parse(
       String((jobCall?.[1] as RequestInit | undefined)?.body ?? "{}"),
     );
-    // The view seeds its month state from the rolling DEFAULT_MONTH, so the
-    // POST body must carry that — not a frozen literal that ages out.
-    expect(body.report_month).toBe(DEFAULT_MONTH);
+    // This month is a WRITE default: it becomes the run's report_month and the
+    // Google clients pull the whole calendar month, so the seeded value must be
+    // the last COMPLETE month — never the in-progress DEFAULT_MONTH the read
+    // views open on, and never a frozen literal that ages out.
+    expect(body.report_month).toBe(lastCompleteMonthKey());
+    expect(body.report_month).not.toBe(DEFAULT_MONTH);
     expect(body.dry_run).toBe(false);
     expect(body.reason).toBe("Manual March pull");
   });

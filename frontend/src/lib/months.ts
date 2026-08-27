@@ -21,7 +21,10 @@
 //   - File: frontend/src/components/srcc/AppShell.tsx -> Topbar month <select>
 //     renders monthKeyLabel over the same MONTH_OPTIONS.
 //   - File: frontend/src/components/srcc/views/ConnectorsView.tsx -> formatDate
-//     documents the UTC-shift trap this module avoids.
+//     documents the UTC-shift trap this module avoids; its month state seeds
+//     from lastCompleteMonthKey (the ingest/payment WRITE default).
+//   - File: frontend/src/components/srcc/views/RegistryView.tsx -> the account-
+//     link proposal's effective month seeds from currentMonthKey.
 // ============================================================================
 
 /** How many months the rolling selector window offers, newest first. */
@@ -57,6 +60,31 @@ export const monthKey = (year: number, monthIndex: number): string => {
  */
 export const currentMonthKey = (now: Date = new Date()): string =>
   monthKey(now.getFullYear(), now.getMonth());
+
+// ============================================================================
+// Purpose: The month a WRITE should default to — the last COMPLETE calendar
+//   month, i.e. the one before the month containing `now`.
+// Database/ORM: None (frontend, integer arithmetic over local Date components).
+// Standards: WHY writes default here and reads default to currentMonthKey: a
+//   connector run and an AdSense payment sync both address a WHOLE calendar
+//   month. The Google clients request the full month range and the backend
+//   validates only the "YYYY-MM" FORMAT, so submitting the in-progress month
+//   ingests a PARTIAL month and stores it as if it were the finished figure.
+//   The last complete month is the newest month that cannot be partial. Reads
+//   are unaffected — showing an in-progress month is honest, writing one is not.
+//   Same integer arithmetic as the rest of this module (no Date parsing, so no
+//   timezone shift) and the same injectable `now` for deterministic tests.
+// Blast Radius: The DEFAULT month a connector/payment write proposes. It is a
+//   default, not a constraint — the operator can still pick any offered month,
+//   including the current one — and it stores no value itself.
+// Connections:
+//   - File: frontend/src/components/srcc/views/ConnectorsView.tsx -> seeds its
+//     month state (connector-run report_month + AdSense payment month) here.
+//   - File: frontend/src/components/srcc/shared.tsx -> MONTH_OPTIONS; this key
+//     is MONTH_OPTIONS[1] by construction, so it is always a selectable option.
+// ============================================================================
+export const lastCompleteMonthKey = (now: Date = new Date()): string =>
+  monthKey(now.getFullYear(), now.getMonth() - 1);
 
 /**
  * The rolling month window: the month containing `now` plus the `size - 1`
