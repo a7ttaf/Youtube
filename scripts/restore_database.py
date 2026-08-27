@@ -107,6 +107,11 @@ EXIT_INTERNAL = 9
 DUMP_NAME = "database.dump"
 ROLES_NAME = "roles.sql"
 MANIFEST_NAME = "manifest.json"
+# Mirrors scripts/backup_database.py's MANIFEST_SCHEMA byte-for-byte (the
+# scripts are stdlib-only CLIs that cannot import each other). A manifest whose
+# schema field differs was not written by a compatible backup run, so nothing
+# downstream may interpret its other fields.
+MANIFEST_SCHEMA = "ums-backup/1"
 
 REQUIRED_ROLES = ("app_tenant", "app_platform")
 # Mirrors scripts/backup_database.py. A run the content gate quarantined keeps
@@ -535,11 +540,35 @@ def _require_manifest_table_row_counts(manifest: dict[str, object]) -> dict[str,
     return expected
 
 
+def _require_manifest_schema(manifest: dict[str, object], manifest_path: Path) -> None:
+    """Refuse a manifest whose schema field is not exactly MANIFEST_SCHEMA.
+
+    FIX: every later check interprets manifest fields against the layout this
+    tool writes, but the ``schema`` discriminator itself was never read -- a
+    tampered, hand-edited or future-format manifest with an unexpected
+    ``schema`` value sailed into the digest and count checks that assume this
+    format. A wrong value is a malformed backup directory (documented exit 2),
+    not a rotted artifact (exit 8): nothing was hashed against a promise this
+    format made.
+    """
+    schema = manifest.get("schema")
+    if schema != MANIFEST_SCHEMA:
+        raise RestoreError(
+            EXIT_USAGE,
+            f"{manifest_path} is not a {MANIFEST_SCHEMA} backup run: its schema "
+            f"field is missing or unrecognized. Do not restore this directory "
+            "with this script.",
+        )
+
+
 def _load_backup(backup_dir: Path) -> dict[str, object]:
     """Load and integrity-check a backup run; return its manifest dict."""
     _require_restorable_backup_dir(backup_dir)
     manifest_path = backup_dir / MANIFEST_NAME
     manifest = _read_restore_manifest(manifest_path)
+    # The schema discriminator is checked first: every check below interprets
+    # manifest fields against the layout the schema value promises.
+    _require_manifest_schema(manifest, manifest_path)
     _refuse_rejected_content_gate(manifest, backup_name=manifest_path.parent.name)
     _verify_backup_artifact_digests(backup_dir, manifest)
     _require_manifest_table_row_counts(manifest)
@@ -684,6 +713,65 @@ def _docker_image_exists(reference: str, *, timeout: int) -> bool:
     return completed.returncode == 0 and bool(completed.stdout.strip())
 
 
+# Repository names whose image can host the rehearsal Postgres server. The
+# official image is published both as ``postgres`` and as ``library/postgres``;
+# anything else (mysql, an arbitrary third-party repository) must not run.
+_POSTGRES_IMAGE_REPOSITORIES = frozenset({"postgres", "library/postgres"})
+
+
+def _image_repository(reference: str) -> str:
+    """Return the repository part of one image reference (everything before :tag)."""
+    return reference.rsplit(":", 1)[0].strip().lower()
+
+
+# ============================================================================
+# Purpose: Prove a locally present image is actually a Postgres image before a
+#          rehearsal container is started from it.
+# Database/ORM: None. Talks to the docker CLI only.
+# Standards: Fail-closed. ``docker image inspect`` proves LOCAL PRESENCE, not
+#            identity, so the image is accepted only when a repo tag's
+#            repository part is ``postgres`` or ``library/postgres``
+#            (case-insensitive). Untagged or ``<none>``-tagged images fall
+#            back to the image config's base reference (``.Config.Image``);
+#            a probe failure, unparseable output or a non-Postgres result all
+#            refuse.
+# Blast Radius: The rehearsal runs the image's entrypoint as root in a
+#               container. This check is what stops a tampered manifest from
+#               naming any local image ID and having it executed.
+# Connections:
+#   - File: scripts/restore_database.py -> ``_resolve_rehearsal_image`` calls
+#     this on every candidate before it is returned.
+# ============================================================================
+def _image_is_postgres(reference: str, *, timeout: int) -> bool:
+    """Return True only when ``reference`` resolves to a Postgres image."""
+    if not reference:
+        return False
+    tags_completed = _run(
+        ["docker", "image", "inspect", "--format", "{{json .RepoTags}}", reference],
+        timeout=timeout,
+    )
+    if tags_completed.returncode != 0:
+        return False
+    try:
+        tags = json.loads(tags_completed.stdout.strip() or "null")
+    except ValueError:
+        return False
+    if isinstance(tags, list):
+        for tag in tags:
+            if isinstance(tag, str) and _image_repository(tag) in _POSTGRES_IMAGE_REPOSITORIES:
+                return True
+    # Untagged (RepoTags null) or <none>-tagged images: compare the base
+    # reference recorded in the image config instead.
+    config_completed = _run(
+        ["docker", "image", "inspect", "--format", "{{.Config.Image}}", reference],
+        timeout=timeout,
+    )
+    if config_completed.returncode != 0:
+        return False
+    base = config_completed.stdout.strip()
+    return bool(base) and _image_repository(base) in _POSTGRES_IMAGE_REPOSITORIES
+
+
 def _resolve_rehearsal_image(*, image_id: str, operator_image: str, timeout: int) -> str:
     """Pick the rehearsal image the OPERATOR chose, never the manifest.
 
@@ -696,12 +784,32 @@ def _resolve_rehearsal_image(*, image_id: str, operator_image: str, timeout: int
     select the image now: the still-local recorded config ID (verified via
     ``docker image inspect``) or an explicit ``--rehearse-image`` the
     operator typed.
+
+    FIX(P1): local presence was the ONLY check on the recorded image ID, but
+    ``docker image inspect`` proves nothing about WHAT an image is -- a
+    tampered manifest could name any image ID already on this host and its
+    entrypoint would run in the rehearsal container. Every resolved candidate,
+    operator-supplied included (operators can typo; the rehearsal needs a
+    Postgres server), must now also pass a Postgres-image check before it is
+    returned; a non-Postgres candidate is refused with EXIT_USAGE instead of
+    being started.
     """
-    if operator_image:
-        return operator_image
-    if image_id and _docker_image_exists(image_id, timeout=timeout):
-        return image_id
-    return ""
+    candidate = operator_image.strip()
+    if not candidate and image_id and _docker_image_exists(image_id, timeout=timeout):
+        candidate = image_id
+    if not candidate:
+        return ""
+    if not _image_is_postgres(candidate, timeout=timeout):
+        raise RestoreError(
+            EXIT_USAGE,
+            "the resolved rehearsal image has no postgres / library/postgres "
+            "repository tag, so it is not a Postgres image and will not be "
+            "started (the recorded image ID or --rehearse-image reference "
+            "names something else). Pull a Postgres image and pass "
+            "--rehearse-image <reference>, or use --container with a "
+            "container you prepared yourself.",
+        )
+    return candidate
 
 
 def _create_throwaway(
@@ -2508,6 +2616,46 @@ def _container_default_database(container: str, *, timeout: int) -> str:
 _LOCALE_FIELD_RE = re.compile(r"^[A-Za-z0-9_@+\-.]*$")
 
 
+def _locale_provider_options(
+    provider: str, collate: str, ctype: str, locale: str
+) -> list[str]:
+    """Map one datlocprovider code onto CREATE DATABASE locale options.
+
+    FIX: the provider field was compared against the full word ``"icu"``, but
+    ``pg_database.datlocprovider::text`` yields the one-character codes
+    ``'c'`` (libc), ``'i'`` (icu) and ``'b'`` (builtin, PG17+) -- so a real
+    ICU database fell into the libc branch and the restore silently recreated
+    the target with the wrong collation provider. The mapping is now by code;
+    an unrecognized code refuses instead of degrading to libc, which would
+    change ORDER BY and unique-index semantics without a word of warning.
+    """
+    if provider == "i":
+        if locale:
+            return [f"LOCALE_PROVIDER icu ICU_LOCALE {_quote_literal(locale)}"]
+        return []
+    if provider == "b":
+        # The builtin provider (PG17+) takes BUILTIN_LOCALE, never ICU_LOCALE;
+        # datlocale is NULL for a builtin database created without an explicit
+        # locale, and an empty option is how "inherit the target's" is spelled
+        # here.
+        if locale:
+            return [f"LOCALE_PROVIDER builtin BUILTIN_LOCALE {_quote_literal(locale)}"]
+        return []
+    if provider not in ("c", ""):
+        raise RestoreError(
+            EXIT_USAGE,
+            f"manifest source.database_locale carries an unrecognized locale "
+            f"provider code {provider!r}; refusing to recreate the target "
+            "with a guessed collation provider",
+        )
+    options: list[str] = []
+    if collate:
+        options.append(f"LC_COLLATE {_quote_literal(collate)}")
+    if ctype:
+        options.append(f"LC_CTYPE {_quote_literal(ctype)}")
+    return options
+
+
 def _create_database_options(locale_row: str) -> str:
     """Return CREATE DATABASE options reproducing the source locale, or "".
 
@@ -2516,9 +2664,11 @@ def _create_database_options(locale_row: str) -> str:
     the archive carries none of them and a source/target locale mismatch
     silently changed collation semantics -- ORDER BY and unique indexes
     behaved differently after restore. The manifest's database_locale row
-    (encoding|collate|ctype|provider|icu) now drives TEMPLATE template0 plus
-    explicit ENCODING/LC_COLLATE/LC_CTYPE (libc) or LOCALE_PROVIDER/ICU_LOCALE
-    (icu). Every field is charset-validated and the literals are quoted, so
+    (encoding id|encoding name|collate|ctype|provider code|locale name) now
+    drives TEMPLATE template0 plus explicit ENCODING/LC_COLLATE/LC_CTYPE
+    (libc, provider code ``c`` or empty), LOCALE_PROVIDER icu ICU_LOCALE
+    (code ``i``) or LOCALE_PROVIDER builtin BUILTIN_LOCALE (code ``b``).
+    Every field is charset-validated and the literals are quoted, so
     the unsigned manifest cannot inject through it; a row that is present but
     malformed REFUSES rather than silently dropping the locale.
     """
@@ -2531,7 +2681,7 @@ def _create_database_options(locale_row: str) -> str:
             f"manifest source.database_locale is malformed: {locale_row!r}; "
             "refusing to recreate the target with an unpreserved locale",
         )
-    _enc_id, encoding, collate, ctype, provider, icu = parts
+    _enc_id, encoding, collate, ctype, provider, locale = parts
     if not encoding:
         raise RestoreError(
             EXIT_USAGE,
@@ -2539,14 +2689,7 @@ def _create_database_options(locale_row: str) -> str:
             "refusing to recreate the target with an unpreserved locale",
         )
     options = ["TEMPLATE template0", f"ENCODING {_quote_literal(encoding)}"]
-    if provider == "icu":
-        if icu:
-            options.append(f"LOCALE_PROVIDER icu ICU_LOCALE {_quote_literal(icu)}")
-    else:
-        if collate:
-            options.append(f"LC_COLLATE {_quote_literal(collate)}")
-        if ctype:
-            options.append(f"LC_CTYPE {_quote_literal(ctype)}")
+    options.extend(_locale_provider_options(provider, collate, ctype, locale))
     return " " + " ".join(options)
 
 
@@ -2648,6 +2791,14 @@ def _execute_restore(
     # is going to refuse must not be modified at all, not even by an
     # idempotent CREATE ROLE.
     _guard_empty(container, allow_nonempty=args.allow_nonempty, timeout=args.timeout)
+    # FIX(P1): the archive readability probe used to run ONLY under
+    # --allow-nonempty. An empty-target restore therefore replayed roles.sql
+    # first -- creating cluster-global roles on the target -- and only then
+    # discovered pg_restore could not read the archive, leaving those roles
+    # applied for a failed restore. The probe is read-only (pg_restore --list
+    # opens no connection and writes nothing), so it now runs on EVERY restore
+    # path, before roles and before the drop.
+    _preflight_dump_readable(container, backup_dir / DUMP_NAME, timeout=args.timeout)
     if args.allow_nonempty:
         # FIX(round-8 review): a piecemeal schema clear ran outside the restore
         # transaction, so any later failure erased the original database while
@@ -2664,13 +2815,8 @@ def _execute_restore(
         # database was irrecoverable. Preflighting turns that into a refusal
         # that changes nothing.
         _preflight_roles_file(container, backup_dir / ROLES_NAME, timeout=args.timeout)
-        # FIX: prove the ARCHIVE is readable here too, not just roles.sql. The
-        # digest check on the way in only proves the bytes match what backup
-        # wrote -- a newer-format archive hashes correctly and is still
-        # unreadable by this container's pg_restore, which was discovered only
-        # when _restore_data ran, one step AFTER the drop had committed. Both
-        # preflights are read-only, so both belong before it.
-        _preflight_dump_readable(container, backup_dir / DUMP_NAME, timeout=args.timeout)
+        # The archive probe above now covers the readability half on every
+        # path; before the drop it doubles as the destructive-path guarantee.
         # FIX(round-23 P1): every LIVE cluster check also belongs BEFORE the
         # drop. The post-replay checks inside _restore_roles used to be the
         # only place a target-leftover membership or privileged attribute was

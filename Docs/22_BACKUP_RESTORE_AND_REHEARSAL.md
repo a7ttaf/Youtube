@@ -874,23 +874,37 @@ python scripts\restore_database.py --backup-dir D:\UMS-Backups\ums-backup-202608
 This will:
 
 1. re-hash `database.dump` and `roles.sql` against `manifest.json` and stop if either
-   has rotted (exit `8`);
+   has rotted (exit `8`); a `manifest.json` whose `schema` field is not
+   `ums-backup/1` is refused here too (exit `2`) — it was not written by a
+   compatible backup run, so none of its other fields are interpreted;
 2. `docker run` a disposable Postgres from the image recorded at backup time —
-   verified to still exist locally first — with `POSTGRES_HOST_AUTH_METHOD=trust`
-   and no published ports. Once that image has been pruned the rehearsal refuses
-   to start (exit `2`): pull a Postgres image yourself and pass
-   `--rehearse-image <reference>`. The manifest is unsigned, so its
-   `source.image` reference is never executed on its own authority;
+   verified to still exist locally first, **and verified to be a Postgres
+   image** (a `postgres` / `library/postgres` repository tag, falling back to
+   the image config's base reference when the image is untagged) — with
+   `POSTGRES_HOST_AUTH_METHOD=trust` and no published ports. Local presence
+   alone proves nothing about what an image is: a tampered manifest can name
+   any local image ID, so a locally present non-Postgres image is refused
+   (exit `2`). Once that image has been pruned the rehearsal refuses to start
+   (exit `2`): pull a Postgres image yourself and pass
+   `--rehearse-image <reference>` — that reference is yours, but it must pass
+   the same Postgres check (operators can typo; the rehearsal needs a Postgres
+   server). The manifest is unsigned, so its `source.image` reference is never
+   executed on its own authority;
 3. wait for the *real* server, not the initdb bootstrap server;
-4. apply **`roles.sql` first**, tolerating the expected
+4. prove `pg_restore --list` inside the target container can actually read
+   `database.dump` — a read-only probe of the header and table of contents
+   that runs on **every** restore path, before anything is applied (exit `6`
+   if it cannot). The sha256 check in step 1 proves the bytes match what
+   backup wrote; only this probe proves *this container* can parse them;
+5. apply **`roles.sql` first**, tolerating the expected
    `ERROR: role "ums" already exists` (`pg_dumpall` emits `CREATE ROLE` for the
    bootstrap superuser, which the Postgres image has already created);
-5. **re-query `pg_roles` and refuse to continue** unless `app_tenant` *and*
+6. **re-query `pg_roles` and refuse to continue** unless `app_tenant` *and*
    `app_platform` are now present (exit `5`);
-6. `pg_restore --single-transaction` the archive, so a failure leaves the throwaway
+7. `pg_restore --single-transaction` the archive, so a failure leaves the throwaway
    empty rather than half-populated;
-7. print a per-table comparison against `manifest.json`;
-8. destroy the container.
+8. print a per-table comparison against `manifest.json`;
+9. destroy the container.
 
 ### Step 3 — read the verification table
 
@@ -1072,7 +1086,10 @@ There is no automatic pre-restore safety copy. If the target holds anything you
 might still need, take a backup of it **before** running with `--allow-nonempty`.
 
 Before the drop runs, the script read-only preflights the live target and
-refuses (changing nothing) when: an application role already carries a cluster
+refuses (changing nothing) when: the archive cannot be read by this
+container's `pg_restore --list` (exit `6` — that probe runs on **every**
+restore path, before `roles.sql` is applied, so a refusal never leaves
+cluster roles behind), an application role already carries a cluster
 membership or a privileged attribute a clean `roles.sql` would not clear
 (exit `5`), or any client still holds a session on the target database
 (exit `2`) — `DROP DATABASE ... WITH (FORCE)` disconnects them, but Compose
@@ -1091,11 +1108,11 @@ Restore exit codes:
 | Code | Meaning |
 |---|---|
 | `0` | Restored and verified |
-| `2` | Bad backup directory, the target database is not empty, or the run was quarantined by the backup content gate (`…Z.rejected`) |
+| `2` | Bad backup directory (including a `manifest.json` whose `schema` is not `ums-backup/1`), the target database is not empty, the run was quarantined by the backup content gate (`…Z.rejected`), or the resolved rehearsal image is not a Postgres image |
 | `3` | Docker daemon unavailable |
 | `4` | Target container unavailable or could not be created |
 | `5` | **`app_tenant` / `app_platform` still missing after `roles.sql`** — nothing was restored |
-| `6` | `pg_restore` failed |
+| `6` | `pg_restore` failed — including the read-only readability preflight, which runs on every restore path before `roles.sql` is applied |
 | `7` | Post-restore row counts did not match the manifest |
 | `8` | An artifact failed its sha256 check — do not restore that run |
 | `9` | Unexpected internal error — the traceback is printed above the summary |

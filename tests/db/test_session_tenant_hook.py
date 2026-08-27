@@ -165,6 +165,146 @@ def test_sqlite_begin_nested_still_releases_instead_of_committing():
         assert check.execute(text("SELECT count(*) FROM ums_savepoint_probe")).scalar() == 0
 
 
+def test_sqlite_writer_lock_releases_when_checkin_runs_on_another_thread():
+    """A cross-thread session close must release the StaticPool writer lock.
+
+    Round-28 Qodo pair: FastAPI's synchronous yielded-session dependency has
+    no thread-affinity guarantee, so the pool checkin/reset events can fire on
+    a different thread than the one that emitted BEGIN. The previous
+    thread-identity release guard made the non-reentrant lock permanently held
+    in that case. Ownership is now the owning checkout's connection record, so
+    the owning checkout's close from ANY thread releases, and a subsequent
+    Session must be able to begin.
+    """
+    import threading
+
+    from sqlalchemy import text
+
+    factory = build_session_factory(
+        "sqlite+pysqlite:///file:ums_cross_thread_release?mode=memory&cache=shared&uri=true"
+    )
+    with factory() as setup:
+        setup.execute(text("CREATE TABLE ums_cross_thread_probe (v TEXT)"))
+        setup.commit()
+
+    began = threading.Event()
+    closed = threading.Event()
+    errors: list[Exception] = []
+    holder: dict[str, object] = {}
+
+    def _begin_on_thread_a() -> None:
+        """Begin a transaction on thread A and leave the checkout open."""
+        try:
+            session = factory()
+            holder["session"] = session
+            session.execute(
+                text("INSERT INTO ums_cross_thread_probe (v) VALUES ('a')")
+            )
+            began.set()
+            # The connection is returned from thread B, NOT from this thread:
+            # exactly the dependency-teardown shape that stranded the old
+            # thread-identity release guard. This thread idles until B's close
+            # has completed.
+            closed.wait(timeout=10)
+        except Exception as exc:  # pragma: no cover - surfaces as assertion below
+            errors.append(exc)
+            began.set()
+            closed.set()
+
+    def _close_on_thread_b() -> None:
+        """Return the owning checkout's connection from thread B."""
+        try:
+            session = holder["session"]
+            session.close()
+        except Exception as exc:  # pragma: no cover - surfaces as assertion below
+            errors.append(exc)
+        finally:
+            closed.set()
+
+    thread_a = threading.Thread(target=_begin_on_thread_a)
+    thread_b = threading.Thread(target=_close_on_thread_b)
+    thread_a.start()
+    assert began.wait(timeout=10), "thread A never began its transaction"
+    thread_b.start()
+    assert closed.wait(timeout=10), "thread B never closed the session"
+    thread_a.join(timeout=10)
+    thread_b.join(timeout=10)
+    assert not thread_a.is_alive() and not thread_b.is_alive()
+    assert errors == [], f"cross-thread close failed: {errors!r}"
+
+    # A subsequent Session must be able to BEGIN: the lock is free.
+    release_check: dict[str, object] = {}
+
+    def _verify_successor_can_begin() -> None:
+        """Begin a fresh transaction; hang here if the lock leaked."""
+        try:
+            with factory() as successor:
+                successor.execute(
+                    text("INSERT INTO ums_cross_thread_probe (v) VALUES ('b')")
+                )
+                successor.commit()
+            release_check["ok"] = True
+        except Exception as exc:  # pragma: no cover - surfaces as assertion below
+            release_check["error"] = repr(exc)
+
+    verifier = threading.Thread(target=_verify_successor_can_begin, daemon=True)
+    verifier.start()
+    verifier.join(timeout=10)
+    assert not verifier.is_alive(), (
+        "the writer lock leaked across the cross-thread close: a successor "
+        "Session could not begin"
+    )
+    assert release_check == {"ok": True}, f"successor failed: {release_check!r}"
+    # Thread A's INSERT was intentionally left uncommitted, so the cross-thread
+    # close correctly rolled it back via reset-on-return; the successor's
+    # committed row is the only durable one.
+    with factory() as check:
+        values = set(check.execute(text("SELECT v FROM ums_cross_thread_probe")).scalars())
+    assert values == {"b"}
+
+
+def test_sqlite_owning_record_reset_then_checkin_releases_exactly_once():
+    """The owning checkout's reset+checkin close must release exactly once.
+
+    Round-28: a normal COMMIT leaves ``in_transaction == False`` while the pool
+    reset event still fires BEFORE the reset-on-return rollback, and SQLAlchemy
+    can emit reset/checkin pairs where no checkin follows the reset at all.
+    Releasing on both events must therefore stay idempotent: a stray second
+    release of ``threading.Lock`` raises ``RuntimeError: release unlocked
+    lock``, and a lock handed over while a predecessor's reset is still pending
+    would roll back the successor's BEGIN. After the owning session closes,
+    successor Sessions must begin, commit, and close cleanly.
+    """
+    from sqlalchemy import text
+
+    factory = build_session_factory(
+        "sqlite+pysqlite:///file:ums_reset_checkin_once?mode=memory&cache=shared&uri=true"
+    )
+    with factory() as setup:
+        setup.execute(text("CREATE TABLE ums_reset_probe (v TEXT)"))
+        setup.commit()
+
+    # Owning checkout: INSERT + COMMIT (reset fires with in_transaction False),
+    # then close -- both events target the same owning record. Exactly one
+    # release may happen across the pair.
+    with factory() as owner:
+        owner.execute(text("INSERT INTO ums_reset_probe (v) VALUES ('owner')"))
+        owner.commit()
+
+    # Successor Sessions must begin and commit cleanly; a corrupted lock state
+    # (double release, or a release that lands mid-reset) surfaces here.
+    for index in range(3):
+        with factory() as successor:
+            successor.execute(
+                text("INSERT INTO ums_reset_probe (v) VALUES (:v)"), {"v": f"s{index}"}
+            )
+            successor.commit()
+
+    with factory() as check:
+        values = set(check.execute(text("SELECT v FROM ums_reset_probe")).scalars())
+    assert values == {"owner", "s0", "s1", "s2"}
+
+
 def test_postgres_tenant_lane_sets_role_and_trusted_tenant_context():
     """Verify the tenant lane sets app_tenant and the trusted tenant context."""
     url = require_postgres_url()

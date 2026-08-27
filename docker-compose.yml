@@ -314,6 +314,12 @@ services:
       #
       # No migration path is needed for existing installs: the misconfiguration
       # meant Postgres never initialised, so there is no old cluster to move.
+      # Every revision of this file that shipped the legacy mount shipped a
+      # Postgres 18 image, and the 18 entrypoint exits before initdb whenever
+      # the legacy path is a mount, empty or not. The operator-facing version —
+      # what each entrypoint error variant means and the exact commands per
+      # case — is the "Operator note: existing volumes and fresh stacks"
+      # subsection of B0 in Docs/20_DEPLOYMENT_READINESS_AUDIT.md.
       - postgres-data:/var/lib/postgresql
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]

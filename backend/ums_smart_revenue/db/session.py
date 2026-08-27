@@ -16,7 +16,7 @@
 """SQLAlchemy engine and session-factory helpers with per-URL engine caching."""
 
 from collections.abc import Callable, Iterator
-from threading import Lock, get_ident
+from threading import Lock, get_ident, local
 from typing import Any
 
 from sqlalchemy import Connection, Engine, create_engine, event
@@ -103,10 +103,16 @@ def build_engine(database_url: str) -> Engine:
 #   The same StaticPool connection is also shared across independent Sessions
 #   (HTTP request + connector scheduler/executor). An unconditional second BEGIN
 #   raises ``cannot start a transaction within a transaction`` or lets Session B
-#   commit/roll back Session A's writes. A per-engine RLock is acquired before
-#   BEGIN and released only after dialect do_commit/do_rollback finishes
-#   (Connection commit/rollback events fire too early). Same-thread overlap
-#   while a txn is already open is refused rather than nesting a colliding BEGIN.
+#   commit/roll back Session A's writes. A per-engine non-reentrant Lock is
+#   acquired before BEGIN and owned by the CHECKOUT (pool connection record +
+#   checked-out fairy), never by a thread: FastAPI's synchronous yielded-session
+#   dependency has no thread-affinity guarantee, so the pool checkin/reset events
+#   can fire on a different thread than the one that ran BEGIN (round-28
+#   finding). The reset listener completes the reset's own ROLLBACK under the
+#   lock before releasing and absorbs SQLAlchemy's duplicate pending call, so a
+#   successor Session's fresh BEGIN can never be rolled back by a predecessor's
+#   late reset. Same-checkout overlap while a txn is already open is refused
+#   rather than nesting a colliding BEGIN.
 # Database/ORM: Engine-level transaction discipline for every SQLite session;
 #   no table, column, or query change.
 # Standards: Documented dialect recipe (SQLAlchemy "Serializable isolation /
@@ -126,11 +132,27 @@ def build_engine(database_url: str) -> Engine:
 def _enable_sqlite_transactional_savepoints(engine: Engine) -> None:
     """Emit real BEGINs on SQLite so SAVEPOINT/RELEASE nest instead of committing."""
     # StaticPool has one DBAPI connection; one non-reentrant lock is enough.
-    # A boolean (not id(dbapi)) tracks ownership because Connection.dbapi_connection
-    # and dialect.do_commit's argument are not always the same Python object.
     writer_lock = Lock()
     lock_held = False
-    lock_owner_thread: int | None = None
+    # The lock is owned by a CHECKOUT -- the pool connection record plus the
+    # specific checked-out fairy -- never by a thread. FastAPI's synchronous
+    # yielded-session dependency has no thread-affinity guarantee, so the pool
+    # checkin/reset events may fire on a different thread than the one that
+    # emitted BEGIN; thread-keyed ownership would strand the lock forever.
+    # (A fresh fairy object is created per checkout, so fairy identity doubles
+    # as the per-checkout generation marker; the record alone is ambiguous
+    # because StaticPool reuses ONE record for every checkout.)
+    owner_record: Any = None
+    owner_fairy: Any = None
+    # Recorded at begin ONLY so the overlapping-session diagnostic can fail
+    # fast (RuntimeError) for same-thread misuse instead of deadlocking on a
+    # non-reentrant acquire. It never authorizes a release.
+    owner_thread_id: int | None = None
+    # Armed on the closing thread when the reset listener releases the lock
+    # while SQLAlchemy's own reset-on-return ROLLBACK is still pending; the
+    # patched dialect do_rollback below consumes it so that pending rollback
+    # can never execute against a successor Session's fresh BEGIN.
+    absorbed_reset_rollback = local()
 
     @event.listens_for(engine, "connect")
     def _disable_pysqlite_transaction_management(
@@ -141,38 +163,36 @@ def _enable_sqlite_transactional_savepoints(engine: Engine) -> None:
         # entirely; the begin hook below owns transaction starts instead.
         dbapi_connection.isolation_level = None
 
-    def _release_writer_lock(dbapi_connection: Any = None) -> None:
-        """Release the StaticPool writer lock -- only by its owning thread,
-        and only when the shared connection is quiescent.
-
-        FIX(codex rounds 22-27, four threads): the pool ``reset`` event fires
-        BEFORE SQLAlchemy's reset-on-return ROLLBACK executes, so an
-        unconditional release there handed the lock to a waiting Session
-        whose fresh ``BEGIN`` was then rolled back by the first session's
-        still-running reset -- on StaticPool both "transactions" share ONE
-        DBAPI connection. The release therefore requires BOTH: (a) the
-        calling thread is the recorded lock owner -- pool events fire on
-        whichever thread returns the connection, so the ORIGINAL checkout's
-        checkin on another thread can never release a successor's lock, even
-        in the narrow window where the successor holds the lock but has not
-        emitted its BEGIN yet; and (b) the shared connection reports
-        ``in_transaction == False`` -- a reset arriving mid-transaction is
-        skipped (the following checkin releases), and the quiescent fast
-        path still releases on whichever event lands first, preserving the
-        reset-only path that a checkin-only release used to deadlock.
-        """
-        nonlocal lock_held, lock_owner_thread
-        if not lock_held:
-            return
-        if lock_owner_thread is not None and lock_owner_thread != get_ident():
-            return
-        if dbapi_connection is not None and getattr(
-            dbapi_connection, "in_transaction", False
-        ):
-            return
+    def _forget_lock_owner() -> None:
+        """Clear owner state and release the lock; caller has verified ownership."""
+        nonlocal lock_held, owner_record, owner_fairy, owner_thread_id
         lock_held = False
-        lock_owner_thread = None
+        owner_record = None
+        owner_fairy = None
+        owner_thread_id = None
         writer_lock.release()
+
+    def _release_writer_lock(dbapi_connection: Any, connection_record: Any) -> None:
+        """Release the StaticPool writer lock on pool CHECKIN -- only for the
+        owning checkout, and only when the shared connection is quiescent.
+
+        FIX(codex rounds 22-28, five threads): thread-keyed release was wrong
+        in BOTH directions. Pool events fire on whichever thread returns the
+        connection, and FastAPI's synchronous dependency teardown gives no
+        thread-affinity guarantee, so requiring the releasing thread to equal
+        the recorded owner thread could strand the non-reentrant lock forever
+        (cross-thread deadlock). Ownership is now the checked-out CONNECTION
+        RECORD captured at BEGIN: (a) the lock must be held, (b) the event's
+        connection record must be the one recorded at the acquisition -- so a
+        stale checkout's events can never release a successor's lock -- and
+        (c) the shared DBAPI connection must report ``in_transaction == False``.
+        """
+        nonlocal lock_held, owner_record, owner_fairy, owner_thread_id
+        if not lock_held or connection_record is not owner_record:
+            return
+        if getattr(dbapi_connection, "in_transaction", False):
+            return
+        _forget_lock_owner()
 
     @event.listens_for(engine, "begin")
     def _emit_begin(connection: Connection) -> None:
@@ -180,21 +200,26 @@ def _enable_sqlite_transactional_savepoints(engine: Engine) -> None:
         # FIX: Hold until the connection returns to the pool after commit/rollback
         # callbacks finish. Releasing in do_commit alone races a second Session
         # onto the still-resetting shared StaticPool connection.
-        nonlocal lock_held, lock_owner_thread
-        current_thread = get_ident()
+        nonlocal lock_held, owner_record, owner_fairy, owner_thread_id
         if writer_lock.locked():
-            if lock_owner_thread == current_thread:
-                dbapi_connection = connection.connection.dbapi_connection
-                if getattr(dbapi_connection, "in_transaction", False):
+            dbapi_connection = connection.connection.dbapi_connection
+            if getattr(dbapi_connection, "in_transaction", False):
+                # Same checkout (or same thread, for the nested-Sessions
+                # misuse) with an open transaction can never be unblocked by
+                # waiting: refuse instead of deadlocking on the acquire.
+                if (
+                    connection.connection is owner_fairy
+                    or get_ident() == owner_thread_id
+                ):
                     raise RuntimeError(
                         "Overlapping SQLite Sessions on StaticPool: another transaction "
                         "is already open on the shared connection. Reuse one Session "
                         "(see _sqlite_platform_session_from_request) or wait for commit."
                     )
-            writer_lock.acquire()
-        else:
-            writer_lock.acquire()
-        lock_owner_thread = current_thread
+        writer_lock.acquire()
+        owner_record = connection.connection._connection_record
+        owner_fairy = connection.connection
+        owner_thread_id = get_ident()
         lock_held = True
         try:
             dbapi_connection = connection.connection.dbapi_connection
@@ -206,31 +231,60 @@ def _enable_sqlite_transactional_savepoints(engine: Engine) -> None:
                 )
             connection.exec_driver_sql("BEGIN")
         except Exception:
-            _release_writer_lock()
+            # The acquisition above is ours and our BEGIN failed: undo it
+            # unconditionally so the lock cannot strand on this error path.
+            _forget_lock_owner()
             raise
 
     @event.listens_for(engine.pool, "checkin")
     def _release_writer_lock_on_checkin(
-        dbapi_connection: Any, _connection_record: Any
+        dbapi_connection: Any, connection_record: Any
     ) -> None:
-        """Release the writer lock after SQLAlchemy returns the connection to the pool."""
-        _release_writer_lock(dbapi_connection)
+        """Release after the pool returns the owning checkout's connection.
+
+        The checkin event fires AFTER the reset-on-return rollback finished
+        (``_finalize_fairy`` runs ``fairy._reset`` first, then
+        ``record.checkin``), so it is an authoritative release point for
+        every close path that reaches it -- including a checkin on a
+        different thread than the one that emitted BEGIN.
+        """
+        _release_writer_lock(dbapi_connection, connection_record)
 
     @event.listens_for(engine.pool, "reset")
     def _release_writer_lock_on_reset(
-        dbapi_connection: Any, _connection_record: Any, _reset_state: Any
+        dbapi_connection: Any, connection_record: Any, reset_state: Any
     ) -> None:
-        """Release on reset -- but only once the connection is quiescent.
+        """Complete the reset for the owning checkout and release the lock.
 
-        The reset event fires BEFORE the reset-on-return rollback, so the
-        quiescent check inside ``_release_writer_lock`` is what keeps a
-        waiting Session from acquiring and having its BEGIN rolled back by
-        this very reset. Keep this alongside checkin release (idempotent via
-        ``lock_held``). Checkin-only release deadlocked concurrent StaticPool
-        writers in
-        ``test_sqlite_overlapping_sessions_serialize_instead_of_colliding_begin``.
+        FIX(codex round-28): the pool ``reset`` event fires BEFORE the
+        reset-on-return ROLLBACK, so an earlier iteration that released here
+        could hand the lock to a waiting Session whose fresh ``BEGIN`` was
+        then rolled back by this checkout's still-running reset; and when the
+        record was already checked in (``fairy_ref`` cleared, so no checkin
+        event follows at all), skipping the release here leaked the lock
+        permanently. This listener therefore FINISHES the reset itself while
+        still holding the lock -- one synchronous ROLLBACK (a no-op once the
+        connection is quiescent) -- and only then releases, arming the
+        ``absorbed_reset_rollback`` flag so the patched ``do_rollback``
+        swallows SQLAlchemy's now-duplicate pending call on this same thread.
+        A successor checkout that acquires the lock afterwards can never have
+        its BEGIN rolled back by this close, and the release no longer
+        depends on a checkin event arriving.
         """
-        _release_writer_lock(dbapi_connection)
+        if not lock_held or connection_record is not owner_record:
+            return
+        # When a successor checkout already exists (its fairy replaced
+        # ``fairy_ref``) it may be waiting on this lock: leave the connection
+        # alone and let the following checkin event release instead.
+        closing_fairy = (
+            connection_record.fairy_ref() if connection_record.fairy_ref else None
+        )
+        if closing_fairy is not None and closing_fairy is not owner_fairy:
+            return
+        if not getattr(reset_state, "transaction_was_reset", False):
+            engine.dialect.do_rollback(dbapi_connection)
+            absorbed_reset_rollback.armed = True
+        _forget_lock_owner()
 
     dialect = engine.dialect
     original_do_commit = dialect.do_commit
@@ -241,11 +295,24 @@ def _enable_sqlite_transactional_savepoints(engine: Engine) -> None:
         original_do_commit(dbapi_connection)
 
     def _do_rollback(dbapi_connection: Any) -> None:
-        """Roll back on the DBAPI connection; lock release waits for pool check-in."""
+        """Roll back unless this call is the already-absorbed reset-on-return.
+
+        The reset listener performs the reset's ROLLBACK itself (under the
+        lock) and arms ``absorbed_reset_rollback`` on its own thread; the
+        reset-on-return callback SQLAlchemy runs immediately afterwards lands
+        on that same thread and is skipped, so a rollback that is provably a
+        quiescent no-op can never be re-executed against a successor's BEGIN.
+        Every other rollback -- including any other thread's live transaction
+        rollback -- runs the original dialect call untouched.
+        """
+        if getattr(absorbed_reset_rollback, "armed", False):
+            absorbed_reset_rollback.armed = False
+            return
         original_do_rollback(dbapi_connection)
 
     # Deliberate instance-level monkeypatch via setattr (avoids method-assign
-    # type suppressions). Lock release remains on reset+checkin listeners above.
+    # type suppressions). do_rollback additionally absorbs the duplicated
+    # reset-on-return rollback described in the reset listener above.
     setattr(dialect, "do_commit", _do_commit)
     setattr(dialect, "do_rollback", _do_rollback)
 

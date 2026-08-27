@@ -740,19 +740,67 @@ def _container_facts(container: str, *, timeout: int) -> dict[str, str]:
     # FIX(codex round-22 P2): recorded so the restore can recreate the target
     # with the SOURCE's encoding/locale instead of the target template's
     # defaults -- pg_dump without --create carries none of them. One pipe-
-    # separated row: encoding id|encoding name|collate|ctype|provider|icu.
-    locale_row = _psql(
-        container,
-        "SELECT b.encoding::text || '|' || pg_encoding_to_char(b.encoding) "
-        "|| '|' || coalesce(b.datcollate, '') || '|' || coalesce(b.datctype, '') "
-        "|| '|' || coalesce(b.datlocprovider::text, '') "
-        "|| '|' || coalesce(b.daticulocale, '') "
-        "FROM pg_catalog.pg_database b WHERE b.datname = current_database();",
-        timeout=timeout,
-    ).strip()
+    # separated row: encoding id|encoding name|collate|ctype|provider code|
+    # locale name for the provider.
+    locale_row = _database_locale_row(container, timeout=timeout)
     if locale_row:
         facts["database_locale"] = locale_row
     return facts
+
+
+# ============================================================================
+# Purpose: Read the connected database's encoding/locale provenance as one
+#          pipe-separated row (encoding id|encoding name|collate|ctype|
+#          provider code|locale name) for ``manifest.source.database_locale``.
+# Database/ORM: Read-only query against pg_catalog.pg_database; no application
+#               table is touched.
+# Standards: Version-tolerant and fail-closed. PostgreSQL 17 renamed
+#            ``pg_database.daticulocale`` to ``datlocale`` and generalized it
+#            to carry the ICU *or* builtin locale name, so the query is tried
+#            in the PG17+ form first and retried in the pre-17 form only when
+#            psql itself fails (``_psql`` raises BackupError on a non-zero
+#            exit, which is what an undefined column produces). A database
+#            that answers neither form still fails the run loudly -- the row
+#            is never silently dropped.
+# Blast Radius: Disaster recovery. This row is what the restore uses to
+#               recreate the target with the source's locale; a missing row
+#               degrades to "unpreserved locale" on the restore side, never
+#               to a wrong one.
+# Connections:
+#   - File: scripts/backup_database.py -> ``_container_facts`` stores the row
+#     in the manifest's source block.
+#   - File: scripts/restore_database.py -> ``_create_database_options`` parses
+#     the same row to rebuild the target database.
+# ============================================================================
+def _database_locale_row(container: str, *, timeout: int) -> str:
+    """Return the locale row, trying the PG17+ column name before the legacy one.
+
+    FIX: the query hardcoded ``daticulocale``, which PostgreSQL 17 renamed to
+    ``datlocale`` -- on the deployed PostgreSQL 18 stack every backup failed
+    with undefined-column before a dump was taken. The PG17+ form is attempted
+    first and the pre-17 name is the fallback, so both releases record
+    provenance.
+    """
+    try:
+        return _psql(
+            container,
+            "SELECT b.encoding::text || '|' || pg_encoding_to_char(b.encoding) "
+            "|| '|' || coalesce(b.datcollate, '') || '|' || coalesce(b.datctype, '') "
+            "|| '|' || coalesce(b.datlocprovider::text, '') "
+            "|| '|' || coalesce(b.datlocale, '') "
+            "FROM pg_catalog.pg_database b WHERE b.datname = current_database();",
+            timeout=timeout,
+        ).strip()
+    except BackupError:
+        return _psql(
+            container,
+            "SELECT b.encoding::text || '|' || pg_encoding_to_char(b.encoding) "
+            "|| '|' || coalesce(b.datcollate, '') || '|' || coalesce(b.datctype, '') "
+            "|| '|' || coalesce(b.datlocprovider::text, '') "
+            "|| '|' || coalesce(b.daticulocale, '') "
+            "FROM pg_catalog.pg_database b WHERE b.datname = current_database();",
+            timeout=timeout,
+        ).strip()
 
 
 # ============================================================================
@@ -1091,6 +1139,17 @@ ORDER BY 1;
 # every cluster (pg_database_owner owns the public schema on PG15+), so the
 # archive's OWNER TO them restores with no CREATE ROLE -- and a roles.sql
 # declaring one would itself be refused by the restore-side allowlist.
+#
+# FIX: this query used to carry two more arms,
+# ``SELECT tsp.prsowner FROM pg_catalog.pg_ts_parser`` and
+# ``SELECT tst.tmptowner FROM pg_catalog.pg_ts_template``. Neither column
+# exists -- pg_ts_parser and pg_ts_template have NO owner columns in any
+# PostgreSQL release (they are cluster-global; pg_dump archives parsers and
+# templates without per-object owners) -- so on a real database the whole
+# owner query failed with undefined-column and every backup run died before
+# a dump was taken. The arms are removed, not corrected: there is no owner
+# column to correct them to, and no owner coverage is lost. Every catalog
+# named below has a verified owner column.
 OWNER_ROLES_SQL = """
 SELECT DISTINCT r.rolname
 FROM (
@@ -1155,16 +1214,6 @@ FROM (
   SELECT tsd.dictowner
   FROM pg_catalog.pg_ts_dict tsd
   JOIN pg_catalog.pg_namespace n ON n.oid = tsd.dictnamespace
-  WHERE n.nspname NOT IN ('pg_catalog', 'information_schema')
-  UNION ALL
-  SELECT tsp.prsowner
-  FROM pg_catalog.pg_ts_parser tsp
-  JOIN pg_catalog.pg_namespace n ON n.oid = tsp.prsnamespace
-  WHERE n.nspname NOT IN ('pg_catalog', 'information_schema')
-  UNION ALL
-  SELECT tst.tmptowner
-  FROM pg_catalog.pg_ts_template tst
-  JOIN pg_catalog.pg_namespace n ON n.oid = tst.tmptnamespace
   WHERE n.nspname NOT IN ('pg_catalog', 'information_schema')
   UNION ALL
   SELECT se.stxowner
@@ -1270,6 +1319,22 @@ def _pg_restore_list(container: str, dump_path: Path, *, timeout: int) -> str:
     return completed.stdout
 
 
+def _toc_entry_owner(stripped: str) -> str:
+    """Return the owner field (the last TOC column) of one trimmed listing line.
+
+    FIX: the owner was read as the LAST whitespace-delimited token, so a
+    quoted role name containing spaces was collected broken -- ``"UMS Admin"``
+    arrived as ``Admin"``. When the line ends in a double quote the owner is
+    the trailing quoted segment: its opening quote is the last quote preceded
+    by a TOC column-separator space, or the start of the line when there is
+    none, and the surrounding quotes are stripped.
+    """
+    if not stripped.endswith('"'):
+        return stripped.rsplit(None, 1)[-1]
+    opener = stripped.rfind(' "') + 1
+    return stripped[opener + 1 : -1]
+
+
 def _roles_referenced_in_dump_listing(listing: str) -> set[str]:
     """Return cluster role names that own TOC objects (including ACL entries).
 
@@ -1289,7 +1354,7 @@ def _roles_referenced_in_dump_listing(listing: str) -> set[str]:
         stripped = line.strip()
         if not stripped or stripped.startswith(";") or not stripped[0].isdigit():
             continue
-        owner = stripped.rsplit(None, 1)[-1]
+        owner = _toc_entry_owner(stripped)
         # FIX: predefined ``pg_`` roles (pg_database_owner owns the public
         # schema on PG15+) exist on every cluster -- an archive's OWNER TO
         # them restores with no CREATE ROLE, and a roles.sql declaring one

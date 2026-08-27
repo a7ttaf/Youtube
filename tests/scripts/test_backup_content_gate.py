@@ -4960,17 +4960,25 @@ def test_execute_restore_recreates_target_only_when_allow_nonempty(
     assert _run(allow_nonempty=True) is True
     assert (
         order.index("guard")
-        < order.index("preflight")
         < order.index("dumpcheck")
+        < order.index("preflight")
         < order.index("dbname")
         < order.index("recreate:appdb")
         < order.index("roles")
-    ), "roles.sql AND the archive must be validated BEFORE the target is dropped"
+    ), (
+        "the archive AND roles.sql must be validated BEFORE the target is "
+        "dropped; the archive probe now runs on every path, ahead of roles"
+    )
 
     assert _run(allow_nonempty=False) is True
     assert "recreate:appdb" not in order and "dbname" not in order
-    assert "dumpcheck" not in order, (
-        "the empty-target path drops nothing, so it must not pay for the probe"
+    assert "dumpcheck" in order, (
+        "the archive readability probe is read-only and must run on EVERY "
+        "restore path -- an empty-target restore applies roles.sql, so an "
+        "unreadable archive must be refused BEFORE those cluster roles land"
+    )
+    assert order.index("dumpcheck") < order.index("roles"), (
+        "the probe must refuse before roles.sql is applied, not after"
     )
 
 
@@ -5028,7 +5036,9 @@ def test_execute_restore_refuses_an_unreadable_archive_before_dropping_target(
     AFTER DROP DATABASE had committed, leaving an empty shell and no original.
 
     The load-bearing assertion is "recreate" not in order: without it this would
-    only prove the probe ran, not that the drop was actually skipped.
+    only prove the probe ran, not that the drop was actually skipped. The probe
+    now runs BEFORE the roles.sql preflight on every path, so a refusal lands
+    before any cluster state is touched at all.
     """
     from types import SimpleNamespace
 
@@ -5070,7 +5080,10 @@ def test_execute_restore_refuses_an_unreadable_archive_before_dropping_target(
         restore._execute_restore("container", tmp_path, args, {})
 
     assert raised.value.code == restore.EXIT_RESTORE_FAILED
-    assert order == ["preflight", "dumpcheck"], (
+    # The archive probe moved ahead of the roles.sql preflight (every path),
+    # so the refusal lands before ANYTHING touches the cluster -- the stub
+    # raises inside the probe, so the roles preflight is never even reached.
+    assert order == ["dumpcheck"], (
         f"the target must be untouched after the probe refuses, got {order}"
     )
 
@@ -5429,6 +5442,50 @@ def test_load_backup_rejects_missing_table_row_counts(tmp_path: Path) -> None:
     assert "table_row_counts" in str(caught.value)
 
 
+def _write_schema_reject_run(tmp_path: Path, name: str, schema: object) -> Path:
+    """Write a run directory whose every artifact matches except its schema.
+
+    ``schema=None`` writes a manifest with NO schema key at all.
+    """
+    run = tmp_path / name
+    run.mkdir()
+    dump = run / restore.DUMP_NAME
+    roles = run / restore.ROLES_NAME
+    dump.write_bytes(b"PGDMP-placeholder")
+    roles.write_text("CREATE ROLE app_tenant;\n", encoding="utf-8")
+    manifest: dict[str, object] = {
+        "artifacts": {
+            restore.DUMP_NAME: {"sha256": restore._sha256(dump)},
+            restore.ROLES_NAME: {"sha256": restore._sha256(roles)},
+        },
+        "table_row_counts": {"public.channels": 1},
+    }
+    if schema is not None:
+        manifest["schema"] = schema
+    (run / restore.MANIFEST_NAME).write_text(json.dumps(manifest), encoding="utf-8")
+    return run
+
+
+@pytest.mark.parametrize("schema", ["ums-backup/2", "", 1, None])
+def test_load_backup_rejects_a_manifest_from_another_schema(
+    tmp_path: Path, schema: object
+) -> None:
+    """A manifest whose schema field is not exactly ums-backup/1 is refused.
+
+    FIX: the schema discriminator was never read -- a tampered or future-format
+    manifest sailed into digest and count checks that assume this tool's
+    layout. A wrong value is a malformed backup directory (exit 2), and every
+    matching digest beside it cannot make a different format restorable. The
+    None arm is a manifest with the key MISSING entirely, which must refuse
+    the same way.
+    """
+    run = _write_schema_reject_run(tmp_path, "ums-backup-20260824T222108Z", schema)
+    with pytest.raises(restore.RestoreError) as caught:
+        restore._load_backup(run)
+    assert caught.value.code == restore.EXIT_USAGE
+    assert restore.MANIFEST_SCHEMA in str(caught.value)
+
+
 def test_load_backup_rejects_non_numeric_table_row_counts(tmp_path: Path) -> None:
     """Non-numeric table_row_counts values fail closed at load time."""
     run = tmp_path / "ums-backup-20260824T222106Z"
@@ -5539,6 +5596,7 @@ def test_resolve_rehearsal_image_honors_operator_choice(
 ) -> None:
     """An explicit --rehearse-image wins even when the local ID still exists."""
     monkeypatch.setattr(restore, "_docker_image_exists", lambda *_a, **_k: True)
+    monkeypatch.setattr(restore, "_image_is_postgres", lambda *_a, **_k: True)
     chosen = restore._resolve_rehearsal_image(
         image_id="sha256:deadbeef",
         operator_image="postgres:18-alpine",
@@ -5550,14 +5608,133 @@ def test_resolve_rehearsal_image_honors_operator_choice(
 def test_resolve_rehearsal_image_prefers_local_id(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """When the recorded config ID is still local, prefer it."""
+    """When the recorded config ID is still local (and Postgres), prefer it."""
     monkeypatch.setattr(restore, "_docker_image_exists", lambda *_a, **_k: True)
+    monkeypatch.setattr(restore, "_image_is_postgres", lambda *_a, **_k: True)
     chosen = restore._resolve_rehearsal_image(
         image_id="sha256:deadbeef",
         operator_image="",
         timeout=5,
     )
     assert chosen == "sha256:deadbeef"
+
+
+def test_resolve_rehearsal_image_refuses_a_local_non_postgres_image_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A tampered manifest can name ANY local image ID; presence is not enough.
+
+    FIX: ``docker image inspect`` proved only LOCAL PRESENCE, so an attacker-
+    supplied image_id that happened to exist locally was executed as the
+    rehearsal container's entrypoint. A locally present, non-Postgres image
+    must now be refused with EXIT_USAGE instead of being returned.
+    """
+    monkeypatch.setattr(restore, "_docker_image_exists", lambda *_a, **_k: True)
+    monkeypatch.setattr(restore, "_image_is_postgres", lambda *_a, **_k: False)
+    with pytest.raises(restore.RestoreError) as caught:
+        restore._resolve_rehearsal_image(
+            image_id="sha256:deadbeef", operator_image="", timeout=5
+        )
+    assert caught.value.code == restore.EXIT_USAGE
+    assert "--rehearse-image" in str(caught.value)
+    # The untrusted reference must not be echoed back.
+    assert "deadbeef" not in str(caught.value)
+
+
+def test_resolve_rehearsal_image_proceeds_for_a_postgres_image_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A locally present image that passes the Postgres check still runs."""
+    monkeypatch.setattr(restore, "_docker_image_exists", lambda *_a, **_k: True)
+    monkeypatch.setattr(restore, "_image_is_postgres", lambda *_a, **_k: True)
+    assert (
+        restore._resolve_rehearsal_image(
+            image_id="sha256:cafebabe", operator_image="", timeout=5
+        )
+        == "sha256:cafebabe"
+    )
+
+
+def test_resolve_rehearsal_image_refuses_an_operator_mysql_image(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """--rehearse-image is operator-authoritative but still needs Postgres.
+
+    Operators can typo, and the rehearsal needs a Postgres server to restore
+    into; a non-Postgres --rehearse-image must refuse rather than start.
+    """
+    monkeypatch.setattr(restore, "_docker_image_exists", lambda *_a, **_k: True)
+    monkeypatch.setattr(restore, "_image_is_postgres", lambda *_a, **_k: False)
+    with pytest.raises(restore.RestoreError) as caught:
+        restore._resolve_rehearsal_image(
+            image_id="sha256:deadbeef", operator_image="mysql:8", timeout=5
+        )
+    assert caught.value.code == restore.EXIT_USAGE
+    assert "--rehearse-image" in str(caught.value)
+
+
+def test_image_is_postgres_reads_repo_tags_fail_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Corpus for the Postgres-image proof: repo tags, fallback, refusals."""
+
+    def inspect_result(stdout: str, returncode: int = 0):
+        """Return a _run stub answering every docker inspect with ``stdout``."""
+
+        def fake_run(argv: list[str], *, timeout: int):
+            """Return the configured CompletedProcess for the inspect call."""
+            _ = (argv, timeout)
+            return subprocess.CompletedProcess(argv, returncode, stdout, "")
+
+        return fake_run
+
+    # A plain official tag passes, case-insensitively and via library/postgres.
+    monkeypatch.setattr(restore, "_run", inspect_result('["postgres:18-alpine"]\n'))
+    assert restore._image_is_postgres("postgres:18-alpine", timeout=5) is True
+    monkeypatch.setattr(
+        restore, "_run", inspect_result('["Library/Postgres:18"]\n')
+    )
+    assert restore._image_is_postgres("x", timeout=5) is True
+    # mysql, a registry-prefixed non-postgres repo, and a postgres-looking
+    # SUFFIX are all refused.
+    monkeypatch.setattr(restore, "_run", inspect_result('["mysql:8"]\n'))
+    assert restore._image_is_postgres("mysql:8", timeout=5) is False
+    monkeypatch.setattr(
+        restore, "_run", inspect_result('["evil.example/not-postgres:1"]\n')
+    )
+    assert restore._image_is_postgres("x", timeout=5) is False
+    monkeypatch.setattr(
+        restore, "_run", inspect_result('["evil.example/notpostgres:1"]\n')
+    )
+    assert restore._image_is_postgres("x", timeout=5) is False
+    # <none> tags / untagged images fall back to the config's base reference.
+    def tagged_run(argv: list[str], *, timeout: int):
+        """Answer RepoTags with null and Config.Image with the base."""
+        _ = (argv, timeout)
+        if "RepoTags" in " ".join(argv):
+            return subprocess.CompletedProcess(argv, 0, "null\n", "")
+        return subprocess.CompletedProcess(argv, 0, "postgres:18-alpine\n", "")
+
+    monkeypatch.setattr(restore, "_run", tagged_run)
+    assert restore._image_is_postgres("sha256:xyz", timeout=5) is True
+
+    def untagged_unknown(argv: list[str], *, timeout: int):
+        """Answer RepoTags with null and Config.Image with a non-postgres base."""
+        _ = (argv, timeout)
+        if "RepoTags" in " ".join(argv):
+            return subprocess.CompletedProcess(argv, 0, "null\n", "")
+        return subprocess.CompletedProcess(argv, 0, "debian:trixie-slim\n", "")
+
+    monkeypatch.setattr(restore, "_run", untagged_unknown)
+    assert restore._image_is_postgres("sha256:xyz", timeout=5) is False
+    # Probe failure and unparseable output refuse.
+    monkeypatch.setattr(
+        restore, "_run", inspect_result("null\n", returncode=1)
+    )
+    assert restore._image_is_postgres("x", timeout=5) is False
+    monkeypatch.setattr(restore, "_run", inspect_result("not json\n"))
+    assert restore._image_is_postgres("x", timeout=5) is False
+    assert restore._image_is_postgres("", timeout=5) is False
 
 
 def test_create_throwaway_warns_when_timeout_cleanup_fails(
@@ -5980,6 +6157,48 @@ def test_dump_listing_owner_collection_skips_predefined_roles() -> None:
         ]
     )
     assert backup._roles_referenced_in_dump_listing(listing) == {"app_tenant"}
+
+
+def test_dump_listing_owner_collection_keeps_quoted_owners_whole() -> None:
+    """A quoted role name containing spaces must be collected WHOLE.
+
+    FIX: the owner was read as the last whitespace-delimited token, so
+    ``"UMS Admin"`` was collected as ``Admin"`` -- a name roles.sql never
+    declared. The quote-aware reader must take the trailing quoted segment
+    with its quotes stripped, and must leave plain owners exactly as before.
+    """
+    listing = "\n".join(
+        [
+            "; comment lines are skipped",
+            '215; 1259 16393 SCHEMA - public "UMS Admin"',
+            "216; 1259 16421 TABLE public tenants app_tenant",
+            '217; 1259 16422 TABLE DATA public tenants "UMS Admin"',
+            "218; 1259 16423 TABLE public channels -",
+        ]
+    )
+    assert backup._roles_referenced_in_dump_listing(listing) == {
+        "UMS Admin",
+        "app_tenant",
+    }
+    # The raw token must not leak quotes or fragments in either direction.
+    assert 'Admin"' not in backup._roles_referenced_in_dump_listing(listing)
+    assert '"UMS' not in backup._roles_referenced_in_dump_listing(listing)
+
+
+def test_toc_entry_owner_reads_both_owner_shapes() -> None:
+    """Corpus for the quote-aware owner reader on trimmed TOC lines."""
+    assert backup._toc_entry_owner("12; 1259 1 TABLE public t owner1") == "owner1"
+    assert (
+        backup._toc_entry_owner('12; 1259 1 TABLE public t "UMS Admin"')
+        == "UMS Admin"
+    )
+    assert backup._toc_entry_owner("5000; 0 0 BLOB -") == "-"
+    # A quoted owner is the LAST quoted segment: object names may themselves
+    # be quoted, and the owner still wins.
+    assert (
+        backup._toc_entry_owner('12; 1259 1 TABLE "odd table" "UMS Admin"')
+        == "UMS Admin"
+    )
 
 
 def test_create_throwaway_refuses_when_no_image_remains(
@@ -6409,10 +6628,6 @@ def test_owner_roles_sql_and_object_count_cover_exotic_catalogs() -> None:
         "tsc.cfgowner",
         "pg_ts_dict tsd",
         "tsd.dictowner",
-        "pg_ts_parser tsp",
-        "tsp.prsowner",
-        "pg_ts_template tst",
-        "tst.tmptowner",
         "pg_statistic_ext se",
         "se.stxowner",
         "pg_extension ext",
@@ -6425,6 +6640,16 @@ def test_owner_roles_sql_and_object_count_cover_exotic_catalogs() -> None:
         "fsrv.srvowner",
     ):
         assert fragment in owner_sql, fragment
+    # pg_ts_parser and pg_ts_template carry NO owner columns in any PostgreSQL
+    # release (prsowner/tmptowner do not exist; both catalogs are cluster-
+    # global and pg_dump archives parsers/templates without per-object
+    # owners), so the owner query must NOT reference them -- an arm that did
+    # failed every real backup with undefined-column before a dump was taken.
+    # Their absence below is the assertion: there is nothing to cover.
+    assert "pg_ts_parser" not in owner_sql
+    assert "prsowner" not in owner_sql
+    assert "pg_ts_template" not in owner_sql
+    assert "tmptowner" not in owner_sql
     count_sql = restore.USER_OBJECT_COUNT_SQL
     for fragment in (
         "pg_collation",
@@ -6475,16 +6700,80 @@ def test_backup_records_the_database_locale_row() -> None:
     assert facts["database_locale"] == "6|UTF8|en_US.UTF-8|en_US.UTF-8|c|"
 
 
+def test_database_locale_row_falls_back_to_the_legacy_column(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A pre-17 server (no datlocale) must still record its locale row.
+
+    FIX: the query hardcoded ``daticulocale``, which PostgreSQL 17 renamed to
+    ``datlocale``, so the deployed PG18 stack failed with undefined-column on
+    every run. The PG17+ form is attempted FIRST and the legacy form is only
+    the fallback after psql itself fails.
+    """
+    seen: list[str] = []
+
+    def fake_psql(_container: str, sql: str, *, timeout: int) -> str:
+        """Fail the PG18 column name; answer the legacy one."""
+        _ = (_container, timeout)
+        seen.append(sql)
+        if "datlocale" in sql:
+            raise backup.BackupError(
+                backup.EXIT_COMMAND_FAILED,
+                "psql failed: ERROR: column b.datlocale does not exist",
+            )
+        assert "daticulocale" in sql
+        return "6|UTF8|en_US.UTF-8|en_US.UTF-8|c|und-x-icu\n"
+
+    monkeypatch.setattr(backup, "_psql", fake_psql)
+    row = backup._database_locale_row("ctr", timeout=5)
+    assert row == "6|UTF8|en_US.UTF-8|en_US.UTF-8|c|und-x-icu"
+    assert len(seen) == 2
+    assert "datlocale" in seen[0] and "daticulocale" not in seen[0]
+    assert "daticulocale" in seen[1]
+
+
+def test_database_locale_row_tries_the_pg18_column_first(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A PG17+ server answers on the first attempt; no legacy retry is made."""
+    seen: list[str] = []
+
+    def fake_psql(_container: str, sql: str, *, timeout: int) -> str:
+        """Answer only the PG18 datlocale form."""
+        _ = (_container, timeout)
+        seen.append(sql)
+        assert "datlocale" in sql
+        return "6|UTF8|C|C|b|C.utf8\n"
+
+    monkeypatch.setattr(backup, "_psql", fake_psql)
+    assert backup._database_locale_row("ctr", timeout=5) == "6|UTF8|C|C|b|C.utf8"
+    assert len(seen) == 1
+
+
 def test_create_database_options_preserve_the_source_locale() -> None:
-    """TEMPLATE template0 + explicit encoding/locale from the manifest row."""
+    """TEMPLATE template0 + explicit encoding/locale from the manifest row.
+
+    The provider field carries the one-character ``datlocprovider::text``
+    code -- 'c' libc, 'i' icu, 'b' builtin (PG17+) -- not the full word the
+    old comparison expected, which sent real ICU databases down the libc
+    branch and silently changed collation semantics after restore.
+    """
     assert restore._create_database_options("") == ""
     assert restore._create_database_options("6|UTF8|en_US.UTF-8|en_US.UTF-8|c|") == (
         " TEMPLATE template0 ENCODING 'UTF8'"
         " LC_COLLATE 'en_US.UTF-8' LC_CTYPE 'en_US.UTF-8'"
     )
-    assert restore._create_database_options("6|UTF8|||icu|und-x-icu") == (
+    # An empty provider code is the legacy libc shape and takes the same branch.
+    assert restore._create_database_options("6|UTF8|C|C||") == (
+        " TEMPLATE template0 ENCODING 'UTF8' LC_COLLATE 'C' LC_CTYPE 'C'"
+    )
+    assert restore._create_database_options("6|UTF8|||i|und-x-icu") == (
         " TEMPLATE template0 ENCODING 'UTF8'"
         " LOCALE_PROVIDER icu ICU_LOCALE 'und-x-icu'"
+    )
+    assert restore._create_database_options("6|UTF8|||b|C.utf8") == (
+        " TEMPLATE template0 ENCODING 'UTF8'"
+        " LOCALE_PROVIDER builtin BUILTIN_LOCALE 'C.utf8'"
     )
     with pytest.raises(restore.RestoreError) as malformed:
         restore._create_database_options("6|UTF8|en'; DROP TABLE x|c|c|")
@@ -6492,6 +6781,12 @@ def test_create_database_options_preserve_the_source_locale() -> None:
     with pytest.raises(restore.RestoreError) as wrong_shape:
         restore._create_database_options("only-three-parts")
     assert wrong_shape.value.code == restore.EXIT_USAGE
+    # An unknown provider code must refuse, not degrade to libc: libc vs icu
+    # vs builtin changes ORDER BY and unique-index semantics.
+    with pytest.raises(restore.RestoreError) as unknown_provider:
+        restore._create_database_options("6|UTF8|C|C|x|C")
+    assert unknown_provider.value.code == restore.EXIT_USAGE
+    assert "provider" in str(unknown_provider.value)
 
 
 def test_audit_phase_is_bounded_under_a_blocked_audit_sink(
@@ -6508,13 +6803,22 @@ def test_audit_phase_is_bounded_under_a_blocked_audit_sink(
         """Simulate an audit session blocked on a hung shared connection."""
         released.wait(timeout=30)
 
-    executor_module.SHUTDOWN_AUDIT_BUDGET_SECONDS = 0.2
+    # monkeypatch restores the production constant automatically; a bare
+    # assignment here used to leak the 0.2s budget into the rest of the
+    # pytest process (round-28 finding).
+    monkeypatch.setattr(executor_module, "SHUTDOWN_AUDIT_BUDGET_SECONDS", 0.2)
     instance = executor_module.ConnectorJobExecutor.__new__(
         executor_module.ConnectorJobExecutor
     )
     instance._audit_failed_before_start = blocked_audit  # type: ignore[method-assign]
+    # The close deadline is shared between the audit join and the drain wait
+    # (round-28 P1); give this direct call a deadline far beyond the budget so
+    # the join is bounded by the budget alone.
     started = time_module.monotonic()
-    instance._audit_cancelled_within_budget([(("t", "k", "a", "m"), None)])  # type: ignore[arg-type]
+    instance._audit_cancelled_within_budget(
+        [(("t", "k", "a", "m"), None)],  # type: ignore[arg-type]
+        deadline=time_module.monotonic() + 30,
+    )
     elapsed = time_module.monotonic() - started
     released.set()
     assert elapsed < 5, "the audit phase must return within its budget"

@@ -181,6 +181,60 @@ The failure trips on a **fresh, empty** volume — the check fires on the legacy
 merely *being* a mountpoint — so this was never a stale-data problem and there is no
 migration path to write.
 
+#### Operator note: existing volumes and fresh stacks
+
+Pulling the mount fix is safe for a stack that already ran the broken file, and the
+reason is mechanical, not hopeful. Every revision of `docker-compose.yml` in this
+repository's history that shipped the legacy mount already shipped a Postgres **18**
+image (`31620750e`, the first compose stack here, was already `postgres:18-alpine`),
+and the 18 entrypoint exits 1 before `initdb` whenever the legacy path is a mount —
+empty or not (`docker_error_old_databases`, reached from `_main` on every fresh
+start). A `postgres-data` volume created under the broken config therefore cannot
+contain a cluster. Per case:
+
+- **Existing volume from the broken config — nothing to migrate, and this is the
+  only case this repository can produce.** The entrypoint log names the empty
+  mount: `/var/lib/postgresql/data (unused mount/volume)`. Do nothing but pull the
+  fix: the new mount ignores the legacy path, `initdb` runs into
+  `/var/lib/postgresql/18/docker` inside the same volume, and the data is durable
+  from the first `up` on. A clean slate is exactly equivalent, if preferred:
+
+  ```bash
+  docker compose down && docker volume rm ums-smart-revenue_postgres-data && docker compose up -d
+  ```
+
+- **Existing volume holding a real cluster — impossible from this repository's
+  history; reachable only via a hand-run container or a pre-18 image.** The
+  entrypoint then names a bare directory *without* the `(unused mount/volume)`
+  marker and keeps refusing until the cluster is migrated or discarded. Data here
+  is disposable pre-alpha (Docs/22), so discarding is the documented default
+  (`docker volume rm ums-smart-revenue_postgres-data`, then `up -d`). To keep the
+  data instead, migrate it out of the volume and into a fresh 18 cluster
+  (`UMS_DB_USER` / `UMS_DB_NAME` come from your `.env`; for the dump, use the
+  superuser name the *old* cluster was created with):
+
+  ```bash
+  # 1. dump the old cluster with the OLD major image (its PGDATA is the volume root)
+  docker run --rm -v ums-smart-revenue_postgres-data:/var/lib/postgresql/data \
+    postgres:16-alpine pg_dump -U "$UMS_DB_USER" -d "$UMS_DB_NAME" -Fc > pre18.dump
+  # 2. move the old cluster aside inside the volume so the entrypoint stops seeing it
+  docker run --rm -v ums-smart-revenue_postgres-data:/var/lib/postgresql alpine \
+    mv /var/lib/postgresql/data /var/lib/postgresql/data-pre18
+  # 3. boot the fresh 18 cluster and restore into it
+  docker compose up -d postgres
+  docker compose exec -T postgres pg_restore -U "$UMS_DB_USER" -d "$UMS_DB_NAME" < pre18.dump
+  docker compose up -d
+  ```
+
+  `pg_dump` alone does not carry the `app_tenant` / `app_platform` roles — see
+  [22_BACKUP_RESTORE_AND_REHEARSAL.md](22_BACKUP_RESTORE_AND_REHEARSAL.md),
+  "What is *not* in it", before relying on a migrated cluster.
+
+- **Fresh stack.** No volume exists yet: compose creates `postgres-data`, mounts it
+  at `/var/lib/postgresql`, and `initdb` writes `/var/lib/postgresql/18/docker`
+  inside it — which is what the "Data survives a container replacement" row of the
+  verification table below measures.
+
 #### What is now verified (this is measured, not assumed)
 
 | Claim | Evidence |
