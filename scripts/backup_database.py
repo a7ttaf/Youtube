@@ -1046,6 +1046,19 @@ FROM (
   SELECT m.umuser::oid
   FROM pg_catalog.pg_user_mapping m
   WHERE m.umuser IS NOT NULL AND m.umuser <> 0
+  UNION ALL
+  -- Column-level grants. pg_class.relacl carries only TABLE-level privileges,
+  -- so a role holding nothing but GRANT SELECT(col) appeared in neither
+  -- acl_grantees nor the TOC owner scan; dropping it between the snapshot and
+  -- the roles capture published an archive whose GRANT ... (col) referenced a
+  -- role roles.sql never declared, and the restore failed part-way.
+  SELECT (aclexplode(a.attacl)).grantee AS gid
+  FROM pg_catalog.pg_attribute a
+  JOIN pg_catalog.pg_class ac ON ac.oid = a.attrelid
+  JOIN pg_catalog.pg_namespace an ON an.oid = ac.relnamespace
+  WHERE a.attacl IS NOT NULL
+    AND an.nspname NOT IN ('pg_catalog', 'information_schema')
+    AND an.nspname NOT LIKE 'pg\\_temp\\_%' ESCAPE '\\'
 ) g
 JOIN pg_catalog.pg_roles r ON r.oid = g.gid
 WHERE g.gid <> 0

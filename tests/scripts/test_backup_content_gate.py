@@ -4312,6 +4312,10 @@ def test_acl_grantee_sql_covers_every_dumped_acl_catalog() -> None:
         # captures would publish an archive that fails during restore.
         "pg_catalog.pg_user_mapping m",
         "m.umuser",
+        # Column-level grants: pg_class.relacl is TABLE-level only, so a role
+        # holding nothing but GRANT SELECT(col) is invisible without this arm.
+        "pg_catalog.pg_attribute a",
+        "a.attacl",
         "u.role_oid::oid",
     ):
         assert fragment in sql, fragment
