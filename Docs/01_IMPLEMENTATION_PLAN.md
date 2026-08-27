@@ -1248,7 +1248,7 @@ and the reconciled-net content (Phase 4 allocation/tax) feeding report bodies.
   a single page with no router, and a connector job killed mid-run 409-blocks its
   month for six hours. Round 3 traced "no buttons work / it looks like a mockup" to
   three causes, the largest being that the dev proxy ships `assistant_analyst` —
-  **2 of 28 permissions** (`frontend/vite.config.ts:69`, `auth/seed.py`) — so the
+  **2 of 26 permissions** (`frontend/vite.config.ts:69`, `auth/seed.py`, `auth/permissions.py`) — so the
   product has been demoed through its second-most-restricted role. Five blockers,
   none requiring redesign:
   no authentication front door (the app takes identity from gateway headers and
@@ -1257,6 +1257,9 @@ and the reconciled-net content (Phase 4 allocation/tax) feeding report bodies.
   and no non-dev path to serve the browser app. Two viable beta shapes are
   documented there; real revenue can be ingested without any Google/GCP
   dependency via the first-class `MANUAL_UPLOAD` import path.
+  **Freshness (2026-08-28):** P0 execution + living Docs/21 status are on PR #210;
+  Admin/access program is Docs/23 (PR #218); US withholding rate ruling + U1–U4 is
+  Docs/24 (PR #219). Do not schedule unchecked P0 items from the #209 snapshot alone.
 - ⏳ Google credential token monitoring — remaining: credentials repo (PRs #33, #34) +
   four `api_connector_credentials` refresh-telemetry columns (last-attempt,
   token-expiry, last-status, last-error-class) stamped at the

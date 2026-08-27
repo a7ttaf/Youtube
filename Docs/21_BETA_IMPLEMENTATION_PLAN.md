@@ -7,15 +7,35 @@ revenue entering by **manual import**.
 **Method:** every item below was costed against the actual code — file, line, what
 breaks, what it unblocks — not estimated from the finding text.
 
+> ⚠️ **Freshness banner (2026-08-28).** P0 **execution** and the living status table
+> for this plan live on PR **#210** (`feat/beta-p0-durability`). This PR (#209) is the
+> **pre-execution snapshot** at `main` = `d8418cea2`. Do **not** schedule unchecked
+> open items from the hour tables below alone — B0 and most of W0.2 / P0.1–P0.9 are
+> already done on #210. For “what is still open,” read Docs/21 as maintained on #210.
+
+### Related plans (program triad)
+
+| Doc | PR | Role |
+| --- | --- | --- |
+| Docs/20 (this audit’s parent) | [#209](https://github.com/a7ttaf/Youtube/pull/209) | Historical audit snapshot |
+| Docs/21 living + Docs/22 | [#210](https://github.com/a7ttaf/Youtube/pull/210) | P0 code + current schedule source of truth |
+| [`23_ADMIN_ACCESS_AND_CONFIG_PLAN.md`](23_ADMIN_ACCESS_AND_CONFIG_PLAN.md) | [#218](https://github.com/a7ttaf/Youtube/pull/218) | Admin / access / config UI extension |
+| [`24_US_WITHHOLDING_AND_US_REVENUE_PLAN.md`](24_US_WITHHOLDING_AND_US_REVENUE_PLAN.md) | [#219](https://github.com/a7ttaf/Youtube/pull/219) | US revenue + withholding estimate (P3 rate ruling) |
+
+**Residual after #210:** `/security` still missing from Vite `TENANT_SCOPED_ROUTES`
+(Docs/23 A2).
+
 ---
 
 ## The headline
 
-**The remaining work is 38–55 hours. Six to eight focused days.**
+**At snapshot time the remaining work was 38–55 hours. Six to eight focused days.**
 
-That is the whole distance between today's `main` and a beta you can put real money
+That was the distance between `main` @ `d8418cea2` and a beta you can put real money
 data into. Not another phase, not a rewrite. The application is genuinely built; what
-is missing is the layer that lets one person *run* it and not lose data.
+was missing is the layer that lets one person *run* it and not lose data. **Much of
+the P0 band has since landed on #210** — treat the tables below as the original
+costing, not the live backlog.
 
 Three things are worth saying plainly before the table:
 
@@ -23,10 +43,13 @@ Three things are worth saying plainly before the table:
    backup script. The second largest is a bootstrap script. The rest is configuration,
    deletion, and one logging call.
 2. **The biggest *visible* problem is one line.** The app looks like a dead mockup
-   largely because the dev identity ships with 2 of 28 permissions. Fixing that costs
-   a minute and changes the entire impression of the product.
-3. **The most expensive item in the audit is not on this plan at all.** EGP support
-   is 3–6 weeks and is deliberately deferred — see [Decision D3](#the-one-decision-only-you-can-make).
+   largely because the dev identity ships with 2 of **26** permissions. Fixing that
+   costs a minute and changes the entire impression of the product.
+3. **EGP was deferred in this snapshot.** The section
+   [The one decision only you can make](#the-one-decision-only-you-can-make) still
+   records the open question as of `d8418cea2`. **#210’s living Docs/21 records the
+   operator decision that EGP is the main currency** and scopes the EGP program there.
+   Do not re-decide EGP from this frozen text — follow #210.
 
 ---
 
@@ -53,15 +76,19 @@ item is easier to judge once you can actually operate the UI.
 
 | # | Change | File | Time |
 | --- | --- | --- | --- |
-| W0.1 | Create repo-root `.env`; set `VITE_DEV_GATEWAY_ROLE=finance_admin` and `UMS_TRUSTED_GATEWAY_TOKEN` | `.env` (new, repo root) | 15 min |
-| W0.2 | Add `"/org-units"` and `"/users"` to `TENANT_SCOPED_ROUTES` | `frontend/vite.config.ts:13-32` | 5 min |
+| W0.1 | Create repo-root `.env`; set `VITE_DEV_GATEWAY_ROLE=finance_admin` (or `corporate_admin` when creating users) and `UMS_TRUSTED_GATEWAY_TOKEN` | `.env` (new, repo root) | 15 min |
+| W0.2 | Add `"/org-units"` and `"/users"` to `TENANT_SCOPED_ROUTES` (residual: also `"/security"` for Docs/23 A2) | `frontend/vite.config.ts:13-32` | 5 min |
 | W0.3 | Restart the dev server, click through every view, write down what is still dead | — | 30 min |
 
 **W0.1 is the single highest-leverage change in this document.** The shipped default
 role is `assistant_analyst` (`vite.config.ts:69`), which `auth/seed.py` grants exactly
-two permissions — `VIEW_ANALYTICS` and `VIEW_CONFIDENCE` — out of 28. Every write
+two permissions — `VIEW_ANALYTICS` and `VIEW_CONFIDENCE` — out of **26**. Every write
 action and most reads are denied before they reach any logic. You have been demoing
 the product through its second-most-restricted role.
+
+> **Role split (Docs/23):** `finance_admin` is right for the finance UI
+> (`roles.assign` yes). User creation (`POST /users`) needs `users.manage` → use
+> `corporate_admin` (or `super_owner`) for that session.
 
 > ⚠️ **The file is the repo-root `.env`, not `frontend/.env`.** `envDir` is pinned to
 > the repo root (`vite.config.ts:41-51,93,151`) and the comment at `:38` records that
@@ -276,19 +303,25 @@ re-request workaround, and a note that a connector-only month cannot be locked a
 
 ## The one decision only you can make
 
-Everything about currency hangs on one question that has been open since PR #42 and is
-recorded, unanswered, at `Docs/16_OPEN_DECISIONS.md:70-71`:
+> ⚠️ **Status vs #210.** This section is the **snapshot-time** open question at
+> `d8418cea2`. PR **#210**’s living Docs/21 records that the operator decided **EGP
+> is the main currency** and scopes the EGP program there. Prefer #210 for current
+> EGP sequencing; keep the text below as the historical decision frame (and the
+> standing no-FX tripwire).
+
+Everything about currency hung on one question that had been open since PR #42 and is
+recorded at `Docs/16_OPEN_DECISIONS.md:70-71`:
 
 > **Are USD facts acceptable for the beta, with the EGP bank settlement explained as FX
 > variance — yes or no?**
 
-**If yes** (recommended for the beta): nothing changes. The pipeline is internally
-consistent and the numbers are real. Do P2.2 when convenient.
+**If yes** (was recommended for the beta at snapshot time): nothing changes. The
+pipeline is internally consistent and the numbers are real. Do P2.2 when convenient.
 
 **If no:** that is the EGP program — 3–6 weeks, ~2,154 `*_usd` identifiers, and a
 USD-only design that is *test-locked* by
 `tests/finance/test_finance_no_fx_dependency.py:40-53`. It should be its own milestone
-after the beta proves the rest works.
+after the beta proves the rest works. **#210 adopted this path.**
 
 > ⚠️ **Do not let anyone "shortcut" this through `currency_exchange_rates`.** It looks
 > like a 2-hour win and will be rejected by an existing guard test, four documents, and
@@ -328,8 +361,11 @@ Recorded so they are not re-proposed:
   already has"; is really "introduce a second producer of channel revenue facts and
   defend it against double-counting CMS."
 - **Reconciliation-derived TAX** — 12–20h *plus* an unbounded policy question. The
-  hardcoded `0.30` is the no-treaty rate; **no code change answers what US withholding
-  actually is for an Egyptian content owner.**
+  hardcoded `0.30` is the no-treaty rate in
+  `finance/reconciliation_workflow.py`. The **rate ruling and display-estimate
+  program** (15% treaty copyright royalty; never arm recon from the estimate alone)
+  now live in [`24_US_WITHHOLDING_AND_US_REVENUE_PLAN.md`](24_US_WITHHOLDING_AND_US_REVENUE_PLAN.md)
+  (PR #219). Keep recon dormant until a separate ruling.
 - **`POST /org-units`** — 8–16h; two seeded rows do the job.
 - **react-router** — unnecessary for one operator.
 - **Wiring the currency selector** — that is the EGP program wearing a dropdown.
