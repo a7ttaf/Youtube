@@ -6110,6 +6110,7 @@ def test_execute_restore_fails_verification_when_writers_returned(
     healthy = _restore_psql()
 
     def sequencing_psql(_container: str, sql: str, *, timeout: int) -> str:
+        """Answer the writer count 0 first, 1 on every later read."""
         if "pg_stat_activity" in sql:
             writer_reads["n"] += 1
             return "0\n" if writer_reads["n"] == 1 else "1\n"
@@ -6206,6 +6207,7 @@ def test_staging_directory_gets_the_strict_owner_only_lockdown(
     real_restrict = backup._restrict_run_dir_mode
 
     def recording(path: Path, out_dir: Path, *, strict: bool = False) -> None:
+        """Record each lockdown call, then perform the real restriction."""
         calls.append((path.name, strict))
         real_restrict(path, out_dir, strict=strict)
 

@@ -3293,7 +3293,7 @@ def _is_allowlisted_principal(principal_key: str) -> bool:
 def _principal_matches_owner(
     principal_key: str, owner_key: str, owner_domain: str = ""
 ) -> bool:
-    """Match the current user by bare name or by her FULL domain identity.
+    r"""Match the current user by bare name or by her FULL domain identity.
 
     FIX(codex round-22/23 P2): the old ``endswith("\\\\{owner}")`` suffix match
     accepted ANY domain sharing the basename -- an ACE for ``CORP\\alice`` was
