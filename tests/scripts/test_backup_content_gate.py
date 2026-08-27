@@ -2387,6 +2387,45 @@ def test_prune_expires_quarantined_runs(tmp_path: Path) -> None:
     assert fresh.is_dir()
 
 
+def test_prune_expires_every_quarantine_name_publish_can_emit(tmp_path: Path) -> None:
+    """Retention must age out all FOUR quarantine names, not just the plain one.
+
+    ``_publish_staging_run`` renames to ``destination + .rejected`` and, when
+    that name is taken, to a ``.rejected-<8hex>`` nonce. ``destination`` is
+    ``final_dir`` when the verdict was accepted and ``rejected_dir`` when it was
+    not, so a rejected-verdict run that fails its post-rename durability sync
+    lands on ``.rejected.rejected``. Three of those four matched no retention
+    regex, so each repeated durability/ACL failure left a full database.dump +
+    roles.sql on the backup disk forever. The restore side already refused all
+    four; this is retention reaching parity.
+    """
+
+    def _quarantine(name: str) -> Path:
+        run = tmp_path / name
+        run.mkdir(parents=True)
+        (run / backup.DUMP_NAME).write_bytes(b"PGDMP-placeholder")
+        (run / backup.ROLES_NAME).write_text("CREATE ROLE app_tenant;\n", encoding="utf-8")
+        return run
+
+    suffixes = (
+        ".rejected",  # accepted verdict, plain rename
+        ".rejected-1a2b3c4d",  # accepted verdict, nonce fallback
+        ".rejected.rejected",  # rejected verdict, plain rename
+        ".rejected.rejected-9f8e7d6c",  # rejected verdict, nonce fallback
+    )
+    stale = [_quarantine(f"ums-backup-20250101T000000Z{suffix}") for suffix in suffixes]
+    fresh = [_quarantine(f"ums-backup-20260824T222105Z{suffix}") for suffix in suffixes]
+
+    pruned = backup._prune(tmp_path, keep_days=30, keep_min=7, now=NOW)
+
+    for run in stale:
+        assert run.name in pruned.removed, f"{run.name} must age out of the backup disk"
+        assert not run.exists()
+    for run in fresh:
+        assert run.is_dir(), f"{run.name} is inside the retention window and must survive"
+        assert run.name not in pruned.removed
+
+
 def test_prune_ignores_foreign_directories(tmp_path: Path) -> None:
     """Guard: test_prune_ignores_foreign_directories."""
     (tmp_path / "important-operator-notes").mkdir()

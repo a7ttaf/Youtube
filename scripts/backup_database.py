@@ -218,7 +218,21 @@ PARTIAL_RE = re.compile(r"^ums-backup-\d{8}T\d{6}Z\.partial$")
 # it is not a backup to ``_prune``, not a watermark contribution to the next run,
 # and not restorable to ``restore_database.py``.
 REJECTED_SUFFIX = ".rejected"
-REJECTED_RE = re.compile(r"^ums-backup-(\d{8}T\d{6})Z\.rejected$")
+# FIX: this must match EVERY quarantine name ``_publish_staging_run`` can emit,
+# not just the plain one. Its destination is ``final_dir`` for an accepted
+# verdict and ``rejected_dir`` for a rejected one, and each gets a nonce
+# fallback when the plain rename is taken, so four names are reachable:
+#   ums-backup-<stamp>Z.rejected                    (accepted -> plain)
+#   ums-backup-<stamp>Z.rejected-<8hex>             (accepted -> nonce fallback)
+#   ums-backup-<stamp>Z.rejected.rejected           (rejected verdict, plain)
+#   ums-backup-<stamp>Z.rejected.rejected-<8hex>    (rejected verdict, nonce)
+# The old ``\.rejected$`` form matched only the first, so the other three aged
+# out of nothing: `_prune_side_run_directories` skipped them and
+# `_collect_dated_backup_runs` never saw them, leaving a full database.dump +
+# roles.sql per failure to accumulate until the backup disk filled. The restore
+# side already refused all four (restore_database.py:292); retention had never
+# been brought to parity. Group 1 stays the stamp, so age-pruning is unchanged.
+REJECTED_RE = re.compile(r"^ums-backup-(\d{8}T\d{6})Z(?:\.rejected)+(?:-[0-9a-f]{8})?$")
 STAMP_FORMAT = "%Y%m%dT%H%M%S"
 # How far ahead of now a run directory's own stamp may sit and still be read as
 # history. A stamp is written by THIS script from THIS box's clock, so one in
