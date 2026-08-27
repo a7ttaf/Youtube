@@ -743,6 +743,69 @@ def _foreign_roles_in_roles_sql(body: str, *, superuser: str) -> list[str]:
     return foreign
 
 
+_PRIVILEGED_ATTRIBUTE_TOKENS = frozenset({"LOGIN", "SUPERUSER", "BYPASSRLS"})
+
+
+def _collect_role_attribute_tokens(body: str) -> dict[str, set[str]]:
+    """Map each role name to the uppercase attribute tokens roles.sql emitted."""
+    tokens_by_role: dict[str, set[str]] = {}
+    for raw_statement in body.split(";"):
+        statement = raw_statement.strip()
+        if not statement:
+            continue
+        match = re.match(
+            r"(?:CREATE|ALTER)\s+ROLE\s+(\"?[A-Za-z0-9_]+\"?)\s*(?:WITH)?\s*(.*)",
+            statement,
+            re.IGNORECASE | re.DOTALL,
+        )
+        if not match:
+            continue
+        role_name = match.group(1).strip('"').lower()
+        tail = re.sub(r"\s+", " ", match.group(2)).upper()
+        tokens = {token for token in tail.split(" ") if token.isalpha()}
+        tokens_by_role.setdefault(role_name, set()).update(tokens)
+    return tokens_by_role
+
+
+def _role_privilege_drift_problems(body: str) -> list[str]:
+    """Return app roles carrying LOGIN/SUPERUSER/BYPASSRLS in roles.sql.
+
+    Mirrors ``scripts/backup_database.py::_role_privilege_drift_problems`` --
+    same token set, same app-role scope -- because the two gates must agree:
+    a restore stricter than the publish gate would refuse an archive this
+    repository's own backup was allowed to publish.
+
+    ``_restore_roles`` replays every ALTER ROLE in this file as the bootstrap
+    superuser, so a legacy backup whose app roles had drifted to SUPERUSER,
+    BYPASSRLS or LOGIN would silently grant RLS-bypassing or login-capable
+    sessions -- and the migration history is already at head, so nothing reruns
+    to clear them. The CREATE-anchored allowlist above cannot see it: the drift
+    arrives as ALTER ROLE on a role that is itself allowlisted.
+
+    Whole-token matching is what keeps NOLOGIN / NOSUPERUSER / NOBYPASSRLS --
+    exactly what ``pg_dumpall --roles-only`` emits for these roles -- from
+    matching the enabled forms. Scope is the two application roles only: the
+    bootstrap superuser legitimately carries all three, and any other role is
+    already refused by ``_foreign_roles_in_roles_sql``.
+
+    A MISSING app role is deliberately not flagged here; that is the post-apply
+    catalog check in ``_restore_roles``, which is a live check rather than a
+    text one.
+    """
+    problems: list[str] = []
+    tokens_by_role = _collect_role_attribute_tokens(body)
+    for role in REQUIRED_ROLES:
+        tokens = tokens_by_role.get(role)
+        if tokens is None:
+            continue
+        enabled = sorted(tokens & _PRIVILEGED_ATTRIBUTE_TOKENS)
+        if enabled:
+            problems.append(
+                f"{role}: privileged attributes {', '.join(enabled)} must be revoked"
+            )
+    return problems
+
+
 def _preflight_roles_file(container: str, roles_path: Path, *, timeout: int) -> None:
     """Validate roles.sql read-only, so it can run BEFORE anything destructive.
 
@@ -756,7 +819,8 @@ def _preflight_roles_file(container: str, roles_path: Path, *, timeout: int) -> 
         timeout: Seconds allowed for the superuser lookup.
 
     Raises:
-        RestoreError: On unsupported role DDL, or roles outside the allowlist.
+        RestoreError: On unsupported role DDL, roles outside the allowlist, or
+            an application role carrying LOGIN, SUPERUSER or BYPASSRLS.
     """
     body = roles_path.read_text(encoding="utf-8", errors="replace")
     superuser = _psql(container, "SELECT current_user;", timeout=timeout).strip()
@@ -770,6 +834,21 @@ def _preflight_roles_file(container: str, roles_path: Path, *, timeout: int) -> 
             "roles.sql declares cluster roles outside the UMS restore allowlist: "
             f"{', '.join(sorted(foreign))}. Restore into a dedicated UMS Postgres "
             "container or regenerate roles.sql from the backup source cluster.",
+        )
+    # FIX: reject drifted privileges on the application roles BEFORE
+    # _restore_roles replays them as the bootstrap superuser. The gate above is
+    # anchored to CREATE ROLE, so `ALTER ROLE app_tenant WITH SUPERUSER` in a
+    # legacy roles.sql passed straight through and was applied.
+    drift = _role_privilege_drift_problems(body)
+    if drift:
+        raise RestoreError(
+            EXIT_ROLES_FAILED,
+            "roles.sql grants RLS-bypassing privileges to protected roles: "
+            + "; ".join(drift)
+            + ". These ALTER ROLE attributes would be replayed as the bootstrap "
+            "superuser before the archive loads, and the migration history will "
+            "not rerun to clear them. Regenerate roles.sql from a source cluster "
+            "whose application roles are NOLOGIN, NOSUPERUSER, NOBYPASSRLS.",
         )
 
 

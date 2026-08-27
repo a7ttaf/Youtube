@@ -3771,6 +3771,80 @@ def test_restore_roles_accepts_semicolon_terminated_create_role_lines(
     assert "app_tenant" in present
 
 
+def test_restore_preflight_refuses_privileged_app_role_attributes(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """ALTER ROLE app_tenant WITH SUPERUSER must be refused before it is replayed.
+
+    The foreign-role allowlist is anchored to CREATE ROLE, so drift that arrives
+    as ALTER ROLE on an ALREADY-ALLOWLISTED role passed straight through and was
+    applied by the bootstrap superuser -- handing an RLS-bearing application role
+    BYPASSRLS or LOGIN, with no migration left to rerun and revoke it.
+
+    The accept arm is what stops this being vacuous: it feeds the real
+    ``pg_dumpall --roles-only`` shape, whose NOSUPERUSER / NOLOGIN / NOBYPASSRLS
+    tokens must NOT trip a substring match, alongside a bootstrap superuser that
+    legitimately carries all three.
+    """
+    monkeypatch.setattr(
+        restore,
+        "_run_with_file",
+        lambda *_a, **_k: subprocess.CompletedProcess([], 0, "", ""),
+    )
+
+    clean = tmp_path / restore.ROLES_NAME
+    clean.write_text(
+        "CREATE ROLE postgres;\n"
+        "ALTER ROLE postgres WITH SUPERUSER INHERIT CREATEROLE CREATEDB LOGIN "
+        "REPLICATION BYPASSRLS;\n"
+        "CREATE ROLE app_tenant;\n"
+        "ALTER ROLE app_tenant WITH NOSUPERUSER INHERIT NOCREATEROLE NOCREATEDB "
+        "NOLOGIN NOREPLICATION NOBYPASSRLS;\n"
+        "CREATE ROLE app_platform;\n"
+        "ALTER ROLE app_platform WITH NOSUPERUSER INHERIT NOCREATEROLE NOCREATEDB "
+        "NOLOGIN NOREPLICATION NOBYPASSRLS;\n"
+        "GRANT app_tenant TO app_platform;\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(restore, "_psql", _restore_psql(superuser="postgres"))
+    assert "app_tenant" in restore._restore_roles("fake", clean, timeout=5)
+
+    drifted = tmp_path / "drifted.sql"
+    drifted.write_text(
+        "CREATE ROLE app_tenant;\n"
+        "ALTER ROLE app_tenant WITH SUPERUSER BYPASSRLS LOGIN;\n"
+        "CREATE ROLE app_platform;\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(restore, "_psql", _restore_psql())
+    with pytest.raises(restore.RestoreError) as raised:
+        restore._restore_roles("fake", drifted, timeout=5)
+    assert raised.value.code == restore.EXIT_ROLES_FAILED
+    message = str(raised.value)
+    assert "app_tenant" in message
+    assert "BYPASSRLS, LOGIN, SUPERUSER" in message
+
+    # The negative forms are whole tokens, not substrings of the enabled ones.
+    assert (
+        restore._role_privilege_drift_problems(
+            "ALTER ROLE app_tenant WITH NOSUPERUSER NOLOGIN NOBYPASSRLS;\n"
+        )
+        == []
+    )
+
+
+def test_restore_and_backup_agree_on_which_attributes_are_privileged() -> None:
+    """A restore stricter than the publish gate would refuse a valid archive.
+
+    The two drift gates are separate implementations in separate scripts, so the
+    token sets are pinned to each other here: if one side gains a token the other
+    has not, a roles.sql the backup was allowed to PUBLISH would be refused on
+    the way back in -- an archive that can never be restored.
+    """
+    assert restore._PRIVILEGED_ATTRIBUTE_TOKENS == backup._PRIVILEGED_ATTRIBUTE_TOKENS
+    assert tuple(restore.REQUIRED_ROLES) == backup._REQUIRED_UNPRIVILEGED_ROLES
+
+
 def test_backup_roles_rejects_foreign_cluster_roles(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
