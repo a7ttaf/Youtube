@@ -743,8 +743,21 @@ def _foreign_roles_in_roles_sql(body: str, *, superuser: str) -> list[str]:
     return foreign
 
 
-def _restore_roles(container: str, roles_path: Path, *, timeout: int) -> list[str]:
-    """Apply roles.sql and return the required roles present afterward."""
+def _preflight_roles_file(container: str, roles_path: Path, *, timeout: int) -> None:
+    """Validate roles.sql read-only, so it can run BEFORE anything destructive.
+
+    Both checks are non-mutating -- a text scan of the file plus one
+    ``SELECT current_user`` -- which is why they are safe to run against the
+    target before ``--allow-nonempty`` drops it.
+
+    Args:
+        container: Container name to resolve the bootstrap superuser through.
+        roles_path: The archive's ``roles.sql``.
+        timeout: Seconds allowed for the superuser lookup.
+
+    Raises:
+        RestoreError: On unsupported role DDL, or roles outside the allowlist.
+    """
     body = roles_path.read_text(encoding="utf-8", errors="replace")
     superuser = _psql(container, "SELECT current_user;", timeout=timeout).strip()
     unsupported = _unsupported_role_ddl_in_roles_sql(body)
@@ -758,6 +771,11 @@ def _restore_roles(container: str, roles_path: Path, *, timeout: int) -> list[st
             f"{', '.join(sorted(foreign))}. Restore into a dedicated UMS Postgres "
             "container or regenerate roles.sql from the backup source cluster.",
         )
+
+
+def _restore_roles(container: str, roles_path: Path, *, timeout: int) -> list[str]:
+    """Apply roles.sql and return the required roles present afterward."""
+    _preflight_roles_file(container, roles_path, timeout=timeout)
     argv = _container_sh(
         container,
         'exec psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" --no-password -v ON_ERROR_STOP=0 -q -f -',
@@ -1131,6 +1149,14 @@ def _execute_restore(
         # operator explicitly consented to replace, and a failed apply leaves
         # only that pristine shell behind. It also drops the blanket PUBLIC
         # CREATE grant the previous CREATE SCHEMA path re-introduced on PG18.
+        # FIX: validate roles.sql BEFORE the drop, not after. These checks are
+        # read-only, but they used to run inside _restore_roles -- i.e. after
+        # _recreate_target_database had already destroyed the target. A backup
+        # whose bootstrap superuser differs from this target, or one carrying
+        # unsupported role DDL, was therefore rejected only once the original
+        # database was irrecoverable. Preflighting turns that into a refusal
+        # that changes nothing.
+        _preflight_roles_file(container, backup_dir / ROLES_NAME, timeout=args.timeout)
         target_db = _container_default_database(container, timeout=args.timeout)
         _recreate_target_database(container, target_db, timeout=args.timeout)
     roles = _restore_roles(container, backup_dir / ROLES_NAME, timeout=args.timeout)

@@ -3928,6 +3928,13 @@ def test_publish_staging_run_quarantine_survives_a_taken_rejected_name(
     destination = tmp_path / "accepted-run"
     blocked = tmp_path / ("accepted-run" + backup.REJECTED_SUFFIX)
     blocked.mkdir()
+    # The blocker must be NON-EMPTY. POSIX rename(2) lets a directory replace an
+    # EMPTY directory, so an empty blocker is silently replaceable on Linux: the
+    # first quarantine candidate would succeed, the nonce fallback would never be
+    # exercised, and the assertion below would fail there while passing on
+    # Windows (which refuses either way). An occupant makes the collision real on
+    # every supported platform.
+    (blocked / "occupant").write_bytes(b"x")
 
     def _flush_refused(parent: Path) -> None:
         """Every durability sync after publication fails on this disk."""
@@ -4038,8 +4045,13 @@ def test_run_is_published_backup_requires_artifact_metadata(tmp_path: Path) -> N
 def test_execute_restore_recreates_target_only_when_allow_nonempty(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """--allow-nonempty must recreate the whole target database before roles
-    or data apply, so failures leave only a pristine empty shell behind.
+    """--allow-nonempty must recreate the whole target before roles or data apply.
+
+    And -- the arm added for the round-13 P1 -- roles.sql's READ-ONLY validation
+    must run BEFORE the recreate. Those checks used to live inside
+    _restore_roles, i.e. after DROP DATABASE had already destroyed the target, so
+    a backup whose bootstrap superuser differed from this target was rejected
+    only once the original data was irrecoverable.
     """
     from types import SimpleNamespace
 
@@ -4047,6 +4059,11 @@ def test_execute_restore_recreates_target_only_when_allow_nonempty(
     monkeypatch.setattr(restore, "_await_postgres", lambda *a, **k: None)
     monkeypatch.setattr(
         restore, "_guard_empty", lambda *a, **k: order.append("guard")
+    )
+    monkeypatch.setattr(
+        restore,
+        "_preflight_roles_file",
+        lambda container, path, timeout: order.append("preflight"),
     )
     monkeypatch.setattr(
         restore,
@@ -4084,10 +4101,11 @@ def test_execute_restore_recreates_target_only_when_allow_nonempty(
     assert _run(allow_nonempty=True) is True
     assert (
         order.index("guard")
+        < order.index("preflight")
         < order.index("dbname")
         < order.index("recreate:appdb")
         < order.index("roles")
-    )
+    ), "roles.sql must be validated BEFORE the target is dropped"
 
     assert _run(allow_nonempty=False) is True
     assert "recreate:appdb" not in order and "dbname" not in order

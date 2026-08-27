@@ -467,6 +467,18 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     args = parser.parse_args(argv)
     if args.display_name is not None and len(args.display_name) != len(args.email):
         parser.error("--display-name must be repeated exactly as many times as --email")
+    # FIX: reject blank org names HERE, before any database work. OrgUnitORM.name
+    # is only NOT NULL -- there is no nonblank constraint -- so `--sector-name ""`
+    # or a whitespace-only value committed active deterministic SECTOR/COMPANY
+    # rows with unusable labels. Worse, the ids are deterministic, so a later run
+    # with the defaults could not repair them: it read the blank row as drift and
+    # refused, leaving the operator to fix the database by hand. Normalized so a
+    # padded name is stored trimmed rather than creating a near-duplicate label.
+    for flag, value in (("--sector-name", args.sector_name), ("--company-name", args.company_name)):
+        if not value.strip():
+            parser.error(f"{flag} must not be blank or whitespace-only")
+    args.sector_name = args.sector_name.strip()
+    args.company_name = args.company_name.strip()
     return args
 
 

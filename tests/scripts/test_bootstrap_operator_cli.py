@@ -1614,3 +1614,60 @@ def test_the_real_repository_raises_conflict_on_a_losing_concurrent_insert(tmp_p
             loser_session.rollback()
     finally:
         dispose_cached_engine(database_url)
+
+
+@pytest.mark.parametrize("flag", ["--sector-name", "--company-name"])
+@pytest.mark.parametrize("value", ["", "   ", "\t\n"])
+def test_bootstrap_refuses_a_blank_org_name(tmp_path, flag, value, capsys):
+    """A blank org name must be refused before ANY row is written.
+
+    ``OrgUnitORM.name`` is only NOT NULL -- no nonblank constraint -- so a blank
+    value used to commit active deterministic SECTOR/COMPANY rows with unusable
+    labels. Because the ids are deterministic, a later run with the defaults
+    could not repair them: it read the blank row as drift and refused, leaving a
+    manual database repair. Nothing may be created, not even the account.
+    """
+    module = _load_script()
+    database_url = _make_database(tmp_path)
+
+    # argparse refuses at parse time, so this exits rather than returning -- which
+    # is the point: it happens before any session, tenant load, or write.
+    with pytest.raises(SystemExit) as exited:
+        _run(module, database_url, "--email", _OPERATOR_EMAIL, "--org-skeleton", flag, value)
+
+    assert exited.value.code == 2, "a blank org name must exit 2"
+    assert _users(database_url) == [], "no account may be created on a refused run"
+    engine = create_engine(database_url)
+    try:
+        with Session(engine) as session:
+            assert list(session.scalars(select(OrgUnitORM)).all()) == [], "no org rows either"
+    finally:
+        engine.dispose()
+
+
+def test_bootstrap_trims_a_padded_org_name(tmp_path):
+    """A padded name is stored trimmed, not as a near-duplicate label."""
+    module = _load_script()
+    database_url = _make_database(tmp_path)
+
+    assert (
+        _run(
+            module,
+            database_url,
+            "--email",
+            _OPERATOR_EMAIL,
+            "--org-skeleton",
+            "--sector-name",
+            "  Padded Sector  ",
+        )
+        == 0
+    )
+
+    engine = create_engine(database_url)
+    try:
+        with Session(engine) as session:
+            names = {row.name for row in session.scalars(select(OrgUnitORM)).all()}
+    finally:
+        engine.dispose()
+    assert "Padded Sector" in names
+    assert "  Padded Sector  " not in names
