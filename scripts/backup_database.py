@@ -1689,10 +1689,32 @@ def _read_watermark_file(out_dir: Path) -> tuple[dict[str, int], str | None]:
 #                run manifests, which can only push it back UP.
 #              * Every accepted run's manifest. Prune them all and the file
 #                still holds the mark.
-#              Only losing BOTH resets it, and that state -- no watermark file
-#              and no accepted run -- is indistinguishable from a genuinely new
-#              output directory, which ``_evaluate_content`` refuses without
+#              Losing BOTH resets it outright, and that state -- no watermark
+#              file and no accepted run -- is indistinguishable from a genuinely
+#              new output directory, which ``_evaluate_content`` refuses without
 #              --establish-watermark rather than waving through.
+#
+#            KNOWN GAP (codex round-11 P1, not closed here). The two homes are
+#            independent, but they are not equally durable: retention actively
+#            erodes the second one. ``_retention_protected_names`` protects the
+#            last ``keep_min`` runs plus the single NEWEST content-bearing run
+#            -- not the run that supplies each per-table maximum. So an older
+#            run holding the high mark can be pruned while watermark.json still
+#            carries it. That is safe on its own. But if watermark.json is then
+#            lost or corrupted, the rebuild folds only the surviving, lower
+#            manifests, and the mark silently drops: prune a 1000-row run, keep
+#            200-row runs, lose the file, and a later 25-row run clears the 10%
+#            collapse check it should have failed against 1000.
+#            This needs TWO failures (a pruned max-bearing run AND a lost
+#            watermark file) plus a real source-side collapse in that window,
+#            and it destroys no backups -- the harm is one undetected data loss
+#            going unflagged. Closing it means either teaching retention to
+#            protect every maximum-supplying manifest (new logic on the one
+#            destructive path) or persisting recoverable per-table maximum
+#            history inside watermark.json alongside ``resets``. The second is
+#            cheaper and does not touch pruning. Deferred pending that call --
+#            documented here rather than left as a comment claiming an
+#            invariant the code does not hold.
 #
 #            ``reset_after`` is what makes --accept-content-drop stick: runs at
 #            or older than the reset are excluded from the rebuild, so a
