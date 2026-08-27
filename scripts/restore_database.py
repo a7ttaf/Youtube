@@ -793,13 +793,13 @@ def _role_sql_comment_end(text: str, index: int) -> int | None:
 
 
 def _role_sql_quoted_end(text: str, index: int, quote: str, backslashes: bool) -> int:
-    """Return the offset just past the quoted run that starts at ``index``.
+    r"""Return the offset just past the quoted run that starts at ``index``.
 
     A doubled quote (``''`` in a literal, ``""`` in an identifier) is an escape,
     not a terminator. ``backslashes`` is set for an ``E'...'`` literal and for a
     plain literal while ``standard_conforming_strings`` is off -- MEASURED on
     PostgreSQL 18.6: with ``SET standard_conforming_strings = off;`` earlier in
-    the file, psql reads ``'a\\';b'`` as ONE literal and runs the statement
+    the file, psql reads ``'a\';b'`` as ONE literal and runs the statement
     after it, emitting only a WARNING. A scanner without this ends the literal
     early and then swallows the rest of the file inside a phantom string.
     """
@@ -834,6 +834,38 @@ def _role_sql_starts_escape_string(text: str, index: int) -> bool:
         return False
     previous = text[index - 1] if index else ""
     return not (previous.isalnum() or previous == "_")
+
+
+def _role_sql_span(text: str, index: int, escapes: bool) -> tuple[str, int] | None:
+    """Classify the run at ``index`` that psql lexes as a single unit.
+
+    Returns ``(kind, end)`` for a comment, a meta-command, a quoted identifier
+    or a literal, and None for an ordinary character the caller should consume
+    one at a time. Every rule about where a statement may NOT be split lives
+    here, which is what keeps ``_scan_role_sql`` a dispatch rather than a
+    second, subtly different parser.
+
+    ``escapes`` is the file's current ``standard_conforming_strings`` state; it
+    only affects a PLAIN literal, since ``E'...'`` honours backslashes either
+    way.
+    """
+    comment_end = _role_sql_comment_end(text, index)
+    if comment_end is not None:
+        return "comment", comment_end
+    char = text[index]
+    if char == "\\":
+        end = text.find("\n", index)
+        return "meta", len(text) if end < 0 else end
+    if char == '"':
+        return "ident", _role_sql_quoted_end(text, index, '"', False)
+    if char == "'" or _role_sql_starts_escape_string(text, index):
+        quote_at = index if char == "'" else index + 1
+        return "literal", _role_sql_quoted_end(text, quote_at, "'", char != "'" or escapes)
+    if char == "$":
+        dollar_end = _role_sql_dollar_end(text, index)
+        if dollar_end is not None:
+            return "literal", dollar_end
+    return None
 
 
 def _scan_role_sql(body: str) -> list[str]:
@@ -892,46 +924,29 @@ def _scan_role_sql(body: str) -> list[str]:
         statements.append(collapsed)
 
     while index < len(text):
-        char = text[index]
-        comment_end = _role_sql_comment_end(text, index)
-        if comment_end is not None:
-            raw.append(" ")
-            masked.append(" ")
-            index = comment_end
-            continue
-        if char == "\\":
-            end = text.find("\n", index)
-            end = len(text) if end < 0 else end
-            statements.append(" ".join(text[index:end].split()))
-            index = end
-            continue
-        if char == '"':
-            end = _role_sql_quoted_end(text, index, '"', False)
-            raw.append(text[index:end])
-            masked.append(text[index:end])
-            index = end
-            continue
-        if char == "'" or _role_sql_starts_escape_string(text, index):
-            quote_at = index if char == "'" else index + 1
-            end = _role_sql_quoted_end(text, quote_at, "'", char != "'" or escapes[0])
-            raw.append(text[index:end])
-            masked.append(_MASKED_ROLE_SQL_LITERAL)
-            index = end
-            continue
-        if char == "$":
-            dollar_end = _role_sql_dollar_end(text, index)
-            if dollar_end is not None:
-                raw.append(text[index:dollar_end])
-                masked.append(_MASKED_ROLE_SQL_LITERAL)
-                index = dollar_end
-                continue
-        if char == ";":
-            flush()
+        span = _role_sql_span(text, index, escapes[0])
+        if span is None:
+            char = text[index]
+            if char == ";":
+                flush()
+            else:
+                raw.append(char)
+                masked.append(char)
             index += 1
             continue
-        raw.append(char)
-        masked.append(char)
-        index += 1
+        kind, end = span
+        if kind == "meta":
+            statements.append(" ".join(text[index:end].split()))
+        elif kind == "comment":
+            raw.append(" ")
+            masked.append(" ")
+        elif kind == "ident":
+            raw.append(text[index:end])
+            masked.append(text[index:end])
+        else:
+            raw.append(text[index:end])
+            masked.append(_MASKED_ROLE_SQL_LITERAL)
+        index = end
     flush()
     return statements
 
@@ -1166,6 +1181,30 @@ def _role_ddl_membership_edges(tokens: list[tuple[str, str]]) -> list[tuple[str,
     return edges
 
 
+def _role_sql_word_index(tokens: list[tuple[str, str]], word: str) -> int | None:
+    """Return the position of the first bare ``word``, or None if absent."""
+    for position, token in enumerate(tokens):
+        if token[0] == "word" and token[1].upper() == word:
+            return position
+    return None
+
+
+def _alter_group_membership_edges(tokens: list[tuple[str, str]]) -> list[tuple[str, str]]:
+    """Return the edges an ``ALTER GROUP <g> ADD USER <list>`` statement makes.
+
+    Returning [] when either keyword is missing is the whole point of splitting
+    this out: ``ALTER ROLE app_tenant WITH NOLOGIN`` reaches here too, and it
+    creates no membership.
+    """
+    words = _role_sql_words(tokens)
+    start = _role_sql_word_index(tokens, "USER")
+    if "ADD" not in words or start is None:
+        return []
+    group = _role_sql_identifier(tokens[2])
+    names, _end = _role_sql_name_list(tokens, start + 1)
+    return [(name, group) for name in names]
+
+
 def _role_membership_edges(statement: str) -> list[tuple[str, str]]:
     """Return every (member, granted) edge one statement would create.
 
@@ -1186,25 +1225,17 @@ def _role_membership_edges(statement: str) -> list[tuple[str, str]]:
     noun = tokens[1][1].upper()
     if verb == "CREATE" and noun in {"ROLE", "USER", "GROUP"}:
         return _role_ddl_membership_edges(tokens)
-    words = _role_sql_words(tokens)
-    if verb == "ALTER" and noun in {"GROUP", "ROLE"} and "ADD" in words and "USER" in words:
-        group = _role_sql_identifier(tokens[2])
-        start = next(
-            position
-            for position, token in enumerate(tokens)
-            if token[0] == "word" and token[1].upper() == "USER"
-        )
-        names, _end = _role_sql_name_list(tokens, start + 1)
-        return [(name, group) for name in names]
+    if verb == "ALTER" and noun in {"GROUP", "ROLE"}:
+        return _alter_group_membership_edges(tokens)
     return []
 
 
 def _role_membership_problems(body: str) -> list[str]:
-    """Return the roles.sql statements that put an app role into a membership.
+    r"""Return the roles.sql statements that put an app role into a membership.
 
     FIX: ``GRANT <bootstrap superuser> TO app_tenant;`` matched neither the
     CREATE-anchored allowlist nor the attribute-drift gate -- a GRANT can never
-    match a ``(?:CREATE|ALTER)\\s+ROLE`` pattern -- and ``_restore_roles``
+    match a ``(?:CREATE|ALTER)\s+ROLE`` pattern -- and ``_restore_roles``
     replayed it. The post-apply check only asserts the two roles EXIST; it
     never reads pg_auth_members. The result is not a drifted attribute but an
     edge in the authorization graph, and that edge is enough on its own.
@@ -1257,7 +1288,7 @@ def _role_sql_setting_name(tokens: list[tuple[str, str]]) -> str:
 
 
 def _unsupported_role_statement_problems(body: str) -> list[str]:
-    """Return roles.sql statements that are never legitimate here.
+    r"""Return roles.sql statements that are never legitimate here.
 
     Each of these was MEASURED on PostgreSQL 18.6 through the exact
     ``_restore_roles`` invocation, and none of them appears in
@@ -1276,7 +1307,7 @@ def _unsupported_role_statement_problems(body: str) -> list[str]:
     * ``SET ROLE`` / ``SET SESSION AUTHORIZATION`` change who the remainder of
       the file runs as.
     * ``DO`` is already refused by ``_unsupported_role_ddl_in_roles_sql``, but
-      that check is a raw-text ``^\\s*DO`` search that a leading block comment
+      that check is a raw-text ``^\s*DO`` search that a leading block comment
       walks past; this one reads the scanned statement.
     """
     problems: list[str] = []
@@ -1408,10 +1439,10 @@ def _role_privilege_drift_problems(body: str) -> list[str]:
 
 
 def _created_role_names(body: str) -> list[str]:
-    """Return every role name a CREATE ROLE/USER/GROUP in roles.sql declares.
+    r"""Return every role name a CREATE ROLE/USER/GROUP in roles.sql declares.
 
     FIX: the two foreign-role gates and the publish gate's declaration check
-    each ran their own line-anchored ``^\\s*CREATE`` regex, and they failed on
+    each ran their own line-anchored ``^\s*CREATE`` regex, and they failed on
     orthogonal axes. A UTF-8 BOM, a leading block comment, a second CREATE on
     the same line, or a CREATE after a quoted semicolon each hid a foreign
     ``SUPERUSER LOGIN`` role while preflight reported success -- and the SAME
