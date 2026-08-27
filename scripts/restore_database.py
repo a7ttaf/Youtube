@@ -914,6 +914,54 @@ def _restore_roles(container: str, roles_path: Path, *, timeout: int) -> list[st
 #   - File: scripts/backup_database.py -> ``_dump_database`` produced the
 #     archive this restores.
 # ============================================================================
+# ============================================================================
+# Purpose: Prove the archive is READABLE by THIS container's pg_restore before
+#          --allow-nonempty drops the target. The sha256 digest proves the bytes
+#          match what backup wrote; it does NOT prove this container can parse
+#          them -- a newer archive format passes the digest and is still
+#          unrestorable here.
+# Database/ORM: None. ``pg_restore --list`` reads the archive header and table
+#               of contents; it opens no connection and writes nothing.
+# Standards: Fail-closed BEFORE _recreate_target_database, exactly like the
+#            roles.sql preflight beside it. A non-zero exit is
+#            EXIT_RESTORE_FAILED -- the same code the later real pg_restore
+#            would have produced, so the documented exit table is unchanged.
+# Blast Radius: Disaster recovery. Turns "target destroyed, then pg_restore
+#               fails" into a refusal that changes nothing.
+# Connections:
+#   - File: scripts/backup_database.py -> ``_pg_restore_list`` runs the same
+#     read-only listing at BACKUP time to reject an unrestorable dump.
+# ============================================================================
+def _preflight_dump_readable(container: str, dump_path: Path, *, timeout: int) -> None:
+    """Refuse an archive this container's pg_restore cannot read, read-only.
+
+    Note the limit honestly: ``--list`` reads the header and TOC, so it catches
+    an unreadable header, a corrupt TOC and a format version this pg_restore
+    does not support -- the failures that would otherwise surface only AFTER
+    the drop. It does not read the data section, so it is not a promise the
+    restore will succeed; it is a promise the archive is not obviously
+    unrestorable before anything irreversible happens.
+
+    Args:
+        container: Container whose pg_restore must be able to read the archive.
+        dump_path: The archive to probe, streamed on stdin.
+        timeout: Seconds allowed for the listing.
+
+    Raises:
+        RestoreError: When this container's pg_restore cannot read the archive.
+    """
+    argv = _container_sh(container, "exec pg_restore --list")
+    completed = _run_with_file(argv, timeout=timeout, source=dump_path)
+    if completed.returncode != 0:
+        raise RestoreError(
+            EXIT_RESTORE_FAILED,
+            f"pg_restore --list could not read {dump_path.name} inside "
+            f"{container} -- a newer archive format, or a corrupt header or "
+            f"table of contents: {completed.stderr.strip()}. "
+            "The target database was NOT dropped.",
+        )
+
+
 def _restore_data(container: str, dump_path: Path, *, timeout: int, clean: bool) -> None:
     """Restore database.dump into the target via pg_restore --single-transaction."""
     flags = "--no-password --single-transaction"
@@ -1236,6 +1284,13 @@ def _execute_restore(
         # database was irrecoverable. Preflighting turns that into a refusal
         # that changes nothing.
         _preflight_roles_file(container, backup_dir / ROLES_NAME, timeout=args.timeout)
+        # FIX: prove the ARCHIVE is readable here too, not just roles.sql. The
+        # digest check on the way in only proves the bytes match what backup
+        # wrote -- a newer-format archive hashes correctly and is still
+        # unreadable by this container's pg_restore, which was discovered only
+        # when _restore_data ran, one step AFTER the drop had committed. Both
+        # preflights are read-only, so both belong before it.
+        _preflight_dump_readable(container, backup_dir / DUMP_NAME, timeout=args.timeout)
         target_db = _container_default_database(container, timeout=args.timeout)
         _recreate_target_database(container, target_db, timeout=args.timeout)
     roles = _restore_roles(container, backup_dir / ROLES_NAME, timeout=args.timeout)

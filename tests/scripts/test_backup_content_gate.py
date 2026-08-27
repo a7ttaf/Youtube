@@ -4181,6 +4181,11 @@ def test_execute_restore_recreates_target_only_when_allow_nonempty(
     )
     monkeypatch.setattr(
         restore,
+        "_preflight_dump_readable",
+        lambda container, path, timeout: order.append("dumpcheck"),
+    )
+    monkeypatch.setattr(
+        restore,
         "_container_default_database",
         lambda container, timeout: order.append("dbname") or "appdb",
     )
@@ -4216,13 +4221,118 @@ def test_execute_restore_recreates_target_only_when_allow_nonempty(
     assert (
         order.index("guard")
         < order.index("preflight")
+        < order.index("dumpcheck")
         < order.index("dbname")
         < order.index("recreate:appdb")
         < order.index("roles")
-    ), "roles.sql must be validated BEFORE the target is dropped"
+    ), "roles.sql AND the archive must be validated BEFORE the target is dropped"
 
     assert _run(allow_nonempty=False) is True
     assert "recreate:appdb" not in order and "dbname" not in order
+    assert "dumpcheck" not in order, (
+        "the empty-target path drops nothing, so it must not pay for the probe"
+    )
+
+
+def test_preflight_dump_readable_fails_closed_on_a_nonzero_listing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The probe itself must refuse, and must be read-only about how it asks.
+
+    The ordering test above monkeypatches this function out, so without this
+    one the probe's own body would be unguarded: it would prove the CALL SITE
+    is wired up while a probe that swallowed a non-zero exit stayed green.
+    """
+    dump = tmp_path / restore.DUMP_NAME
+    dump.write_bytes(b"PGDMP not-really")
+    seen: list[list[str]] = []
+
+    def _listing(exit_code: int, stderr: str):
+        """Return a _run_with_file stub with a fixed pg_restore --list result."""
+
+        def fake_run_with_file(argv: list[str], *, timeout: int, source: Path):
+            """Record the argv and answer with the configured result."""
+            _ = (timeout, source)
+            seen.append(argv)
+            return subprocess.CompletedProcess(argv, exit_code, "", stderr)
+
+        return fake_run_with_file
+
+    monkeypatch.setattr(
+        restore, "_run_with_file", _listing(1, "unsupported version (1.16)")
+    )
+    with pytest.raises(restore.RestoreError) as raised:
+        restore._preflight_dump_readable("container", dump, timeout=5)
+    assert raised.value.code == restore.EXIT_RESTORE_FAILED
+    assert "unsupported version" in str(raised.value)
+    assert "NOT dropped" in str(raised.value)
+
+    joined = " ".join(seen[0])
+    assert "pg_restore --list" in joined
+    # --list neither connects nor writes; a probe that did either would not be
+    # safe to run before the drop, which is the whole point of running it there.
+    assert "-d " not in joined and "--clean" not in joined
+
+    monkeypatch.setattr(restore, "_run_with_file", _listing(0, ""))
+    restore._preflight_dump_readable("container", dump, timeout=5)
+
+
+def test_execute_restore_refuses_an_unreadable_archive_before_dropping_target(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An archive this container's pg_restore cannot read must be refused first.
+
+    The sha256 digest is checked on the way in, but it only proves the bytes
+    match what backup wrote. A newer archive format hashes correctly and is
+    still unreadable here -- and that was discovered by _restore_data, one step
+    AFTER DROP DATABASE had committed, leaving an empty shell and no original.
+
+    The load-bearing assertion is "recreate" not in order: without it this would
+    only prove the probe ran, not that the drop was actually skipped.
+    """
+    from types import SimpleNamespace
+
+    order: list[str] = []
+    monkeypatch.setattr(restore, "_await_postgres", lambda *a, **k: None)
+    monkeypatch.setattr(restore, "_guard_empty", lambda *a, **k: None)
+    monkeypatch.setattr(
+        restore, "_preflight_roles_file", lambda *a, **k: order.append("preflight")
+    )
+
+    def _reject(container: str, path: Path, timeout: int) -> None:
+        """Stand in for a container whose pg_restore cannot read the archive."""
+        _ = (container, path, timeout)
+        order.append("dumpcheck")
+        raise restore.RestoreError(
+            restore.EXIT_RESTORE_FAILED,
+            "pg_restore --list could not read database.dump",
+        )
+
+    monkeypatch.setattr(restore, "_preflight_dump_readable", _reject)
+    monkeypatch.setattr(
+        restore,
+        "_container_default_database",
+        lambda *a, **k: order.append("dbname") or "appdb",
+    )
+    monkeypatch.setattr(
+        restore, "_recreate_target_database", lambda *a, **k: order.append("recreate")
+    )
+    monkeypatch.setattr(
+        restore, "_restore_roles", lambda *a, **k: order.append("roles") or set()
+    )
+    monkeypatch.setattr(restore, "_restore_data", lambda *a, **k: order.append("data"))
+    monkeypatch.setattr(restore, "_verify", lambda *a, **k: True)
+
+    args = SimpleNamespace(
+        timeout=5, allow_nonempty=True, wait_for_postgres=60, docker_timeout=5
+    )
+    with pytest.raises(restore.RestoreError) as raised:
+        restore._execute_restore("container", tmp_path, args, {})
+
+    assert raised.value.code == restore.EXIT_RESTORE_FAILED
+    assert order == ["preflight", "dumpcheck"], (
+        f"the target must be untouched after the probe refuses, got {order}"
+    )
 
 
 def test_windows_dacl_parser_fail_closed() -> None:
