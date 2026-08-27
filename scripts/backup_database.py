@@ -2156,38 +2156,16 @@ def _created_role_names(body: str) -> list[str]:
     return names
 
 
-def _validate_dump_roles_covered(
-    *,
-    listing: str | None,
-    roles_body: str,
-    acl_grantees: set[str] | None = None,
-    snapshot_owners: set[str] | None = None,
-    superuser: str = "",
-) -> None:
-    """Refuse a backup when the archive references roles absent from roles.sql.
+def _refuse_roles_body_text_gates(roles_body: str, superuser: str) -> None:
+    """Run the five roles.sql text gates in their fail-closed order.
 
-    Args:
-        listing: ``pg_restore --list`` output, or None under ``--no-verify-dump``.
-            None skips only the TOC-derived owner scan; it never relaxes the
-            privilege-drift check, the snapshot ACL-grantee coverage check or
-            the snapshot owner-coverage check, all of which read sources the
-            TOC listing is not needed for.
-        roles_body: Contents of ``roles.sql`` as captured by ``_dump_roles``.
-        acl_grantees: Grantee roles collected from the dump snapshot via
-            ``ACL_GRANTEE_SQL``. Independent of the TOC listing.
-        snapshot_owners: Owner roles collected from the dump snapshot via
-            ``OWNER_ROLES_SQL``. Under ``--no-verify-dump`` this is the only
-            owner source, so owner coverage no longer depends on the flag.
-
-    Raises:
-        BackupError: On drifted privileges, or on a referenced role that
-            ``roles.sql`` does not declare.
+    FIX: mirror the restore-side gates exactly. A restore-only gate turns
+    every archive already carrying the edge into an unrestorable one; a
+    publish-only gate keeps minting archives the restore has to catch. Only
+    the lockout gate needs the bootstrap superuser, which is why it is
+    conditionally evaluated -- the others belong on this path precisely
+    because it stays enforced under --no-verify-dump.
     """
-    # FIX: mirror the restore-side gates exactly. A restore-only gate turns
-    # every archive already carrying the edge into an unrestorable one; a
-    # publish-only gate keeps minting archives the restore has to catch. None
-    # of these four needs the bootstrap superuser, which is why they belong on
-    # this path -- the one that stays enforced under --no-verify-dump.
     meta_commands = _role_sql_meta_command_problems(roles_body)
     if meta_commands:
         raise BackupError(
@@ -2233,6 +2211,36 @@ def _validate_dump_roles_covered(
             + ". The restore replays these as the bootstrap superuser and the "
             "migration history will not rerun to clear them; refusing to publish.",
         )
+
+
+def _validate_dump_roles_covered(
+    *,
+    listing: str | None,
+    roles_body: str,
+    acl_grantees: set[str] | None = None,
+    snapshot_owners: set[str] | None = None,
+    superuser: str = "",
+) -> None:
+    """Refuse a backup when the archive references roles absent from roles.sql.
+
+    Args:
+        listing: ``pg_restore --list`` output, or None under ``--no-verify-dump``.
+            None skips only the TOC-derived owner scan; it never relaxes the
+            privilege-drift check, the snapshot ACL-grantee coverage check or
+            the snapshot owner-coverage check, all of which read sources the
+            TOC listing is not needed for.
+        roles_body: Contents of ``roles.sql`` as captured by ``_dump_roles``.
+        acl_grantees: Grantee roles collected from the dump snapshot via
+            ``ACL_GRANTEE_SQL``. Independent of the TOC listing.
+        snapshot_owners: Owner roles collected from the dump snapshot via
+            ``OWNER_ROLES_SQL``. Under ``--no-verify-dump`` this is the only
+            owner source, so owner coverage no longer depends on the flag.
+
+    Raises:
+        BackupError: On drifted privileges, or on a referenced role that
+            ``roles.sql`` does not declare.
+    """
+    _refuse_roles_body_text_gates(roles_body, superuser)
     # FIX: the shared drift gate no longer reports a MISSING app role -- it is
     # byte-identical to restore's now, and restore must not refuse a file for
     # that (its post-apply catalog check owns absence). Declaring the
