@@ -4617,3 +4617,88 @@ def test_manifest_counts_reject_coercible_shapes_round8() -> None:
     assert backup._manifest_table_counts({"table_row_counts": {}}) == {}
     good = {"table_row_counts": {"public.channels": 12}}
     assert backup._manifest_table_counts(good) == {"public.channels": 12}
+
+
+def test_a_reclaimed_and_replaced_lock_is_not_deleted_by_the_original_run(
+    tmp_path: Path, clock: _Clock
+) -> None:
+    """A run whose lock was reclaimed must not delete the replacement.
+
+    ``--timeout`` is per-command and operator-configurable, so a manual backup
+    can legitimately outlive LOCK_STALE_AFTER while still alive. A second
+    invocation then reclaims and REPLACES the lock -- the directory now belongs
+    to that run. Release used to unlink and rmdir unconditionally, so the first
+    run tore down a live peer's lock: a third invocation could then acquire
+    cleanly while two backups were already publishing and racing the watermark,
+    and the peer reported a release failure it did not cause.
+
+    Driven through the context managers directly. Both runs share this process's
+    pid, so it is the START STAMP half of the ownership check doing the work
+    here -- which is exactly why release must compare both, not the pid alone.
+    """
+    lock_dir = tmp_path / backup.LOCK_DIR_NAME
+
+    first = backup._exclusive_backup_lock(tmp_path)
+    first.__enter__()
+    first_started = (lock_dir / backup.LOCK_STARTED_NAME).read_text(encoding="utf-8")
+
+    clock.advance(backup.LOCK_STALE_AFTER + timedelta(minutes=1))
+    second = backup._exclusive_backup_lock(tmp_path)
+    second.__enter__()
+    second_started = (lock_dir / backup.LOCK_STARTED_NAME).read_text(encoding="utf-8")
+    assert second_started != first_started, "the second run must really have replaced it"
+
+    first.__exit__(None, None, None)
+
+    assert lock_dir.is_dir(), "the original run deleted the replacement run's lock"
+    assert (lock_dir / backup.LOCK_STARTED_NAME).read_text(encoding="utf-8") == second_started
+    assert "lock ownership changed" in (tmp_path / backup.LOG_NAME).read_text(
+        encoding="utf-8"
+    ), "the refusal must land on the durable record, not pass silently"
+
+    second.__exit__(None, None, None)
+    assert not lock_dir.exists(), "the owning run still releases normally"
+
+
+def test_an_uncontended_lock_is_still_released_normally(tmp_path: Path, clock: _Clock) -> None:
+    """The ownership check must not turn every ordinary release into a leak."""
+    lock_dir = tmp_path / backup.LOCK_DIR_NAME
+    with backup._exclusive_backup_lock(tmp_path):
+        assert lock_dir.is_dir()
+    assert not lock_dir.exists(), "a run that still owns its lock must delete it"
+    log = tmp_path / backup.LOG_NAME
+    if log.exists():
+        assert "lock ownership changed" not in log.read_text(encoding="utf-8")
+
+
+def test_the_ownership_check_never_swallows_the_run_s_own_failure(
+    tmp_path: Path, clock: _Clock
+) -> None:
+    """A reclaimed lock must not suppress the exception the run was raising.
+
+    The ownership check lives in a ``finally``. An early ``return`` there --
+    the obvious way to write it -- DISCARDS an in-flight exception, so a
+    backup that failed while its lock was being reclaimed would exit as if it
+    had succeeded. That is a worse bug than the one the check fixes, so the
+    branch is pinned here rather than left to review.
+    """
+    lock_dir = tmp_path / backup.LOCK_DIR_NAME
+
+    first = backup._exclusive_backup_lock(tmp_path)
+    first.__enter__()
+    clock.advance(backup.LOCK_STALE_AFTER + timedelta(minutes=1))
+    second = backup._exclusive_backup_lock(tmp_path)
+    second.__enter__()  # reclaims and replaces -- first no longer owns the lock
+
+    boom = backup.BackupError(backup.EXIT_COMMAND_FAILED, "the dump itself failed")
+
+    # __exit__ returns True only when the context manager SUPPRESSED the
+    # exception -- which is exactly what a `return` inside the finally would do.
+    suppressed = first.__exit__(type(boom), boom, boom.__traceback__)
+
+    assert suppressed is not True, (
+        "the ownership check swallowed the run's own failure; a backup that "
+        "failed would report success"
+    )
+    assert lock_dir.is_dir(), "and the replacement lock is still not deleted"
+    second.__exit__(None, None, None)

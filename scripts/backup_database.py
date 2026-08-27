@@ -1708,13 +1708,31 @@ def _read_watermark_file(out_dir: Path) -> tuple[dict[str, int], str | None]:
 #            This needs TWO failures (a pruned max-bearing run AND a lost
 #            watermark file) plus a real source-side collapse in that window,
 #            and it destroys no backups -- the harm is one undetected data loss
-#            going unflagged. Closing it means either teaching retention to
-#            protect every maximum-supplying manifest (new logic on the one
-#            destructive path) or persisting recoverable per-table maximum
-#            history inside watermark.json alongside ``resets``. The second is
-#            cheaper and does not touch pruning. Deferred pending that call --
-#            documented here rather than left as a comment claiming an
-#            invariant the code does not hold.
+#            going unflagged.
+#
+#            CORRECTION: an earlier revision of this block suggested persisting
+#            the maximum history INSIDE watermark.json alongside ``resets``.
+#            That does not work, and the reason is worth recording so nobody
+#            proposes it again: the failure mode IS watermark.json being lost or
+#            corrupted, and ``_read_watermark_file`` returns ``({}, None)`` for
+#            both -- ``OSError`` covers deletion, ``ValueError`` covers an
+#            unparsable document. A field embedded in that file is unreadable in
+#            exactly the cases it would be needed, and whenever the file IS
+#            readable its ``tables`` already carries the max. It is inert.
+#
+#            The real fix costs the same and needs no schema change, because the
+#            data is ALREADY on disk: every accepted run's manifest records
+#            ``watermark_after`` (the running per-table max at that run), and
+#            grep shows it is written and never read back. Folding each
+#            surviving accepted-published run's ``watermark_after`` into the
+#            rebuild -- inside the existing ``reset_after`` skip, through the
+#            same ``_accepted_published_counts`` trust gate, still as a ``max``
+#            so it can only push the mark UP and fail closed -- restores the
+#            baseline from the manifests that survive. It touches only the read
+#            path, never ``_prune``.
+#            Deferred to its own tested change rather than done here: this is
+#            disaster-recovery semantics, and the retention contract below is
+#            explicit that changes on this axis need their own matrix.
 #
 #            ``reset_after`` is what makes --accept-content-drop stick: runs at
 #            or older than the reset are excluded from the rebuild, so a
@@ -2046,6 +2064,8 @@ def _exclusive_backup_lock(out_dir: Path) -> Iterator[None]:
     lock_dir = out_dir / LOCK_DIR_NAME
     owner = lock_dir / LOCK_OWNER_NAME
     started = lock_dir / LOCK_STARTED_NAME
+    our_pid = f"{os.getpid()}\n"
+    our_started = ""
 
     def _acquire() -> None:
         """Create the lock and record start instant, then owner pid.
@@ -2053,11 +2073,17 @@ def _exclusive_backup_lock(out_dir: Path) -> Iterator[None]:
         ``started.at`` is written BEFORE ``owner.pid`` so no lock ever holds an
         owner without an age; a crash between the writes leaves an ownerless
         lock, which reclaim already treats as abandoned.
+
+        The written stamp is retained so release can prove the lock it is about
+        to delete is still the one this run created.
         """
+        nonlocal our_started
         lock_dir.mkdir()
         try:
-            started.write_text(_utc_now().isoformat() + "\n", encoding="utf-8")
-            owner.write_text(f"{os.getpid()}\n", encoding="utf-8")
+            stamp = _utc_now().isoformat() + "\n"
+            started.write_text(stamp, encoding="utf-8")
+            owner.write_text(our_pid, encoding="utf-8")
+            our_started = stamp
         except OSError:
             shutil.rmtree(lock_dir, ignore_errors=True)
             raise
@@ -2085,23 +2111,56 @@ def _exclusive_backup_lock(out_dir: Path) -> Iterator[None]:
     try:
         yield
     finally:
+        # FIX: release is ownership-checked. A run that legitimately outlives
+        # LOCK_STALE_AFTER can be reclaimed and REPLACED while it is still
+        # alive, at which point the lock directory belongs to the second run.
+        # Deleting it unconditionally here dropped that live peer's lock, which
+        # let a THIRD invocation acquire cleanly while two backups were already
+        # publishing, and left the peer to fail its own rmdir and report a
+        # release failure it did not cause. Tear down only a lock that still
+        # holds this run's pid AND the exact stamp this run wrote.
         try:
-            owner.unlink(missing_ok=True)
-            started.unlink(missing_ok=True)
-            lock_dir.rmdir()
-        except OSError as release_exc:
-            # FIX: a swallowed release failure meant a transient AV/OneDrive
-            # hold left the lock behind after an exit-0 run -- success tonight,
-            # a reclaim (or, before the probe fix, a wedge) tomorrow, with
-            # nothing anywhere saying why. The run's verdict stands, but the
-            # leftover is now on the durable record.
+            current_owner = owner.read_text(encoding="utf-8")
+            current_started = started.read_text(encoding="utf-8")
+        except OSError:
+            current_owner = ""
+            current_started = ""
+        # NOTE: branch, never `return`. A `return` inside `finally` DISCARDS an
+        # in-flight exception, so an early exit here would silently swallow the
+        # backup's own failure on the way out of the lock.
+        if current_owner != our_pid or current_started != our_started:
             line = (
-                f"{_utc_now().isoformat()} WARNING lock release failed: "
-                f"{release_exc}; {lock_dir} was left behind and the next run "
-                "will have to reclaim it"
+                f"{_utc_now().isoformat()} WARNING lock ownership changed under a "
+                f"live run: {lock_dir} no longer holds this run's identity, so it "
+                "was NOT deleted. This run most likely passed LOCK_STALE_AFTER and "
+                "was reclaimed by a second invocation -- check for a concurrent "
+                "backup, which can double-publish and race the watermark."
             )
             _append_log(out_dir, line)
             print(f"WARNING: {line}", file=sys.stderr)
+        else:
+            _release_owned_lock(out_dir, lock_dir, owner, started)
+
+
+def _release_owned_lock(out_dir: Path, lock_dir: Path, owner: Path, started: Path) -> None:
+    """Delete a lock this run still owns; a refused delete is a durable WARNING."""
+    try:
+        owner.unlink(missing_ok=True)
+        started.unlink(missing_ok=True)
+        lock_dir.rmdir()
+    except OSError as release_exc:
+        # FIX: a swallowed release failure meant a transient AV/OneDrive
+        # hold left the lock behind after an exit-0 run -- success tonight,
+        # a reclaim (or, before the probe fix, a wedge) tomorrow, with
+        # nothing anywhere saying why. The run's verdict stands, but the
+        # leftover is now on the durable record.
+        line = (
+            f"{_utc_now().isoformat()} WARNING lock release failed: "
+            f"{release_exc}; {lock_dir} was left behind and the next run "
+            "will have to reclaim it"
+        )
+        _append_log(out_dir, line)
+        print(f"WARNING: {line}", file=sys.stderr)
 
 
 def _restrict_run_dir_mode(

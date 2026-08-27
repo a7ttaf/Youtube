@@ -1547,3 +1547,70 @@ def test_ensure_org_unit_still_fails_closed_when_the_race_winner_is_drifted(tmp_
     finally:
         dispose_cached_engine(database_url)
         engine.dispose()
+
+
+def test_the_real_repository_raises_conflict_on_a_losing_concurrent_insert(tmp_path):
+    """The REAL repository maps a duplicate-email INSERT to UserAccountConflictError.
+
+    This is the linchpin `_ensure_user`'s `except conflict_error` rests on. The
+    sibling race tests stub the repository via `_race_repository`, so they prove
+    the orchestration but nothing about the real
+    SqlAlchemyUserAccountRepository. If it raised a sibling of UserAccountError
+    -- UserAccountStorageError, or a bare sqlalchemy IntegrityError -- the catch
+    would be DEAD in production while those stub tests stayed green.
+
+    A concurrent invocation has committed the winner; the loser's pre-check is
+    made to miss once, the shape of a SELECT under a snapshot older than that
+    commit. The flow then reaches the real INSERT and the real
+    `uq_users_email_lower` index is what discovers the duplicate.
+    """
+    import sqlalchemy.exc as sa_exc
+
+    from ums_smart_revenue.auth.users import (
+        SqlAlchemyUserAccountRepository,
+        UserAccountConflictError,
+        UserAccountStorageError,
+    )
+
+    database_url = _make_database(tmp_path)
+    factory = build_session_factory(database_url)
+    try:
+        with factory() as winner_session:
+            if not winner_session.in_transaction():
+                winner_session.begin()
+            SqlAlchemyUserAccountRepository(winner_session, tenant_id=_TENANT_ID).create_user(
+                email=_OPERATOR_EMAIL, display_name="Winner", is_service_account=False
+            )
+            winner_session.commit()
+
+        with factory() as loser_session:
+            if not loser_session.in_transaction():
+                loser_session.begin()
+            repo = SqlAlchemyUserAccountRepository(loser_session, tenant_id=_TENANT_ID)
+            real_email_exists = repo._email_exists
+            misses = {"n": 0}
+
+            def _miss_once(email, *, excluding_user_id=None):
+                """A SELECT issued under a snapshot older than the winner's commit."""
+                misses["n"] += 1
+                if misses["n"] == 1:
+                    return False
+                return real_email_exists(email, excluding_user_id=excluding_user_id)
+
+            repo._email_exists = _miss_once
+
+            with pytest.raises(UserAccountConflictError) as raised:
+                repo.create_user(
+                    email=_OPERATOR_EMAIL, display_name="Loser", is_service_account=False
+                )
+
+            assert misses["n"] == 1, "the pre-check must have missed, so the INSERT raised"
+            assert not isinstance(raised.value, UserAccountStorageError), (
+                "a duplicate must not surface as the transient-storage sibling"
+            )
+            assert not isinstance(raised.value, sa_exc.IntegrityError), (
+                "and must not leak the raw SQLAlchemy error"
+            )
+            loser_session.rollback()
+    finally:
+        dispose_cached_engine(database_url)
