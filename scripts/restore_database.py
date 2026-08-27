@@ -1838,27 +1838,53 @@ def _preflight_roles_file(container: str, roles_path: Path, *, timeout: int) -> 
         )
 
 
+def _reset_existing_protected_role_settings(container: str, *, timeout: int) -> None:
+    """RESET ALL cluster-level settings on protected roles that already exist.
+
+    FIX: role-level GUCs are cluster-global like memberships; a clean
+    roles.sql carries nothing to overwrite a target-only leftover, so this
+    reset makes the replayed file the sole authority over protected-role
+    settings. Only roles that already exist are reset -- on a fresh cluster
+    the CREATE ROLE lines create them with no settings at all.
+    """
+    existing = [
+        line.strip()
+        for line in _psql(container, ROLES_PRESENT_SQL, timeout=timeout).splitlines()
+        if line.strip()
+    ]
+    if not existing:
+        return
+    reset_lines = [
+        f"ALTER ROLE {_quote_identifier(role)} RESET ALL;" for role in existing
+    ]
+    _psql(container, "\n".join(reset_lines) + "\n", timeout=timeout)
+
+
+def _undeclared_role_settings(
+    container: str, declared: dict[str, set[str]], *, timeout: int
+) -> list[str]:
+    """Return live cluster-level protected-role GUCs the file does not declare."""
+    live: dict[str, set[str]] = {}
+    for line in _psql(container, ROLE_SETTINGS_KEYS_SQL, timeout=timeout).splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        role, _, key = stripped.partition(" = ")
+        live.setdefault(role, set()).add(key)
+    return sorted(
+        f"{role} SET {key}"
+        for role, keys in live.items()
+        for key in keys - declared.get(role, set())
+    )
+
+
 def _restore_roles(container: str, roles_path: Path, *, timeout: int) -> list[str]:
     """Apply roles.sql and return the required roles present afterward."""
     _preflight_roles_file(container, roles_path, timeout=timeout)
     # FIX: cluster-global role settings survive DROP DATABASE just like
     # memberships do, and a clean roles.sql carries no ALTER ROLE app_* SET
-    # line to overwrite a target-only leftover. RESET ALL on the protected
-    # roles BEFORE the replay makes the file the sole authority over their
-    # settings: whatever the replay declares is exactly what remains. Only
-    # roles that already exist are reset -- on a fresh cluster the CREATE
-    # ROLE lines in the file create them with no settings at all.
-    existing_protected = [
-        line.strip()
-        for line in _psql(container, ROLES_PRESENT_SQL, timeout=timeout).splitlines()
-        if line.strip()
-    ]
-    if existing_protected:
-        reset_lines = [
-            f"ALTER ROLE {_quote_identifier(role)} RESET ALL;"
-            for role in existing_protected
-        ]
-        _psql(container, "\n".join(reset_lines) + "\n", timeout=timeout)
+    # line to overwrite a target-only leftover -- normalize before replay.
+    _reset_existing_protected_role_settings(container, timeout=timeout)
     argv = _container_sh(
         container,
         'exec psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" --no-password -v ON_ERROR_STOP=0 -q -f -',
@@ -1924,17 +1950,7 @@ def _restore_roles(container: str, roles_path: Path, *, timeout: int) -> list[st
     declared = _protected_role_setting_declarations(
         roles_path.read_text(encoding="utf-8", errors="replace")
     )
-    live_settings: dict[str, set[str]] = {}
-    for line in _psql(container, ROLE_SETTINGS_KEYS_SQL, timeout=timeout).splitlines():
-        if not line.strip():
-            continue
-        role, _, key = line.strip().partition(" = ")
-        live_settings.setdefault(role, set()).add(key)
-    undeclared_settings = sorted(
-        f"{role} SET {key}"
-        for role, keys in live_settings.items()
-        for key in keys - declared.get(role, set())
-    )
+    undeclared_settings = _undeclared_role_settings(container, declared, timeout=timeout)
     if undeclared_settings:
         raise RestoreError(
             EXIT_ROLES_FAILED,
