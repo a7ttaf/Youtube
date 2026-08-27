@@ -82,6 +82,50 @@ def build_engine(database_url: str) -> Engine:
     return create_engine(database_url, pool_pre_ping=True)
 
 
+def _refuses_overlapping_static_pool_begin(
+    connection: Connection,
+    writer_lock: Lock,
+    owner_fairy: Any,
+    owner_thread_id: int | None,
+) -> None:
+    """Refuse a BEGIN that would collide with an open transaction on the
+    shared StaticPool connection when the holder is the owning checkout or
+    the owning thread.
+
+    Waiting can never unblock the holder in those two cases (it is this very
+    checkout, or it is parked on this same thread), so the collision is
+    refused with the overlapping-sessions diagnostic instead of deadlocking
+    on the non-reentrant acquire. A DIFFERENT checkout on a DIFFERENT thread
+    simply falls through and waits for the owner's commit/rollback -- that
+    wait is the writer serialization this lock exists to provide.
+    """
+    if not writer_lock.locked():
+        return
+    dbapi_connection = connection.connection.dbapi_connection
+    if not getattr(dbapi_connection, "in_transaction", False):
+        return
+    if connection.connection is owner_fairy or get_ident() == owner_thread_id:
+        raise RuntimeError(
+            "Overlapping SQLite Sessions on StaticPool: another transaction "
+            "is already open on the shared connection. Reuse one Session "
+            "(see _sqlite_platform_session_from_request) or wait for commit."
+        )
+
+
+def _successor_checkout_holds_record(connection_record: Any, owner_fairy: Any) -> bool:
+    """Whether a DIFFERENT checkout's fairy currently holds the pool record.
+
+    The record's ``fairy_ref`` is overwritten at every checkout, so a
+    non-None ``fairy_ref`` that is not the lock-owning fairy means a successor
+    checkout exists and may already be waiting to BEGIN; the reset listener
+    must then leave both the connection and the release to the checkin event.
+    """
+    closing_fairy = (
+        connection_record.fairy_ref() if connection_record.fairy_ref else None
+    )
+    return closing_fairy is not None and closing_fairy is not owner_fairy
+
+
 # ============================================================================
 # Purpose: Make SAVEPOINTs REAL on SQLite and serialize independent writers on
 #   the StaticPool connection. pysqlite's legacy isolation mode emits BEGIN only
@@ -194,6 +238,21 @@ def _enable_sqlite_transactional_savepoints(engine: Engine) -> None:
             return
         _forget_lock_owner()
 
+    # FIX: the pool record of the BEGINning checkout is captured from the pool
+    # ``checkout`` event -- the PUBLIC carrier of the record -- into this
+    # thread-local, instead of reading the fairy's protected
+    # ``_connection_record`` attribute (DeepSource PYL-W0212). The checkout
+    # event fires on the same thread immediately before that checkout's first
+    # BEGIN, so the begin hook always reads the record of its own checkout.
+    _last_checkout = local()
+
+    @event.listens_for(engine.pool, "checkout")
+    def _note_checked_out_record(
+        _dbapi_connection: Any, connection_record: Any, _checkout_fairy: Any
+    ) -> None:
+        """Hand the checked-out pool record to the begin hook on this thread."""
+        _last_checkout.record = connection_record
+
     @event.listens_for(engine, "begin")
     def _emit_begin(connection: Connection) -> None:
         """Emit an explicit BEGIN for each outer transaction; serialize writers."""
@@ -201,23 +260,11 @@ def _enable_sqlite_transactional_savepoints(engine: Engine) -> None:
         # callbacks finish. Releasing in do_commit alone races a second Session
         # onto the still-resetting shared StaticPool connection.
         nonlocal lock_held, owner_record, owner_fairy, owner_thread_id
-        if writer_lock.locked():
-            dbapi_connection = connection.connection.dbapi_connection
-            if getattr(dbapi_connection, "in_transaction", False):
-                # Same checkout (or same thread, for the nested-Sessions
-                # misuse) with an open transaction can never be unblocked by
-                # waiting: refuse instead of deadlocking on the acquire.
-                if (
-                    connection.connection is owner_fairy
-                    or get_ident() == owner_thread_id
-                ):
-                    raise RuntimeError(
-                        "Overlapping SQLite Sessions on StaticPool: another transaction "
-                        "is already open on the shared connection. Reuse one Session "
-                        "(see _sqlite_platform_session_from_request) or wait for commit."
-                    )
+        _refuses_overlapping_static_pool_begin(
+            connection, writer_lock, owner_fairy, owner_thread_id
+        )
         writer_lock.acquire()
-        owner_record = connection.connection._connection_record
+        owner_record = getattr(_last_checkout, "record", None)
         owner_fairy = connection.connection
         owner_thread_id = get_ident()
         lock_held = True
@@ -276,10 +323,7 @@ def _enable_sqlite_transactional_savepoints(engine: Engine) -> None:
         # When a successor checkout already exists (its fairy replaced
         # ``fairy_ref``) it may be waiting on this lock: leave the connection
         # alone and let the following checkin event release instead.
-        closing_fairy = (
-            connection_record.fairy_ref() if connection_record.fairy_ref else None
-        )
-        if closing_fairy is not None and closing_fairy is not owner_fairy:
+        if _successor_checkout_holds_record(connection_record, owner_fairy):
             return
         if not getattr(reset_state, "transaction_was_reset", False):
             engine.dialect.do_rollback(dbapi_connection)
