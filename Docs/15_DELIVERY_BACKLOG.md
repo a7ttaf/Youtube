@@ -619,6 +619,13 @@ closed unmerged and superseded by the consolidated batch in #156.
   The summary tiles are now wired to the live `GET /audit/summary` aggregate-count
   route (see the audit summary endpoint entry below); the Retention tile stays a
   static policy constant.
+- ⏳ View error boundary (branch `feat/p1-error-boundary`, unmerged) —
+  `frontend/src/components/srcc/ErrorBoundary.tsx` wraps `<ViewRouter/>` in
+  AppShell, keyed by the active view. A render-time crash now degrades to one
+  themed panel (human message + `error.name`, never `error.message`, plus a
+  "Try again" reset) instead of React 19 unmounting the whole root to a blank
+  page. Remaining: nothing for this item; other surfaces (main.tsx root, the
+  import flow) are still unguarded.
 
 ## P2 — Advanced features
 

@@ -22,6 +22,7 @@ import {
   WORKFLOW_STEPS,
 } from "@/lib/mock/data";
 import type { Role, ViewKey } from "@/lib/mock/data";
+import ErrorBoundary from "./ErrorBoundary";
 import { BrandIcon, NAV_ICONS, RefreshIcon } from "./icons";
 import AuditView from "./views/AuditView";
 import CloseView from "./views/CloseView";
@@ -1066,6 +1067,8 @@ const AppShell = () => {
           canViewFinance={canViewFinance}
           canCreateExport={canCreateAnyExport(permissions)}
         />
+        {/* Keyed by the active view so navigating away clears a caught error. */}
+        <ErrorBoundary key={view}>
         <ViewRouter
           view={view}
           permissions={permissions}
@@ -1079,6 +1082,7 @@ const AppShell = () => {
             setView("trace");
           }}
         />
+        </ErrorBoundary>
         {view === "command" && <WorkflowRail />}
       </main>
     </div>
