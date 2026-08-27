@@ -2901,7 +2901,14 @@ def test_the_cli_publishes_a_first_run_and_returns_zero(
 def test_no_verify_dump_skips_pg_restore_list(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, clock: _Clock
 ) -> None:
-    """--no-verify-dump must not invoke pg_restore --list at all."""
+    """--no-verify-dump must not invoke pg_restore --list at all.
+
+    Do NOT route this through ``_run_cli``: that helper installs a fresh
+    ``_FakeContainer`` on every call, which re-binds ``backup._pg_restore_list``
+    to the benign fake and silently discards the ``_forbidden`` stub below. The
+    assertion then holds for the wrong reason and the test proves nothing.
+    Install the fakes first, override last, then drive ``backup.main`` directly.
+    """
     called = {"n": 0}
 
     def _forbidden(*_a: object, **_k: object) -> str:
@@ -2911,7 +2918,12 @@ def test_no_verify_dump_skips_pg_restore_list(
 
     _FakeContainer(REAL).install(monkeypatch)
     monkeypatch.setattr(backup, "_pg_restore_list", _forbidden)
-    code = _run_cli(monkeypatch, tmp_path, REAL, "--establish-watermark", "--no-verify-dump")
+    assert backup._pg_restore_list is _forbidden, "the stub must survive fixture installation"
+
+    code = backup.main(
+        ["--out-dir", str(tmp_path), "--establish-watermark", "--no-verify-dump"]
+    )
+
     assert code == backup.EXIT_OK
     assert called["n"] == 0
 
@@ -3448,6 +3460,44 @@ def test_validate_dump_roles_covered_ignores_empty_acl_grantee_set() -> None:
         )
     assert raised.value.code == backup.EXIT_ARTIFACT_INVALID
     assert "stale_owner" in str(raised.value)
+
+
+def test_validate_dump_roles_covered_keeps_authorization_checks_without_a_listing() -> None:
+    """``listing=None`` (--no-verify-dump) skips ONLY the TOC owner scan.
+
+    Round-9 P1 requires privilege-drift refusal to survive --no-verify-dump, and
+    round-11 P1 requires --no-verify-dump not to run pg_restore --list at all.
+    Both hold together because neither authorization check reads the TOC: drift
+    reads roles.sql and grantee coverage reads the dump snapshot. This pins that
+    -- if a later change reinstates the listing as the source of either check,
+    the first two arms go green-when-they-should-be-red and this test fails.
+    """
+    declared = "CREATE ROLE app_tenant;\nCREATE ROLE app_platform;\n"
+
+    # 1. Privilege drift still refuses with no listing at all.
+    with pytest.raises(backup.BackupError) as drift:
+        backup._validate_dump_roles_covered(
+            listing=None,
+            roles_body="CREATE ROLE app_tenant WITH BYPASSRLS;\nCREATE ROLE app_platform;\n",
+        )
+    assert "BYPASSRLS" in str(drift.value)
+
+    # 2. Snapshot ACL grantees still refuse with no listing at all.
+    with pytest.raises(backup.BackupError) as grantee:
+        backup._validate_dump_roles_covered(
+            listing=None,
+            roles_body=declared,
+            acl_grantees={"ghost_grantee"},
+        )
+    assert grantee.value.code == backup.EXIT_ARTIFACT_INVALID
+    assert "ghost_grantee" in str(grantee.value)
+
+    # 3. TOC owners are the ONLY thing dropped: the same undeclared owner that
+    #    refuses with a listing is accepted without one.
+    undeclared_owner = "3; 2615 16384 TABLE public tenants stale_owner\n"
+    with pytest.raises(backup.BackupError):
+        backup._validate_dump_roles_covered(listing=undeclared_owner, roles_body=declared)
+    backup._validate_dump_roles_covered(listing=None, roles_body=declared)
 
 
 def test_dump_listing_owner_collection_covers_every_owned_toc_entry() -> None:

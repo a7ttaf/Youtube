@@ -1184,9 +1184,23 @@ def _role_privilege_drift_problems(roles_body: str) -> list[str]:
 
 
 def _validate_dump_roles_covered(
-    *, listing: str, roles_body: str, acl_grantees: set[str] | None = None
+    *, listing: str | None, roles_body: str, acl_grantees: set[str] | None = None
 ) -> None:
-    """Refuse a backup when the archive references roles absent from roles.sql."""
+    """Refuse a backup when the archive references roles absent from roles.sql.
+
+    Args:
+        listing: ``pg_restore --list`` output, or None under ``--no-verify-dump``.
+            None skips only the TOC-derived owner scan; it never relaxes the
+            privilege-drift check or the snapshot ACL-grantee coverage check,
+            both of which read sources the TOC listing is not needed for.
+        roles_body: Contents of ``roles.sql`` as captured by ``_dump_roles``.
+        acl_grantees: Grantee roles collected from the dump snapshot via
+            ``ACL_GRANTEE_SQL``. Independent of the TOC listing.
+
+    Raises:
+        BackupError: On drifted privileges, or on a referenced role that
+            ``roles.sql`` does not declare.
+    """
     drift = _role_privilege_drift_problems(roles_body)
     if drift:
         raise BackupError(
@@ -1197,7 +1211,7 @@ def _validate_dump_roles_covered(
             "archive and the migration history will not rerun to clear them; "
             "refusing to publish.",
         )
-    referenced = _roles_referenced_in_dump_listing(listing)
+    referenced = _roles_referenced_in_dump_listing(listing) if listing is not None else set()
     if acl_grantees:
         referenced |= acl_grantees
     missing = sorted(
@@ -3758,14 +3772,22 @@ def run_backup(args: argparse.Namespace, out_dir: Path) -> BackupOutcome:
         # Authorization-relevant checks can never depend on whether deep TOC
         # verification runs: skipping them would let LOGIN/SUPERUSER/BYPASSRLS
         # drift reach restore under --no-verify-dump (round-9 review P1).
-        dump_listing = _pg_restore_list(container, staging / DUMP_NAME, timeout=args.timeout)
+        # FIX: those checks do NOT need the TOC listing -- privilege drift reads
+        # roles.sql and grantee coverage reads the dump snapshot -- so honoring
+        # --no-verify-dump here keeps both enforced while the flag once again
+        # means what it documents: pg_restore --list is not run at all.
+        dump_listing = (
+            _pg_restore_list(container, staging / DUMP_NAME, timeout=args.timeout)
+            if args.verify_dump
+            else None
+        )
         _validate_dump_roles_covered(
             listing=dump_listing,
             roles_body=(staging / ROLES_NAME).read_text(encoding="utf-8", errors="replace"),
             acl_grantees=acl_grantees,
         )
         toc_entries = -1
-        if args.verify_dump:
+        if dump_listing is not None:
             toc_entries = len(
                 [
                     line
@@ -3917,7 +3939,10 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         help=(
             "Skip piping the written dump back through pg_restore --list. Only use "
             "this if that check proves unreliable on the host: it is the only thing "
-            "distinguishing a readable archive from a file of the right size."
+            "distinguishing a readable archive from a file of the right size. "
+            "Role privilege-drift validation and snapshot ACL-grantee coverage "
+            "still run -- neither reads the TOC listing -- but TOC entry counting "
+            "and the TOC object-owner coverage scan are skipped with it."
         ),
     )
     parser.add_argument(
