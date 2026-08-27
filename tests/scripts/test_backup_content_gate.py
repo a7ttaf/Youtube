@@ -2426,6 +2426,52 @@ def test_prune_expires_every_quarantine_name_publish_can_emit(tmp_path: Path) ->
         assert run.name not in pruned.removed
 
 
+def test_a_naive_prior_status_timestamp_does_not_raise(tmp_path: Path) -> None:
+    """An offset-less ``started_utc`` must be treated as malformed, not compared.
+
+    ``datetime.fromisoformat`` accepts a timestamp with no offset and returns a
+    NAIVE datetime; comparing that against our timezone-aware ``started`` raises
+    TypeError. This runs while recording the terminal verdict -- after
+    publication, watermarking and pruning -- and the failure reporter compares
+    again, so an unguarded compare lets the CLI escape with an undocumented
+    exception. A legacy or hand-recovered writer is enough to produce one.
+    """
+    (tmp_path / backup.LAST_RUN_NAME).write_text(
+        json.dumps({"status": "OK", "started_utc": "2027-01-01T00:00:00"}),
+        encoding="utf-8",
+    )
+
+    # Naive, and FAR in the future: were it compared it would win and return
+    # True, so this pins the treat-as-malformed branch and not an accident of
+    # ordering.
+    assert backup._last_run_holds_newer_completed_verdict(tmp_path, NOW) is False
+
+    aware_newer = json.dumps({"status": "OK", "started_utc": "2027-01-01T00:00:00+00:00"})
+    (tmp_path / backup.LAST_RUN_NAME).write_text(aware_newer, encoding="utf-8")
+    assert backup._last_run_holds_newer_completed_verdict(tmp_path, NOW) is True, (
+        "an aware newer verdict must still be protected from being overwritten"
+    )
+
+
+def test_the_cli_refuses_a_keep_min_below_the_documented_minimum(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, clock: _Clock
+) -> None:
+    """--keep-min 0 must be refused BEFORE the dump and the watermark write.
+
+    The CLI and runbook promise a minimum of one. argparse accepts 0 or a
+    negative, and _retention_protected_names then builds no keep-min
+    protection, so the next successful run can delete every expired backup
+    except the single newest content-bearing one -- silently retaining fewer
+    recovery points than the operator asked for.
+    """
+    for value in ("0", "-3"):
+        code = _run_cli(monkeypatch, tmp_path, REAL, "--establish-watermark", "--keep-min", value)
+
+        assert code == backup.EXIT_USAGE, f"--keep-min {value} must be refused"
+        assert not (tmp_path / backup.WATERMARK_NAME).exists(), "no watermark may be written"
+        assert _run_dirs(tmp_path) == [], "no run directory may be created"
+
+
 def test_prune_ignores_foreign_directories(tmp_path: Path) -> None:
     """Guard: test_prune_ignores_foreign_directories."""
     (tmp_path / "important-operator-notes").mkdir()
@@ -4211,6 +4257,12 @@ def test_acl_grantee_sql_covers_every_dumped_acl_catalog() -> None:
         # dropped before roles.sql was captured and restore would fail.
         "pg_catalog.pg_policy p",
         "p.polroles",
+        # Foreign-server user mappings: the archive carries
+        # CREATE USER MAPPING FOR <role>, but TOC owner parsing never exposes
+        # the mapped user, so a mapping dropped with its role between the two
+        # captures would publish an archive that fails during restore.
+        "pg_catalog.pg_user_mapping m",
+        "m.umuser",
         "u.role_oid::oid",
     ):
         assert fragment in sql, fragment
