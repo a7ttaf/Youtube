@@ -854,6 +854,39 @@ def test_overlapping_logging_leases_survive_first_shutdown():
         assert installed_log_handler() is None
 
 
+def test_double_release_of_one_token_does_not_silence_a_live_lease():
+    """A token releases at most once, so a repeat cannot spend another lease.
+
+    The refcount is process-wide, so a second ``restore_logging`` on the SAME
+    token used to decrement again and consume the second lifespan's lease --
+    dropping the count to zero, removing the shared handler and restoring the
+    previous levels while that second app was still running. The existing
+    ``refcount <= 0`` guard cannot see this: at the second call there IS still
+    a lease outstanding, just not this token's.
+    """
+    with production_shaped_root() as root:
+        shared_stream = io.StringIO()
+        first = configure_logging(level="INFO", stream=shared_stream)
+        second = configure_logging(level="INFO", stream=io.StringIO())
+        configured_root_level = root.level
+
+        restore_logging(first)
+        # A ``finally`` that runs twice, or a belt-and-braces teardown.
+        restore_logging(first)
+
+        # The second lifespan is still live: the handler must survive...
+        assert installed_log_handler() is not None
+        # ...the levels must not have been rolled back under it...
+        assert root.level == configured_root_level
+        # ...and it must still actually DELIVER, which is what the caller loses.
+        logging.getLogger(FIRST_PARTY_LOGGER_NAME).info("second app still logging")
+        assert "second app still logging" in shared_stream.getvalue()
+
+        # The surviving lease still owns the only remaining release.
+        restore_logging(second)
+        assert installed_log_handler() is None
+
+
 def test_configure_snapshots_levels_under_lock_against_concurrent_restore(
     monkeypatch,
 ):

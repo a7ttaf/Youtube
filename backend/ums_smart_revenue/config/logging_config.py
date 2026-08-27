@@ -111,7 +111,7 @@ FIRST_PARTY_LOGGER_NAME = __name__.partition(".")[0]
 THIRD_PARTY_LOG_LEVEL = logging.WARNING
 
 
-@dataclass(frozen=True)
+@dataclass
 class LoggingConfiguration:
     """Undo token returned by :func:`configure_logging`.
 
@@ -119,12 +119,27 @@ class LoggingConfiguration:
     Every successful configure call (including a lease on an already-installed
     handler) increments a process-wide reference count; :func:`restore_logging`
     decrements it and only removes the handler when the count reaches zero.
+
+    ``released`` makes each token consume its lease AT MOST ONCE. The refcount
+    is process-wide, so without it a second ``restore_logging`` on the same
+    token decremented again and consumed a DIFFERENT lifespan's lease: with two
+    apps configured, a double release dropped the count to zero and removed the
+    shared handler while the second app was still running, silencing its logs.
+    The refcount guard alone cannot catch that -- it only sees "no lease
+    outstanding", never "this token already released".
+
+    Not frozen, because the flag has to travel with the token. Keeping the
+    state on the token rather than in a module-level set is deliberate: a
+    module-level registry is reset by ``importlib.reload`` and by the test
+    fixture, which would recycle lease identities and break the reload
+    re-adoption path.
     """
 
     installed: bool
     handler: logging.Handler | None
     previous_root_level: int
     previous_first_party_level: int
+    released: bool = False
 
 
 _logging_lock = threading.Lock()
@@ -383,7 +398,11 @@ def configure_logging(
 #   one handler via reference counting so the first shutdown cannot silence a
 #   still-active second app. In production, shutdown is immediately followed by
 #   process exit, and it runs AFTER the workers are closed, so no real shutdown
-#   line loses its handler.
+#   line loses its handler. Because the count is process-wide, the release is
+#   also idempotent PER TOKEN (`LoggingConfiguration.released`): a token that
+#   released once can never decrement again and consume a different lifespan's
+#   lease. The refcount guard cannot do that on its own -- it only detects "no
+#   lease outstanding at all".
 # Blast Radius: Root logger handlers + level, and the `ums_smart_revenue`
 #   logger's level. No authorization, finance, audit, or export behavior.
 # Connections:
@@ -398,13 +417,15 @@ def restore_logging(configuration: LoggingConfiguration) -> None:
     Overlapping app lifespans therefore share a single handler and the first
     shutdown cannot silence a still-active second app.
 
-    CALL AT MOST ONCE PER TOKEN. The count is process-wide and the token
-    carries no released state, so releasing the same ``configuration`` twice
-    decrements twice and consumes another lifespan's lease -- with two apps
-    configured, a double release drops the count to zero, removes the shared
-    handler and restores the previous levels while the second app is still
-    running, silencing its logs. The guard below only makes a release with NO
-    outstanding lease a no-op; it cannot detect a token that already released.
+    Each token releases AT MOST ONCE. The count is process-wide, so without a
+    per-token flag a second release of the same ``configuration`` decremented
+    again and consumed another lifespan's lease -- with two apps configured,
+    that dropped the count to zero, removed the shared handler and restored the
+    previous levels while the second app was still running, silencing its logs.
+    The refcount guard alone cannot catch that: it only sees "no lease
+    outstanding", never "this token already released". ``configuration.released``
+    closes it, so a repeated release (a ``finally`` that runs twice, a
+    belt-and-braces teardown) is now a genuine no-op.
 
     Args:
         configuration: The undo token returned by :func:`configure_logging`.
@@ -415,13 +436,16 @@ def restore_logging(configuration: LoggingConfiguration) -> None:
             state has none.
 
     Returns:
-        None. The call is a no-op when no lease is outstanding (``refcount``
-        already zero), when leases remain after this release, or when no
-        handler is installed.
+        None. The call is a no-op when this token already released, when no
+        lease is outstanding (``refcount`` already zero), when leases remain
+        after this release, or when no handler is installed.
     """
     with _logging_lock:
+        if configuration.released:
+            return
         if _logging_state.refcount <= 0:
             return
+        configuration.released = True
         _logging_state.refcount -= 1
         if _logging_state.refcount > 0:
             return
