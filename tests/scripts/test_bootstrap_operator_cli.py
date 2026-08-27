@@ -21,10 +21,11 @@ import importlib.util
 import sys
 from collections.abc import Iterable
 from pathlib import Path
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 from typing import Any
 from uuid import UUID, uuid4
 
+import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
@@ -1287,3 +1288,176 @@ def test_seed_migration_catalog_covers_every_permission(tmp_path):
     # seeded the right number of the wrong keys still fails.
     assert role_keys == {role.value for role in RoleKey}
     assert permission_keys == {permission.value for permission in Permission}
+
+
+def test_ensure_user_reports_existing_when_a_concurrent_create_conflicts(tmp_path):
+    """A losing concurrent create must report EXISTING, not exit 2.
+
+    Two bootstrap invocations for the same email can both miss the initial
+    lookup; the loser's create_user raises UserAccountConflictError after the
+    winner commits. That error is a SIBLING of UserAccountStorageError under
+    UserAccountError, so _run_bootstrap's `except storage_error` retry envelope
+    does not catch it -- it reached main's `except ValueError` and rolled the
+    whole invocation back, contradicting the documented idempotency contract.
+    """
+    module = _load_script()
+    from ums_smart_revenue.auth.users import (
+        USER_STATUS_ACTIVE,
+        UserAccountConflictError,
+        UserAccountValidationError,
+    )
+
+    winner = SimpleNamespace(
+        email=_OPERATOR_EMAIL,
+        id=uuid4(),
+        display_name="Winner",
+        status=USER_STATUS_ACTIVE,
+        is_service_account=False,
+    )
+
+    class _RaceRepository:
+        """Misses the lookup, then loses the insert to the committed winner."""
+
+        def __init__(self, session, *, tenant_id):
+            self.lookups = 0
+
+        def get_user_by_email(self, *, email):
+            self.lookups += 1
+            return None if self.lookups == 1 else winner
+
+        def create_user(self, *, email, display_name, is_service_account):
+            raise UserAccountConflictError("users_email_key")
+
+    deps = {
+        "SqlAlchemyUserAccountRepository": _RaceRepository,
+        "UserAccountConflictError": UserAccountConflictError,
+        "UserAccountValidationError": UserAccountValidationError,
+        "USER_STATUS_DISABLED": "disabled",
+    }
+
+    outcome = module._ensure_user(
+        object(), deps, tenant_id=UMS_TENANT_ID, email=_OPERATOR_EMAIL, display_name="Loser"
+    )
+
+    assert outcome.created is False, "the losing racer must report EXISTING"
+    assert outcome.user_id == winner.id, "it must report the WINNER's stored id"
+    assert outcome.display_name == "Winner", "values come from the stored row, not the CLI"
+
+
+def test_ensure_user_still_fails_closed_on_a_concurrently_created_disabled_account(tmp_path):
+    """The conflict reload runs the SAME guards as the ordinary lookup branch.
+
+    Otherwise a concurrently created disabled or service account would be
+    waved through on the race path while being refused on the normal one.
+    """
+    module = _load_script()
+    from ums_smart_revenue.auth.users import (
+        UserAccountConflictError,
+        UserAccountValidationError,
+    )
+
+    for attribute, value in (("status", "disabled"), ("is_service_account", True)):
+        winner = SimpleNamespace(
+            email=_OPERATOR_EMAIL,
+            id=uuid4(),
+            display_name="Winner",
+            status="active",
+            is_service_account=False,
+        )
+        setattr(winner, attribute, value)
+
+        class _RaceRepository:
+            """Misses the lookup, then loses to a winner that must be refused."""
+
+            def __init__(self, session, *, tenant_id):
+                self.lookups = 0
+
+            def get_user_by_email(self, *, email):
+                self.lookups += 1
+                return None if self.lookups == 1 else winner
+
+            def create_user(self, *, email, display_name, is_service_account):
+                raise UserAccountConflictError("users_email_key")
+
+        deps = {
+            "SqlAlchemyUserAccountRepository": _RaceRepository,
+            "UserAccountConflictError": UserAccountConflictError,
+            "UserAccountValidationError": UserAccountValidationError,
+            "USER_STATUS_DISABLED": "disabled",
+        }
+
+        with pytest.raises(UserAccountValidationError):
+            module._ensure_user(
+                object(),
+                deps,
+                tenant_id=UMS_TENANT_ID,
+                email=_OPERATOR_EMAIL,
+                display_name="Loser",
+            )
+
+
+def test_ensure_org_unit_recovers_from_a_concurrent_deterministic_insert(tmp_path):
+    """A losing concurrent org-unit insert must not roll back the invocation.
+
+    Org ids are deterministic, so two concurrent --org-skeleton runs compute
+    the same id, both miss the get(), and the loser's flush raises
+    IntegrityError. Unwrapped that escaped to main's `except SQLAlchemyError`
+    and discarded the whole invocation -- including its freshly created account
+    -- even though the skeleton it wanted now exists.
+
+    The race is reproduced faithfully: the row really is in the database (the
+    winner committed), and get() is made to miss it exactly once, which is what
+    a SELECT issued before the winner's commit sees.
+    """
+    module = _load_script()
+    database_url = _make_database(tmp_path)
+    unit_id = uuid4()
+
+    engine = create_engine(database_url)
+    try:
+        with Session(engine) as seed:
+            seed.add(
+                OrgUnitORM(
+                    id=unit_id,
+                    tenant_id=_TENANT_ID,
+                    parent_id=None,
+                    type="SECTOR",
+                    name="Winning Sector",
+                    active=True,
+                )
+            )
+            seed.commit()
+
+        with Session(engine) as session:
+            real_get = session.get
+            misses = {"n": 0}
+
+            def _get_missing_once(entity, ident, **kwargs):
+                """Simulate a SELECT issued before the winner's commit landed."""
+                if entity is OrgUnitORM and misses["n"] == 0:
+                    misses["n"] += 1
+                    return None
+                return real_get(entity, ident, **kwargs)
+
+            session.get = _get_missing_once
+
+            outcome = module._ensure_org_unit(
+                session,
+                OrgUnitORM,
+                unit_id=unit_id,
+                tenant_id=_TENANT_ID,
+                parent_id=None,
+                unit_type="SECTOR",
+                name="Winning Sector",
+                name_flag="--sector-name",
+            )
+
+            assert misses["n"] == 1, "the race must actually have been exercised"
+            assert outcome.created is False, "the loser must report EXISTING"
+            assert outcome.name == "Winning Sector"
+            # The enclosing transaction must still be usable: the savepoint
+            # absorbed the failed insert instead of poisoning the session.
+            assert session.get(OrgUnitORM, unit_id) is not None
+            session.commit()
+    finally:
+        engine.dispose()

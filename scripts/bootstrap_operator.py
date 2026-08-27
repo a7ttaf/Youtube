@@ -218,6 +218,7 @@ def _load_dependencies() -> dict[str, Any]:
     from ums_smart_revenue.auth.users import (
         USER_STATUS_DISABLED,
         SqlAlchemyUserAccountRepository,
+        UserAccountConflictError,
         UserAccountError,
         UserAccountStorageError,
         UserAccountValidationError,
@@ -251,6 +252,7 @@ def _load_dependencies() -> dict[str, Any]:
         "TenantStatus": TenantStatus,
         "UMS_TENANT_ID": UMS_TENANT_ID,
         "USER_STATUS_DISABLED": USER_STATUS_DISABLED,
+        "UserAccountConflictError": UserAccountConflictError,
         "UserAccountError": UserAccountError,
         "UserAccountStorageError": UserAccountStorageError,
         "UserAccountValidationError": UserAccountValidationError,
@@ -505,39 +507,64 @@ def _ensure_user(
     repository = deps["SqlAlchemyUserAccountRepository"](session, tenant_id=tenant_id)
     existing = repository.get_user_by_email(email=email)
     if existing is not None:
-        # FIX: A disabled account must not be treated as a usable EXISTING
-        # operator. Runtime principals fail-closed on disabled status, but this
-        # path previously returned the id and could still attach --role.
-        if existing.status == deps["USER_STATUS_DISABLED"]:
-            raise deps["UserAccountValidationError"](
-                f"User {email!r} exists with status=disabled. This script creates "
-                "accounts and never reactivates them — flipping the flag would be "
-                "an unaudited identity write before first login, and it would "
-                "silently undo a deliberate deactivation. Nothing was changed. "
-                "Reactivate the users row in the database and re-run."
-            )
-        if existing.is_service_account:
-            raise deps["UserAccountValidationError"](
-                f"User {email!r} is a service account. bootstrap_operator creates "
-                "human operator accounts only — pass a human email or provision "
-                "the service actor through the connector runbook instead."
-            )
-        return _UserOutcome(
-            email=existing.email,
-            user_id=existing.id,
-            display_name=existing.display_name,
-            created=False,
+        return _accept_existing_user(existing, deps, email=email)
+    try:
+        entry = repository.create_user(
+            email=email,
+            display_name=display_name,
+            is_service_account=False,
         )
-    entry = repository.create_user(
-        email=email,
-        display_name=display_name,
-        is_service_account=False,
-    )
+    except deps["UserAccountConflictError"]:
+        # FIX: a concurrent bootstrap for the same email committed between our
+        # lookup and our insert. UserAccountConflictError is a SIBLING of
+        # UserAccountStorageError under UserAccountError, so the retry envelope
+        # in _run_bootstrap (`except storage_error`) does not catch it: it
+        # reached main's `except ValueError` and exited 2, rolling back this
+        # invocation's other work even though the account it wanted now exists.
+        # That contradicts the documented idempotency contract. Re-read the
+        # winner and report EXISTING -- through the SAME validation as the
+        # lookup branch, so a concurrently created disabled or service account
+        # still fails closed rather than being waved through.
+        winner = repository.get_user_by_email(email=email)
+        if winner is None:
+            raise
+        return _accept_existing_user(winner, deps, email=email)
     return _UserOutcome(
         email=entry.email,
         user_id=entry.id,
         display_name=entry.display_name,
         created=True,
+    )
+
+
+def _accept_existing_user(existing: Any, deps: dict[str, Any], *, email: str) -> _UserOutcome:
+    """Validate an already-stored account and report it as EXISTING.
+
+    Shared by the initial lookup and the concurrent-create-conflict reload so
+    both paths apply identical fail-closed guards.
+    """
+    # FIX: A disabled account must not be treated as a usable EXISTING
+    # operator. Runtime principals fail-closed on disabled status, but this
+    # path previously returned the id and could still attach --role.
+    if existing.status == deps["USER_STATUS_DISABLED"]:
+        raise deps["UserAccountValidationError"](
+            f"User {email!r} exists with status=disabled. This script creates "
+            "accounts and never reactivates them — flipping the flag would be "
+            "an unaudited identity write before first login, and it would "
+            "silently undo a deliberate deactivation. Nothing was changed. "
+            "Reactivate the users row in the database and re-run."
+        )
+    if existing.is_service_account:
+        raise deps["UserAccountValidationError"](
+            f"User {email!r} is a service account. bootstrap_operator creates "
+            "human operator accounts only — pass a human email or provision "
+            "the service actor through the connector runbook instead."
+        )
+    return _UserOutcome(
+        email=existing.email,
+        user_id=existing.id,
+        display_name=existing.display_name,
+        created=False,
     )
 
 
@@ -751,10 +778,12 @@ def _ensure_org_unit(
     name_flag: str,
 ) -> _OrgUnitOutcome:
     """Create the unit if absent; report the stored row's own values either way."""
+    from sqlalchemy.exc import IntegrityError
+
     row = session.get(org_orm, unit_id)
     created = row is None
     if created:
-        row = org_orm(
+        candidate = org_orm(
             id=unit_id,
             tenant_id=tenant_id,
             parent_id=parent_id,
@@ -765,9 +794,31 @@ def _ensure_org_unit(
             # is dropped by every org read.
             active=True,
         )
-        session.add(row)
-        session.flush()
-    else:
+        # FIX: org ids are DETERMINISTIC (_bootstrap_uuid over tenant + role),
+        # so two concurrent --org-skeleton runs -- even for different operator
+        # emails -- compute the same id, both miss the get() above, and the
+        # loser's flush raises IntegrityError. Unwrapped, that escaped to main's
+        # `except SQLAlchemyError` and rolled back the WHOLE invocation,
+        # including its freshly created account and role, even though the
+        # skeleton it wanted now exists. The savepoint confines the failed
+        # insert so the enclosing transaction stays usable, exactly as
+        # SqlAlchemyUserRoleAssignmentRepository._get_or_create_scope does for
+        # concurrent access-scope creators.
+        try:
+            with session.begin_nested():
+                session.add(candidate)
+                session.flush()
+            row = candidate
+        except IntegrityError:
+            # The savepoint rolled back; re-read the winning row and fall
+            # through to the SAME drift validation an ordinary EXISTING row
+            # gets, so a concurrent writer that created a drifted or inactive
+            # unit still fails closed instead of being silently accepted.
+            row = session.get(org_orm, unit_id)
+            if row is None:
+                raise
+            created = False
+    if not created:
         drift = _org_unit_drift(
             row,
             tenant_id=tenant_id,
