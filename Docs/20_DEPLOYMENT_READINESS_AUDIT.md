@@ -42,8 +42,8 @@ corrections are recorded rather than quietly dropped.
 | --- | --- | --- |
 | Docs/21 (living status) | [#210](https://github.com/a7ttaf/Youtube/pull/210) | P0 execution + current schedule source of truth |
 | Docs/22 backup rehearsal | [#210](https://github.com/a7ttaf/Youtube/pull/210) | Backup/restore runbook shipped with P0 |
-| [`23_ADMIN_ACCESS_AND_CONFIG_PLAN.md`](23_ADMIN_ACCESS_AND_CONFIG_PLAN.md) | [#218](https://github.com/a7ttaf/Youtube/pull/218) | Admin / access / config UI (Docs/21 is silent here) |
-| [`24_US_WITHHOLDING_AND_US_REVENUE_PLAN.md`](24_US_WITHHOLDING_AND_US_REVENUE_PLAN.md) | [#219](https://github.com/a7ttaf/Youtube/pull/219) | US revenue slice + withholding estimate (fills P3 rate gap) |
+| Docs/23 Admin access plan | [#218](https://github.com/a7ttaf/Youtube/pull/218) | Admin / access / config UI (Docs/21 is silent here) |
+| Docs/24 US withholding plan | [#219](https://github.com/a7ttaf/Youtube/pull/219) | US revenue slice + withholding estimate (fills P3 rate gap) |
 
 **Residual proxy note:** after #210 adds `/org-units` and `/users`, `/security` is
 still missing from `TENANT_SCOPED_ROUTES` — required by Docs/23 A2.

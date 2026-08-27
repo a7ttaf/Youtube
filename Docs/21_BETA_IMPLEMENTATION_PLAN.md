@@ -19,8 +19,8 @@ breaks, what it unblocks — not estimated from the finding text.
 | --- | --- | --- |
 | Docs/20 (this audit’s parent) | [#209](https://github.com/a7ttaf/Youtube/pull/209) | Historical audit snapshot |
 | Docs/21 living + Docs/22 | [#210](https://github.com/a7ttaf/Youtube/pull/210) | P0 code + current schedule source of truth |
-| [`23_ADMIN_ACCESS_AND_CONFIG_PLAN.md`](23_ADMIN_ACCESS_AND_CONFIG_PLAN.md) | [#218](https://github.com/a7ttaf/Youtube/pull/218) | Admin / access / config UI extension |
-| [`24_US_WITHHOLDING_AND_US_REVENUE_PLAN.md`](24_US_WITHHOLDING_AND_US_REVENUE_PLAN.md) | [#219](https://github.com/a7ttaf/Youtube/pull/219) | US revenue + withholding estimate (P3 rate ruling) |
+| Docs/23 Admin access plan | [#218](https://github.com/a7ttaf/Youtube/pull/218) | Admin / access / config UI extension |
+| Docs/24 US withholding plan | [#219](https://github.com/a7ttaf/Youtube/pull/219) | US revenue + withholding estimate (P3 rate ruling) |
 
 **Residual after #210:** `/security` still missing from Vite `TENANT_SCOPED_ROUTES`
 (Docs/23 A2).
@@ -364,8 +364,8 @@ Recorded so they are not re-proposed:
   hardcoded `0.30` is the no-treaty rate in
   `finance/reconciliation_workflow.py`. The **rate ruling and display-estimate
   program** (15% treaty copyright royalty; never arm recon from the estimate alone)
-  now live in [`24_US_WITHHOLDING_AND_US_REVENUE_PLAN.md`](24_US_WITHHOLDING_AND_US_REVENUE_PLAN.md)
-  (PR #219). Keep recon dormant until a separate ruling.
+  now live in Docs/24 (PR [#219](https://github.com/a7ttaf/Youtube/pull/219)).
+  Keep recon dormant until a separate ruling.
 - **`POST /org-units`** — 8–16h; two seeded rows do the job.
 - **react-router** — unnecessary for one operator.
 - **Wiring the currency selector** — that is the EGP program wearing a dropdown.
