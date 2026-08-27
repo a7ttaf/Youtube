@@ -2257,6 +2257,29 @@ def _created_role_names(body: str) -> list[str]:
     return names
 
 
+def _warn_when_roles_body_carries_bootstrap_password(
+    roles_body: str, superuser: str, *, include_passwords: bool
+) -> None:
+    """Print the coordinating WARNING for a bootstrap PASSWORD line (round-26 P1).
+
+    Not a refusal: the archive is sound and restores cleanly into a target
+    whose POSTGRES_PASSWORD matches this source's. The restore-side preflight
+    refuses the mismatched case because only it can see the target's live
+    credential behavior.
+    """
+    if not include_passwords:
+        return
+    if "PASSWORD" not in _collect_role_attribute_tokens(roles_body).get(superuser, set()):
+        return
+    print(
+        "WARNING: roles.sql carries the bootstrap role's PASSWORD. A "
+        "restore refuses to replay it unless the target's "
+        "POSTGRES_PASSWORD already matches this backup's; a mismatched "
+        "target would lose every connection mid-restore.",
+        file=sys.stderr,
+    )
+
+
 def _refuse_roles_body_text_gates(roles_body: str, superuser: str) -> None:
     """Run the five roles.sql text gates in their fail-closed order.
 
@@ -5121,20 +5144,11 @@ def run_backup(args: argparse.Namespace, out_dir: Path) -> BackupOutcome:
         # against the same identity the restore will connect as.
         facts = _container_facts(container, timeout=args.docker_timeout)
         roles_body = (staging / ROLES_NAME).read_text(encoding="utf-8", errors="replace")
-        if args.include_role_passwords and "PASSWORD" in _collect_role_attribute_tokens(
-            roles_body
-        ).get(facts.get("superuser", ""), set()):
-            # Not a refusal: the archive is sound and restores cleanly into a
-            # target whose POSTGRES_PASSWORD matches this source's. The
-            # restore-side preflight refuses the mismatched case because only
-            # it can see the target's live credential behavior.
-            print(
-                "WARNING: roles.sql carries the bootstrap role's PASSWORD. A "
-                "restore refuses to replay it unless the target's "
-                "POSTGRES_PASSWORD already matches this backup's; a mismatched "
-                "target would lose every connection mid-restore.",
-                file=sys.stderr,
-            )
+        _warn_when_roles_body_carries_bootstrap_password(
+            roles_body,
+            facts.get("superuser", ""),
+            include_passwords=bool(args.include_role_passwords),
+        )
         _validate_dump_roles_covered(
             listing=dump_listing,
             roles_body=roles_body,
