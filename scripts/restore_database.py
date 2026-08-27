@@ -168,6 +168,29 @@ ROLE_SETTINGS_KEYS_SQL = (
     "AND r.rolname IN ('app_tenant', 'app_platform') "
     "ORDER BY 1;"
 )
+# FIX(round-23): privileged attributes are cluster-global like memberships,
+# and a clean roles.sql neither carries nor revokes them -- a target
+# app_tenant left SUPERUSER by hand therefore satisfied every text gate and
+# the post-apply NAME check while keeping the RLS-bypassing attribute. The
+# token list mirrors _PRIVILEGED_ATTRIBUTE_TOKENS exactly.
+ROLE_PRIVILEGED_ATTRIBUTES_SQL = (
+    "SELECT rolname FROM pg_catalog.pg_roles "
+    "WHERE rolname IN ('app_tenant', 'app_platform') "
+    "AND (rolsuper OR rolbypassrls OR rolcanlogin OR rolcreaterole "
+    "OR rolcreatedb OR rolreplication) "
+    "ORDER BY rolname;"
+)
+# FIX(round-23): a live application pool survives DROP DATABASE ... WITH
+# (FORCE) -- the disconnect is momentary and restart-policies reconnect the
+# moment the recreated database exists, so writers can mutate the target
+# between pg_restore and _verify. Any session on the target database that is
+# neither this psql connection nor the bootstrap superuser is such a writer.
+FOREIGN_WRITER_SESSIONS_SQL = (
+    "SELECT count(*) FROM pg_catalog.pg_stat_activity "
+    "WHERE datname = current_database() "
+    "AND pid <> pg_backend_pid() "
+    "AND usename <> current_user;"
+)
 # Count user objects across every non-system schema so a database that only
 # has tables/enums/functions/empty custom schemas cannot look empty and
 # bypass --allow-nonempty.
@@ -1887,6 +1910,105 @@ def _undeclared_role_settings(
     )
 
 
+def _refuse_post_apply_role_problems(
+    container: str, roles_path: Path, *, timeout: int
+) -> None:
+    """Refuse every live cluster-role violation the replay left behind.
+
+    Three absolute/post-replay invariants, all fail-closed:
+
+    * membership graph empty (memberships are cluster-global, survive DROP
+      DATABASE, and appear in no archive);
+    * no cluster-level GUC on a protected role that roles.sql does not
+      declare (the RESET-ALL normalization makes extras scanner drift);
+    * no privileged attribute on a protected role (round-23: a clean
+      roles.sql does not revoke target-leftover SUPERUSER/BYPASSRLS/LOGIN/
+      CREATEROLE/CREATEDB/REPLICATION, and the CREATE ROLE lines are no-ops
+      on a target where the role already exists).
+    """
+    memberships = [
+        line.strip()
+        for line in _psql(container, ROLE_MEMBERSHIPS_SQL, timeout=timeout).splitlines()
+        if line.strip()
+    ]
+    if memberships:
+        raise RestoreError(
+            EXIT_ROLES_FAILED,
+            "after applying roles.sql an application role is a member of "
+            f"another role: {'; '.join(memberships)}. Memberships are "
+            "cluster-global, so this one predates the archive and survived the "
+            "database drop. It grants the lane the other role's object "
+            "privileges without any attribute change. REVOKE it and re-run.",
+        )
+    declared = _protected_role_setting_declarations(
+        roles_path.read_text(encoding="utf-8", errors="replace")
+    )
+    undeclared_settings = _undeclared_role_settings(container, declared, timeout=timeout)
+    if undeclared_settings:
+        raise RestoreError(
+            EXIT_ROLES_FAILED,
+            "after applying roles.sql the protected roles still carry "
+            "cluster-global settings roles.sql does not declare: "
+            f"{'; '.join(undeclared_settings)}. Role settings survive "
+            "DROP DATABASE, so these predate the archive or were installed "
+            "by something other than the replayed file. Clear them with "
+            "ALTER ROLE <role> RESET ALL and re-run.",
+        )
+    privileged = [
+        line.strip()
+        for line in _psql(container, ROLE_PRIVILEGED_ATTRIBUTES_SQL, timeout=timeout).splitlines()
+        if line.strip()
+    ]
+    if privileged:
+        raise RestoreError(
+            EXIT_ROLES_FAILED,
+            "after applying roles.sql the protected roles still carry "
+            "privileged attributes "
+            "(SUPERUSER/BYPASSRLS/LOGIN/CREATEROLE/CREATEDB/REPLICATION): "
+            f"{', '.join(privileged)}. Attributes are cluster-global and a "
+            "clean roles.sql does not revoke them, so these predate the "
+            "archive. Run ALTER ROLE <role> WITH NOSUPERUSER NOBYPASSRLS "
+            "NOLOGIN NOCREATEROLE NOCREATEDB NOREPLICATION and re-run.",
+        )
+
+
+def _live_protected_role_problems(container: str, *, timeout: int) -> list[str]:
+    """Return live cluster-role violations the roles.sql text gates cannot see.
+
+    Shared by the pre-destruction preflight in ``_execute_restore`` and the
+    post-replay defense in ``_refuse_post_apply_role_problems``' callers:
+    the same absolute invariant read at two different times.
+    """
+    problems: list[str] = []
+    memberships = [
+        line.strip()
+        for line in _psql(container, ROLE_MEMBERSHIPS_SQL, timeout=timeout).splitlines()
+        if line.strip()
+    ]
+    if memberships:
+        problems.append("membership edges: " + "; ".join(memberships))
+    privileged = [
+        line.strip()
+        for line in _psql(container, ROLE_PRIVILEGED_ATTRIBUTES_SQL, timeout=timeout).splitlines()
+        if line.strip()
+    ]
+    if privileged:
+        problems.append("privileged attributes on: " + ", ".join(privileged))
+    return problems
+
+
+def _foreign_writer_session_count(container: str, *, timeout: int) -> int:
+    """Count live non-superuser sessions on the target database."""
+    raw = _psql(container, FOREIGN_WRITER_SESSIONS_SQL, timeout=timeout).strip()
+    try:
+        return int(raw or "0")
+    except ValueError as exc:
+        raise RestoreError(
+            EXIT_RESTORE_FAILED,
+            f"could not read the live session count from psql output {raw!r}: {exc}",
+        ) from exc
+
+
 def _restore_roles(container: str, roles_path: Path, *, timeout: int) -> list[str]:
     """Apply roles.sql and return the required roles present afterward."""
     _preflight_roles_file(container, roles_path, timeout=timeout)
@@ -1930,42 +2052,9 @@ def _restore_roles(container: str, roles_path: Path, *, timeout: int) -> list[st
             "statements reference those roles, so restoring the data now "
             "would fail part-way and leave a half-populated database.",
         )
-    # FIX: assert the graph, not just the names. See ROLE_MEMBERSHIPS_SQL --
-    # a membership the TARGET cluster already had survives DROP DATABASE and
-    # appears in no archive, so this is the only place it can be caught.
-    memberships = [
-        line.strip()
-        for line in _psql(container, ROLE_MEMBERSHIPS_SQL, timeout=timeout).splitlines()
-        if line.strip()
-    ]
-    if memberships:
-        raise RestoreError(
-            EXIT_ROLES_FAILED,
-            "after applying roles.sql an application role is a member of "
-            f"another role: {'; '.join(memberships)}. Memberships are "
-            "cluster-global, so this one predates the archive and survived the "
-            "database drop. It grants the lane the other role's object "
-            "privileges without any attribute change. REVOKE it and re-run.",
-        )
-    # FIX: belt and braces for the RESET-ALL normalization above. After it,
-    # the only settings that can remain are the ones the file itself
-    # declares, so anything extra means the normalization missed or the file
-    # installed something the scanner misparsed -- both fail closed here
-    # rather than reporting a successful restore over stale role settings.
-    declared = _protected_role_setting_declarations(
-        roles_path.read_text(encoding="utf-8", errors="replace")
-    )
-    undeclared_settings = _undeclared_role_settings(container, declared, timeout=timeout)
-    if undeclared_settings:
-        raise RestoreError(
-            EXIT_ROLES_FAILED,
-            "after applying roles.sql the protected roles still carry "
-            "cluster-global settings roles.sql does not declare: "
-            f"{'; '.join(undeclared_settings)}. Role settings survive "
-            "DROP DATABASE, so these predate the archive or were installed "
-            "by something other than the replayed file. Clear them with "
-            "ALTER ROLE <role> RESET ALL and re-run.",
-        )
+    # FIX: assert the live graph and attribute surface, not just the names --
+    # all three checks now live in one fail-closed helper.
+    _refuse_post_apply_role_problems(container, roles_path, timeout=timeout)
     return present
 
 
@@ -2379,6 +2468,40 @@ def _execute_restore(
         # when _restore_data ran, one step AFTER the drop had committed. Both
         # preflights are read-only, so both belong before it.
         _preflight_dump_readable(container, backup_dir / DUMP_NAME, timeout=args.timeout)
+        # FIX(round-23 P1): every LIVE cluster check also belongs BEFORE the
+        # drop. The post-replay checks inside _restore_roles used to be the
+        # only place a target-leftover membership or privileged attribute was
+        # caught -- i.e. after _recreate_target_database had already destroyed
+        # the original database, converting a recoverable refusal into
+        # permanent data loss. Reading the same catalog here turns both into
+        # refusals that change nothing.
+        live_problems = _live_protected_role_problems(container, timeout=args.timeout)
+        if live_problems:
+            raise RestoreError(
+                EXIT_ROLES_FAILED,
+                "the target cluster's application roles already carry "
+                "cluster-global state a clean roles.sql neither carries nor "
+                "clears: " + "; ".join(live_problems) + ". Refusing BEFORE "
+                "the target database is dropped so the original data is "
+                "preserved. REVOKE the membership(s) and/or run ALTER ROLE "
+                "<role> WITH NOSUPERUSER NOBYPASSRLS NOLOGIN NOCREATEROLE "
+                "NOCREATEDB NOREPLICATION, then re-run.",
+            )
+        # FIX(round-23): DROP DATABASE ... WITH (FORCE) disconnects live
+        # clients but Compose restart policies reconnect them the moment the
+        # recreated database exists, so writers can mutate the target between
+        # pg_restore and _verify. Refuse up front instead.
+        live_writers = _foreign_writer_session_count(container, timeout=args.timeout)
+        if live_writers:
+            raise RestoreError(
+                EXIT_USAGE,
+                f"the target database has {live_writers} live client "
+                "session(s) from other users. DROP DATABASE ... WITH (FORCE) "
+                "disconnects them, but their pools reconnect while the "
+                "restore runs and the verification can then pass over "
+                "mutated data. Stop the application and scheduler containers "
+                "first (e.g. `docker compose stop app app-dev`), then re-run.",
+            )
         target_db = _container_default_database(container, timeout=args.timeout)
         _recreate_target_database(container, target_db, timeout=args.timeout)
     roles = _restore_roles(container, backup_dir / ROLES_NAME, timeout=args.timeout)
@@ -2390,7 +2513,22 @@ def _execute_restore(
         clean=args.allow_nonempty,
     )
     print("pg_restore completed")
-    return _verify(container, manifest, timeout=args.timeout)
+    ok = _verify(container, manifest, timeout=args.timeout)
+    if args.allow_nonempty:
+        # FIX(round-23): a pool that reconnected during the restore makes the
+        # row counts that were just verified stale the moment they are read;
+        # refuse to certify a live restore that was not actually quiesced.
+        live_writers = _foreign_writer_session_count(container, timeout=args.timeout)
+        if live_writers:
+            raise RestoreError(
+                EXIT_VERIFY_FAILED,
+                f"{live_writers} client session(s) were connected to the "
+                "target during or after the restore: the verified row counts "
+                "may no longer describe the database. Stop the application "
+                "containers, re-run the restore, and keep them stopped until "
+                "it exits 0.",
+            )
+    return ok
 
 
 def _cleanup_rehearsal_throwaway(

@@ -127,30 +127,39 @@ def _restore_psql(
     present: list[str] | None = None,
     memberships: list[str] | None = None,
     settings: list[str] | None = None,
+    privileged: list[str] | None = None,
+    writers: int = 0,
 ):
     """Return a psql stub answering each read-only query _restore_roles makes.
 
-    ``memberships`` models ``ROLE_MEMBERSHIPS_SQL`` -- the post-apply assertion
-    that an application role is a member of nothing. ``settings`` models
-    ``ROLE_SETTINGS_KEYS_SQL`` the same way, as ``role = guc`` lines. Both
-    default to EMPTY, which is the healthy cluster; a test that wants those
-    failures passes the lines explicitly. Answering them from the role list,
-    as the single catch-all branch used to, made every caller look like a
-    compromised cluster.
+    ``memberships`` models ``ROLE_MEMBERSHIPS_SQL`` and ``settings`` models
+    ``ROLE_SETTINGS_KEYS_SQL`` as ``role = guc`` lines; ``privileged`` models
+    ``ROLE_PRIVILEGED_ATTRIBUTES_SQL``; ``writers`` models the
+    ``pg_stat_activity`` count. All default to the healthy/empty cluster; a
+    test that wants those failures passes the values explicitly. Answering
+    them from the role list, as the single catch-all branch used to, made
+    every caller look like a compromised cluster.
     """
     roles = list(restore.REQUIRED_ROLES) if present is None else list(present)
     edges = list(memberships or [])
     gucs = list(settings or [])
+    privs = list(privileged or [])
 
     def fake_psql(_container: str, sql: str, *, timeout: int) -> str:
-        """Answer ``current_user``, the membership graph, or the role catalog."""
+        """Answer the catalog query psql was asked to run."""
         _ = (_container, timeout)
+        # pg_stat_activity first: its SQL also contains the literal
+        # "current_user", which the branch below would misroute.
+        if "pg_stat_activity" in sql:
+            return f"{writers}\n"
         if "current_user" in sql:
             return superuser
         if "pg_auth_members" in sql:
             return ("\n".join(edges) + "\n") if edges else ""
         if "pg_db_role_setting" in sql:
             return ("\n".join(gucs) + "\n") if gucs else ""
+        if "rolsuper" in sql:
+            return ("\n".join(privs) + "\n") if privs else ""
         return "\n".join(roles) + "\n"
 
     return fake_psql
@@ -4922,6 +4931,10 @@ def test_execute_restore_recreates_target_only_when_allow_nonempty(
         restore, "_restore_data", lambda *a, **k: order.append("data")
     )
     monkeypatch.setattr(restore, "_verify", lambda *a, **k: True)
+    # The round-23 live checks read the catalog through _psql; stub it as a
+    # healthy cluster so the destructive path is reached and its ORDER can be
+    # asserted below.
+    monkeypatch.setattr(restore, "_psql", _restore_psql())
 
     def _run(*, allow_nonempty: bool) -> bool:
         """Drive one CLI invocation and return its exit code."""
@@ -5162,6 +5175,31 @@ def test_windows_dacl_accepts_the_owner_on_the_merged_echoed_path_row() -> None:
 
     with_owner = "\n".join([merged_system, "desktop\\winuser:(F)"])
     assert backup._windows_dacl_problems(with_owner, "winuser") == []
+
+    # FIX(codex round-23 P2): with USERDOMAIN known, an ACE for a DIFFERENT
+    # domain sharing the basename is a stranger, not the owner. The old bare
+    # suffix match treated CORP\winuser as the owner and passed the DACL.
+    lookalike = "C:\\backups\\run corp\\winuser:(F)"
+    assert backup._windows_dacl_problems(
+        lookalike, "winuser", owner_domain="desktop"
+    ) == [
+        "unexpected non-owner principal C:\\backups\\run corp\\winuser holds "
+        "full control",
+        "no explicit Full-control grant for 'winuser' was found",
+    ]
+    # The full identity itself still matches, bare or fused onto the path row.
+    assert (
+        backup._windows_dacl_problems(
+            "desktop\\winuser:(F)", "winuser", owner_domain="desktop"
+        )
+        == []
+    )
+    assert (
+        backup._windows_dacl_problems(
+            merged, "winuser", owner_domain="desktop"
+        )
+        == []
+    )
 
     # A stranger carrying Full control (not just a restricted ACE) must hit
     # the dedicated non-owner refusal, and the missing owner grant stays
@@ -5754,6 +5792,8 @@ def test_restore_roles_resets_existing_protected_roles_before_replay(
             return "ums"
         if "pg_auth_members" in sql or "pg_db_role_setting" in sql:
             return ""
+        if "rolsuper" in sql or "pg_stat_activity" in sql:
+            return ""
         return "app_tenant\napp_platform\n"
 
     applied: list[str] = []
@@ -5949,3 +5989,236 @@ def test_rehearse_image_flag_requires_rehearse() -> None:
             ["--backup-dir", "x", "--container", "c", "--rehearse-image", "postgres:18"]
         )
     assert caught.value.code == 2
+
+
+# ==========================================================================
+# Round-23 wave: preflight the LIVE target before the destructive drop
+# (memberships, privileged attributes, foreign writer sessions), preserve
+# watermark-maxima runs in retention, strict staging DACL.
+# ==========================================================================
+
+
+def _patched_execute_restore(monkeypatch: pytest.MonkeyPatch, order: list[str]):
+    """Patch _execute_restore's collaborators the ordering tests freeze out."""
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(restore, "_await_postgres", lambda *a, **k: None)
+    monkeypatch.setattr(restore, "_guard_empty", lambda *a, **k: order.append("guard"))
+    monkeypatch.setattr(
+        restore,
+        "_preflight_roles_file",
+        lambda container, path, timeout: order.append("preflight"),
+    )
+    monkeypatch.setattr(
+        restore,
+        "_preflight_dump_readable",
+        lambda container, path, timeout: order.append("dumpcheck"),
+    )
+    monkeypatch.setattr(
+        restore,
+        "_container_default_database",
+        lambda container, timeout: order.append("dbname") or "appdb",
+    )
+    monkeypatch.setattr(
+        restore,
+        "_recreate_target_database",
+        lambda container, target_db, timeout: order.append(f"recreate:{target_db}"),
+    )
+    monkeypatch.setattr(
+        restore,
+        "_restore_roles",
+        lambda container, path, timeout: order.append("roles") or set(),
+    )
+    monkeypatch.setattr(restore, "_restore_data", lambda *a, **k: order.append("data"))
+    monkeypatch.setattr(restore, "_verify", lambda *a, **k: True)
+    return SimpleNamespace
+
+
+def test_execute_restore_refuses_live_role_state_before_the_drop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A target-leftover membership must refuse BEFORE the drop (codex P1)."""
+    order: list[str] = []
+    args_ns = _patched_execute_restore(monkeypatch, order)
+    monkeypatch.setattr(restore, "_psql", _restore_psql(memberships=["app_tenant -> postgres"]))
+
+    with pytest.raises(restore.RestoreError) as caught:
+        restore._execute_restore(
+            "container",
+            tmp_path,
+            args_ns(timeout=5, allow_nonempty=True, wait_for_postgres=60, docker_timeout=5),
+            {},
+        )
+    assert caught.value.code == restore.EXIT_ROLES_FAILED
+    assert "membership edges: app_tenant -> postgres" in str(caught.value)
+    assert "recreate:appdb" not in order, "the refusal must land before the drop"
+
+
+def test_execute_restore_refuses_live_privileged_attributes_before_the_drop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A target app_tenant left SUPERUSER by hand must refuse pre-drop."""
+    order: list[str] = []
+    args_ns = _patched_execute_restore(monkeypatch, order)
+    monkeypatch.setattr(restore, "_psql", _restore_psql(privileged=["app_tenant"]))
+
+    with pytest.raises(restore.RestoreError) as caught:
+        restore._execute_restore(
+            "container",
+            tmp_path,
+            args_ns(timeout=5, allow_nonempty=True, wait_for_postgres=60, docker_timeout=5),
+            {},
+        )
+    assert caught.value.code == restore.EXIT_ROLES_FAILED
+    assert "privileged attributes on: app_tenant" in str(caught.value)
+    assert "recreate:appdb" not in order
+
+
+def test_execute_restore_refuses_live_writers_before_the_drop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Live application pools must be stopped before a destructive restore."""
+    order: list[str] = []
+    args_ns = _patched_execute_restore(monkeypatch, order)
+    monkeypatch.setattr(restore, "_psql", _restore_psql(writers=3))
+
+    with pytest.raises(restore.RestoreError) as caught:
+        restore._execute_restore(
+            "container",
+            tmp_path,
+            args_ns(timeout=5, allow_nonempty=True, wait_for_postgres=60, docker_timeout=5),
+            {},
+        )
+    assert caught.value.code == restore.EXIT_USAGE
+    assert "3 live client" in str(caught.value)
+    assert "docker compose stop" in str(caught.value)
+    assert "recreate:appdb" not in order
+
+
+def test_execute_restore_fails_verification_when_writers_returned(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A pool that reconnects during the restore invalidates the verification.
+
+    The session count is read twice: zero before the drop (the guard passes),
+    one after _verify -- exactly what a Compose app with restart:
+    unless-stopped does the moment the recreated database exists.
+    """
+    order: list[str] = []
+    args_ns = _patched_execute_restore(monkeypatch, order)
+    writer_reads = {"n": 0}
+    healthy = _restore_psql()
+
+    def sequencing_psql(_container: str, sql: str, *, timeout: int) -> str:
+        if "pg_stat_activity" in sql:
+            writer_reads["n"] += 1
+            return "0\n" if writer_reads["n"] == 1 else "1\n"
+        return healthy(_container, sql, timeout=timeout)
+
+    monkeypatch.setattr(restore, "_psql", sequencing_psql)
+    with pytest.raises(restore.RestoreError) as caught:
+        restore._execute_restore(
+            "container",
+            tmp_path,
+            args_ns(timeout=5, allow_nonempty=True, wait_for_postgres=60, docker_timeout=5),
+            {},
+        )
+    assert caught.value.code == restore.EXIT_VERIFY_FAILED
+    assert "may no longer describe the database" in str(caught.value)
+
+
+def test_restore_roles_rejects_privileged_attributes(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Post-replay defense in depth: privileged attributes refuse (Qodo)."""
+    roles_path = tmp_path / restore.ROLES_NAME
+    roles_path.write_text(
+        "CREATE ROLE app_tenant;\nCREATE ROLE app_platform;\n", encoding="utf-8"
+    )
+    monkeypatch.setattr(restore, "_psql", _restore_psql(privileged=["app_tenant"]))
+    monkeypatch.setattr(
+        restore,
+        "_run_with_file",
+        lambda *_a, **_k: subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="", stderr=""
+        ),
+    )
+    with pytest.raises(restore.RestoreError) as caught:
+        restore._restore_roles("fake", roles_path, timeout=5)
+    assert caught.value.code == restore.EXIT_ROLES_FAILED
+    assert "privileged attributes" in str(caught.value)
+    assert "NOSUPERUSER" in str(caught.value)
+
+
+def test_retention_preserves_runs_holding_watermark_maxima(tmp_path: Path) -> None:
+    """A run holding a per-table historical maximum must never be pruned.
+
+    Retention kept only the keep_min window and the newest content-bearing
+    run, so the run carrying a table's high-water mark could be deleted; with
+    watermark.json later lost, _load_watermark would rebuild a silently
+    downgraded baseline (codex round-20 P1).
+    """
+    newest = _write_run(tmp_path, "20260820T000000", counts=_database(**{"public.channels": 5}))
+    historic = _write_run(
+        tmp_path, "20260101T000000", counts=_database(**{"public.channels": 10})
+    )
+    dominated = _write_run(
+        tmp_path, "20260102T000000", counts=_database(**{"public.channels": 3})
+    )
+
+    backup._prune(
+        tmp_path, keep_days=30, keep_min=1, now=datetime(2026, 8, 27, 3, 0, tzinfo=UTC)
+    )
+
+    assert newest.is_dir()
+    assert historic.is_dir(), (
+        "the run holding the historical maximum must survive: deleting it "
+        "silently downgrades the rebuildable watermark baseline"
+    )
+    assert not dominated.exists(), (
+        "a run whose counts are dominated by newer runs buys no protection"
+    )
+
+
+def test_watermark_maxima_contributors_read_the_fold_filter(tmp_path: Path) -> None:
+    """A rejected run's high counts must not buy it retention protection."""
+    rejected = _write_run(
+        tmp_path, "20260101T000000", counts=_database(**{"public.channels": 99}), rejected=True
+    )
+    classified = [
+        (run, backup._run_has_content(run))
+        for run in sorted(tmp_path.iterdir(), key=lambda child: child.name)
+    ]
+    assert backup._watermark_maxima_contributors(classified) == set()
+    _ = rejected
+
+
+def test_staging_directory_gets_the_strict_owner_only_lockdown(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, clock: _Clock
+) -> None:
+    """Staging must be locked down strict BEFORE artifacts land in it.
+
+    The lenient default left the staging directory on an inherited NTFS DACL
+    until publish time -- a window in which other local principals could
+    read database.dump, roles.sql and manifest.json (codex round-20 P1).
+    """
+    calls: list[tuple[str, bool]] = []
+    real_restrict = backup._restrict_run_dir_mode
+
+    def recording(path: Path, out_dir: Path, *, strict: bool = False) -> None:
+        calls.append((path.name, strict))
+        real_restrict(path, out_dir, strict=strict)
+
+    monkeypatch.setattr(backup, "_restrict_run_dir_mode", recording)
+    _FakeContainer(REAL).install(monkeypatch)
+
+    code = backup.main(["--out-dir", str(tmp_path), "--establish-watermark"])
+
+    assert code == backup.EXIT_OK
+    staging_calls = [
+        strict for name, strict in calls if name.endswith(backup.PARTIAL_SUFFIX)
+    ]
+    assert staging_calls and all(staging_calls), (
+        "every staging lockdown must be strict: secrets are written there "
+        "moments after it is created"
+    )

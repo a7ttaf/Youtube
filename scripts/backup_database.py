@@ -3163,9 +3163,12 @@ def _restrict_run_dir_mode(
     POSIX stays best-effort either way -- a refused chmod lands on the durable
     record and stderr instead of vanishing.
 
-    ``strict`` (Windows publish-time NTFS DACL check) makes an unenforceable
-    or permissive ACL raise instead of warn: a published run's verdict hinges
-    on it. The pre-dump staging call uses the lenient default.
+    ``strict`` (Windows NTFS DACL enforcement) makes an unenforceable or
+    permissive ACL raise instead of warn, and strips inherited grants up
+    front. Both call sites now use it: the published run's verdict hinges on
+    it, and the pre-dump staging call holds password-bearing artifacts within
+    moments of creation, so a lenient window there was readable by every
+    principal the output root inherited.
     """
     try:
         os.chmod(path, 0o700)
@@ -3287,18 +3290,46 @@ def _is_allowlisted_principal(principal_key: str) -> bool:
     return False
 
 
-def _principal_matches_owner(principal_key: str, owner_key: str) -> bool:
-    """Match USERNAME with or without its machine/domain prefix."""
-    return bool(owner_key) and (
-        principal_key == owner_key or principal_key.endswith("\\" + owner_key)
+def _principal_matches_owner(
+    principal_key: str, owner_key: str, owner_domain: str = ""
+) -> bool:
+    """Match the current user by bare name or by her FULL domain identity.
+
+    FIX(codex round-22/23 P2): the old ``endswith("\\\\{owner}")`` suffix match
+    accepted ANY domain sharing the basename -- an ACE for ``CORP\\alice`` was
+    treated as the owner ``alice`` and the DACL passed as owner-only while
+    ``CORP\\alice`` kept full control. With ``USERDOMAIN`` known (it always is
+    on Windows), the principal must equal the bare username, equal
+    ``<domain>\\\\<user>``, or end with that FULL identity -- which is what
+    keeps icacls' fused first row (``<path> DESKTOP\\\\winuser``) working.
+    Without a domain the old bare-name suffix fallback remains, because a
+    false quarantine of the operator's own healthy backup is worse than the
+    theoretical no-domain case.
+    """
+    if principal_key == owner_key:
+        return True
+    if not owner_domain:
+        return principal_key.endswith("\\" + owner_key)
+    full_owner = owner_domain + "\\" + owner_key
+    # The fused icacls first row joins the path to the principal with a
+    # SPACE (``C:\...\run DESKTOP\winuser``); a same-domain parent joins
+    # with a backslash. Both are the full identity; any other domain never
+    # produces this suffix.
+    return principal_key.endswith(full_owner) and (
+        principal_key == full_owner
+        or principal_key.endswith(" " + full_owner)
+        or principal_key.endswith("\\" + full_owner)
     )
 
 
-def _windows_dacl_problems(icacls_output: str, current_user: str) -> list[str]:
+def _windows_dacl_problems(
+    icacls_output: str, current_user: str, owner_domain: str = ""
+) -> list[str]:
     r"""List reasons the icacls output is NOT an owner-only grant.
 
-    Fail-closed allowlist semantics: only the current user (matched with or
-    without its machine/domain prefix, since icacls prints e.g.
+    Fail-closed allowlist semantics: only the current user (matched by bare
+    name or by her FULL ``USERDOMAIN`` identity -- see
+    ``_principal_matches_owner`` -- since icacls prints e.g.
     ``DESKTOP\\winuser`` while USERNAME reads ``winuser``) and the
     infrastructure principals accepted by ``_is_allowlisted_principal`` may
     hold grants. Inherited markers ('(I)'), any other principal, or the
@@ -3307,6 +3338,7 @@ def _windows_dacl_problems(icacls_output: str, current_user: str) -> list[str]:
     """
     problems: list[str] = []
     owner_key = current_user.strip().lower()
+    domain_key = owner_domain.strip().lower()
     owner_grant_seen = False
     for raw_line in icacls_output.splitlines():
         parsed = _parse_icacls_listing_line(raw_line)
@@ -3319,7 +3351,7 @@ def _windows_dacl_problems(icacls_output: str, current_user: str) -> list[str]:
         if _is_allowlisted_principal(principal_key):
             continue
         if "F" in right_codes:
-            if _principal_matches_owner(principal_key, owner_key):
+            if _principal_matches_owner(principal_key, owner_key, domain_key):
                 owner_grant_seen = True
             else:
                 problems.append(
@@ -3375,7 +3407,9 @@ def _windows_enforce_owner_only_acl(path: Path) -> None:
             f"(exit {applied.returncode}): {applied.stderr.strip()}; refusing to "
             "publish to an insecure destination",
         )
-    problems = _windows_dacl_problems(listed.stdout, user)
+    problems = _windows_dacl_problems(
+        listed.stdout, user, owner_domain=os.environ.get("USERDOMAIN", "")
+    )
     if problems:
         raise BackupError(
             EXIT_ARTIFACT_INVALID,
@@ -4241,12 +4275,39 @@ def _collect_dated_backup_runs(
     return runs
 
 
+def _watermark_maxima_contributors(
+    classified: list[tuple[Path, bool | None]],
+) -> set[str]:
+    """Return run names that still hold a per-table maximum newer runs lack.
+
+    FIX(codex round-20 P1): retention protected only the keep_min window and
+    the newest content-bearing run, so an older accepted run carrying a
+    table's historical high-water mark could be deleted. If watermark.json is
+    then lost or corrupted, ``_load_watermark`` rebuilds from surviving
+    manifests only and the baseline silently downgrades -- the content gate
+    would accept a shrunken database as "not a drop". A run survives when
+    deleting it would change that fold: it holds at least one per-table
+    count greater than every newer accepted run's. Reads counts through the
+    same ``_accepted_published_counts`` filter the fold itself uses, so
+    rejected and unpublished directories never buy protection.
+    """
+    seen: dict[str, int] = {}
+    contributors: set[str] = set()
+    for run, _has_content in reversed(classified):
+        counts = _accepted_published_counts(run) or {}
+        if any(value > seen.get(name, 0) for name, value in counts.items()):
+            contributors.add(run.name)
+            for name, value in counts.items():
+                seen[name] = max(seen.get(name, 0), value)
+    return contributors
+
+
 def _retention_protected_names(
     classified: list[tuple[Path, bool | None]],
     *,
     keep_min: int,
 ) -> set[str]:
-    """Names protected by --keep-min eligibility and newest-with-content pin.
+    """Names protected by --keep-min eligibility, the content pin, and maxima.
 
     Invariant 2: proven-empty runs are filtered out BEFORE the --keep-min slice
     is taken, so they cannot occupy a protection slot. Slicing first and
@@ -4255,6 +4316,9 @@ def _retention_protected_names(
     Invariant 3 keeps `None` (unknown) in the eligible list.
     Invariant 1: pin the newest run that proves it holds data, whatever its age
     and whatever --keep-min worked out to.
+    Invariant 4: every run that still contributes a per-table high-water mark
+    to the fold is protected, whatever its age -- losing it would silently
+    downgrade the rebuildable watermark baseline.
     """
     eligible = [run.name for run, has_content in classified if has_content is not False]
     protected = set(eligible[-keep_min :]) if keep_min >= 1 else set()
@@ -4264,6 +4328,7 @@ def _retention_protected_names(
     )
     if newest_with_content is not None:
         protected.add(newest_with_content)
+    protected |= _watermark_maxima_contributors(classified)
     return protected
 
 
@@ -4855,7 +4920,12 @@ def run_backup(args: argparse.Namespace, out_dir: Path) -> BackupOutcome:
     if staging.exists():
         shutil.rmtree(staging)
     staging.mkdir(parents=True, mode=0o700)
-    _restrict_run_dir_mode(staging, out_dir)
+    # FIX(codex round-20 P1): strict, not lenient. database.dump, roles.sql
+    # (possibly carrying password verifiers) and manifest.json land in this
+    # directory moments later; a lenient chmod-only lockdown on an inherited
+    # NTFS DACL left a window where other local principals could read them.
+    # Strict fails the run BEFORE any secret is written instead of after.
+    _restrict_run_dir_mode(staging, out_dir, strict=True)
 
     watermark = _load_watermark(out_dir)
     expected_identity = _load_identity(out_dir)

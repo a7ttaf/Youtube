@@ -388,8 +388,33 @@ def _redact_argparse_token(token: str) -> str:
 
 
 def _redact_argparse_message(message: str) -> str:
-    """Redact credential-bearing tokens from an argparse error message."""
-    return " ".join(_redact_argparse_token(token) for token in message.split())
+    """Redact credential-bearing tokens from an argparse error message.
+
+    FIX(codex round-23 P2): a quoted database-URL password may contain
+    literal spaces, and argparse's token-wise echo splits it -- the scheme
+    fragment and the @-bearing fragment were each masked, but the MIDDLE
+    password words contained neither marker and passed through raw
+    (``postgresql+psycopg://user:top very secret@host/db`` masked ``top``
+    and ``secret@host`` while printing ``very``). A token that opens a URL
+    now opens a masking span that runs until the next token carrying the
+    userinfo terminator ``@`` (inclusive). Over-masking is the documented
+    failure direction for this guard.
+    """
+    redacted: list[str] = []
+    inside_url = False
+    for token in message.split():
+        if inside_url:
+            redacted.append(_UNPRINTABLE_URL)
+            if "@" in token:
+                inside_url = False
+            continue
+        redacted.append(_redact_argparse_token(token))
+        opens_url = "://" in token or token.lower().startswith(
+            _ARGPARSE_SCHEME_PREFIXES
+        )
+        if opens_url and "@" not in token:
+            inside_url = True
+    return " ".join(redacted)
 
 
 class _RedactingArgumentParser(argparse.ArgumentParser):
@@ -514,8 +539,16 @@ def _ensure_user(
     tenant_id: UUID,
     email: str,
     display_name: str,
+    audit_sink: Any,
 ) -> _UserOutcome:
-    """Create the account if absent; return its server-generated id either way."""
+    """Create the account if absent; return its server-generated id either way.
+
+    A CREATE is an authorization-relevant write, so it records
+    ``USER_ACCOUNT_CHANGED`` on the caller's sink and transaction -- the same
+    event shape ``backend/ums_smart_revenue/api/users.py`` emits, with the
+    created account as its own actor (bootstrap semantics: there is no other
+    authenticated principal yet).
+    """
     repository = deps["SqlAlchemyUserAccountRepository"](session, tenant_id=tenant_id)
     existing = repository.get_user_by_email(email=email)
     if existing is not None:
@@ -546,6 +579,26 @@ def _ensure_user(
         if winner is None:
             raise
         return _accept_existing_user(winner, deps, email=email)
+    deps["record_audit_event"](
+        sink=audit_sink,
+        actor=deps["UserPrincipal"](
+            user_id=entry.id,
+            email=entry.email,
+            tenant_id=str(tenant_id),
+        ),
+        event_type=deps["AuditEventType"].USER_ACCOUNT_CHANGED,
+        entity_type="user",
+        entity_id=str(entry.id),
+        scope=deps["AccessScope"].global_scope(),
+        reason=_ROLE_ASSIGNMENT_REASON,
+        details={
+            "action": "created",
+            "target_user_id": entry.id,
+            "email": entry.email,
+            "status": getattr(entry, "status", "active"),
+            "is_service_account": False,
+        },
+    )
     return _UserOutcome(
         email=entry.email,
         user_id=entry.id,
@@ -1050,11 +1103,14 @@ def _run_bootstrap(
                         message = _require_seeded_role(session, deps, role_key)
                         if message is not None:
                             raise ValueError(message)
-                    audit_sink = (
-                        deps["PlatformLaneAuditSink"](session, tenant_id=tenant.id)
-                        if role_key is not None
-                        else None
-                    )
+                    # FIX(codex round-20 P1): the sink used to exist only when
+                    # --role was passed, so an account-only bootstrap created a
+                    # persistent authorization identity with NO audit event --
+                    # the first --email run was completely absent from
+                    # audit_logs. The sink now always exists and creation
+                    # itself records USER_ACCOUNT_CHANGED on the same
+                    # transaction, so an unauditable create rolls back.
+                    audit_sink = deps["PlatformLaneAuditSink"](session, tenant_id=tenant.id)
                     users: list[_UserOutcome] = []
                     for email, display_name in accounts:
                         user = _ensure_user(
@@ -1063,6 +1119,7 @@ def _run_bootstrap(
                             tenant_id=tenant.id,
                             email=email,
                             display_name=display_name,
+                            audit_sink=audit_sink,
                         )
                         if role_key is not None:
                             user = _assign_global_role(
@@ -1205,15 +1262,21 @@ def main(argv: list[str] | None = None) -> int:
     """
     args = _parse_args(argv if argv is not None else sys.argv[1:])
     deps = _load_dependencies()
-    try:
-        settings = deps["load_app_settings"]()
-    except ValueError:
-        # Settings validation text can echo rejected values such as database
-        # URLs, so keep the terminal message stable and value-free.
-        print("ValueError: invalid operator settings", file=sys.stderr)
-        return 2
-
-    database_url = args.database_url or settings.database_url
+    # FIX(codex round-23 P2): load app settings ONLY when the URL has to come
+    # from them. An explicit --database-url used to pay for full ambient
+    # settings validation first, so one stale malformed UMS_* variable
+    # aborted a run whose database target was fully specified on the CLI.
+    database_url = args.database_url
+    if not database_url:
+        try:
+            settings = deps["load_app_settings"]()
+        except ValueError:
+            # Settings validation text can echo rejected values such as
+            # database URLs, so keep the terminal message stable and
+            # value-free.
+            print("ValueError: invalid operator settings", file=sys.stderr)
+            return 2
+        database_url = settings.database_url
     if not database_url:
         print(
             "A database URL is required: pass --database-url or set UMS_DATABASE_URL.",

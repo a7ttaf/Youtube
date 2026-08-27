@@ -1365,6 +1365,7 @@ def test_ensure_user_reports_existing_when_a_concurrent_create_conflicts():
         tenant_id=UMS_TENANT_ID,
         email=_OPERATOR_EMAIL,
         display_name="Loser",
+        audit_sink=object(),
     )
 
     assert outcome.created is False, "the losing racer must report EXISTING"
@@ -1403,6 +1404,7 @@ def test_ensure_user_still_fails_closed_on_a_concurrently_created_bad_account(
             tenant_id=UMS_TENANT_ID,
             email=_OPERATOR_EMAIL,
             display_name="Loser",
+            audit_sink=object(),
         )
 
 
@@ -1689,3 +1691,69 @@ def test_main_docstring_documents_the_cli_contract() -> None:
     ):
         assert required in doc, required
     assert "0 when" in doc and "2 for every handled failure" in doc
+
+
+def test_account_only_bootstrap_records_a_user_account_changed_event(tmp_path):
+    """Creating an operator identity without --role must still be audited.
+
+    The audit sink used to be constructed only when --role was passed, so the
+    first --email bootstrap created a persistent authorization identity with
+    no audit event at all (codex round-20 P1).
+    """
+    module = _load_script()
+    database_url = _make_database(tmp_path)
+    _seed_role_catalog(database_url)
+
+    assert _run(module, database_url, "--email", _OPERATOR_EMAIL) == 0
+
+    engine = create_engine(database_url)
+    try:
+        with Session(engine) as session:
+            audit_rows = list(
+                session.scalars(
+                    select(AuditLogORM).where(
+                        AuditLogORM.event_type == "USER_ACCOUNT_CHANGED"
+                    )
+                ).all()
+            )
+    finally:
+        engine.dispose()
+
+    assert len(audit_rows) == 1
+    audit = audit_rows[0]
+    assert audit.entity_type == "user"
+    assert audit.reason == "operator bootstrap"
+    assert audit.sensitive is True
+
+
+def test_argparse_redaction_masks_every_whitespace_split_password_word():
+    """A quoted password with spaces must not leak its MIDDLE words.
+
+    argparse echoes argv token by token, so 'user:top very secret@host' came
+    back as three tokens; only the scheme fragment and the @-bearing fragment
+    were masked and the middle password words printed raw (codex round-23 P2).
+    """
+    module = _load_script()
+    message = (
+        "argument --database-url: invalid value: "
+        "'postgresql+psycopg://user:top very secret@host/db'"
+    )
+    redacted = module._redact_argparse_message(message)
+    for secret in ("top", "very", "secret"):
+        assert secret not in redacted, secret
+    assert module._UNPRINTABLE_URL in redacted
+
+
+def test_explicit_database_url_skips_ambient_settings_validation(tmp_path, monkeypatch):
+    """--database-url must not be held hostage by a malformed UMS_* variable.
+
+    The whole ambient settings object used to be validated before the CLI
+    override was even looked at, so one stale malformed variable aborted a
+    run whose database target was fully specified (codex round-23 P2).
+    """
+    module = _load_script()
+    database_url = _make_database(tmp_path)
+    _seed_role_catalog(database_url)
+    monkeypatch.setenv("UMS_DATABASE_URL", "not-a-url")
+
+    assert _run(module, database_url, "--email", _OPERATOR_EMAIL) == 0
