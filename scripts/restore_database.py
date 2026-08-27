@@ -729,81 +729,724 @@ def _unsupported_role_ddl_in_roles_sql(body: str) -> str | None:
     return None
 
 
-def _foreign_roles_in_roles_sql(body: str, *, superuser: str) -> list[str]:
-    """Return CREATE ROLE names outside the UMS restore allowlist."""
-    allowed = {superuser, *REQUIRED_ROLES}
-    foreign: list[str] = []
-    pattern = re.compile(
-        r'(?im)^\s*CREATE\s+(?:ROLE|USER)\s+(?:"([^"]+)"|([^\s;]+))',
-    )
-    for match in pattern.finditer(body):
-        name = (match.group(1) or match.group(2) or "").strip()
-        if name not in allowed:
-            foreign.append(name)
-    return foreign
+_PROTECTED_APP_ROLES = REQUIRED_ROLES
 
 
-_PRIVILEGED_ATTRIBUTE_TOKENS = frozenset({"LOGIN", "SUPERUSER", "BYPASSRLS"})
+# ============================================================================
+# Purpose: Read roles.sql the way psql's own lexer reads it, so every gate
+#          below judges the statements the executor will actually run.
+# Database/ORM: None. Pure text, which is what keeps these checks safe to run
+#               BEFORE ``--allow-nonempty`` drops the target.
+# Standards: Comment stripping, quote-aware splitting, psql meta-command
+#            extraction and literal masking happen ONCE, here. No gate below
+#            gets its own regex over the raw file: two parsers for one language
+#            is exactly how a validator and psql end up reading different
+#            programs. Literal BODIES are masked to ``''`` so a semicolon or an
+#            attribute keyword inside a string can neither move a statement
+#            boundary nor forge a token, and so a refused statement can be
+#            quoted back at the operator without echoing a SCRAM verifier out
+#            of an ``--include-role-passwords`` archive.
+# Blast Radius: Authorization. A statement this function drops is a statement
+#               no gate below can refuse.
+# Connections:
+#   - File: scripts/backup_database.py -> the byte-identical block on the
+#     publish side; ``test_restore_and_backup_share_one_role_sql_gate``
+#     compares ``inspect.getsource`` of every function here.
+#   - File: scripts/restore_database.py -> ``_restore_roles`` pipes this file
+#     into ``psql -f -``; psql is the parser this scanner has to agree with.
+# ============================================================================
+_ROLE_SQL_BOM = "\ufeff\ufffe"
+_ROLE_SQL_DOLLAR_TAG_RE = re.compile(r"\$(?:[A-Za-z_][A-Za-z0-9_]*)?\$")
+_ROLE_SQL_META_NAME_RE = re.compile(r"\\([A-Za-z_]+|\S?)")
+_ROLE_SQL_WORD_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_$]*")
+_ROLE_SQL_STD_STRINGS_RE = re.compile(
+    r"(?is)^SET\s+standard_conforming_strings\s*(?:=|TO)\s*'?(?P<value>[A-Za-z0-9_]+)"
+)
+_ROLE_SQL_RESET_STD_STRINGS_RE = re.compile(r"(?is)^RESET\s+standard_conforming_strings\b")
+_MASKED_ROLE_SQL_LITERAL = "''"
+
+
+def _role_sql_comment_end(text: str, index: int) -> int | None:
+    """Return the offset just past a comment at ``index``, else None.
+
+    Block comments nest in PostgreSQL, so the depth counter is not decoration.
+    """
+    if text.startswith("--", index):
+        end = text.find("\n", index)
+        return len(text) if end < 0 else end
+    if not text.startswith("/*", index):
+        return None
+    depth = 0
+    cursor = index
+    while cursor < len(text):
+        if text.startswith("/*", cursor):
+            depth += 1
+            cursor += 2
+        elif text.startswith("*/", cursor):
+            depth -= 1
+            cursor += 2
+            if depth == 0:
+                return cursor
+        else:
+            cursor += 1
+    return len(text)
+
+
+def _role_sql_quoted_end(text: str, index: int, quote: str, backslashes: bool) -> int:
+    """Return the offset just past the quoted run that starts at ``index``.
+
+    A doubled quote (``''`` in a literal, ``""`` in an identifier) is an escape,
+    not a terminator. ``backslashes`` is set for an ``E'...'`` literal and for a
+    plain literal while ``standard_conforming_strings`` is off -- MEASURED on
+    PostgreSQL 18.6: with ``SET standard_conforming_strings = off;`` earlier in
+    the file, psql reads ``'a\\';b'`` as ONE literal and runs the statement
+    after it, emitting only a WARNING. A scanner without this ends the literal
+    early and then swallows the rest of the file inside a phantom string.
+    """
+    cursor = index + 1
+    while cursor < len(text):
+        if backslashes and text[cursor] == "\\" and cursor + 1 < len(text):
+            cursor += 2
+            continue
+        if text[cursor] != quote:
+            cursor += 1
+            continue
+        if text.startswith(quote * 2, cursor):
+            cursor += 2
+            continue
+        return cursor + 1
+    return len(text)
+
+
+def _role_sql_dollar_end(text: str, index: int) -> int | None:
+    """Return the offset just past a ``$tag$...$tag$`` literal, else None."""
+    tag = _ROLE_SQL_DOLLAR_TAG_RE.match(text, index)
+    if tag is None:
+        return None
+    marker = tag.group(0)
+    close = text.find(marker, tag.end())
+    return len(text) if close < 0 else close + len(marker)
+
+
+def _role_sql_starts_escape_string(text: str, index: int) -> bool:
+    """Return True at the ``E`` of an ``E'...'`` backslash-escape literal."""
+    if text[index] not in "eE" or not text.startswith("'", index + 1):
+        return False
+    previous = text[index - 1] if index else ""
+    return not (previous.isalnum() or previous == "_")
+
+
+def _scan_role_sql(body: str) -> list[str]:
+    r"""Split roles.sql into the statements psql executes, literals masked.
+
+    FIX: the gates below read ``body.split(";")`` and then ANCHORED a match at
+    the start of each chunk, so any chunk that did not START with CREATE/ALTER
+    ROLE was silently dropped -- and ``pg_dumpall --roles-only`` prints
+
+        --
+        -- Role memberships
+        --
+
+        GRANT app_platform TO postgres WITH ADMIN OPTION, ...;
+
+    which puts that banner inside the first membership chunk. A membership gate
+    written in the old style is vacuous against the shipped output shape, not
+    merely attackable. The same naive split severed a statement at a semicolon
+    inside a quoted or dollar-quoted PASSWORD, stranding the privileged tail in
+    a chunk no pattern matched.
+
+    psql meta-commands are returned as their own entries, backslash and all,
+    because psql terminates them at the newline rather than at a semicolon --
+    and because it honours a backslash ANYWHERE outside a quote or comment, not
+    just at the start of a line. MEASURED on PostgreSQL 18.6 through the exact
+    ``_restore_roles`` invocation: ``SET client_encoding = 'UTF8' \! id`` and
+    ``SELECT 1\! id`` both execute the shell command as uid=0 inside the
+    database container, with psql exiting 0 and printing nothing at all.
+
+    Honest limits. This is a statement splitter, not a SQL parser: it knows
+    where statements END, not what they MEAN. It does not implement ``U&'...'``
+    Unicode-escape literals (which lex as a plain literal after the ``U&``, and
+    which pg_dumpall never emits). The leading UTF-8 BOM is stripped explicitly
+    because ``str.strip()`` does not treat U+FEFF as whitespace.
+    """
+    text = body.lstrip(_ROLE_SQL_BOM)
+    statements: list[str] = []
+    raw: list[str] = []
+    masked: list[str] = []
+    escapes = [False]
+    index = 0
+
+    def flush() -> None:
+        """Emit the buffered statement and track standard_conforming_strings."""
+        raw_text = " ".join("".join(raw).split())
+        collapsed = " ".join("".join(masked).split())
+        raw.clear()
+        masked.clear()
+        if not collapsed:
+            return
+        setting = _ROLE_SQL_STD_STRINGS_RE.match(raw_text)
+        if setting is not None:
+            escapes[0] = setting.group("value").lower() in {"off", "false", "0"}
+        elif _ROLE_SQL_RESET_STD_STRINGS_RE.match(raw_text):
+            escapes[0] = False
+        statements.append(collapsed)
+
+    while index < len(text):
+        char = text[index]
+        comment_end = _role_sql_comment_end(text, index)
+        if comment_end is not None:
+            raw.append(" ")
+            masked.append(" ")
+            index = comment_end
+            continue
+        if char == "\\":
+            end = text.find("\n", index)
+            end = len(text) if end < 0 else end
+            statements.append(" ".join(text[index:end].split()))
+            index = end
+            continue
+        if char == '"':
+            end = _role_sql_quoted_end(text, index, '"', False)
+            raw.append(text[index:end])
+            masked.append(text[index:end])
+            index = end
+            continue
+        if char == "'" or _role_sql_starts_escape_string(text, index):
+            quote_at = index if char == "'" else index + 1
+            end = _role_sql_quoted_end(text, quote_at, "'", char != "'" or escapes[0])
+            raw.append(text[index:end])
+            masked.append(_MASKED_ROLE_SQL_LITERAL)
+            index = end
+            continue
+        if char == "$":
+            dollar_end = _role_sql_dollar_end(text, index)
+            if dollar_end is not None:
+                raw.append(text[index:dollar_end])
+                masked.append(_MASKED_ROLE_SQL_LITERAL)
+                index = dollar_end
+                continue
+        if char == ";":
+            flush()
+            index += 1
+            continue
+        raw.append(char)
+        masked.append(char)
+        index += 1
+    flush()
+    return statements
+
+
+def _role_sql_tokens(statement: str) -> list[tuple[str, str]]:
+    """Tokenise one scanned statement into ('word' | 'ident' | 'other', text).
+
+    ``word`` is a bare keyword or identifier, ``ident`` is the CONTENT of a
+    double-quoted identifier with its case preserved, and everything else is
+    opaque. Keeping the two apart is what lets the gates below fold names the
+    way PostgreSQL folds them.
+    """
+    tokens: list[tuple[str, str]] = []
+    index = 0
+    while index < len(statement):
+        char = statement[index]
+        if char.isspace():
+            index += 1
+            continue
+        if char == '"':
+            end = _role_sql_quoted_end(statement, index, '"', False)
+            tokens.append(("ident", statement[index + 1 : end - 1].replace('""', '"')))
+            index = end
+            continue
+        if char == "'":
+            tokens.append(("other", _MASKED_ROLE_SQL_LITERAL))
+            index += 2
+            continue
+        word = _ROLE_SQL_WORD_RE.match(statement, index)
+        if word is not None:
+            tokens.append(("word", word.group(0)))
+            index = word.end()
+            continue
+        tokens.append(("other", char))
+        index += 1
+    return tokens
+
+
+def _role_sql_identifier(token: tuple[str, str]) -> str:
+    """Return the role name a token denotes, folding only UNQUOTED words.
+
+    FIX: the old ``("?[A-Za-z0-9_]+"?)`` capture TRUNCATED at the first
+    non-word character and then lowercased, so ``"app_tenant-shadow"`` and
+    ``"App_Tenant"`` -- both DISTINCT roles to PostgreSQL, which does not fold
+    quoted identifiers -- were reported as drift on ``app_tenant`` and refused
+    a restore over statements psql answers with "role does not exist".
+    """
+    kind, value = token
+    if kind == "ident":
+        return value
+    if kind == "word":
+        return value.lower()
+    return ""
+
+
+def _role_sql_words(tokens: list[tuple[str, str]]) -> list[str]:
+    """Return the uppercase bare words of a statement, in order."""
+    return [value.upper() for kind, value in tokens if kind == "word"]
+
+
+# ============================================================================
+# Purpose: Refuse psql meta-commands roles.sql has no business carrying.
+# Database/ORM: None.
+# Standards: Allowlist, and it is exactly two names. ``\restrict`` /
+#            ``\unrestrict`` are NOT optional to support -- MEASURED: every
+#            pg_dumpall from 13 through 18 wraps its body in that pair (the
+#            CVE-2025-8714 hardening), so refusing backslash commands wholesale
+#            would refuse every genuine archive.
+# Blast Radius: Arbitrary code execution as the docker-exec user inside the
+#               database container. ``_container_sh`` passes no ``-u``, so that
+#               user is root.
+# Connections:
+#   - File: scripts/restore_database.py -> ``_unsupported_role_ddl_in_roles_sql``
+#     looks only for DO and EXECUTE, and ``_unexpected_roles_errors`` needs an
+#     ERROR line -- a successful ``\!`` produces neither.
+# ============================================================================
+_ALLOWED_ROLE_SQL_META_COMMANDS = frozenset({"restrict", "unrestrict"})
+
+
+def _role_sql_meta_command_problems(body: str) -> list[str]:
+    r"""Return psql meta-commands in roles.sql outside the two-name allowlist.
+
+    FIX: nothing looked at backslash commands at all. MEASURED on PostgreSQL
+    18.6 through the exact ``_restore_roles`` argv: a roles.sql containing
+    ``\! id > /tmp/proof`` -- at the start of a line, glued to a word, or in the
+    middle of an unterminated statement -- runs that shell command as uid=0
+    inside the container, and psql exits 0 with EMPTY stderr, so
+    ``_unexpected_roles_errors`` has nothing to catch. A genuine PG18 archive
+    is protected only by its own leading ``\restrict``, which puts psql in
+    restricted mode; an operator-trimmed or pre-CVE-2025-8714 archive -- the
+    legacy archive this whole gate exists for -- carries no such line.
+
+    Matching the WHOLE first token rather than a prefix keeps ``\restrictfoo``
+    outside the allowlist.
+    """
+    problems: list[str] = []
+    for statement in _scan_role_sql(body):
+        if not statement.startswith("\\"):
+            continue
+        match = _ROLE_SQL_META_NAME_RE.match(statement)
+        name = (match.group(1) if match is not None else "").lower()
+        if name not in _ALLOWED_ROLE_SQL_META_COMMANDS:
+            problems.append(statement)
+    return problems
+
+
+# ============================================================================
+# Purpose: Refuse a roles.sql that makes an application role a MEMBER of any
+#          other role. Membership is not an attribute, so every attribute gate
+#          in this file is structurally blind to it.
+# Database/ORM: Reads no catalog; judges the text pg_dumpall wrote from
+#               pg_auth_members. Needs no bootstrap-superuser argument, which
+#               is why it can live on the publish side's superuser-free path.
+# Standards: One direction only. ``GRANT app_tenant TO <login>`` is the
+#            deployed restricted-login model (Docs/17:46-52) and the exact edge
+#            20260608_0001's downgrade enumerates and revokes, and real
+#            pg_dumpall output carries ``GRANT app_* TO <bootstrap superuser>``
+#            once anyone takes ADMIN OPTION -- so constraining the granted side
+#            would refuse genuine archives. ``GRANT <anything> TO app_tenant``
+#            is the edge no migration or script in this repository creates.
+# Blast Radius: Authorization, cluster-wide. With ``inherit_option = t`` the
+#               app role is treated as the OWNER of every table the bootstrap
+#               superuser owns, so ``ALTER TABLE ... NO FORCE ROW LEVEL
+#               SECURITY`` and ``DROP POLICY`` succeed with no SET ROLE at all,
+#               and a plain ``SET ROLE <superuser>`` reaches a superuser
+#               session in one hop.
+# Connections:
+#   - File: backend/ums_smart_revenue/db/alembic/versions/20260608_0001_tenant_rls_enforcement.py
+#     -> ``_create_role`` (92-113) issues ``CREATE ROLE "<role>" NOLOGIN`` and
+#     grants these roles NOTHING; the downgrade (386-397) enumerates
+#     pg_auth_members and REVOKEs memberships separately from object
+#     privileges, so the migration already treats membership as its own graph.
+# ============================================================================
+_ROLE_SQL_LIST_CLAUSE_WORDS = frozenset({"IN", "ROLE", "GROUP", "USER", "ADMIN"})
+
+
+def _role_sql_name_list(tokens: list[tuple[str, str]], start: int) -> tuple[list[str], int]:
+    """Read a comma-separated role list starting at ``start``.
+
+    Stops at the next clause keyword or at the first name not followed by a
+    comma, which is how PostgreSQL's own grammar ends a ``role_list``.
+    """
+    names: list[str] = []
+    index = start
+    while index < len(tokens):
+        token = tokens[index]
+        if token == ("other", ","):
+            index += 1
+            continue
+        if token[0] == "word" and token[1].upper() in _ROLE_SQL_LIST_CLAUSE_WORDS:
+            break
+        name = _role_sql_identifier(token)
+        if not name:
+            break
+        names.append(name)
+        index += 1
+        if index >= len(tokens) or tokens[index] != ("other", ","):
+            break
+    return names, index
+
+
+def _grant_membership_edges(tokens: list[tuple[str, str]]) -> list[tuple[str, str]]:
+    """Return (member, granted) edges a GRANT statement creates.
+
+    An unquoted ``ON`` before the ``TO`` marks an OBJECT grant, not a
+    membership, and object grants are left alone. That is load-bearing on real
+    archives, not a nicety: ``pg_dumpall --roles-only`` has a fourth section,
+    ``-- Role privileges on configuration parameters``, and MEASURED on
+    PostgreSQL 18.6 it emits lines such as ``GRANT SET ON PARAMETER work_mem TO
+    app_platform;`` and ``GRANT ALTER SYSTEM ON PARAMETER shared_buffers TO
+    app_tenant WITH GRANT OPTION;``. Reading those as memberships would refuse
+    a file this repository's own backup publishes. Testing the WORD ``ON``
+    rather than the text keeps ``GRANT postgres TO app_tenant, "ON";`` refused.
+    """
+    to_index = None
+    for position, token in enumerate(tokens):
+        if token[0] != "word":
+            continue
+        upper = token[1].upper()
+        if upper == "ON":
+            return []
+        if upper == "TO":
+            to_index = position
+            break
+    if to_index is None:
+        return []
+    granted = [n for n in (_role_sql_identifier(t) for t in tokens[1:to_index]) if n]
+    members: list[str] = []
+    for token in tokens[to_index + 1 :]:
+        if token[0] == "word" and token[1].upper() in {"WITH", "GRANTED"}:
+            break
+        name = _role_sql_identifier(token)
+        if name:
+            members.append(name)
+    return [(member, role) for member in members for role in granted]
+
+
+def _role_ddl_membership_edges(tokens: list[tuple[str, str]]) -> list[tuple[str, str]]:
+    """Return (member, granted) edges a CREATE ROLE clause creates.
+
+    ``IN ROLE`` / ``IN GROUP`` make the SUBJECT a member of the listed roles;
+    ``ROLE`` / ``USER`` / ``ADMIN`` make the listed roles members OF the
+    subject. pg_dumpall emits neither form -- it writes a bare ``CREATE ROLE
+    x;`` and a separate GRANT -- but ``CREATE ROLE app_tenant IN ROLE
+    postgres;`` produces the identical pg_auth_members row, and so does
+    ``CREATE ROLE postgres ROLE app_tenant;`` pointing the other way.
+    """
+    edges: list[tuple[str, str]] = []
+    subject = _role_sql_identifier(tokens[2])
+    index = 3
+    while index < len(tokens):
+        token = tokens[index]
+        if token[0] != "word":
+            index += 1
+            continue
+        upper = token[1].upper()
+        nested = (
+            upper == "IN"
+            and index + 1 < len(tokens)
+            and tokens[index + 1][0] == "word"
+            and tokens[index + 1][1].upper() in {"ROLE", "GROUP"}
+        )
+        if nested:
+            names, index = _role_sql_name_list(tokens, index + 2)
+            edges.extend((subject, name) for name in names)
+            continue
+        if upper in {"ROLE", "USER", "ADMIN"}:
+            names, index = _role_sql_name_list(tokens, index + 1)
+            edges.extend((name, subject) for name in names)
+            continue
+        index += 1
+    return edges
+
+
+def _role_membership_edges(statement: str) -> list[tuple[str, str]]:
+    """Return every (member, granted) edge one statement would create.
+
+    ``ALTER GROUP <g> ADD USER <list>`` is the legacy spelling and it is not
+    hypothetical: MEASURED on PostgreSQL 18.6, ``ALTER GROUP postgres ADD USER
+    app_tenant;`` exits 0 with empty stderr and leaves ``postgres ->
+    app_tenant inherit=true`` in pg_auth_members, while naming only roles the
+    CREATE-ROLE allowlist already permits.
+    """
+    tokens = _role_sql_tokens(statement)
+    if not tokens or tokens[0][0] != "word":
+        return []
+    verb = tokens[0][1].upper()
+    if verb == "GRANT":
+        return _grant_membership_edges(tokens)
+    if len(tokens) < 3 or tokens[1][0] != "word":
+        return []
+    noun = tokens[1][1].upper()
+    if verb == "CREATE" and noun in {"ROLE", "USER", "GROUP"}:
+        return _role_ddl_membership_edges(tokens)
+    words = _role_sql_words(tokens)
+    if verb == "ALTER" and noun in {"GROUP", "ROLE"} and "ADD" in words and "USER" in words:
+        group = _role_sql_identifier(tokens[2])
+        start = next(
+            position
+            for position, token in enumerate(tokens)
+            if token[0] == "word" and token[1].upper() == "USER"
+        )
+        names, _end = _role_sql_name_list(tokens, start + 1)
+        return [(name, group) for name in names]
+    return []
+
+
+def _role_membership_problems(body: str) -> list[str]:
+    """Return the roles.sql statements that put an app role into a membership.
+
+    FIX: ``GRANT <bootstrap superuser> TO app_tenant;`` matched neither the
+    CREATE-anchored allowlist nor the attribute-drift gate -- a GRANT can never
+    match a ``(?:CREATE|ALTER)\\s+ROLE`` pattern -- and ``_restore_roles``
+    replayed it. The post-apply check only asserts the two roles EXIST; it
+    never reads pg_auth_members. The result is not a drifted attribute but an
+    edge in the authorization graph, and that edge is enough on its own.
+
+    Deliberately NOT proportional to how dangerous the granted role looks: the
+    cross-lane edge ``GRANT app_tenant TO app_platform`` grants neither
+    SUPERUSER nor a ``pg_*`` role and still crosses the platform/tenant write
+    boundary 20260608_0001 exists to hold.
+    """
+    problems: list[str] = []
+    for statement in _scan_role_sql(body):
+        if statement.startswith("\\"):
+            continue
+        for member, granted in _role_membership_edges(statement):
+            if member in _PROTECTED_APP_ROLES:
+                problems.append(f"{member} becomes a member of {granted}: {statement}")
+    return problems
+
+
+# ============================================================================
+# Purpose: Refuse statements roles.sql must never carry at all -- the ones that
+#          escalate or brick without ever naming a role attribute.
+# Database/ORM: None.
+# Standards: A short DENY list of proven-dangerous shapes, deliberately NOT an
+#            allowlist of every shape pg_dumpall emits. An allowlist was tried
+#            and refuted: pg_dumpall's ``-- Role privileges on configuration
+#            parameters`` section is real output that no hand-written shape
+#            table anticipated, and refusing it would have blocked both the
+#            publish and the restore of a healthy cluster. Each entry below is
+#            instead a construct MEASURED to be absent from pg_dumpall
+#            --roles-only output and MEASURED to escalate when replayed.
+# Blast Radius: Cluster availability and authorization.
+# Connections:
+#   - File: scripts/restore_database.py -> ``_restore_roles`` runs this file as
+#     the bootstrap superuser with ON_ERROR_STOP off.
+# ============================================================================
+_UNSAFE_ROLE_SETTINGS = frozenset(
+    {"session_preload_libraries", "local_preload_libraries", "shared_preload_libraries"}
+)
+
+
+def _role_sql_setting_name(tokens: list[tuple[str, str]]) -> str:
+    """Return the GUC an ``ALTER ROLE ... SET/RESET`` statement targets."""
+    for position, token in enumerate(tokens):
+        if token[0] == "word" and token[1].upper() in {"SET", "RESET"}:
+            if position + 1 < len(tokens):
+                return _role_sql_identifier(tokens[position + 1])
+            return ""
+    return ""
+
+
+def _unsupported_role_statement_problems(body: str) -> list[str]:
+    """Return roles.sql statements that are never legitimate here.
+
+    Each of these was MEASURED on PostgreSQL 18.6 through the exact
+    ``_restore_roles`` invocation, and none of them appears in
+    ``pg_dumpall --roles-only`` output:
+
+    * ``ALTER ROLE ALL SET session_preload_libraries TO 'evil';`` exits 0 and
+      then makes the cluster unreachable to EVERY role including the bootstrap
+      superuser (``FATAL: could not access file "evil"``); with a planted .so
+      it is code execution in the postgres process on every connection.
+      pg_dumpall does not dump ``ALTER ROLE ALL`` settings -- verified by
+      setting both the global and the per-database form and re-dumping.
+    * ``ALTER ROLE ums_admin RENAME TO app_tenant;`` exits 0 with only a
+      WARNING and leaves a role NAMED app_tenant that is ``rolsuper=true
+      rolcanlogin=true`` -- which then satisfies the post-apply
+      ``ROLES_PRESENT_SQL`` existence check, so the restore reports success.
+    * ``SET ROLE`` / ``SET SESSION AUTHORIZATION`` change who the remainder of
+      the file runs as.
+    * ``DO`` is already refused by ``_unsupported_role_ddl_in_roles_sql``, but
+      that check is a raw-text ``^\\s*DO`` search that a leading block comment
+      walks past; this one reads the scanned statement.
+    """
+    problems: list[str] = []
+    for statement in _scan_role_sql(body):
+        if statement.startswith("\\"):
+            continue
+        tokens = _role_sql_tokens(statement)
+        words = _role_sql_words(tokens)
+        if not words:
+            continue
+        if words[0] == "DO":
+            problems.append(f"DO blocks are not allowed in roles.sql: {statement}")
+            continue
+        if words[:2] in (["SET", "ROLE"], ["RESET", "ROLE"], ["SET", "SESSION"]):
+            problems.append(f"session-identity statements are not allowed: {statement}")
+            continue
+        if words[0] not in {"CREATE", "ALTER", "DROP"} or words[1:2] not in (
+            ["ROLE"],
+            ["USER"],
+            ["GROUP"],
+        ):
+            continue
+        if "RENAME" in words:
+            if any(_role_sql_identifier(t) in _PROTECTED_APP_ROLES for t in tokens):
+                problems.append(f"RENAME touching a protected role: {statement}")
+            continue
+        if words[0] == "ALTER" and tokens[2] == ("word", "ALL"):
+            problems.append(f"ALTER ROLE ALL is not allowed in roles.sql: {statement}")
+            continue
+        setting = _role_sql_setting_name(tokens)
+        if setting in _UNSAFE_ROLE_SETTINGS:
+            problems.append(f"role setting {setting} loads code at login: {statement}")
+    return problems
+
+
+# ============================================================================
+# Purpose: Refuse a roles.sql whose application roles carry a privileged
+#          attribute, reading the same statements psql will execute.
+# Database/ORM: None.
+# Standards: Whole-token matching keeps NOSUPERUSER / NOLOGIN / NOBYPASSRLS --
+#            exactly what pg_dumpall writes for these roles -- from matching
+#            the enabled forms. ``ALTER ROLE ... SET/RESET`` and its ``IN
+#            DATABASE`` form are excluded because their tail is a GUC name and
+#            a GUC VALUE, not an attribute list.
+# Blast Radius: Authorization. ``_restore_roles`` replays every ALTER ROLE as
+#               the bootstrap superuser and the migration history is at head,
+#               so nothing reruns to clear what lands here.
+# Connections:
+#   - File: backend/ums_smart_revenue/db/alembic/versions/20260608_0001_tenant_rls_enforcement.py
+#     -> ``_create_role`` (92-113) creates both roles NOLOGIN and nothing else.
+# ============================================================================
+_PRIVILEGED_ATTRIBUTE_TOKENS = frozenset(
+    {"SUPERUSER", "BYPASSRLS", "LOGIN", "CREATEROLE", "CREATEDB", "REPLICATION"}
+)
+
+
+def _role_attribute_clause(statement: str) -> tuple[str, list[str]] | None:
+    """Return (role, attribute words) for a plain CREATE/ALTER ROLE, else None.
+
+    FIX: excluding the SET/RESET forms is what removes two live over-refusals.
+    ``ALTER ROLE app_tenant SET application_name TO login;`` and its
+    ``IN DATABASE`` twin were refused as LOGIN drift although psql applies both
+    with ZERO attribute change -- the old tokenizer could not tell a GUC VALUE
+    from a role attribute, and a restore script's worst failure is refusing a
+    file that would have restored.
+    """
+    tokens = _role_sql_tokens(statement)
+    if len(tokens) < 3 or tokens[0][0] != "word" or tokens[1][0] != "word":
+        return None
+    if tokens[0][1].upper() not in {"CREATE", "ALTER"}:
+        return None
+    if tokens[1][1].upper() not in {"ROLE", "USER", "GROUP"}:
+        return None
+    name = _role_sql_identifier(tokens[2])
+    if not name:
+        return None
+    words = _role_sql_words(tokens[3:])
+    if words[:1] in (["SET"], ["RESET"]) or words[:2] == ["IN", "DATABASE"]:
+        return None
+    if "RENAME" in words:
+        return None
+    return name, [word for word in words if word != "WITH"]
 
 
 def _collect_role_attribute_tokens(body: str) -> dict[str, set[str]]:
     """Map each role name to the uppercase attribute tokens roles.sql emitted."""
     tokens_by_role: dict[str, set[str]] = {}
-    for raw_statement in body.split(";"):
-        statement = raw_statement.strip()
-        if not statement:
+    for statement in _scan_role_sql(body):
+        if statement.startswith("\\"):
             continue
-        match = re.match(
-            r"(?:CREATE|ALTER)\s+ROLE\s+(\"?[A-Za-z0-9_]+\"?)\s*(?:WITH)?\s*(.*)",
-            statement,
-            re.IGNORECASE | re.DOTALL,
-        )
-        if not match:
+        clause = _role_attribute_clause(statement)
+        if clause is None:
             continue
-        role_name = match.group(1).strip('"').lower()
-        tail = re.sub(r"\s+", " ", match.group(2)).upper()
-        tokens = {token for token in tail.split(" ") if token.isalpha()}
-        tokens_by_role.setdefault(role_name, set()).update(tokens)
+        role, words = clause
+        tokens_by_role.setdefault(role, set()).update(words)
     return tokens_by_role
 
 
 def _role_privilege_drift_problems(body: str) -> list[str]:
-    """Return app roles carrying LOGIN/SUPERUSER/BYPASSRLS in roles.sql.
+    """Return app roles carrying a privileged attribute in roles.sql.
 
-    Mirrors ``scripts/backup_database.py::_role_privilege_drift_problems`` --
-    same token set, same app-role scope -- because the two gates must agree:
-    a restore stricter than the publish gate would refuse an archive this
-    repository's own backup was allowed to publish.
+    Byte-identical to the twin in the sibling script, because the two gates
+    must agree: a restore stricter than the publish gate would refuse an
+    archive this repository's own backup was allowed to publish.
 
-    ``_restore_roles`` replays every ALTER ROLE in this file as the bootstrap
-    superuser, so a legacy backup whose app roles had drifted to SUPERUSER,
-    BYPASSRLS or LOGIN would silently grant RLS-bypassing or login-capable
-    sessions -- and the migration history is already at head, so nothing reruns
-    to clear them. The CREATE-anchored allowlist above cannot see it: the drift
-    arrives as ALTER ROLE on a role that is itself allowlisted.
+    CREATEROLE / CREATEDB / REPLICATION joined the token set here. MEASURED:
+    with ``ALTER ROLE app_tenant WITH CREATEROLE`` replayed, an app_tenant
+    session can ``CREATE ROLE backdoor LOGIN PASSWORD ...`` -- a standing login
+    account minted from the tenant lane -- and pg_dumpall emits the attribute
+    on the allowlisted role, so a legacy archive carries it through unseen.
+    ``_create_role`` grants none of the six.
 
-    Whole-token matching is what keeps NOLOGIN / NOSUPERUSER / NOBYPASSRLS --
-    exactly what ``pg_dumpall --roles-only`` emits for these roles -- from
-    matching the enabled forms. Scope is the two application roles only: the
-    bootstrap superuser legitimately carries all three, and any other role is
-    already refused by ``_foreign_roles_in_roles_sql``.
-
-    A MISSING app role is deliberately not flagged here; that is the post-apply
-    catalog check in ``_restore_roles``, which is a live check rather than a
-    text one.
+    A MISSING app role is deliberately not flagged here. That is the publish
+    gate's ``_role_declared_in_roles_sql`` check, which names the exact
+    identifier and tells the operator what to do; leaving it out is what lets
+    the two implementations be byte-identical and pinned to each other by
+    source rather than by a frozenset.
     """
     problems: list[str] = []
     tokens_by_role = _collect_role_attribute_tokens(body)
-    for role in REQUIRED_ROLES:
+    for role in _PROTECTED_APP_ROLES:
         tokens = tokens_by_role.get(role)
         if tokens is None:
             continue
         enabled = sorted(tokens & _PRIVILEGED_ATTRIBUTE_TOKENS)
         if enabled:
-            problems.append(
-                f"{role}: privileged attributes {', '.join(enabled)} must be revoked"
-            )
+            problems.append(f"{role}: privileged attributes {', '.join(enabled)} must be revoked")
     return problems
+
+
+def _created_role_names(body: str) -> list[str]:
+    """Return every role name a CREATE ROLE/USER/GROUP in roles.sql declares.
+
+    FIX: the two foreign-role gates and the publish gate's declaration check
+    each ran their own line-anchored ``^\\s*CREATE`` regex, and they failed on
+    orthogonal axes. A UTF-8 BOM, a leading block comment, a second CREATE on
+    the same line, or a CREATE after a quoted semicolon each hid a foreign
+    ``SUPERUSER LOGIN`` role while preflight reported success -- and the SAME
+    regex pointed the other way answered False for ``/* c */ CREATE ROLE
+    app_tenant;``, i.e. the backup refused a valid roles.sql. One scanner, one
+    answer.
+    """
+    names: list[str] = []
+    for statement in _scan_role_sql(body):
+        if statement.startswith("\\"):
+            continue
+        tokens = _role_sql_tokens(statement)
+        if len(tokens) < 3 or tokens[0][0] != "word" or tokens[1][0] != "word":
+            continue
+        if tokens[0][1].upper() != "CREATE":
+            continue
+        if tokens[1][1].upper() not in {"ROLE", "USER", "GROUP"}:
+            continue
+        name = _role_sql_identifier(tokens[2])
+        if name:
+            names.append(name)
+    return names
+
+
+def _foreign_roles_in_roles_sql(body: str, *, superuser: str) -> list[str]:
+    """Return CREATE ROLE names outside the UMS restore allowlist.
+
+    The bootstrap superuser name comes from ``SELECT current_user``, which is
+    the role's true name rather than an SQL identifier token, so it is compared
+    VERBATIM. pg_dumpall writes ``CREATE ROLE "Ums_Admin";`` quoted for a
+    mixed-case superuser and ``CREATE ROLE postgres;`` bare for a folded one;
+    ``_role_sql_identifier`` resolves both to the same name PostgreSQL would.
+    """
+    allowed = {superuser, *REQUIRED_ROLES}
+    return [name for name in _created_role_names(body) if name not in allowed]
 
 
 def _preflight_roles_file(container: str, roles_path: Path, *, timeout: int) -> None:
@@ -819,14 +1462,46 @@ def _preflight_roles_file(container: str, roles_path: Path, *, timeout: int) -> 
         timeout: Seconds allowed for the superuser lookup.
 
     Raises:
-        RestoreError: On unsupported role DDL, roles outside the allowlist, or
-            an application role carrying LOGIN, SUPERUSER or BYPASSRLS.
+        RestoreError: On a psql meta-command, a statement pg_dumpall never
+            emits, unsupported role DDL, roles outside the allowlist, an
+            application role carrying a privileged attribute, or an application
+            role placed into the cluster membership graph.
     """
     body = roles_path.read_text(encoding="utf-8", errors="replace")
     superuser = _psql(container, "SELECT current_user;", timeout=timeout).strip()
     unsupported = _unsupported_role_ddl_in_roles_sql(body)
     if unsupported:
         raise RestoreError(EXIT_ROLES_FAILED, unsupported)
+    # FIX: psql honours a backslash command ANYWHERE outside a quote or a
+    # comment, not only at the start of a line, and a successful one prints
+    # nothing. MEASURED through the exact _restore_roles argv: a roles.sql
+    # carrying `\! id > /pr210_B` wrote "uid=0(root) gid=0(root)" inside the
+    # database container while psql exited 0 with EMPTY stderr, so
+    # _unexpected_roles_errors had nothing to catch and the surrounding CREATE
+    # ROLE statements still applied. Nothing here looked at meta-commands.
+    meta_commands = _role_sql_meta_command_problems(body)
+    if meta_commands:
+        raise RestoreError(
+            EXIT_ROLES_FAILED,
+            "roles.sql carries psql meta-commands: "
+            + "; ".join(meta_commands)
+            + r". Only \restrict and \unrestrict are allowed; psql executes the "
+            "rest inside the database container. Regenerate roles.sql with "
+            "pg_dumpall --roles-only from the backup source cluster.",
+        )
+    # FIX: statements that escalate or brick without ever naming a role
+    # attribute. `ALTER ROLE ALL SET session_preload_libraries` left the
+    # cluster unreachable to every role including the bootstrap superuser, and
+    # `ALTER ROLE <superuser> RENAME TO app_tenant` left a SUPERUSER LOGIN role
+    # NAMED app_tenant, which then SATISFIES the post-apply existence check.
+    unsupported_statements = _unsupported_role_statement_problems(body)
+    if unsupported_statements:
+        raise RestoreError(
+            EXIT_ROLES_FAILED,
+            "roles.sql carries statements pg_dumpall --roles-only never emits: "
+            + "; ".join(unsupported_statements)
+            + ". Regenerate roles.sql from the backup source cluster.",
+        )
     foreign = _foreign_roles_in_roles_sql(body, superuser=superuser)
     if foreign:
         raise RestoreError(
@@ -849,6 +1524,23 @@ def _preflight_roles_file(container: str, roles_path: Path, *, timeout: int) -> 
             "superuser before the archive loads, and the migration history will "
             "not rerun to clear them. Regenerate roles.sql from a source cluster "
             "whose application roles are NOLOGIN, NOSUPERUSER, NOBYPASSRLS.",
+        )
+    # FIX: membership is not an attribute, so every check above is structurally
+    # blind to it -- a GRANT statement can never match a CREATE/ALTER ROLE
+    # pattern, and the post-apply check only asserts the two roles EXIST, never
+    # reading pg_auth_members. MEASURED: with `GRANT <superuser> TO app_tenant;`
+    # replayed, an app_tenant session with is_superuser=off and NO SET ROLE read
+    # every row of an RLS table lacking FORCE, and on a FORCE table it ran
+    # `ALTER TABLE ... NO FORCE ROW LEVEL SECURITY` and then read every row.
+    memberships = _role_membership_problems(body)
+    if memberships:
+        raise RestoreError(
+            EXIT_ROLES_FAILED,
+            "roles.sql puts a protected role into the cluster membership graph: "
+            + "; ".join(memberships)
+            + ". A membership is not a role attribute, so it survives every "
+            "attribute check. Regenerate roles.sql from a source cluster whose "
+            "application roles hold no memberships.",
         )
 
 

@@ -70,6 +70,7 @@ from __future__ import annotations
 import ast
 import errno
 import importlib.util
+import inspect
 import json
 import os
 import re
@@ -3785,6 +3786,13 @@ def test_restore_preflight_refuses_privileged_app_role_attributes(
     ``pg_dumpall --roles-only`` shape, whose NOSUPERUSER / NOLOGIN / NOBYPASSRLS
     tokens must NOT trip a substring match, alongside a bootstrap superuser that
     legitimately carries all three.
+
+    Its ``GRANT app_tenant TO app_platform`` line is gone deliberately: the
+    membership gate refuses it, because that edge makes the PLATFORM lane a
+    member of the TENANT lane and crosses the platform-only write boundary
+    20260608_0001 holds. The replacement is the edge real ``pg_dumpall`` output
+    actually carries -- ``GRANT app_* TO <bootstrap superuser>`` -- which must
+    keep passing.
     """
     monkeypatch.setattr(
         restore,
@@ -3803,7 +3811,7 @@ def test_restore_preflight_refuses_privileged_app_role_attributes(
         "CREATE ROLE app_platform;\n"
         "ALTER ROLE app_platform WITH NOSUPERUSER INHERIT NOCREATEROLE NOCREATEDB "
         "NOLOGIN NOREPLICATION NOBYPASSRLS;\n"
-        "GRANT app_tenant TO app_platform;\n",
+        "GRANT app_tenant TO postgres WITH ADMIN OPTION, INHERIT TRUE GRANTED BY postgres;\n",
         encoding="utf-8",
     )
     monkeypatch.setattr(restore, "_psql", _restore_psql(superuser="postgres"))
@@ -3833,16 +3841,562 @@ def test_restore_preflight_refuses_privileged_app_role_attributes(
     )
 
 
-def test_restore_and_backup_agree_on_which_attributes_are_privileged() -> None:
-    """A restore stricter than the publish gate would refuse a valid archive.
+# CAPTURED, not written: the exact bytes of
+#   pg_dumpall -U postgres -l ums --roles-only --no-password --no-role-passwords
+# on postgres:18 for a cluster in the shipped container shape -- the bootstrap
+# superuser plus the two NOLOGIN roles 20260608_0001 ``_create_role`` creates.
+# Only the ``\restrict`` nonce is replaced (it is random per dump) and the long
+# ALTER ROLE lines are wrapped across adjacent literals, which concatenate back
+# to the identical bytes.
+#
+# It is the accept arm for every gate below, and it is not a soft one. It
+# carries: the ``\restrict``/``\unrestrict`` meta-command pair every supported
+# branch emits; a COMMENT ON ROLE whose value holds a backslash, a doubled
+# quote AND a semicolon; a per-role GUC; BOTH legitimate
+# ``GRANT app_* TO <bootstrap superuser>`` membership edges; and three
+# ``GRANT ... ON PARAMETER ... TO ...`` object grants from the
+# ``-- Role privileges on configuration parameters`` section, two of which name
+# an application role.
+_REAL_ROLES_SQL = (
+    "--\n"
+    "-- PostgreSQL database cluster dump\n"
+    "--\n"
+    "\n"
+    "\\restrict RESTRICTTOKEN\n"
+    "\n"
+    "SET default_transaction_read_only = off;\n"
+    "\n"
+    "SET client_encoding = 'UTF8';\n"
+    "SET standard_conforming_strings = on;\n"
+    "\n"
+    "--\n"
+    "-- Roles\n"
+    "--\n"
+    "\n"
+    "CREATE ROLE app_platform;\n"
+    "ALTER ROLE app_platform WITH NOSUPERUSER INHERIT NOCREATEROLE NOCREATEDB "
+    "NOLOGIN NOREPLICATION NOBYPASSRLS;\n"
+    "CREATE ROLE app_tenant;\n"
+    "ALTER ROLE app_tenant WITH NOSUPERUSER INHERIT NOCREATEROLE NOCREATEDB "
+    "NOLOGIN NOREPLICATION NOBYPASSRLS;\n"
+    "COMMENT ON ROLE app_tenant IS E'has \\\\ backslash and '' quote and ; semi';\n"
+    "CREATE ROLE postgres;\n"
+    "ALTER ROLE postgres WITH SUPERUSER INHERIT CREATEROLE CREATEDB LOGIN "
+    "REPLICATION BYPASSRLS;\n"
+    "\n"
+    "--\n"
+    "-- User Configurations\n"
+    "--\n"
+    "\n"
+    "--\n"
+    '-- User Config "app_platform"\n'
+    "--\n"
+    "\n"
+    "ALTER ROLE app_platform SET search_path TO 'public';\n"
+    "\n"
+    "\n"
+    "--\n"
+    "-- Role memberships\n"
+    "--\n"
+    "\n"
+    "GRANT app_platform TO postgres WITH ADMIN OPTION, INHERIT TRUE GRANTED BY postgres;\n"
+    "GRANT app_tenant TO postgres WITH ADMIN OPTION, INHERIT TRUE GRANTED BY postgres;\n"
+    "\n"
+    "\n"
+    "--\n"
+    "-- Role privileges on configuration parameters\n"
+    "--\n"
+    "\n"
+    "GRANT SET ON PARAMETER log_min_duration_statement TO pg_monitor;\n"
+    "GRANT ALTER SYSTEM ON PARAMETER shared_buffers TO app_tenant WITH GRANT OPTION;\n"
+    "GRANT SET ON PARAMETER work_mem TO app_platform;\n"
+    "\n"
+    "\n"
+    "\\unrestrict RESTRICTTOKEN\n"
+    "\n"
+    "--\n"
+    "-- PostgreSQL database cluster dump complete\n"
+    "--\n"
+    "\n"
+)
 
-    The two drift gates are separate implementations in separate scripts, so the
-    token sets are pinned to each other here: if one side gains a token the other
-    has not, a roles.sql the backup was allowed to PUBLISH would be refused on
-    the way back in -- an archive that can never be restored.
+# The same capture from a cluster whose bootstrap superuser is MIXED CASE
+# (POSTGRES_USER=Ums_Admin). pg_dumpall writes ``CREATE ROLE "Ums_Admin";``
+# double-quoted -- PostgreSQL does not fold quoted identifiers -- while
+# ``SELECT current_user`` returns the bare name. A gate that folds one and not
+# the other calls the bootstrap superuser a foreign role and refuses a genuine
+# archive before the drop.
+_REAL_MIXED_CASE_ROLES_SQL = (
+    "--\n-- Roles\n--\n\n"
+    'CREATE ROLE "Ums_Admin";\n'
+    'ALTER ROLE "Ums_Admin" WITH SUPERUSER INHERIT CREATEROLE CREATEDB LOGIN '
+    "REPLICATION BYPASSRLS;\n"
+    "CREATE ROLE app_platform;\n"
+    "ALTER ROLE app_platform WITH NOSUPERUSER INHERIT NOCREATEROLE NOCREATEDB "
+    "NOLOGIN NOREPLICATION NOBYPASSRLS;\n"
+    "CREATE ROLE app_tenant;\n"
+    "ALTER ROLE app_tenant WITH NOSUPERUSER INHERIT NOCREATEROLE NOCREATEDB "
+    "NOLOGIN NOREPLICATION NOBYPASSRLS;\n"
+)
+
+_BOTH_APP_ROLES = "CREATE ROLE app_tenant;\nCREATE ROLE app_platform;\n"
+
+
+def _roles_sql_gate_problems(module: ModuleType, body: str, superuser: str) -> list[str]:
+    """Run every roles.sql gate in ``module`` and return the pooled problems."""
+    foreign = (
+        module._foreign_roles_in_roles_sql
+        if hasattr(module, "_foreign_roles_in_roles_sql")
+        else module._foreign_cluster_roles_in_roles_sql
+    )
+    return (
+        module._role_sql_meta_command_problems(body)
+        + module._unsupported_role_statement_problems(body)
+        + module._role_privilege_drift_problems(body)
+        + module._role_membership_problems(body)
+        + [f"foreign role {name}" for name in foreign(body, superuser=superuser)]
+    )
+
+
+def test_roles_sql_gate_accepts_real_pg_dumpall_output() -> None:
+    """A restore script's worst failure is refusing a recovery that would work.
+
+    Every arm here is real ``pg_dumpall --roles-only`` output or a shape it
+    genuinely emits, and every one must PASS both scripts. The parameter-ACL
+    arms are the ones that make the membership rule earn itself: pg_dumpall has
+    a fourth section, ``-- Role privileges on configuration parameters``, whose
+    lines are ``GRANT <privilege> ON PARAMETER <guc> TO <role>`` -- an OBJECT
+    grant that names an application role. Reading those as memberships would
+    refuse a file this repository's own backup publishes.
     """
+    accepted = (
+        ("the captured container-shape dump", _REAL_ROLES_SQL, "postgres"),
+        ("a mixed-case bootstrap superuser", _REAL_MIXED_CASE_ROLES_SQL, "Ums_Admin"),
+        (
+            "the restricted-login membership edge",
+            _BOTH_APP_ROLES
+            + "GRANT app_tenant TO ums_app WITH INHERIT FALSE GRANTED BY postgres;\n",
+            "postgres",
+        ),
+        (
+            "the PG<=15 membership form, no WITH clause",
+            _BOTH_APP_ROLES + "GRANT app_platform TO ums_app GRANTED BY postgres;\n",
+            "postgres",
+        ),
+        (
+            "a parameter ACL granted to an app role",
+            _BOTH_APP_ROLES + "GRANT SET ON PARAMETER work_mem TO app_platform;\n",
+            "postgres",
+        ),
+        (
+            "an object grant naming an app role",
+            _BOTH_APP_ROLES + "GRANT SELECT ON TABLE public.channels TO app_tenant;\n",
+            "postgres",
+        ),
+        (
+            "a per-role GUC whose VALUE is an attribute word",
+            _BOTH_APP_ROLES + "ALTER ROLE app_tenant SET application_name TO login;\n",
+            "postgres",
+        ),
+        (
+            "the per-database GUC form",
+            _BOTH_APP_ROLES
+            + "ALTER ROLE app_tenant IN DATABASE ums SET application_name TO LOGIN;\n",
+            "postgres",
+        ),
+        (
+            "a quoted lookalike, a DIFFERENT role in PostgreSQL",
+            _BOTH_APP_ROLES + 'ALTER ROLE "App_Tenant" WITH SUPERUSER;\n',
+            "postgres",
+        ),
+        (
+            "a hyphenated lookalike, also a different role",
+            _BOTH_APP_ROLES + 'ALTER ROLE "app_tenant-shadow" WITH SUPERUSER;\n',
+            "postgres",
+        ),
+        (
+            "a SCRAM verifier, expiry and connection limit",
+            _BOTH_APP_ROLES
+            + "ALTER ROLE app_tenant WITH PASSWORD 'SCRAM-SHA-256$4096:ab==$cd:ef' "
+            "VALID UNTIL '2030-01-01 00:00:00+00' CONNECTION LIMIT 5;\n",
+            "postgres",
+        ),
+        (
+            "a membership naming no application role",
+            _BOTH_APP_ROLES + "GRANT pg_monitor TO postgres;\n",
+            "postgres",
+        ),
+        ("a REVOKE", _BOTH_APP_ROLES + "REVOKE app_tenant FROM app_platform;\n", "postgres"),
+    )
+    for module in (restore, backup):
+        for label, body, superuser in accepted:
+            assert _roles_sql_gate_problems(module, body, superuser) == [], (
+                module.__name__,
+                label,
+            )
+    # And the whole captured dump really is publishable.
+    backup._validate_dump_roles_covered(listing=None, roles_body=_REAL_ROLES_SQL)
+
+
+def test_restore_preflight_refuses_a_role_membership_for_an_app_role(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A GRANT carries no attribute token, so no attribute gate can see it.
+
+    ``GRANT postgres TO app_tenant`` matches neither the CREATE-anchored
+    allowlist nor the CREATE/ALTER-anchored drift gate, and the post-apply check
+    only asserts the two roles EXIST -- it never reads pg_auth_members. Replayed
+    on PostgreSQL 18 through the exact ``_restore_roles`` invocation it exits 0
+    with EMPTY stderr and leaves ``postgres -> app_tenant``: with
+    ``is_superuser=off`` and NO SET ROLE, that session read every row of an RLS
+    table lacking FORCE, and on a FORCE table it ran ``ALTER TABLE ... NO FORCE
+    ROW LEVEL SECURITY`` and then read every row.
+
+    The accept arm is the captured dump, which carries both legitimate
+    ``GRANT app_* TO postgres`` edges -- so the refusal cannot be a blanket
+    "no GRANTs in roles.sql", which would block every real archive.
+    """
+    monkeypatch.setattr(
+        restore,
+        "_run_with_file",
+        lambda *_a, **_k: subprocess.CompletedProcess([], 0, "", ""),
+    )
+    monkeypatch.setattr(restore, "_psql", _restore_psql(superuser="postgres"))
+
+    accepted = tmp_path / restore.ROLES_NAME
+    accepted.write_text(_REAL_ROLES_SQL, encoding="utf-8")
+    assert "app_tenant" in restore._restore_roles("fake", accepted, timeout=5)
+
+    refused = {
+        "the superuser granted to the lane": _BOTH_APP_ROLES
+        + "GRANT postgres TO app_tenant WITH INHERIT TRUE GRANTED BY postgres;\n",
+        "behind the banner pg_dumpall prints": _BOTH_APP_ROLES
+        + "--\n-- Role memberships\n--\n\nGRANT postgres TO app_tenant;\n",
+        "the cross-lane edge": _BOTH_APP_ROLES + "GRANT app_tenant TO app_platform;\n",
+        "a predefined role": _BOTH_APP_ROLES + "GRANT pg_read_all_data TO app_tenant;\n",
+        "a role list": _BOTH_APP_ROLES + 'GRANT postgres TO app_tenant, "ON";\n',
+        "the CREATE ROLE IN ROLE clause": "CREATE ROLE app_tenant IN ROLE postgres;\n"
+        "CREATE ROLE app_platform;\n",
+        "the CREATE ROLE clause pointed the other way": _BOTH_APP_ROLES
+        + "CREATE ROLE postgres ROLE app_tenant;\n",
+        "the legacy ALTER GROUP spelling": _BOTH_APP_ROLES
+        + "ALTER GROUP postgres ADD USER app_tenant;\n",
+        "an unquoted member that folds": _BOTH_APP_ROLES + "GRANT postgres TO APP_TENANT;\n",
+    }
+    for index, (label, body) in enumerate(refused.items()):
+        path = tmp_path / f"membership-{index}.sql"
+        path.write_text(body, encoding="utf-8")
+        with pytest.raises(restore.RestoreError) as raised:
+            restore._restore_roles("fake", path, timeout=5)
+        assert raised.value.code == restore.EXIT_ROLES_FAILED, label
+        assert "membership graph" in str(raised.value), label
+
+    # The drift gate genuinely cannot see any of this. If this starts failing,
+    # the membership gate has been folded into the attribute gate and the two
+    # are no longer independent checks.
+    assert restore._role_privilege_drift_problems("GRANT postgres TO app_tenant;\n") == []
+
+
+def test_backup_refuses_to_publish_a_role_membership_for_an_app_role() -> None:
+    """The publish gate was blind in exactly the same way the restore gate was.
+
+    A gate on one side of a round trip is not a gate: restore-only turns every
+    archive already carrying the edge into an unrestorable one, and
+    publish-only keeps minting archives the restore has to catch. The membership
+    rule needs no bootstrap superuser, which is why it lives on the
+    superuser-free path that stays enforced under ``--no-verify-dump``.
+    """
+    with pytest.raises(backup.BackupError) as raised:
+        backup._validate_dump_roles_covered(
+            listing=None,
+            roles_body=_BOTH_APP_ROLES
+            + "GRANT postgres TO app_tenant WITH INHERIT TRUE GRANTED BY postgres;\n",
+        )
+    assert raised.value.code == backup.EXIT_ARTIFACT_INVALID
+    assert "membership graph" in str(raised.value)
+
+    backup._validate_dump_roles_covered(listing=None, roles_body=_REAL_ROLES_SQL)
+
+
+def test_roles_sql_gate_reads_the_statements_psql_executes() -> None:
+    r"""The validator must read the program psql runs, not a different one.
+
+    Every body here was applied through the real ``_restore_roles`` psql
+    invocation and LANDED its privilege -- rolsuper/rolbypassrls true, or the
+    pg_auth_members edge -- with psql exiting 0. The old gate returned [] for
+    all of them because ``body.split(";")`` plus an anchored ``re.match`` drops
+    any chunk not STARTING with CREATE/ALTER ROLE, which is exactly what a
+    comment or a quoted semicolon manufactures.
+
+    The last two are the ones no line-anchored alternative reaches: psql treats
+    ``\'`` inside an ``E'...'`` literal -- and inside a plain literal once the
+    file has done ``SET standard_conforming_strings = off`` -- as an escaped
+    quote, so a scanner that stops at that quote swallows the rest of the file,
+    GRANT included, inside a phantom string.
+    """
+    drift_hidden = {
+        "a line comment before the ALTER": _BOTH_APP_ROLES
+        + "-- bumped\nALTER ROLE app_tenant WITH SUPERUSER;\n",
+        "a trailing comment on the previous statement": "CREATE ROLE app_platform;\n"
+        "CREATE ROLE app_tenant; -- created above\n"
+        "ALTER ROLE app_tenant WITH SUPERUSER;\n",
+        "a block comment spanning the split": _BOTH_APP_ROLES
+        + "/* dumped; regenerated */\nALTER ROLE app_tenant WITH SUPERUSER;\n",
+        "a block comment on the same line": _BOTH_APP_ROLES
+        + "/* note */ ALTER ROLE app_tenant WITH SUPERUSER;\n",
+        "a semicolon inside a quoted password": _BOTH_APP_ROLES
+        + "ALTER ROLE app_tenant WITH PASSWORD 'x;' SUPERUSER;\n",
+        "a semicolon inside a dollar-quoted password": _BOTH_APP_ROLES
+        + "ALTER ROLE app_tenant WITH PASSWORD $$a;b$$ SUPERUSER;\n",
+        "a tagged dollar quote landing BYPASSRLS": _BOTH_APP_ROLES
+        + "ALTER ROLE app_tenant WITH PASSWORD $tag$p;w$tag$ BYPASSRLS;\n",
+        "a UTF-8 BOM, which str.strip() does not remove": "﻿"
+        "CREATE ROLE app_tenant SUPERUSER;\nCREATE ROLE app_platform;\n",
+        "a second statement on the same line": "CREATE ROLE app_platform NOLOGIN; "
+        "CREATE ROLE app_tenant WITH SUPERUSER;\n",
+    }
+    membership_hidden = {
+        "an E-string escaped quote": _BOTH_APP_ROLES
+        + "ALTER ROLE app_tenant WITH PASSWORD E'a\\';b' NOLOGIN;\n"
+        + "GRANT postgres TO app_tenant;\n",
+        "standard_conforming_strings turned off": _BOTH_APP_ROLES
+        + "SET standard_conforming_strings = off;\n"
+        + "ALTER ROLE app_tenant WITH PASSWORD 'a\\';b' NOLOGIN;\n"
+        + "GRANT postgres TO app_tenant;\n",
+    }
+    for module in (restore, backup):
+        for label, body in drift_hidden.items():
+            assert module._role_privilege_drift_problems(body) != [], (module.__name__, label)
+        for label, body in membership_hidden.items():
+            assert module._role_membership_problems(body) != [], (module.__name__, label)
+
+    # Literal BODIES are masked. That is not cosmetic: it is what stops a
+    # keyword inside a string forging an attribute token, and what keeps a
+    # SCRAM verifier out of a refusal message when an archive was taken with
+    # --include-role-passwords.
+    for module in (restore, backup):
+        assert module._scan_role_sql(
+            "ALTER ROLE app_tenant WITH PASSWORD 'SCRAM-SHA-256$4096:s3cret$verifier';\n"
+        ) == ["ALTER ROLE app_tenant WITH PASSWORD ''"], module.__name__
+        assert module._scan_role_sql(
+            "COMMENT ON ROLE app_tenant IS $tag$ SUPERUSER $tag$;\n"
+        ) == ["COMMENT ON ROLE app_tenant IS ''"], module.__name__
+
+    # The same divergence pointed the OTHER way: these are VALID declarations
+    # the publish gate used to refuse, because its line-anchored regex could
+    # not see past a comment, a BOM, or a preceding statement.
+    for body in (
+        "/* c */ CREATE ROLE app_tenant;\n",
+        "CREATE ROLE postgres; CREATE ROLE app_tenant;\n",
+        "﻿CREATE ROLE app_tenant;\n",
+    ):
+        assert backup._role_declared_in_roles_sql(body, "app_tenant"), body
+
+    # ...and the foreign-role gates, which fail on the SAME axis: each of these
+    # created a foreign SUPERUSER LOGIN role while preflight reported success.
+    for body in (
+        "﻿CREATE ROLE evil_admin SUPERUSER LOGIN;\n",
+        "CREATE ROLE app_tenant; CREATE ROLE evil_admin SUPERUSER LOGIN;\n",
+        "  /* c */  CREATE ROLE evil_admin SUPERUSER LOGIN;\n",
+        "ALTER ROLE app_tenant SET search_path = 'a;b'; CREATE ROLE evil_admin SUPERUSER;\n",
+    ):
+        assert restore._foreign_roles_in_roles_sql(body, superuser="postgres") == [
+            "evil_admin"
+        ], body
+        assert backup._foreign_cluster_roles_in_roles_sql(body, superuser="postgres") == [
+            "evil_admin"
+        ], body
+
+
+def test_roles_sql_gate_refuses_psql_meta_commands(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    r"""``\!`` runs a shell command in the database container and psql exits 0.
+
+    ``_container_sh`` passes no ``-u``, so that shell runs as root. MEASURED on
+    postgres:18 through the exact ``_restore_roles`` argv: a roles.sql carrying
+    ``\! id > /pr210_B`` wrote ``uid=0(root) gid=0(root) groups=0(root)`` to
+    that file, psql returned 0, and stderr was EMPTY -- so
+    ``_unexpected_roles_errors`` had nothing to classify, and the surrounding
+    CREATE ROLE statements still applied. psql honours a backslash ANYWHERE
+    outside a quote or a comment, which is why the mid-statement and
+    glued-to-a-word arms are here and not decoration.
+
+    ``\restrict``/``\unrestrict`` are NOT optional to allow: every supported
+    branch wraps its dump in that pair, so refusing backslash commands
+    wholesale would refuse every genuine archive. The accept arm is the
+    captured dump, which contains them.
+    """
+    monkeypatch.setattr(
+        restore,
+        "_run_with_file",
+        lambda *_a, **_k: subprocess.CompletedProcess([], 0, "", ""),
+    )
+    monkeypatch.setattr(restore, "_psql", _restore_psql(superuser="postgres"))
+
+    assert restore._role_sql_meta_command_problems(_REAL_ROLES_SQL) == []
+    assert backup._role_sql_meta_command_problems(_REAL_ROLES_SQL) == []
+
+    refused = {
+        "line-initial": _BOTH_APP_ROLES + "\\! id > /tmp/pwned\n",
+        "mid-statement": _BOTH_APP_ROLES + "SET client_encoding = 'UTF8' \\! id\n;\n",
+        "glued to a word": _BOTH_APP_ROLES + "SELECT 1\\! id\n;\n",
+        "include": _BOTH_APP_ROLES + "\\i /etc/passwd\n",
+        "copy": _BOTH_APP_ROLES + "\\copy pg_authid TO '/tmp/authid'\n",
+        "a lookalike of an allowed name": _BOTH_APP_ROLES + "\\restrictfoo TOK\n",
+    }
+    for index, (label, body) in enumerate(refused.items()):
+        assert restore._role_sql_meta_command_problems(body) != [], label
+        assert backup._role_sql_meta_command_problems(body) != [], label
+        path = tmp_path / f"meta-{index}.sql"
+        path.write_text(body, encoding="utf-8")
+        with pytest.raises(restore.RestoreError) as raised:
+            restore._restore_roles("fake", path, timeout=5)
+        assert raised.value.code == restore.EXIT_ROLES_FAILED, label
+        assert "meta-command" in str(raised.value), label
+
+    # A backslash inside a literal is NOT a meta-command -- pg_dumpall re-emits
+    # a role comment containing one as exactly this E-string.
+    assert (
+        restore._role_sql_meta_command_problems(
+            "COMMENT ON ROLE app_tenant IS E'a \\\\! id backslash';\n"
+        )
+        == []
+    )
+
+
+def test_roles_sql_gate_refuses_statements_pg_dumpall_never_emits(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Shapes that escalate or brick without ever naming a role attribute.
+
+    All were MEASURED on postgres:18 through the real ``_restore_roles``
+    invocation, and none appears in ``pg_dumpall --roles-only`` output:
+
+    * ``ALTER ROLE ALL SET session_preload_libraries TO 'evil';`` exits 0 and
+      then no role can connect at all -- ``FATAL: could not access file
+      "evil"`` for the bootstrap superuser included.
+    * ``ALTER ROLE ums_admin RENAME TO app_tenant;`` exits 0 with only a
+      WARNING and leaves a role NAMED app_tenant that is ``rolsuper=true
+      rolcanlogin=true`` -- which then SATISFIES the post-apply existence
+      check, so the restore reports success.
+    * ``SET ROLE`` changes who the remainder of the file runs as.
+    """
+    monkeypatch.setattr(
+        restore,
+        "_run_with_file",
+        lambda *_a, **_k: subprocess.CompletedProcess([], 0, "", ""),
+    )
+    monkeypatch.setattr(restore, "_psql", _restore_psql(superuser="postgres"))
+
+    assert restore._unsupported_role_statement_problems(_REAL_ROLES_SQL) == []
+    assert backup._unsupported_role_statement_problems(_REAL_ROLES_SQL) == []
+
+    refused = {
+        "ALTER ROLE ALL, preload libraries": _BOTH_APP_ROLES
+        + "ALTER ROLE ALL SET session_preload_libraries TO 'evil';\n",
+        "ALTER ROLE ALL, anything at all": _BOTH_APP_ROLES
+        + "ALTER ROLE ALL SET statement_timeout TO '1ms';\n",
+        "a per-role preload library on the superuser": _BOTH_APP_ROLES
+        + "ALTER ROLE postgres SET session_preload_libraries TO 'evil';\n",
+        "a rename into a protected name": _BOTH_APP_ROLES
+        + "ALTER ROLE ums_admin RENAME TO app_tenant;\n",
+        "a rename out of a protected name": _BOTH_APP_ROLES
+        + "ALTER ROLE app_tenant RENAME TO app_tenant_old;\n",
+        "SET ROLE": _BOTH_APP_ROLES + "SET ROLE postgres;\n",
+        "a DO block a comment walked past": _BOTH_APP_ROLES
+        + "/* x */ DO $$ BEGIN EXECUTE 'ALTER ROLE app_tenant SUPERUSER'; END $$;\n",
+    }
+    for index, (label, body) in enumerate(refused.items()):
+        assert restore._unsupported_role_statement_problems(body) != [], label
+        assert backup._unsupported_role_statement_problems(body) != [], label
+        path = tmp_path / f"unsupported-{index}.sql"
+        path.write_text(body, encoding="utf-8")
+        with pytest.raises(restore.RestoreError) as raised:
+            restore._restore_roles("fake", path, timeout=5)
+        assert raised.value.code == restore.EXIT_ROLES_FAILED, label
+
+    # A per-role GUC that is NOT a code loader stays allowed -- pg_dumpall
+    # emits exactly this line.
+    assert (
+        restore._unsupported_role_statement_problems(
+            "ALTER ROLE app_platform SET search_path TO 'public';\n"
+        )
+        == []
+    )
+
+
+def test_roles_sql_drift_gate_names_all_six_privileged_attributes() -> None:
+    """The invariant is 20260608_0001's, and it is all six attributes.
+
+    ``_create_role`` issues ``CREATE ROLE "<role>" NOLOGIN`` and grants these
+    roles nothing else, and ``pg_dumpall`` writes the negative form of every
+    one of the six for them. CREATEROLE is the one that is not merely tidiness:
+    an app_tenant session holding it can mint a standing LOGIN account -- and
+    because pg_dumpall emits the attribute on an allowlisted role, a legacy
+    archive from a cluster where an operator once set it restores clean.
+    """
+    for module in (restore, backup):
+        assert module._PRIVILEGED_ATTRIBUTE_TOKENS == frozenset(
+            {"SUPERUSER", "BYPASSRLS", "LOGIN", "CREATEROLE", "CREATEDB", "REPLICATION"}
+        ), module.__name__
+        assert module._role_privilege_drift_problems(
+            _BOTH_APP_ROLES + "ALTER ROLE app_tenant WITH CREATEROLE CREATEDB REPLICATION;\n"
+        ) == [
+            "app_tenant: privileged attributes CREATEDB, CREATEROLE, REPLICATION must be revoked"
+        ], module.__name__
+        # The negative forms pg_dumpall really writes are whole tokens, not
+        # substrings of the enabled ones.
+        assert module._role_privilege_drift_problems(_REAL_ROLES_SQL) == [], module.__name__
+
+
+def test_restore_and_backup_share_one_role_sql_gate() -> None:
+    """Pin the two gates by SOURCE, not by comparing two frozensets.
+
+    The previous version compared ``_PRIVILEGED_ATTRIBUTE_TOKENS`` and the role
+    tuple and nothing else -- which is how the two implementations came to
+    disagree on a MISSING app role (backup reported drift, restore returned [])
+    without any test noticing. The scripts are stdlib-only operator CLIs that
+    cannot import each other, so the block is duplicated on purpose; comparing
+    the source of every shared function turns any drift into a failure here,
+    and the corpus tests above prove the shared source actually answers the
+    question rather than the two agreeing on nothing.
+    """
+    shared = (
+        "_role_sql_comment_end",
+        "_role_sql_quoted_end",
+        "_role_sql_dollar_end",
+        "_role_sql_starts_escape_string",
+        "_scan_role_sql",
+        "_role_sql_tokens",
+        "_role_sql_identifier",
+        "_role_sql_words",
+        "_role_sql_meta_command_problems",
+        "_role_sql_name_list",
+        "_grant_membership_edges",
+        "_role_ddl_membership_edges",
+        "_role_membership_edges",
+        "_role_membership_problems",
+        "_role_sql_setting_name",
+        "_unsupported_role_statement_problems",
+        "_role_attribute_clause",
+        "_collect_role_attribute_tokens",
+        "_role_privilege_drift_problems",
+        "_created_role_names",
+    )
+    for name in shared:
+        assert inspect.getsource(getattr(restore, name)) == inspect.getsource(
+            getattr(backup, name)
+        ), f"{name} has drifted between the two scripts"
     assert restore._PRIVILEGED_ATTRIBUTE_TOKENS == backup._PRIVILEGED_ATTRIBUTE_TOKENS
+    assert restore._ALLOWED_ROLE_SQL_META_COMMANDS == backup._ALLOWED_ROLE_SQL_META_COMMANDS
+    assert restore._UNSAFE_ROLE_SETTINGS == backup._UNSAFE_ROLE_SETTINGS
+    assert restore._PROTECTED_APP_ROLES == backup._PROTECTED_APP_ROLES
     assert tuple(restore.REQUIRED_ROLES) == backup._REQUIRED_UNPRIVILEGED_ROLES
+    # The membership gate reads _PROTECTED_APP_ROLES while the publish gate's
+    # declaration check reads REQUIRED_ROLES; pin backup's two tuples together
+    # so it cannot judge memberships and declarations against different sets.
+    assert tuple(backup.REQUIRED_ROLES) == backup._REQUIRED_UNPRIVILEGED_ROLES
 
 
 def test_backup_roles_rejects_foreign_cluster_roles(
