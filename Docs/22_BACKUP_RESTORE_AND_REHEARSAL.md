@@ -1054,11 +1054,18 @@ closes the *empty* case, and now the *wiped-and-re-migrated* case too. It does n
 close the *partially restored* case.
 
 **If you must restore over a database that already has tables**, add
-`--allow-nonempty`. That switches `pg_restore` to `--clean --if-exists`, which
-**DROPs the existing objects**. It is a real repair path — it was used to repair a
-roles-less half-populated database back to a byte-for-byte-equivalent privilege
-surface — but it is destructive, and without the flag the script refuses and tells
-you so (exit `2`).
+`--allow-nonempty`. That **drops and recreates the entire target database** —
+`DROP DATABASE ... WITH (FORCE)` (which disconnects any live sessions), then
+`CREATE DATABASE` — before restoring with `pg_restore --clean --if-exists`.
+Everything the database held is destroyed, **including schemas, extensions and
+objects this archive does not contain**, and none of it is recoverable once the
+drop runs. It is a real repair path — it was used to repair a roles-less
+half-populated database back to a byte-for-byte-equivalent privilege surface —
+but the blast radius is the whole database, not just the dump's own schemas.
+Without the flag the script refuses and tells you so (exit `2`).
+
+There is no automatic pre-restore safety copy. If the target holds anything you
+might still need, take a backup of it **before** running with `--allow-nonempty`.
 
 Restore exit codes:
 

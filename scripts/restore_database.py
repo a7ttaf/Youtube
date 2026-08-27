@@ -20,8 +20,11 @@ Two modes:
 
 ``--container NAME``
     Restore into a container you name. Refuses a non-empty database unless
-    ``--allow-nonempty`` is passed, which switches pg_restore to
-    ``--clean --if-exists`` and is therefore destructive.
+    ``--allow-nonempty`` is passed, which drops and recreates the entire
+    target database (``DROP DATABASE ... WITH (FORCE)``, then
+    ``CREATE DATABASE``) before restoring with ``--clean --if-exists``.
+    Everything the database held is destroyed, including schemas and
+    extensions the archive does not contain.
 
 Credentials: as with the backup script, the host process never learns a
 database password. Everything runs inside the container and the password is
@@ -954,8 +957,12 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         "--allow-nonempty",
         action="store_true",
         help=(
-            "Permit restoring over a database that already has tables. This switches "
-            "pg_restore to --clean --if-exists and DROPS the existing objects."
+            "Permit restoring over a database that already has tables. This DROPS "
+            "AND RECREATES THE ENTIRE TARGET DATABASE (DROP DATABASE ... WITH "
+            "(FORCE), then CREATE DATABASE) before restoring, destroying every "
+            "schema, extension and object it holds -- including ones the archive "
+            "does not contain -- and disconnecting any live sessions. The restore "
+            "then runs with pg_restore --clean --if-exists."
         ),
     )
     parser.add_argument(
@@ -1063,9 +1070,10 @@ def _guard_empty(container: str, *, allow_nonempty: bool, timeout: int) -> None:
             EXIT_USAGE,
             f"the target database already has {existing} user objects outside "
             "system catalogs. Restore into an empty database (recreate the "
-            "container/volume), or pass --allow-nonempty to DROP and replace "
-            "existing objects in the dump's schemas (foreign schemas are not "
-            "removed).",
+            "container/volume), or pass --allow-nonempty to DROP AND RECREATE "
+            "THE WHOLE TARGET DATABASE -- every schema, extension and object it "
+            "holds is destroyed, including ones this archive does not contain, "
+            "and it cannot be recovered afterwards.",
         )
 
 
