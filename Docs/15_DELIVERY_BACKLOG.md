@@ -20,6 +20,20 @@ scheduled group sync is reconciled inline under its branch name
 deliberately OUTSIDE that high-water mark; on merge its entries convert to
 `✅ PR #171`.
 
+**US-withholding plan note (2026-08-28, branch `docs/us-withholding-plan`):** adds
+`Docs/24_US_WITHHOLDING_AND_US_REVENUE_PLAN.md` — the verified rate ruling (Egypt–US
+treaty copyright-royalty withholding is **15%**, not the operator's guessed 16%; no-form
+default is 24%/30% on worldwide earnings) plus the program that makes per-channel
+US-viewer revenue and the estimated-withholding calculation visible: U1 read-only probe
+(country-dimension Analytics queries must decompose the trusted totals), U2 additive
+country-sliced ingestion (distinct source_row_keys; EGP-sequencing tripwire), U3 display
++ `US revenue × UMS_US_WITHHOLDING_RATE` (config, default 0.15, estimate-labeled, never
+in net math), U4 optional manual actual-withholding anchor (the actual line is
+AdSense-UI-only). Verified today: the Analytics lane fetches `dimensions=month` only; the
+Reporting CSV already carries `country_code` but the adapter drops it; `payments.list`
+has no line items, so no withholding is ingested anywhere. Docs-only branch; on merge
+these entries convert to its PR number.
+
 **Test-harness note (2026-06-11, branch `fix/pg-migration-test-lock-timeout`):** the PG
 migration round-trip tests' `fresh_engine` schema reset now sets `SET LOCAL lock_timeout`
 so a contended `DROP SCHEMA public CASCADE` fails fast with a diagnosable error instead of
