@@ -143,23 +143,6 @@ export const CHANNELS = [
   },
 ];
 
-export const ISSUES = [
-  { tone: "red" as Severity, title: "Outside-CMS source missing", sub: "Sports Extra, 6 channels in TV sector", badge: { text: "High", tone: "red" as Severity } },
-  { tone: "amber" as Severity, title: "Bank amount needs FX confirmation", sub: "Transfer fee and bank gap not finalized", badge: { text: "Review", tone: "amber" as Severity } },
-  { tone: "amber" as Severity, title: "Manual override used", sub: "Kids Arabic adjustment approved by Finance", badge: { text: "Audit", tone: "amber" as Severity } },
-];
-
-export const CLOSE_STEPS = [
-  { tone: "green" as Severity, title: "YouTube reports normalized", sub: "Raw files retained, checksum verified", badge: { text: "Done", tone: "green" as Severity } },
-  { tone: "green" as Severity, title: "AdSense payment matched", sub: "Payment object linked to March close", badge: { text: "Done", tone: "green" as Severity } },
-  { tone: "amber" as Severity, title: "Unresolved gap allocation", sub: "Post-tax proportional method selected", action: "Review" },
-];
-
-export const EXPORT_READINESS = [
-  { tone: "amber" as Severity, title: "Confidence notes required", sub: "Allocated values must be included", badge: { text: "Open", tone: "amber" as Severity } },
-  { tone: "red" as Severity, title: "Raw appendix restricted", sub: "Requires raw file permission", badge: { text: "Blocked", tone: "red" as Severity } },
-];
-
 export const WORKFLOW_STEPS: Array<{ state: string; tone: WorkflowTone; label: string }> = [
   { state: "is-done", tone: "green", label: "Reports" },
   { state: "is-done", tone: "green", label: "Normalize" },
@@ -169,24 +152,11 @@ export const WORKFLOW_STEPS: Array<{ state: string; tone: WorkflowTone; label: s
   { state: "", tone: "amber", label: "Export" },
 ];
 
-export const REGISTRY_SUMMARY = [
-  { label: "Active channels", value: "318", note: "300+ target registry, 12 pending review" },
-  { label: "Outside CMS", value: "70", note: "Allocation requires explicit source mapping" },
-  { label: "Unmapped revenue", value: "$42.8K", note: "Held from export until mapped", finance: true },
-  { label: "Scoped changes", value: "9", note: "Company and sector approvals required" },
-];
-
 export const REGISTRY_ROWS = [
   { avatar: "DR", name: "UMS Drama", code: "UC-DRAMA-01", company: "United Studios", sector: "TV", cms: { text: "Inside CMS", tone: "green" as Severity }, source: "YouTube Reporting API", node: "channel:ums-drama", state: { text: "Approved", tone: "green" as Severity }, action: "Review" },
   { avatar: "SX", name: "Sports Extra", code: "UC-SPORT-7", company: "TV Sector", sector: "TV", cms: { text: "Outside CMS", tone: "amber" as Severity }, source: "Uploaded owner statement", node: "channel:sports-extra", state: { text: "Evidence due", tone: "amber" as Severity }, action: "Assign" },
   { avatar: "NL", name: "UMS News Live", code: "UC-NEWS-22", company: "News Network", sector: "News", cms: { text: "Inside CMS", tone: "green" as Severity }, source: "YouTube Analytics API", node: "channel:news-live", state: { text: "Approved", tone: "green" as Severity }, action: "Review" },
   { avatar: "MS", name: "Music Stage", code: "UC-MUSIC-31", company: "Catalog Media", sector: "Entertainment", cms: { text: "Unmapped", tone: "red" as Severity }, source: "Not linked", node: "pending", state: { text: "Export block", tone: "red" as Severity }, action: "Map" },
-];
-
-export const REGISTRY_CONTROLS = [
-  { tone: "green" as Severity, title: "Company scope enforced", sub: "Managers cannot open unrelated company mappings", badge: { text: "Pass", tone: "green" as Severity } },
-  { tone: "amber" as Severity, title: "Finance month impact", sub: "Changes after lock require Finance Admin approval", badge: { text: "Guarded", tone: "amber" as Severity } },
-  { tone: "green" as Severity, title: "Registry lineage update", sub: "SQL mapping changes refresh trace-ready issue relationships after approval", badge: { text: "SQL", tone: "violet" as Severity } },
 ];
 
 export const CLOSE_SUMMARY = [
@@ -208,11 +178,6 @@ export const CLOSE_CHECKPOINTS = [
   { name: "Payment reconciliation", owner: "Finance Admin", evidence: "payment_reconciliation_id", action: "View bank reconciliation", state: { text: "Review", tone: "amber" as Severity }, next: "Explain Gap" },
   { name: "Manual override approval", owner: "Corporate Admin", evidence: "override_id", action: "Create manual override", state: { text: "3 pending", tone: "amber" as Severity }, next: "Review" },
   { name: "Month lock", owner: "Finance Admin", evidence: "finance_month_id", action: "Lock or unlock month", state: { text: "Blocked", tone: "red" as Severity }, next: "Resolve" },
-];
-
-export const RECON_NOTES = [
-  { tone: "amber" as Severity, title: "Gap allocation needs final note", sub: "Finance memo is required before export", badge: { text: "Open", tone: "amber" as Severity } },
-  { tone: "green" as Severity, title: "Override audit trail present", sub: "Reason, approver, timestamp, and before value captured", badge: { text: "Ready", tone: "green" as Severity } },
 ];
 
 export const TRACE_SUMMARY = [
@@ -262,12 +227,6 @@ export const EXPORTS_ROWS = [
   { name: "Raw Appendix", scope: "raw", audience: "Audit", money: { text: "Raw files", tone: "red" as Severity }, requires: "Raw report file permission", status: { text: "Blocked", tone: "red" as Severity }, action: "Request" },
 ];
 
-export const EXPORTS_GUARDRAILS = [
-  { tone: "green" as Severity, title: "Revenue cells permission checked", sub: "Assistant Analyst receives server-filtered finance exports", badge: { text: "On", tone: "green" as Severity } },
-  { tone: "amber" as Severity, title: "Confidence notes required", sub: "Allocated and overridden values require explanations", badge: { text: "Open", tone: "amber" as Severity } },
-  { tone: "red" as Severity, title: "Raw appendix restricted", sub: "Only Audit Viewer plus raw file grant can open source files", badge: { text: "Blocked", tone: "red" as Severity } },
-];
-
 export const EXPORT_META = [
   { label: "Scope hash", chip: "exp_8b3c41" },
   { label: "Month", value: "Mar 2026 locked" },
@@ -305,3 +264,10 @@ export const CREDENTIAL_CONTROLS = [
 // GET /audit/events and the summary tiles to GET /audit/summary (real,
 // tenant-scoped aggregate counts) via views/AuditView. The mock no longer
 // carries any audit data.
+
+// ISSUES, CLOSE_STEPS, EXPORT_READINESS, REGISTRY_SUMMARY, REGISTRY_CONTROLS,
+// RECON_NOTES and EXPORTS_GUARDRAILS removed (P1.4): every panel they fed
+// rendered fabricated counts, statuses and badges. The Command / Registry /
+// Close / Exports views now derive their summaries from the API data they
+// already load, and the panels with no real source were deleted rather than
+// refilled — a screen shows a real number, an honest empty state, or nothing.

@@ -7,11 +7,9 @@ import { useChannels } from "@/lib/api/useChannels";
 import { useProposeAccountLinkAction } from "@/lib/api/useChannelAccountLinks";
 import { useOrgUnits } from "@/lib/api/useOrgUnits";
 import type { Severity } from "@/lib/mock/data";
-import { REGISTRY_CONTROLS, REGISTRY_SUMMARY } from "@/lib/mock/data";
 import {
   Badge,
   Dot,
-  ItemRow,
   RESTRICTED_FINANCE_VALUE,
   SummaryTile,
 } from "../shared";
@@ -170,34 +168,50 @@ const describeMutationError = (err: unknown): string => {
 
 // ---- Summary tile counts (derived from fetched channels) -------------------
 
+type RegistrySummaryTile = {
+  label: string;
+  value: string;
+  note: string;
+};
+
 // ============================================================================
-// Purpose: Derive display values for all four summary tiles from the live
-//   channel response. Returns neutral values (loading: "…", error: "—") when
-//   channels is null so mock numbers are never shown during load or on error.
-//   Finance tiles (Unmapped revenue, Scoped changes) have no live source —
-//   they show "—" after a successful fetch rather than static mock numbers.
+// Purpose: Derive the registry summary tiles from the live channel response.
+//   Both tiles are counts of the SAME fetched rows the table renders, so the
+//   header can never disagree with the body. Returns neutral values
+//   (loading: "…", error/no data: "—") with no note when channels is null.
+// Standards: No fabricated values. The tile set was cut from four to two in
+//   P1.4: "Unmapped revenue" and "Scoped changes" had no live source and stood
+//   permanently at "—", so they were deleted rather than left as empty
+//   furniture. Neither remaining tile shows money, so no finance gating applies.
 //   Outside-CMS count includes ONLY channels with cms_status === "OUTSIDE_CMS".
+// Blast Radius: Registry header display only. No mutation, no money.
 // ============================================================================
 const buildSummaryTiles = (
   channels: ChannelRegistryEntry[] | null,
   loading: boolean,
-  baseStatic: typeof REGISTRY_SUMMARY,
-): typeof REGISTRY_SUMMARY => {
-  const neutral = loading ? "…" : "—";
+): RegistrySummaryTile[] => {
   if (!channels) {
-    return baseStatic.map((tile) => ({ ...tile, value: neutral, note: "" }));
+    const neutral = loading ? "…" : "—";
+    return [
+      { label: "Active channels", value: neutral, note: "" },
+      { label: "Outside CMS", value: neutral, note: "" },
+    ];
   }
-  const activeCount = channels.length;
   const outsideCmsCount = channels.filter(
     (ch) => ch.cms_status === "OUTSIDE_CMS",
   ).length;
-  return baseStatic.map((tile) => {
-    // FIX: always clear note — mock subtitle copy contradicts live-derived values.
-    if (tile.label === "Active channels") return { ...tile, value: String(activeCount), note: "" };
-    if (tile.label === "Outside CMS") return { ...tile, value: String(outsideCmsCount), note: "" };
-    // Finance tiles (Unmapped revenue, Scoped changes): no live source yet.
-    return { ...tile, value: "—", note: "" };
-  });
+  return [
+    {
+      label: "Active channels",
+      value: String(channels.length),
+      note: "Channels returned by the registry read",
+    },
+    {
+      label: "Outside CMS",
+      value: String(outsideCmsCount),
+      note: "Channels whose CMS status is OUTSIDE_CMS",
+    },
+  ];
 };
 
 type ChannelAsyncState = ReturnType<typeof useChannels>;
@@ -1118,32 +1132,7 @@ const AccountLinkProposalPanel = ({
   );
 };
 
-/** The registry-controls panel listing the expected production behaviors. */
-const RegistryControlsPanel = () => {
-  return (
-    <section className="panel">
-      <div className="panel-header">
-        <div className="panel-title">
-          <strong>Registry Controls</strong>
-          <span>Active safeguards for registry operations</span>
-        </div>
-      </div>
-      <div className="issue-list" role="list">
-        {REGISTRY_CONTROLS.map((c) => (
-          <ItemRow
-            key={c.title}
-            tone={c.tone}
-            title={c.title}
-            sub={c.sub}
-            trailing={<Badge tone={c.badge.tone}>{c.badge.text}</Badge>}
-          />
-        ))}
-      </div>
-    </section>
-  );
-};
-
-/** Registry side panels: the live mapping-change form, the account-link proposal form, and registry controls. */
+/** Registry side panels: the live mapping-change form and the account-link proposal form. */
 const RegistrySidePanels = ({
   canManageRegistry,
   channels,
@@ -1173,7 +1162,6 @@ const RegistrySidePanels = ({
         context={assignContext}
         onProposed={onMutated}
       />
-      <RegistryControlsPanel />
     </aside>
   );
 };
@@ -1250,11 +1238,7 @@ const RegistryView = ({
     [orgUnitState.data],
   );
 
-  const summaryTiles = buildSummaryTiles(
-    channelState.data,
-    channelState.loading,
-    REGISTRY_SUMMARY,
-  );
+  const summaryTiles = buildSummaryTiles(channelState.data, channelState.loading);
 
   const onMap = useCallback(
     (ch: ChannelRegistryEntry) =>

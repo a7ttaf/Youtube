@@ -2014,6 +2014,11 @@ single P-tier above.
   mock). All display fields derived client-side (avatar, CMS badge, source
   label, state per Option A, trace key). Extracted to `views/RegistryView.tsx`;
   16 new Vitest tests. All six dashboard pages off mock data.
+- ⏳ Summary-dataset de-mock (P1.4) — branch `feat/p1-demock-views` (unmerged):
+  drops the fabricated Issue Queue / Month Close / Export Readiness / Registry
+  Controls / Reconciliation / Export Guardrails panels and their seven datasets
+  from `lib/mock/data.ts`; the registry tiles keep only the two `GET /channels`
+  counts. No API source meant deletion, never invented replacement data.
 - ✅ Soft Dark design system — PR #79, on `feat/design-system-softdark` (stacked
   on Registry Phase 2): `frontend/src/styles.css` token values converted to the
   UMS Revenue Design System Soft Dark theme (dark_dimmed surfaces/ink/status,

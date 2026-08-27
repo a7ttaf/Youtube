@@ -201,6 +201,38 @@ describe("ExportsView wired to the exports endpoint", () => {
     );
   });
 
+  it("renders no mock Export Guardrails panel", async () => {
+    fetchMock().mockResolvedValue(jsonResponse(POPULATED_LIST));
+    renderExportsView();
+
+    await waitFor(() =>
+      expect(screen.getByText("FINANCE_EXCEL")).toBeInTheDocument(),
+    );
+    // Panel title, its policy badge, and the three fabricated guardrail rows.
+    expect(screen.queryByText("Export Guardrails")).not.toBeInTheDocument();
+    expect(screen.queryByText("Policy")).not.toBeInTheDocument();
+    expect(
+      screen.queryByText("Revenue cells permission checked"),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByText("Confidence notes required")).not.toBeInTheDocument();
+    expect(screen.queryByText("Raw appendix restricted")).not.toBeInTheDocument();
+    // The real, per-job status column is still the screen's status signal.
+    expect(screen.getByText("COMPLETED")).toBeInTheDocument();
+  });
+
+  it("renders no guardrail rows in the empty state either", async () => {
+    fetchMock().mockResolvedValue(jsonResponse(EMPTY_LIST));
+    renderExportsView();
+
+    await waitFor(() =>
+      expect(screen.getByText(/No export jobs yet/i)).toBeInTheDocument(),
+    );
+    expect(screen.queryByText("Export Guardrails")).not.toBeInTheDocument();
+    expect(
+      screen.queryByText("Revenue cells permission checked"),
+    ).not.toBeInTheDocument();
+  });
+
   it("does NOT fetch the binary through the api client (download is a plain anchor only)", async () => {
     fetchMock().mockResolvedValue(jsonResponse(POPULATED_LIST));
     renderExportsView();

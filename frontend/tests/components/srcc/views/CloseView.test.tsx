@@ -187,6 +187,36 @@ describe("CloseView wired to finance-close", () => {
     ).toBeInTheDocument();
   });
 
+  it("renders no mock Reconciliation Equation panel", async () => {
+    fetchMock().mockImplementation(
+      routeFetch({
+        status: () => jsonResponse(OPEN_STATUS),
+        readiness: () => jsonResponse(READINESS_BLOCKED),
+      }),
+    );
+    renderCloseView();
+
+    await waitFor(() =>
+      expect(screen.getAllByText("OPEN").length).toBeGreaterThan(0),
+    );
+    // Panel title, the unverified equation, and the two fabricated RECON_NOTES.
+    expect(screen.queryByText("Reconciliation Equation")).not.toBeInTheDocument();
+    expect(screen.queryByText(/approved_overrides = locked_net/)).not.toBeInTheDocument();
+    expect(
+      screen.queryByText("Gap allocation needs final note"),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByText("Override audit trail present"),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByText("Mock")).not.toBeInTheDocument();
+    // The real blocker checklist is still the screen's issue list.
+    expect(
+      screen.getByText(
+        "2 pending manual overrides require approval before locking 2026-03.",
+      ),
+    ).toBeInTheDocument();
+  });
+
   it("shows a no-permission message on a 403 ApiError from the status read", async () => {
     fetchMock().mockImplementation(
       routeFetch({
