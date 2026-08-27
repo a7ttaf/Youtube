@@ -1,4 +1,4 @@
-# UMS Smart Revenue Control Center
+# Youtube Revenue Control Center
 
 > Numbers-first internal revenue control plane for YouTube channel portfolios. Built for **UMS** as tenant #1, designed to onboard **Rotana Holding** and other tenants without redeployment.
 
