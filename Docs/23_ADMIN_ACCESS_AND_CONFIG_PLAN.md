@@ -146,9 +146,11 @@ corporate_admin (CLI) → verify via `GET /users/{id}/access` → flip the env �
 gateway now supplies identity only. Cross-references Docs/21 P2 — this band documents,
 it does not re-scope.
 
-**Suggested order: A1 → A2 → (beta ships) → A3 → A4 → A5.** A1+A2 are worth doing
-right after the P1 band merges — they are the same "stop looking like a mockup" story
-applied to administration. A3–A5 sit naturally with P2.
+**Suggested order: A1 → A2 → (beta ships) → A6 → A3 → A4 → A5.** A1+A2 are worth
+doing right after the P1 band merges — they are the same "stop looking like a mockup"
+story applied to administration. A6 (delegated administration, §4b) comes before A3
+because the scoped-grants UI should be built on the delegation model's ceiling, not
+retrofitted under it. A3–A5 sit naturally with P2.
 
 ---
 
@@ -168,6 +170,74 @@ applied to administration. A3–A5 sit naturally with P2.
 - **T5 — Keep the `users.manage` / `roles.assign` split.** finance_admin's
   assign-but-not-create shape is seeded policy; the UI reflects it rather than
   papering over it.
+- **T6 — The no-amplification ceiling is a mutation-tested invariant, not a code
+  review promise.** Every A6 policy test must go RED when its guard is deleted:
+  a delegated admin attempting (a) a role above their layer, (b) a grant outside
+  their scope subtree, (c) an upward self-modification, and (d) a revoke of an
+  assignment they could not have made — all four refused, all four proven by
+  reject→accept matrices, per the standing gate-flip discipline.
+- **T7 — Until A6 lands, delegation is a policy decision, not a feature.** Do not
+  grant `users.manage` / `roles.assign` beyond HQ trust; the current gates act
+  tenant-wide.
+
+## 4b — A6: Delegated administration with a hard ceiling (operator-required, 2026-08-27)
+
+The operator's requirement, added after reading the first version of this plan, in his
+own words: *"CEO of some sub-company, it will never see others; some users only see the
+views; I can give CEO to add some users; GM add X to co. X for permission X — fully
+config for permissions, but no one can take higher layer I give."*
+
+That is a precise specification of **scope-bounded delegated administration with a
+no-amplification invariant**, and it is the most security-sensitive band in this
+program. What the code enforces today was verified line by line
+(`api/users.py:651-737`):
+
+**Exists today (keep, but not sufficient):**
+
+- **Family ceilings.** super_owner assignments require super_owner; finance roles
+  require finance_admin or super_owner; super-owner-only / finance / connector
+  permission grants each require the matching admin role. Service-account lifecycle is
+  super_owner-only.
+- **Scoped assignments.** Role assignments and grants already CARRY a scope
+  (global / sector / company / channel / finance-month), and the read-side authz layer
+  checks permissions **on a scope** — the data model for "company CEO" exists.
+
+**Missing (the A6 work):**
+
+1. **Scoped admin gates.** `_require_role_assignment_permission` and
+   `_require_user_management_permission` demand the permission at **GLOBAL scope
+   only** — bounded delegation is impossible today: authority to add users or assign
+   roles cannot be granted "for company X only". A6 makes both gates scope-aware.
+2. **Scope containment.** A delegated admin may act only on users and assignments
+   inside their own scope subtree; users they create are born inside it; revocations
+   are limited to assignments they could have made.
+3. **The no-amplification invariant** — the operator's "no one can take higher layer":
+   an actor may assign a (role, scope) pair or grant a (permission, scope) pair **only
+   if its effective permission set at that scope is a subset of the actor's own
+   effective set there**, with self-modification upward always refused. This
+   generalizes the family lists (which stay as a second belt). Subset-of-permissions is
+   the recommended ceiling test — it is checkable mechanically and never needs a
+   hand-maintained rank ladder (decision D-A6).
+4. **Read-isolation proof.** "It will never see others" must be **proven per view**,
+   not assumed: a test matrix where a company-scoped principal exercises channels /
+   revenue / close / exports / audit / groups / connectors and every response is
+   verified to contain only their company's rows. Tenant isolation is RLS-enforced;
+   THIS is org-scope isolation inside one tenant, enforced at the app layer, and it has
+   never been systematically proven. Whatever leaks, A6 fixes.
+5. **"Add by email"** is the existing create flow (email is the account key). Actual
+   invitation email is out of scope: UMS has no mailer and no login of its own —
+   identity arrives from the gateway. When a real IdP/login lands (post-beta), invites
+   ride it.
+
+**Estimate: 24–44h** (policy rework + mutation-tested ceiling 12–20h; read-isolation
+matrix + fixes 8–16h, honest unknown until measured; delegated mode in the A1 UI
+4–8h). Sequence: **after A1** — A1 serves the global admin (the operator) immediately;
+A6 is what makes it safe to hand pieces of it to sub-company people.
+
+> ⚠️ **Interim rule, effective now:** until A6 lands, `users.manage` and `roles.assign`
+> must not be granted to anyone outside HQ trust. Today's gates would let a delegated
+> admin act tenant-wide and assign laterally (e.g. connector_admin) beyond their own
+> layer. The family ceilings protect super_owner and finance only.
 
 ## 5 — Decisions for the operator
 
@@ -177,6 +247,8 @@ applied to administration. A3–A5 sit naturally with P2.
 | D-A2 | Gate for the catalog reads (`/security/*`) | Move to `users.manage` alongside the matrix UI; `audit.view` was a placeholder |
 | D-A3 | A4 status endpoint scope | Read-only allowlist, `platform.manage_settings` gate |
 | D-A4 | When A1 lands | Immediately after the P1 band merges, before beta polish |
+| D-A5 | A6 ceiling mechanism | **Subset-of-effective-permissions at the scope** (mechanical, no rank ladder to maintain); family lists stay as a second belt |
+| D-A6 | Where a delegated admin's new users land | Born inside the delegator's scope subtree, always; only a global admin can move them |
 
 ## 6 — Ideas added to the project (operator-invited)
 

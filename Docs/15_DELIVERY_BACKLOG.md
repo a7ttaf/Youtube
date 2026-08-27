@@ -628,10 +628,14 @@ closed unmerged and superseded by the consolidated batch in #156.
   assignment + scoped permission grants + catalog reads, all audited with
   required reasons — `api/users.py`, `api/security.py`) and NO view exposes it.
   `Docs/23_ADMIN_ACCESS_AND_CONFIG_PLAN.md` scopes the program: A1 Admin view
-  MVP (10–15h, frontend-only), A2 access matrix + "who am I", A3 scoped-grants
-  UI, A4 read-only deployment-status panel, A5 database-authz cutover runbook;
-  tripwires forbid a role/permission editor and any secret display. Remaining:
-  the whole program (plan only so far).
+  MVP (10–15h, frontend-only), A2 access matrix + "who am I", A6 delegated
+  administration with a no-amplification ceiling (operator-required: sub-company
+  CEO sees only their company, can add users, "no one can take higher layer" —
+  24–44h, backend policy + read-isolation proof), A3 scoped-grants UI, A4
+  read-only deployment-status panel, A5 database-authz cutover runbook;
+  tripwires forbid a role/permission editor, any secret display, and any
+  delegation before A6's mutation-tested ceiling lands. Remaining: the whole
+  program (plan only so far).
 - ⏳ Display-only currency conversion foundation — remaining: display-only
   conversion is not started. Note the distinction: bank-side FX + transfer-fee
   effects ARE derived as evidence-only `deduction_components` by Track F
