@@ -1796,6 +1796,13 @@ single P-tier above.
   viewers narrowed to their granted connector ids (no foreign-credential leak);
   offset-paginated (`limit` ≤ `100`). Token-health frontend wired into
   ConnectorsView. Read-only: no audit write, no migration.
+- ⏳ AppShell chrome de-mocked (branch `feat/p1-demock-chrome`, unmerged; item
+  P1.3): `NAV_GROUPS`/`VIEW_COPY` become honest static config owned by the shell
+  (no invented nav counts, no month/scope/currency in the page copy);
+  `WORKFLOW_STEPS` + its rail, the operational-cue strip, the "Raw files gated"
+  pill, and the four handler-less header controls (Scope, **Currency**, Refresh,
+  Create Export) are DELETED, not wired — the currency selector permanently, per
+  the single-currency decision. Remaining: the Month select is still unwired.
 - ✅ Import stepper UI — PR-B of the import/sync UI arc (2026-08-09, branch
   `feat/import-stepper-ui`) — closes the arc PR-A opened: the Registry
   header's disabled Bulk Import placeholder becomes a live **Import CSV**

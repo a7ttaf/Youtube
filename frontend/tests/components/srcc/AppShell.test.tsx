@@ -693,6 +693,118 @@ describe("AppShell production session hydration", () => {
   });
 });
 
+// ---------------------------------------------------------------- de-mocked chrome
+
+// The shell chrome used to be driven by lib/mock/data: NAV_GROUPS carried
+// invented badge counts, VIEW_COPY named a month/scope/currency the shell reads
+// from nowhere, and WORKFLOW_STEPS drove a close-progress rail frozen at
+// "Allocate". Four controls (Scope select, Currency select, Refresh reports,
+// Create Export) had no handler at all. These tests pin the removals, because
+// nothing else fails when fabricated chrome comes back: it renders fine, it
+// just lies.
+
+/** Render the shell on its default Command view and return the sidebar. */
+const renderChrome = async (): Promise<HTMLElement> => {
+  (globalThis.fetch as ReturnType<typeof vi.fn>).mockImplementation(
+    routeFetchWithSession(() =>
+      jsonResponse(sessionBody({ canViewRevenue: true, canExportRevenue: true })),
+    ),
+  );
+  renderShell();
+  return await screen.findByRole("complementary", { name: "Primary navigation" });
+};
+
+/** Every <option> label inside every combobox under `scope`, trimmed. */
+const comboboxOptionLabels = (scope: HTMLElement): string[] => {
+  return within(scope)
+    .queryAllByRole("combobox")
+    .flatMap((box) => Array.from(box.querySelectorAll("option")))
+    .map((option) => option.textContent?.trim() ?? "");
+};
+
+describe("AppShell de-mocked chrome", () => {
+  it("CHROME: the sidebar lists the real view names and nothing else", async () => {
+    const sidebar = await renderChrome();
+    // Exact equality is the assertion: a nav button's whole text is its label.
+    // The removed count badges ("Live", "318", "CMS", "5", "SQL", "12", "2",
+    // "AA") were mock constants rendered inside these same buttons, so any of
+    // them coming back appends to the string compared here.
+    const labels = within(sidebar)
+      .getAllByRole("button")
+      .map((button) => button.textContent?.trim() ?? "");
+    expect(labels).toEqual([
+      "Command Center",
+      "Channel Registry",
+      "CMS Groups",
+      "Month Close",
+      "Trace Explorer",
+      "Exports",
+      "Connectors",
+      "Audit Log",
+    ]);
+  });
+
+  it("CHROME: the page heading and subtitle are the shell's own honest copy", async () => {
+    await renderChrome();
+    expect(
+      screen.getByRole("heading", { name: "Revenue Command Center", level: 1 }),
+    ).toBeInTheDocument();
+    // The old subtitle asserted a close month, a scope and a reporting currency
+    // — three values the shell has no source for.
+    expect(screen.queryByText(/USD reporting currency/iu)).not.toBeInTheDocument();
+    expect(screen.queryByText(/March 2026 close/iu)).not.toBeInTheDocument();
+  });
+
+  it("CHROME: no currency selector remains — single-currency by decision", async () => {
+    await renderChrome();
+    const filters = screen.getByRole("group", { name: "Report filters" });
+    expect(within(filters).queryByLabelText(/currency/iu)).not.toBeInTheDocument();
+    // The deleted control offered exactly these three codes with no onChange.
+    const filterOptions = comboboxOptionLabels(filters);
+    expect(filterOptions).not.toContain("USD");
+    expect(filterOptions).not.toContain("EGP");
+    expect(filterOptions).not.toContain("AED");
+    // Nothing anywhere in the mounted shell offers a non-USD code either.
+    // ExportsView owns the one REAL currency field (wired, USD-only, sent with
+    // the export request) and is not mounted on the Command view rendered here.
+    const shellOptions = comboboxOptionLabels(document.body);
+    expect(shellOptions).not.toContain("EGP");
+    expect(shellOptions).not.toContain("AED");
+  });
+
+  it("CHROME: the four handler-less header controls are gone, Month survives", async () => {
+    await renderChrome();
+    expect(
+      screen.queryByRole("button", { name: /create export/iu }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Refresh reports" }),
+    ).not.toBeInTheDocument();
+    const filters = screen.getByRole("group", { name: "Report filters" });
+    expect(within(filters).queryByLabelText("Scope")).not.toBeInTheDocument();
+    // Month is the deliberate survivor: still unwired, but wiring the shell's
+    // month is a separate item, so this PR leaves it exactly as it found it.
+    expect(within(filters).getByLabelText("Month")).toBeInTheDocument();
+  });
+
+  it("CHROME: the fabricated status cues and month-close rail are gone", async () => {
+    await renderChrome();
+    expect(screen.queryByLabelText("Operational status")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Month close workflow")).not.toBeInTheDocument();
+    expect(screen.queryByText(/2 blockers before export/iu)).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /open close/iu })).not.toBeInTheDocument();
+  });
+
+  it("CHROME: the role card shows only the capability-derived finance state", async () => {
+    await renderChrome();
+    const meta = screen.getByLabelText("Role permission state");
+    expect(within(meta).getByText(/money visible/iu)).toBeInTheDocument();
+    // "Raw files gated" was a fixed amber pill that contradicted itself for any
+    // principal actually holding the raw-export grant this session carries.
+    expect(within(meta).queryByText(/raw files gated/iu)).not.toBeInTheDocument();
+  });
+});
+
 // ---------------------------------------------------------------- groups nav
 
 describe("AppShell groups navigation", () => {

@@ -1,6 +1,6 @@
 import type { ReactNode } from "react";
 
-import type { Severity, WorkflowTone } from "@/lib/mock/data";
+import type { Severity } from "@/lib/mock/data";
 
 // ============================================================================
 // Purpose: Shared presentational helpers for the SRCC shell views. Extracted
@@ -178,11 +178,6 @@ export const TimelinePlaceholderRow = ({
       <Badge tone={tone}>{badge}</Badge>
     </>
   );
-};
-
-/** Map a workflow tone to a Dot severity; "primary" renders an untoned dot. */
-export const workflowDotTone = (tone: WorkflowTone): Severity | undefined => {
-  return tone === "primary" ? undefined : tone;
 };
 
 /** Render a list row with a tone dot, title, subtitle, and trailing slot. */

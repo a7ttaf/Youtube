@@ -13,15 +13,16 @@ import { Dot } from "./shared";
 // Database/ORM: None (presentation only).
 // Standards: Zero internal state, zero data fetching, zero extra props beyond
 //   the contract. Reuses the existing .steps/.step/.is-current/.is-done
-//   step-indicator classes and the Dot primitive (see AppShell's WorkflowRail)
-//   for the step row, and .action-row/.ghost-button for the Cancel action — no
-//   new visual language is introduced. Cancel is disable-able by the caller
-//   (cancelDisabledReason) so a flow with a write in flight can refuse to
-//   unmount itself mid-request; the reason doubles as the button title, so a
-//   disabled Cancel always states why. .steps hardcodes a 6-column grid (sized
-//   for WorkflowRail's fixed 6-item rail); an inline gridTemplateColumns
-//   override sizes it to the caller's actual step count so a 3-step (or any
-//   N-step) flow lays out evenly instead of leaving empty trailing columns.
+//   step-indicator classes and the Dot primitive for the step row, and
+//   .action-row/.ghost-button for the Cancel action — no new visual language is
+//   introduced. Cancel is disable-able by the caller (cancelDisabledReason) so a
+//   flow with a write in flight can refuse to unmount itself mid-request; the
+//   reason doubles as the button title, so a disabled Cancel always states why.
+//   .steps carries a 6-column default (inherited from the mock month-close rail
+//   that has since been deleted, and now only a fallback); an inline
+//   gridTemplateColumns override sizes it to the caller's actual step count so a
+//   3-step (or any N-step) flow lays out evenly instead of leaving empty
+//   trailing columns.
 // Blast Radius: Presentation only; the sole side effect is the caller-supplied
 //   onCancel.
 // ============================================================================
@@ -56,10 +57,8 @@ export type ActionStepperProps = {
 };
 
 /**
- * Tone for a step's leading Dot: green once passed, the default (primary)
- * dot for the active step, amber while still upcoming — the same
- * done/current/pending coloring AppShell's WorkflowRail already uses for its
- * own step Dots (see workflowDotTone in shared.tsx).
+ * Tone for a step's leading Dot: green once passed, the default (primary) dot
+ * for the active step, amber while still upcoming.
  */
 const stepDotTone = (index: number, activeIndex: number): Severity | undefined => {
   if (index < activeIndex) {
