@@ -1860,6 +1860,15 @@ def _reset_existing_protected_role_settings(container: str, *, timeout: int) -> 
     _psql(container, "\n".join(reset_lines) + "\n", timeout=timeout)
 
 
+def _required_roles_present(container: str, *, timeout: int) -> list[str]:
+    """Return the required application roles the cluster currently reports."""
+    return [
+        line.strip()
+        for line in _psql(container, ROLES_PRESENT_SQL, timeout=timeout).splitlines()
+        if line.strip()
+    ]
+
+
 def _undeclared_role_settings(
     container: str, declared: dict[str, set[str]], *, timeout: int
 ) -> list[str]:
@@ -1911,11 +1920,7 @@ def _restore_roles(container: str, roles_path: Path, *, timeout: int) -> list[st
         print("roles.sql reported (expected: 'role already exists' for the bootstrap user):")
         for line in allowed:
             print(f"    {line}")
-    present = [
-        line.strip()
-        for line in _psql(container, ROLES_PRESENT_SQL, timeout=timeout).splitlines()
-        if line.strip()
-    ]
+    present = _required_roles_present(container, timeout=timeout)
     missing = [role for role in REQUIRED_ROLES if role not in present]
     if missing:
         raise RestoreError(
