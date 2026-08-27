@@ -2401,6 +2401,7 @@ def test_prune_expires_every_quarantine_name_publish_can_emit(tmp_path: Path) ->
     """
 
     def _quarantine(name: str) -> Path:
+        """Write one quarantined run directory carrying real backup artifacts."""
         run = tmp_path / name
         run.mkdir(parents=True)
         (run / backup.DUMP_NAME).write_bytes(b"PGDMP-placeholder")

@@ -1290,7 +1290,55 @@ def test_seed_migration_catalog_covers_every_permission(tmp_path):
     assert permission_keys == {permission.value for permission in Permission}
 
 
-def test_ensure_user_reports_existing_when_a_concurrent_create_conflicts(tmp_path):
+def _race_repository(winner: Any) -> type:
+    """Build a repository stub that misses the lookup, then loses the insert.
+
+    Mirrors the real repository surface for the concurrent-create race: the
+    first ``get_user_by_email`` is the SELECT issued before the winner
+    committed, so it misses; ``create_user`` then raises the conflict that
+    commit caused, and the second lookup returns the winning row.
+
+    ``winner`` is closed over as a FUNCTION parameter, not a loop variable, so
+    each caller gets its own binding.
+    """
+    from ums_smart_revenue.auth.users import UserAccountConflictError
+
+    class _RaceRepository:
+        """Repository stub for the concurrent user-create race."""
+
+        def __init__(self, session: Any, *, tenant_id: Any) -> None:
+            """Accept the real repository's constructor signature."""
+            self.lookups = 0
+
+        def get_user_by_email(self, *, email: str) -> Any:
+            """Miss the first lookup, then return the committed winner."""
+            self.lookups += 1
+            return None if self.lookups == 1 else winner
+
+        @staticmethod
+        def create_user(*, email: str, display_name: str, is_service_account: bool) -> Any:
+            """Lose the insert to the concurrent winner."""
+            raise UserAccountConflictError("users_email_key")
+
+    return _RaceRepository
+
+
+def _race_deps(winner: Any) -> dict[str, Any]:
+    """Assemble the dependency map _ensure_user needs for the race tests."""
+    from ums_smart_revenue.auth.users import (
+        UserAccountConflictError,
+        UserAccountValidationError,
+    )
+
+    return {
+        "SqlAlchemyUserAccountRepository": _race_repository(winner),
+        "UserAccountConflictError": UserAccountConflictError,
+        "UserAccountValidationError": UserAccountValidationError,
+        "USER_STATUS_DISABLED": "disabled",
+    }
+
+
+def test_ensure_user_reports_existing_when_a_concurrent_create_conflicts():
     """A losing concurrent create must report EXISTING, not exit 2.
 
     Two bootstrap invocations for the same email can both miss the initial
@@ -1301,11 +1349,7 @@ def test_ensure_user_reports_existing_when_a_concurrent_create_conflicts(tmp_pat
     whole invocation back, contradicting the documented idempotency contract.
     """
     module = _load_script()
-    from ums_smart_revenue.auth.users import (
-        USER_STATUS_ACTIVE,
-        UserAccountConflictError,
-        UserAccountValidationError,
-    )
+    from ums_smart_revenue.auth.users import USER_STATUS_ACTIVE
 
     winner = SimpleNamespace(
         email=_OPERATOR_EMAIL,
@@ -1315,28 +1359,12 @@ def test_ensure_user_reports_existing_when_a_concurrent_create_conflicts(tmp_pat
         is_service_account=False,
     )
 
-    class _RaceRepository:
-        """Misses the lookup, then loses the insert to the committed winner."""
-
-        def __init__(self, session, *, tenant_id):
-            self.lookups = 0
-
-        def get_user_by_email(self, *, email):
-            self.lookups += 1
-            return None if self.lookups == 1 else winner
-
-        def create_user(self, *, email, display_name, is_service_account):
-            raise UserAccountConflictError("users_email_key")
-
-    deps = {
-        "SqlAlchemyUserAccountRepository": _RaceRepository,
-        "UserAccountConflictError": UserAccountConflictError,
-        "UserAccountValidationError": UserAccountValidationError,
-        "USER_STATUS_DISABLED": "disabled",
-    }
-
     outcome = module._ensure_user(
-        object(), deps, tenant_id=UMS_TENANT_ID, email=_OPERATOR_EMAIL, display_name="Loser"
+        object(),
+        _race_deps(winner),
+        tenant_id=UMS_TENANT_ID,
+        email=_OPERATOR_EMAIL,
+        display_name="Loser",
     )
 
     assert outcome.created is False, "the losing racer must report EXISTING"
@@ -1344,56 +1372,38 @@ def test_ensure_user_reports_existing_when_a_concurrent_create_conflicts(tmp_pat
     assert outcome.display_name == "Winner", "values come from the stored row, not the CLI"
 
 
-def test_ensure_user_still_fails_closed_on_a_concurrently_created_disabled_account(tmp_path):
+@pytest.mark.parametrize(
+    ("attribute", "value"),
+    [("status", "disabled"), ("is_service_account", True)],
+)
+def test_ensure_user_still_fails_closed_on_a_concurrently_created_bad_account(
+    attribute: str, value: object
+):
     """The conflict reload runs the SAME guards as the ordinary lookup branch.
 
     Otherwise a concurrently created disabled or service account would be
     waved through on the race path while being refused on the normal one.
     """
     module = _load_script()
-    from ums_smart_revenue.auth.users import (
-        UserAccountConflictError,
-        UserAccountValidationError,
+    from ums_smart_revenue.auth.users import UserAccountValidationError
+
+    winner = SimpleNamespace(
+        email=_OPERATOR_EMAIL,
+        id=uuid4(),
+        display_name="Winner",
+        status="active",
+        is_service_account=False,
     )
+    setattr(winner, attribute, value)
 
-    for attribute, value in (("status", "disabled"), ("is_service_account", True)):
-        winner = SimpleNamespace(
+    with pytest.raises(UserAccountValidationError):
+        module._ensure_user(
+            object(),
+            _race_deps(winner),
+            tenant_id=UMS_TENANT_ID,
             email=_OPERATOR_EMAIL,
-            id=uuid4(),
-            display_name="Winner",
-            status="active",
-            is_service_account=False,
+            display_name="Loser",
         )
-        setattr(winner, attribute, value)
-
-        class _RaceRepository:
-            """Misses the lookup, then loses to a winner that must be refused."""
-
-            def __init__(self, session, *, tenant_id):
-                self.lookups = 0
-
-            def get_user_by_email(self, *, email):
-                self.lookups += 1
-                return None if self.lookups == 1 else winner
-
-            def create_user(self, *, email, display_name, is_service_account):
-                raise UserAccountConflictError("users_email_key")
-
-        deps = {
-            "SqlAlchemyUserAccountRepository": _RaceRepository,
-            "UserAccountConflictError": UserAccountConflictError,
-            "UserAccountValidationError": UserAccountValidationError,
-            "USER_STATUS_DISABLED": "disabled",
-        }
-
-        with pytest.raises(UserAccountValidationError):
-            module._ensure_user(
-                object(),
-                deps,
-                tenant_id=UMS_TENANT_ID,
-                email=_OPERATOR_EMAIL,
-                display_name="Loser",
-            )
 
 
 def test_ensure_org_unit_recovers_from_a_concurrent_deterministic_insert(tmp_path):
