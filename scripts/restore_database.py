@@ -1287,6 +1287,40 @@ def _role_sql_setting_name(tokens: list[tuple[str, str]]) -> str:
     return ""
 
 
+_ROLE_SQL_ALLOWED_HEADS = frozenset({"SET", "RESET", "GRANT", "REVOKE"})
+_ROLE_SQL_ROLE_NOUNS = frozenset({"ROLE", "USER", "GROUP"})
+
+
+def _role_sql_statement_is_role_shaped(words: list[str]) -> bool:
+    """Return True only for statement shapes pg_dumpall --roles-only emits.
+
+    FIX: the gate below used to IGNORE any statement that was not role DDL,
+    which meant a legacy or tampered roles.sql could carry ordinary SQL and
+    ``_restore_roles`` would execute it as the bootstrap superuser. The digest
+    on the archive is integrity, not authenticity -- the manifest is unsigned,
+    so whoever can edit roles.sql can recompute it. ``COPY (SELECT '') TO
+    PROGRAM '...'`` is command execution as the postgres OS user, and
+    ``ALTER SYSTEM``, ``DROP DATABASE`` and ``CREATE EXTENSION plpython3u``
+    all sailed through.
+
+    This is an allowlist of VERBS, not of statement shapes. That distinction
+    is what an earlier design got wrong: pg_dumpall has a
+    ``-- Role privileges on configuration parameters`` section emitting
+    ``GRANT ALTER SYSTEM ON PARAMETER shared_buffers TO app_tenant``, so a
+    shape table refused genuine output. Allowing the GRANT verb outright keeps
+    that section working while ``ALTER SYSTEM`` as a STATEMENT is still
+    refused, because its second word is not a role noun.
+    """
+    if words[0] in _ROLE_SQL_ALLOWED_HEADS:
+        return True
+    if words[0] in {"CREATE", "ALTER", "DROP"}:
+        return len(words) > 1 and words[1] in _ROLE_SQL_ROLE_NOUNS
+    if words[0] in {"COMMENT", "SECURITY"}:
+        # COMMENT ON ROLE x IS '...' and SECURITY LABEL FOR p ON ROLE x IS '...'
+        return "ROLE" in words
+    return False
+
+
 def _unsupported_role_statement_problems(body: str) -> list[str]:
     r"""Return roles.sql statements that are never legitimate here.
 
@@ -1324,17 +1358,28 @@ def _unsupported_role_statement_problems(body: str) -> list[str]:
         if words[:2] in (["SET", "ROLE"], ["RESET", "ROLE"], ["SET", "SESSION"]):
             problems.append(f"session-identity statements are not allowed: {statement}")
             continue
-        if words[0] not in {"CREATE", "ALTER", "DROP"} or words[1:2] not in (
-            ["ROLE"],
-            ["USER"],
-            ["GROUP"],
-        ):
+        # FIX: this used to `continue` on anything that was not role DDL, so
+        # ordinary SQL in a tampered roles.sql was replayed as the bootstrap
+        # superuser -- including `COPY (SELECT '') TO PROGRAM '...'`, which is
+        # command execution as the postgres OS user.
+        if not _role_sql_statement_is_role_shaped(words):
+            problems.append(
+                f"statement pg_dumpall --roles-only never emits: {statement}"
+            )
+            continue
+        if words[0] not in {"CREATE", "ALTER", "DROP"} or words[1] not in _ROLE_SQL_ROLE_NOUNS:
             continue
         if "RENAME" in words:
             if any(_role_sql_identifier(t) in _PROTECTED_APP_ROLES for t in tokens):
                 problems.append(f"RENAME touching a protected role: {statement}")
             continue
-        if words[0] == "ALTER" and tokens[2] == ("word", "ALL"):
+        # FIX: this compared the RAW token to "ALL", so `ALTER ROLE all SET
+        # statement_timeout TO '1ms'` -- which PostgreSQL applies to every role
+        # in the cluster -- walked straight past. Unquoted identifiers fold;
+        # a QUOTED "ALL" is a role genuinely named ALL and must NOT be treated
+        # as the wildcard, which is why the word/ident kind is still checked.
+        wildcard = tokens[2][0] == "word" and tokens[2][1].upper() == "ALL"
+        if words[0] == "ALTER" and wildcard:
             problems.append(f"ALTER ROLE ALL is not allowed in roles.sql: {statement}")
             continue
         setting = _role_sql_setting_name(tokens)

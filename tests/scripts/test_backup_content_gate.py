@@ -4304,6 +4304,23 @@ def test_roles_sql_gate_refuses_statements_pg_dumpall_never_emits(
         "a rename out of a protected name": _BOTH_APP_ROLES
         + "ALTER ROLE app_tenant RENAME TO app_tenant_old;\n",
         "SET ROLE": _BOTH_APP_ROLES + "SET ROLE postgres;\n",
+        # An unquoted identifier folds, so the wildcard spelling is not fixed.
+        "ALTER ROLE all, lowercase": _BOTH_APP_ROLES
+        + "ALTER ROLE all SET statement_timeout TO '1ms';\n",
+        "ALTER ROLE All, mixed case": _BOTH_APP_ROLES
+        + "ALTER ROLE All SET statement_timeout TO '1ms';\n",
+        # Ordinary SQL is not role DDL, and used to be ignored rather than
+        # refused. COPY ... TO PROGRAM is command execution as the postgres
+        # OS user; the rest reconfigure or destroy the cluster.
+        "COPY TO PROGRAM": _BOTH_APP_ROLES
+        + "COPY (SELECT '') TO PROGRAM 'id > /tmp/pwned';\n",
+        "ALTER SYSTEM": _BOTH_APP_ROLES
+        + "ALTER SYSTEM SET session_preload_libraries = 'evil';\n",
+        "DROP DATABASE": _BOTH_APP_ROLES + "DROP DATABASE ums;\n",
+        "CREATE EXTENSION": _BOTH_APP_ROLES + "CREATE EXTENSION plpython3u;\n",
+        "DROP OWNED BY": _BOTH_APP_ROLES + "DROP OWNED BY app_tenant;\n",
+        "a bare SELECT": _BOTH_APP_ROLES
+        + "SELECT pg_catalog.pg_read_file('/etc/passwd');\n",
         "a DO block a comment walked past": _BOTH_APP_ROLES
         + "/* x */ DO $$ BEGIN EXECUTE 'ALTER ROLE app_tenant SUPERUSER'; END $$;\n",
     }
@@ -4324,6 +4341,27 @@ def test_roles_sql_gate_refuses_statements_pg_dumpall_never_emits(
         )
         == []
     )
+    # A role genuinely NAMED "ALL" is quoted, and PostgreSQL does not fold a
+    # quoted identifier -- so it is an ordinary role, not the wildcard.
+    assert (
+        restore._unsupported_role_statement_problems(
+            'ALTER ROLE "ALL" SET statement_timeout TO \'1ms\';\n'
+        )
+        == []
+    )
+    # The verb allowlist must not eat the shapes pg_dumpall really writes:
+    # the session GUC header, a role comment, and the parameter-ACL section.
+    for allowed in (
+        "SET default_transaction_read_only = off;\n",
+        "SET standard_conforming_strings = on;\n",
+        "COMMENT ON ROLE app_tenant IS 'lane';\n",
+        "SECURITY LABEL FOR anon ON ROLE app_tenant IS 'MASKED';\n",
+        "GRANT ALTER SYSTEM ON PARAMETER shared_buffers TO app_tenant;\n",
+        "REVOKE app_tenant FROM app_platform;\n",
+        "DROP ROLE IF EXISTS app_tenant;\n",
+    ):
+        assert restore._unsupported_role_statement_problems(allowed) == [], allowed
+        assert backup._unsupported_role_statement_problems(allowed) == [], allowed
 
 
 def test_roles_sql_drift_gate_names_all_six_privileged_attributes() -> None:
@@ -4381,6 +4419,7 @@ def test_restore_and_backup_share_one_role_sql_gate() -> None:
         "_role_membership_edges",
         "_role_membership_problems",
         "_role_sql_setting_name",
+        "_role_sql_statement_is_role_shaped",
         "_unsupported_role_statement_problems",
         "_role_attribute_clause",
         "_collect_role_attribute_tokens",
@@ -4394,6 +4433,8 @@ def test_restore_and_backup_share_one_role_sql_gate() -> None:
     assert restore._PRIVILEGED_ATTRIBUTE_TOKENS == backup._PRIVILEGED_ATTRIBUTE_TOKENS
     assert restore._ALLOWED_ROLE_SQL_META_COMMANDS == backup._ALLOWED_ROLE_SQL_META_COMMANDS
     assert restore._UNSAFE_ROLE_SETTINGS == backup._UNSAFE_ROLE_SETTINGS
+    assert restore._ROLE_SQL_ALLOWED_HEADS == backup._ROLE_SQL_ALLOWED_HEADS
+    assert restore._ROLE_SQL_ROLE_NOUNS == backup._ROLE_SQL_ROLE_NOUNS
     assert restore._PROTECTED_APP_ROLES == backup._PROTECTED_APP_ROLES
     assert tuple(restore.REQUIRED_ROLES) == backup._REQUIRED_UNPRIVILEGED_ROLES
     # The membership gate reads _PROTECTED_APP_ROLES while the publish gate's
