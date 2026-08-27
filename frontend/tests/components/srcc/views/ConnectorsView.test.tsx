@@ -2,6 +2,7 @@ import { fireEvent, render, screen, waitFor, within } from "@testing-library/rea
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { DEFAULT_MONTH } from "@/components/srcc/shared";
 import { ConnectorsView } from "@/components/srcc/views/ConnectorsView";
 import type {
   AdsensePaymentListResponse,
@@ -661,7 +662,9 @@ describe("ConnectorsView wired to the connector + AdSense endpoints", () => {
     const body = JSON.parse(
       String((jobCall?.[1] as RequestInit | undefined)?.body ?? "{}"),
     );
-    expect(body.report_month).toBe("2026-03");
+    // The view seeds its month state from the rolling DEFAULT_MONTH, so the
+    // POST body must carry that — not a frozen literal that ages out.
+    expect(body.report_month).toBe(DEFAULT_MONTH);
     expect(body.dry_run).toBe(false);
     expect(body.reason).toBe("Manual March pull");
   });

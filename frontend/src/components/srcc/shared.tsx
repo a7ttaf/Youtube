@@ -1,6 +1,7 @@
 import type { ReactNode } from "react";
 
 import type { Severity, WorkflowTone } from "@/lib/mock/data";
+import { rollingMonthWindow } from "@/lib/months";
 
 // ============================================================================
 // Purpose: Shared presentational helpers for the SRCC shell views. Extracted
@@ -18,19 +19,39 @@ import type { Severity, WorkflowTone } from "@/lib/mock/data";
 // Sentinel shown wherever a finance value is withheld from the current viewer.
 export const RESTRICTED_FINANCE_VALUE = "Restricted";
 
-/**
- * The month each wired view (Command/Close/Trace/Exports/Connectors) defaults
- * to: a recent, demo-seedable month per the MVP task brief. Shared from here so
- * the five views stay in lockstep instead of each copying the literal.
- */
-export const DEFAULT_MONTH = "2026-03";
+// ============================================================================
+// Purpose: Publish the month window every wired view and the AppShell chrome
+//   select share. Previously two frozen literals ("2026-03" and a four-entry
+//   list ending at "2025-12") that silently aged into a default month with no
+//   data; now a ROLLING window derived from the current calendar month.
+// Database/ORM: None — a selection default, not a stored value.
+// Standards: The window is computed once at module load from LOCAL date
+//   components (see @/lib/months) so it cannot shift a month in negative-UTC
+//   timezones. The exported SHAPES are unchanged — DEFAULT_MONTH is a
+//   "YYYY-MM" string, MONTH_OPTIONS a newest-first string[] whose first entry
+//   IS DEFAULT_MONTH — so every consumer keeps working untouched.
+// Blast Radius: The default month each view requests. No finance math, no
+//   currency, no write path.
+// Connections:
+//   - File: frontend/src/lib/months.ts -> rollingMonthWindow computes these.
+//   - File: frontend/src/components/srcc/AppShell.tsx -> Topbar month select.
+//   - Files: views/{Command,Close,Trace,Exports,Connectors}View.tsx -> each
+//     seeds its month state from DEFAULT_MONTH and lists MONTH_OPTIONS.
+// ============================================================================
 
 /**
- * Months offered in every wired view's month selector (most recent first). The
- * selector is a simple dropdown by design — wiring real data is the priority,
- * not month discovery — and DEFAULT_MONTH is its first entry.
+ * Months offered in every wired view's month selector (most recent first): the
+ * current calendar month plus the three before it. The selector stays a simple
+ * dropdown by design — wiring real data is the priority, not month discovery.
  */
-export const MONTH_OPTIONS = ["2026-03", "2026-02", "2026-01", "2025-12"];
+export const MONTH_OPTIONS = rollingMonthWindow();
+
+/**
+ * The month each wired view (Command/Close/Trace/Exports/Connectors) defaults
+ * to: the current calendar month, and by construction the first MONTH_OPTIONS
+ * entry. Shared from here so the five views stay in lockstep.
+ */
+export const DEFAULT_MONTH = MONTH_OPTIONS[0];
 
 const USD_FORMATTER = new Intl.NumberFormat("en-US", {
   style: "currency",

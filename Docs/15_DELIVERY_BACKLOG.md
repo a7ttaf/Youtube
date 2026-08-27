@@ -619,6 +619,11 @@ closed unmerged and superseded by the consolidated batch in #156.
   The summary tiles are now wired to the live `GET /audit/summary` aggregate-count
   route (see the audit summary endpoint entry below); the Retention tile stays a
   static policy constant.
+- ⏳ Rolling month window (item P1.2, branch `feat/p1-rolling-months`) — the
+  frozen `DEFAULT_MONTH = "2026-03"` / `MONTH_OPTIONS` literals and the AppShell
+  topbar month `<select>` now all derive from `frontend/src/lib/months.ts`:
+  current calendar month + the 3 before it, from LOCAL date components with an
+  injectable `now`. Converts to `✅ PR #N` on merge.
 
 ## P2 — Advanced features
 

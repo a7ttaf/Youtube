@@ -1,6 +1,7 @@
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+import { DEFAULT_MONTH } from "@/components/srcc/shared";
 import CloseView from "@/components/srcc/views/CloseView";
 import type {
   FinanceCloseReadinessResponse,
@@ -9,6 +10,10 @@ import type {
 import { TenantProvider } from "@/contexts/TenantContext";
 
 const ORIGINAL_FETCH = globalThis.fetch;
+
+// The armed confirm button names the month the view is on, which is the rolling
+// DEFAULT_MONTH — derive the matcher from it instead of a literal that ages out.
+const CONFIRM_LOCK_LABEL = new RegExp(`^confirm lock ${DEFAULT_MONTH}$`, "i");
 
 beforeEach(() => {
   vi.stubGlobal("fetch", vi.fn());
@@ -242,7 +247,7 @@ describe("CloseView wired to finance-close", () => {
     // First click arms the action (the button switches to a confirm label).
     fireEvent.click(lockButton);
     const confirmButton = await screen.findByRole("button", {
-      name: /^confirm lock 2026-03$/i,
+      name: CONFIRM_LOCK_LABEL,
     });
     // Second click executes the POST.
     fireEvent.click(confirmButton);
@@ -307,7 +312,7 @@ describe("CloseView wired to finance-close", () => {
     // First click arms the action (the button switches to a confirm label).
     fireEvent.click(lockButton);
     const confirmButton = await screen.findByRole("button", {
-      name: /^confirm lock 2026-03$/i,
+      name: CONFIRM_LOCK_LABEL,
     });
 
     // Double-click the armed confirm before busy=true re-renders: both clicks run
@@ -360,7 +365,7 @@ describe("CloseView wired to finance-close", () => {
     // Arm, then confirm the lock so the conflicting POST fires.
     fireEvent.click(lockButton);
     fireEvent.click(
-      await screen.findByRole("button", { name: /^confirm lock 2026-03$/i }),
+      await screen.findByRole("button", { name: CONFIRM_LOCK_LABEL }),
     );
 
     await waitFor(() =>
