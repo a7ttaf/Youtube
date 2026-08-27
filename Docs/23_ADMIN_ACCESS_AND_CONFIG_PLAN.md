@@ -2,7 +2,7 @@
 
 *Written 2026-08-27, scoped against the merged integration tree (main `d8418cea2` + the
 #211–#217 draft band + the #209/#210 P0 stack). Every "exists today" claim below was
-verified against code, not recalled.*
+verified against code, not recalled. Gap-patched 2026-08-28 (triad review).*
 
 The operator's question that produced this plan: **"From where do I add the other users?
 From where the permissions? From where can I make full config?"**
@@ -11,6 +11,20 @@ The short answer: **the backend for all of it already exists and is audited — 
 missing is the user interface.** Nothing in the current beta plan (Docs/21) builds one.
 This document is the honest inventory of what works today, the plan for the missing
 surface, and the tripwires that keep it safe.
+
+### Prerequisites & related plans
+
+| Doc / PR | Role |
+| --- | --- |
+| Docs/20–21 snapshot | [#209](https://github.com/a7ttaf/Youtube/pull/209) — parent beta audit/plan |
+| Docs/21 living + P0 code | [#210](https://github.com/a7ttaf/Youtube/pull/210) — **hard prerequisite** for A1/A5 |
+| Docs/24 US withholding | [#219](https://github.com/a7ttaf/Youtube/pull/219) — sibling finance program (no overlap) |
+
+> ⚠️ **Hard dependency on #210.** `scripts/bootstrap_operator.py`, Alembic migration
+> `20260825_0001` (roles/permissions seed), and Vite proxy `/users` (plus `/org-units`)
+> land on #210 — **not on bare `main`**. Do not start A1 or A5 until #210 is merged
+> (or cherry-picked). After #210, A2 still needs `/security` added to
+> `TENANT_SCOPED_ROUTES`.
 
 ---
 
@@ -29,9 +43,10 @@ surface, and the tripwires that keep it safe.
 | Direct permission grant (scoped) | `POST /users/{id}/permissions` | `roles.assign` |
 | Revoke grant | `POST /users/{id}/permissions/{grant_id}/revoke` | `roles.assign` |
 
-All in `backend/ums_smart_revenue/api/users.py`. Every write takes a **required audit
-reason** and lands in `audit_logs` through the same sink as finance writes. Grants and
-role assignments carry a `scope_type` (global / sector / company / channel /
+All in `backend/ums_smart_revenue/api/users.py`. There is **no `DELETE /users`** —
+lifecycle is activate/deactivate via `PATCH` status. Every write takes a **required
+audit reason** and lands in `audit_logs` through the same sink as finance writes.
+Grants and role assignments carry a `scope_type` (global / sector / company / channel /
 finance-month), so scoped access is already expressible.
 
 **Who holds the gates** (from the seeded catalog, 16 roles × 26 permissions):
@@ -44,19 +59,23 @@ roles to existing users but cannot create users.
 1. **CLI (first admin / repeatable):** `scripts/bootstrap_operator.py`
    `--email … --display-name … --role …` (repeatable per user), plus `--org-skeleton`
    for the sector/company tree. This is how the first `corporate_admin` comes to exist.
-2. **API (from the dev dashboard environment):** the Vite dev proxy already forwards
-   `/users` with the trusted-gateway headers (W0.2), so `POST /users` works from the
-   browser dev setup — **but only when the dev gateway role holds `users.manage`**.
-   The recommended dev role `finance_admin` does NOT; user creation from the dev proxy
-   needs `VITE_DEV_GATEWAY_ROLE=corporate_admin` for the session doing it.
+   **Ships on #210** — absent from bare `main`.
+2. **API (from the dev dashboard environment):** the Vite dev proxy forwards `/users`
+   with the trusted-gateway headers once W0.2 / #210 lands, so `POST /users` works
+   from the browser dev setup — **but only when the dev gateway role holds
+   `users.manage`**. The recommended finance-demo role `finance_admin` does NOT; user
+   creation from the dev proxy needs `VITE_DEV_GATEWAY_ROLE=corporate_admin` for the
+   session doing it. On bare `main`, `/users` is also missing from
+   `TENANT_SCOPED_ROUTES` (same class of gap as `/org-units`).
 
 ### Permissions and roles catalog
 
 - `GET /security/roles` and `GET /security/permissions` (`api/security.py`) expose the
   catalog read-only (currently gated by `audit.view`).
 - The catalog itself is **code-owned and migration-seeded** (`auth/roles.py`,
-  `auth/permissions.py`, `auth/seed.py`, migration `20260825_0001`). There is no API to
-  create a role or permission, on purpose — see tripwire T1.
+  `auth/permissions.py`, `auth/seed.py`, migration `20260825_0001` on **#210**). There
+  is no API to create a role or permission, on purpose — see tripwire T1. On bare
+  `main`, `db/security_seed.sql` exists but is not wired into Alembic first-run.
 
 ### Identity vs accounts — the part that surprises everyone
 
@@ -104,14 +123,28 @@ A ninth view, nav-gated to principals holding `users.manage` (decision D-A1):
 
 - User list (`GET /users`): email, display name, status, service-account badge.
 - Create user: email + display name + human/service toggle (`POST /users`).
-- Activate / deactivate (`PATCH /users/{id}`).
+- Activate / deactivate (`PATCH /users/{id}`) — not a hard delete.
 - Per-user drawer: current roles + assign/revoke with role picker, scope picker, and
   the **required reason field** (the API refuses blank reasons — surface that, don't
   fight it).
 - Access profile panel (`GET /users/{id}/access`): the user's effective permissions.
 
-New backend work: none. New wiring: add the Admin view to `ViewRouter`/nav; hooks for
-the six endpoints.
+**Session capability hole (A1 sub-item):** `GET /session/me` /
+`SessionCapabilities` today has no `can_manage_users` / `can_assign_roles`. The SPA
+cannot fail-closed hide the Admin nav from session alone without inventing client-side
+permission parsing. **Preferred:** extend `/session/me` with those two boolean
+capabilities (same pattern as `can_view_audit` / `can_manage_groups`). Alternative:
+document reading raw permission lists from the session payload — weaker and easier to
+drift.
+
+New backend work for the six user endpoints: none (APIs exist). New wiring: Admin view
+in `ViewRouter`/nav + hooks; **plus** the session-capability extension above (small
+backend touch). Do not start until #210 is merged.
+
+> ⚠️ **A1 must not present today's role-assignment policy as safe for delegation.**
+> Family ceilings on **role** assign fence `super_owner` + finance roles only —
+> anyone with `roles.assign` can still assign `connector_admin` / `corporate_admin`
+> (see T9 / A6). HQ-only until A6.
 
 ### A2 — Access matrix & "who am I" — **4–6h**
 
@@ -119,10 +152,11 @@ the six endpoints.
 - A "Your access" panel: the resolved principal, role, scope, and capability list the
   session already carries (`GET /session/me`) — kills the "why is this button dead"
   confusion at the root.
-- Wiring item found during the audit: `/security` is **not** in the dev proxy's
-  `TENANT_SCOPED_ROUTES` (`frontend/vite.config.ts`) — add it, or the matrix 404s in
-  dev. Decide whether `audit.view` is the right gate for catalog reads or whether they
-  should move under `users.manage` (decision D-A2).
+- **Proxy residual:** on bare `main`, `/users` and `/security` are both missing from
+  `TENANT_SCOPED_ROUTES`. #210 adds `/users` (and `/org-units`); **A2 still must add
+  `/security`**, or the matrix 404s in dev. Decide whether `audit.view` is the right
+  gate for catalog reads or whether they should move under `users.manage`
+  (decision D-A2).
 
 ### A3 — Scoped grants UI — **6–10h**
 
@@ -179,11 +213,17 @@ external-access milestone; the first competitor account waits for A5+A6+A7 all g
   reject→accept matrices, per the standing gate-flip discipline.
 - **T7 — Until A6 lands, delegation is a policy decision, not a feature.** Do not
   grant `users.manage` / `roles.assign` beyond HQ trust; the current gates act
-  tenant-wide.
+  tenant-wide. **Release gate:** no sub-company / competitor account until A6 is green.
 - **T8 — No password store, permanently.** UMS never stores, hashes, prompts for, or
   resets a password. Sign-in is Google OIDC behind the operator's allowlist, and the
   no-password property holds by construction — there is nothing to phish, leak, or
   "save". Any future feature that needs a credential field is designed wrong.
+- **T9 — Role-family ceiling hole (today).** `_require_role_assignment_policy`
+  (`api/users.py`) fences `super_owner` + finance **roles** only. Permission grants
+  have connector/finance/super-owner belts, but **role** assign does not stop
+  `finance_admin` / `corporate_admin` from assigning `connector_admin` or
+  `corporate_admin`. A1 must not paper over this; A6's subset-of-permissions ceiling
+  closes it. Mutation-test the reject matrix when A6 lands.
 
 ## 4b — A6: Delegated administration with a hard ceiling (operator-required, 2026-08-27)
 
@@ -199,10 +239,11 @@ program. What the code enforces today was verified line by line
 
 **Exists today (keep, but not sufficient):**
 
-- **Family ceilings.** super_owner assignments require super_owner; finance roles
-  require finance_admin or super_owner; super-owner-only / finance / connector
-  permission grants each require the matching admin role. Service-account lifecycle is
-  super_owner-only.
+- **Family ceilings (partial).** super_owner assignments require super_owner; finance
+  roles require finance_admin or super_owner; super-owner-only / finance / connector
+  **permission grants** each require the matching admin role. Service-account lifecycle
+  is super_owner-only. **Gap (T9):** there is no matching fence preventing assignment of
+  `connector_admin` / `corporate_admin` roles to lateral peers — A6 must close this.
 - **Scoped assignments.** Role assignments and grants already CARRY a scope
   (global / sector / company / channel / finance-month), and the read-side authz layer
   checks permissions **on a scope** — the data model for "company CEO" exists.
@@ -333,6 +374,7 @@ gate). None of the three is optional for that step, and the beta needs none of t
 
 ---
 
-*Relationship to Docs/21: this program is additive and currency-neutral; it does not
-touch the P0/P1 bands or the EGP phases. Only A4's status endpoint adds backend
-surface, and it is read-only.*
+*Relationship to Docs/21 (#209 snapshot / #210 living): this program is additive and
+currency-neutral; it does not touch the P0/P1 bands or the EGP phases. A1/A5 assume
+#210 merged. Only A4's status endpoint (plus the A1 session-capability booleans) adds
+backend surface, and the status endpoint is read-only. Independent of Docs/24 (#219).*

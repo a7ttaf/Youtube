@@ -622,24 +622,28 @@ closed unmerged and superseded by the consolidated batch in #156.
 
 ## P2 — Advanced features
 
-- ⏳ Admin, access & configuration UI — branch `docs/admin-access-config-plan`:
-  the operator asked "from where do I add users / permissions / config?"; the
-  answer is the backend already ships all of it (users CRUD + scoped role
-  assignment + scoped permission grants + catalog reads, all audited with
-  required reasons — `api/users.py`, `api/security.py`) and NO view exposes it.
-  `Docs/23_ADMIN_ACCESS_AND_CONFIG_PLAN.md` scopes the program: A1 Admin view
-  MVP (10–15h, frontend-only), A2 access matrix + "who am I", A6 delegated
-  administration with a no-amplification ceiling (operator-required: sub-company
-  CEO sees only their company, can add users, "no one can take higher layer" —
-  24–44h, backend policy + competitor-grade read-isolation proof — sub-companies
-  are competitors, aggregates count as data), A7 Google-only sign-in behind an
-  operator-owned domain allowlist (no password store ever; Workspace domains +
-  exact emails, never gmail.com wholesale; 10–18h; external-access milestone =
-  A5+A6+A7 all green), A3 scoped-grants UI, A4
-  read-only deployment-status panel, A5 database-authz cutover runbook;
-  tripwires forbid a role/permission editor, any secret display, and any
-  delegation before A6's mutation-tested ceiling lands. Remaining: the whole
-  program (plan only so far).
+- ⏳ Admin, access & configuration UI — branch `docs/admin-access-config-plan`
+  (PR #218): the operator asked "from where do I add users / permissions / config?";
+  the answer is the backend already ships the account/access surface (list/create/
+  patch users — no DELETE; scoped role assignment + scoped permission grants +
+  catalog reads, all audited with required reasons — `api/users.py`,
+  `api/security.py`) and NO view exposes it. `Docs/23_ADMIN_ACCESS_AND_CONFIG_PLAN.md`
+  scopes the program: **prerequisite #210** (bootstrap CLI, `20260825_0001` seed,
+  `/users` proxy); A1 Admin view MVP (10–15h + session `can_manage_users` /
+  `can_assign_roles` booleans — `/session/me` lacks them today), A2 access matrix +
+  "who am I" (still needs `/security` in `TENANT_SCOPED_ROUTES` after #210), A6
+  delegated administration with a no-amplification ceiling (operator-required:
+  sub-company CEO sees only their company, can add users, "no one can take higher
+  layer" — 24–44h, backend policy + competitor-grade read-isolation proof —
+  sub-companies are competitors, aggregates count as data; closes today's role-family
+  hole where `roles.assign` can still assign `connector_admin` / `corporate_admin`),
+  A7 Google-only sign-in behind an operator-owned domain allowlist (no password store
+  ever; Workspace domains + exact emails, never gmail.com wholesale; 10–18h;
+  external-access milestone = A5+A6+A7 all green), A3 scoped-grants UI, A4 read-only
+  deployment-status panel, A5 database-authz cutover runbook; tripwires forbid a
+  role/permission editor, any secret display, and any delegation before A6's
+  mutation-tested ceiling lands. Parent: Docs/21 (#209/#210); sibling: Docs/24
+  (#219). Remaining: the whole program (plan only so far).
 - ⏳ Display-only currency conversion foundation — remaining: display-only
   conversion is not started. Note the distinction: bank-side FX + transfer-fee
   effects ARE derived as evidence-only `deduction_components` by Track F
