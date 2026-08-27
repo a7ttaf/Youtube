@@ -141,13 +141,35 @@ def _enable_sqlite_transactional_savepoints(engine: Engine) -> None:
         # entirely; the begin hook below owns transaction starts instead.
         dbapi_connection.isolation_level = None
 
-    def _release_writer_lock() -> None:
-        """Release the StaticPool writer lock if this engine currently holds it."""
+    def _release_writer_lock(dbapi_connection: Any = None) -> None:
+        """Release the StaticPool writer lock -- only when the shared
+        connection is quiescent.
+
+        FIX(codex rounds 22-25, three threads): the pool ``reset`` event
+        fires BEFORE SQLAlchemy's reset-on-return ROLLBACK executes, so an
+        unconditional release there handed the lock to a waiting Session
+        whose fresh ``BEGIN`` was then rolled back by the first session's
+        still-running reset -- on StaticPool both "transactions" share ONE
+        DBAPI connection. And because ``lock_held`` is engine-global, the
+        ORIGINAL checkout's later ``checkin`` released the NEW owner's lock,
+        admitting a third writer. The release now requires the shared
+        connection to report ``in_transaction == False``: a reset arriving
+        mid-transaction is skipped (the following checkin releases), a
+        checkin arriving while a successor already began is skipped (the
+        successor's own return releases), and the quiescent fast path still
+        releases on whichever event lands first, preserving the reset-only
+        path that a checkin-only release used to deadlock.
+        """
         nonlocal lock_held, lock_owner_thread
-        if lock_held:
-            lock_held = False
-            lock_owner_thread = None
-            writer_lock.release()
+        if not lock_held:
+            return
+        if dbapi_connection is not None and getattr(
+            dbapi_connection, "in_transaction", False
+        ):
+            return
+        lock_held = False
+        lock_owner_thread = None
+        writer_lock.release()
 
     @event.listens_for(engine, "begin")
     def _emit_begin(connection: Connection) -> None:
@@ -186,22 +208,26 @@ def _enable_sqlite_transactional_savepoints(engine: Engine) -> None:
 
     @event.listens_for(engine.pool, "checkin")
     def _release_writer_lock_on_checkin(
-        _dbapi_connection: Any, _connection_record: Any
+        dbapi_connection: Any, _connection_record: Any
     ) -> None:
         """Release the writer lock after SQLAlchemy returns the connection to the pool."""
-        _release_writer_lock()
+        _release_writer_lock(dbapi_connection)
 
     @event.listens_for(engine.pool, "reset")
     def _release_writer_lock_on_reset(
-        _dbapi_connection: Any, _connection_record: Any, _reset_state: Any
+        dbapi_connection: Any, _connection_record: Any, _reset_state: Any
     ) -> None:
-        """Release on reset: StaticPool can reset without a following checkin.
+        """Release on reset -- but only once the connection is quiescent.
 
-        Keep this alongside checkin release (idempotent via ``lock_held``).
-        Checkin-only release deadlocked concurrent StaticPool writers in
+        The reset event fires BEFORE the reset-on-return rollback, so the
+        quiescent check inside ``_release_writer_lock`` is what keeps a
+        waiting Session from acquiring and having its BEGIN rolled back by
+        this very reset. Keep this alongside checkin release (idempotent via
+        ``lock_held``). Checkin-only release deadlocked concurrent StaticPool
+        writers in
         ``test_sqlite_overlapping_sessions_serialize_instead_of_colliding_begin``.
         """
-        _release_writer_lock()
+        _release_writer_lock(dbapi_connection)
 
     dialect = engine.dialect
     original_do_commit = dialect.do_commit

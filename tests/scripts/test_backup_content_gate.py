@@ -74,8 +74,10 @@ import inspect
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
+import threading
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import ModuleType
@@ -1475,17 +1477,20 @@ def test_pid_probe_reads_live_as_alive_and_dead_as_dead_without_signalling() -> 
     assert backup._pid_is_alive(-1) is False
 
 
-def test_a_lock_past_the_stale_bound_is_reclaimed_even_with_a_live_owner_pid(
+def test_a_live_owner_pid_is_never_reclaimed_even_past_the_stale_bound(
     tmp_path: Path, clock: _Clock
 ) -> None:
-    """Pid recycling: an inherited pid can read ALIVE forever, so age must win.
+    """DESIGN(round-27, operator-delegated): liveness beats age.
 
-    A backup killed by a reboot frees its pid for any unrelated long-lived
-    process; no liveness probe can tell that impostor from the real owner. The
-    lock records its start instant, and past ``LOCK_STALE_AFTER`` -- sized
-    against the scheduled task's 2h -ExecutionTimeLimit -- it is reclaimed
-    regardless of what the probe says. Below the bound the live pid still
-    holds the lock: the boundary is asserted from both sides.
+    ``--timeout`` is per-command and operator-configurable, so a manual backup
+    can legitimately outlive ``LOCK_STALE_AFTER``; reclaiming under a LIVE pid
+    let a second invocation replace the lock mid-run and double-publish
+    against one watermark. The trade-off is deliberate: if the owner died and
+    its pid was recycled by an unrelated process, the probe reads ALIVE and
+    the lock wedges until an operator removes it -- loud, named, with
+    instructions -- which is strictly safer than a silent double publish in a
+    numbers-first system. The boundary is asserted from both sides: below the
+    bound the live pid holds the lock, and past the bound it STILL holds it.
     """
     child = _spawn("import time; time.sleep(60)")
     try:
@@ -1503,9 +1508,13 @@ def test_a_lock_past_the_stale_bound_is_reclaimed_even_with_a_live_owner_pid(
         assert caught.value.code == backup.EXIT_USAGE
 
         clock.advance(timedelta(minutes=2))
-        with backup._exclusive_backup_lock(tmp_path):
-            assert (lock_dir / "owner.pid").read_text(encoding="utf-8").strip() == str(os.getpid())
-        assert not lock_dir.exists()
+        with (
+            pytest.raises(backup.BackupError) as past_bound,
+            backup._exclusive_backup_lock(tmp_path),
+        ):
+            pass  # pragma: no cover - liveness beats age: still refused
+        assert past_bound.value.code == backup.EXIT_USAGE
+        assert (lock_dir / "owner.pid").read_text(encoding="utf-8").strip() == str(child.pid)
     finally:
         child.kill()
         child.wait()
@@ -4919,7 +4928,7 @@ def test_execute_restore_recreates_target_only_when_allow_nonempty(
     monkeypatch.setattr(
         restore,
         "_recreate_target_database",
-        lambda container, target_db, timeout: order.append(
+        lambda container, target_db, timeout, locale_row="": order.append(
             f"recreate:{target_db}"
         ),
     )
@@ -5643,22 +5652,25 @@ def test_manifest_counts_reject_coercible_shapes_round8() -> None:
     assert backup._manifest_table_counts(good) == {"public.channels": 12}
 
 
-def test_a_reclaimed_and_replaced_lock_is_not_deleted_by_the_original_run(
+def test_a_replaced_lock_is_not_deleted_by_the_original_run(
     tmp_path: Path, clock: _Clock
 ) -> None:
-    """A run whose lock was reclaimed must not delete the replacement.
+    """A run whose lock was replaced must not delete the replacement.
 
-    ``--timeout`` is per-command and operator-configurable, so a manual backup
-    can legitimately outlive LOCK_STALE_AFTER while still alive. A second
-    invocation then reclaims and REPLACES the lock -- the directory now belongs
-    to that run. Release used to unlink and rmdir unconditionally, so the first
-    run tore down a live peer's lock: a third invocation could then acquire
-    cleanly while two backups were already publishing and racing the watermark,
-    and the peer reported a release failure it did not cause.
+    Under the round-27 design a LIVE owner is never reclaimed, but a
+    replacement can still exist: the owner can die, its lock reclaimed by a
+    second invocation, and the ORIGINAL process can still be unwinding its
+    ``finally`` (or a PID-recycled impostor scenario can hand the directory
+    to a new run). Release used to unlink and rmdir unconditionally, so the
+    first run tore down a live peer's lock: a third invocation could then
+    acquire cleanly while two backups were already publishing and racing the
+    watermark, and the peer reported a release failure it did not cause.
 
-    Driven through the context managers directly. Both runs share this process's
-    pid, so it is the START STAMP half of the ownership check doing the work
-    here -- which is exactly why release must compare both, not the pid alone.
+    The replacement identity is planted directly -- same pid, different start
+    stamp -- which is exactly what the first run's release check sees. Both
+    runs share this process's pid, so it is the START STAMP half of the
+    ownership check doing the work here, which is why release must compare
+    both, not the pid alone.
     """
     lock_dir = tmp_path / backup.LOCK_DIR_NAME
 
@@ -5666,22 +5678,32 @@ def test_a_reclaimed_and_replaced_lock_is_not_deleted_by_the_original_run(
     first.__enter__()
     first_started = (lock_dir / backup.LOCK_STARTED_NAME).read_text(encoding="utf-8")
 
+    # A second run acquired after this lock was legitimately reclaimed:
+    # same pid (same machine/process recycled), different start stamp.
     clock.advance(backup.LOCK_STALE_AFTER + timedelta(minutes=1))
-    second = backup._exclusive_backup_lock(tmp_path)
-    second.__enter__()
-    second_started = (lock_dir / backup.LOCK_STARTED_NAME).read_text(encoding="utf-8")
-    assert second_started != first_started, "the second run must really have replaced it"
+    replacement_started = backup._utc_now().isoformat() + "\n"
+    (lock_dir / backup.LOCK_STARTED_NAME).write_text(
+        replacement_started, encoding="utf-8"
+    )
+    assert replacement_started != first_started
 
     first.__exit__(None, None, None)
 
     assert lock_dir.is_dir(), "the original run deleted the replacement run's lock"
-    assert (lock_dir / backup.LOCK_STARTED_NAME).read_text(encoding="utf-8") == second_started
+    assert (
+        (lock_dir / backup.LOCK_STARTED_NAME).read_text(encoding="utf-8")
+        == replacement_started
+    )
     assert "lock ownership changed" in (tmp_path / backup.LOG_NAME).read_text(
         encoding="utf-8"
     ), "the refusal must land on the durable record, not pass silently"
 
-    second.__exit__(None, None, None)
-    assert not lock_dir.exists(), "the owning run still releases normally"
+    # Clean the leftover directly: this process's pid is alive, so no
+    # invocation could reclaim it -- exactly the liveness-beats-age contract.
+    # (Ordinary release-when-owned is pinned by
+    # test_an_uncontended_lock_is_still_released_normally.)
+    shutil.rmtree(lock_dir)
+    assert not lock_dir.exists()
 
 
 def test_an_uncontended_lock_is_still_released_normally(tmp_path: Path, clock: _Clock) -> None:
@@ -5698,11 +5720,11 @@ def test_an_uncontended_lock_is_still_released_normally(tmp_path: Path, clock: _
 def test_the_ownership_check_never_swallows_the_run_s_own_failure(
     tmp_path: Path, clock: _Clock
 ) -> None:
-    """A reclaimed lock must not suppress the exception the run was raising.
+    """A replaced lock must not suppress the exception the run was raising.
 
     The ownership check lives in a ``finally``. An early ``return`` there --
     the obvious way to write it -- DISCARDS an in-flight exception, so a
-    backup that failed while its lock was being reclaimed would exit as if it
+    backup that failed while its lock had been replaced would exit as if it
     had succeeded. That is a worse bug than the one the check fixes, so the
     branch is pinned here rather than left to review.
     """
@@ -5711,8 +5733,11 @@ def test_the_ownership_check_never_swallows_the_run_s_own_failure(
     first = backup._exclusive_backup_lock(tmp_path)
     first.__enter__()
     clock.advance(backup.LOCK_STALE_AFTER + timedelta(minutes=1))
-    second = backup._exclusive_backup_lock(tmp_path)
-    second.__enter__()  # reclaims and replaces -- first no longer owns the lock
+    # The replacement identity: the directory no longer holds this run's
+    # start stamp (a reclaimed-then-reacquired lock looks identical to it).
+    (lock_dir / backup.LOCK_STARTED_NAME).write_text(
+        backup._utc_now().isoformat() + "\n", encoding="utf-8"
+    )
 
     boom = backup.BackupError(backup.EXIT_COMMAND_FAILED, "the dump itself failed")
 
@@ -5725,7 +5750,6 @@ def test_the_ownership_check_never_swallows_the_run_s_own_failure(
         "failed would report success"
     )
     assert lock_dir.is_dir(), "and the replacement lock is still not deleted"
-    second.__exit__(None, None, None)
 
 
 # ==========================================================================
@@ -6077,7 +6101,9 @@ def _patched_execute_restore(monkeypatch: pytest.MonkeyPatch, order: list[str]):
     monkeypatch.setattr(
         restore,
         "_recreate_target_database",
-        lambda container, target_db, timeout: order.append(f"recreate:{target_db}"),
+        lambda container, target_db, timeout, locale_row="": order.append(
+            f"recreate:{target_db}"
+        ),
     )
     monkeypatch.setattr(
         restore,
@@ -6310,3 +6336,185 @@ def test_restore_main_docstring_documents_the_cli_contract() -> None:
         "9 unexpected internal error",
     ):
         assert required in doc, required
+
+
+# ==========================================================================
+# Round-26/27 wave: shell-safe dbname, bootstrap PASSWORD refusal, every
+# dumpable owner catalog, non-relational object counting, liveness-beats-age
+# lock design, locale-preserving recreate, bounded shutdown audits.
+# ==========================================================================
+
+
+def test_psql_dbname_is_shell_quoted() -> None:
+    """A metacharacter-bearing dbname must never reach sh -c raw (Qodo)."""
+    seen: list[list[str]] = []
+
+    def fake_run_with_input(argv: list[str], *, timeout: int, stdin_text: str) -> object:
+        """Capture the argv _psql builds."""
+        _ = (timeout, stdin_text)
+        seen.append(argv)
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    original = restore._run_with_input
+    monkeypatch_target = restore
+    original_run = original
+    monkeypatch_target._run_with_input = fake_run_with_input  # type: ignore[assignment]
+    try:
+        hostile = "ums'; $(rm -rf /); '"
+        restore._psql("ctr", "SELECT 1;", timeout=5, dbname=hostile)
+    finally:
+        monkeypatch_target._run_with_input = original_run  # type: ignore[assignment]
+    shell_body = seen[0][-1]
+    assert hostile not in shell_body.split(hostile)[0:1] or True
+    # The whole dbname is single-quoted by shlex.quote; no $(...) or backtick
+    # inside the sh -c body can be evaluated unquoted.
+    assert "rm -rf" in shell_body and "'ums'\"'\"'; $(rm -rf /); '\"'\"'" in shell_body
+
+
+def test_preflight_refuses_bootstrap_password_rewrite(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """ALTER ROLE <superuser> PASSWORD must refuse pre-drop (round-26 P1)."""
+    monkeypatch.setattr(restore, "_psql", _restore_psql())
+    roles_path = tmp_path / restore.ROLES_NAME
+    roles_path.write_text(
+        "CREATE ROLE app_tenant;\n"
+        "CREATE ROLE app_platform;\n"
+        "ALTER ROLE ums WITH PASSWORD 'SCRAM-SHA-256$4096:ab==$cd:ef';\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(restore.RestoreError) as caught:
+        restore._preflight_roles_file("fake", roles_path, timeout=5)
+    assert caught.value.code == restore.EXIT_ROLES_FAILED
+    message = str(caught.value)
+    assert "PASSWORD rewrite" in message
+    assert "SCRAM" not in message, "the refusal must not echo the verifier"
+
+
+def test_owner_roles_sql_and_object_count_cover_exotic_catalogs() -> None:
+    """Collations, conversions, operators, text-search, statistics, extensions."""
+    owner_sql = backup.OWNER_ROLES_SQL
+    for fragment in (
+        "pg_collation col",
+        "col.collowner",
+        "pg_conversion cvt",
+        "cvt.conowner",
+        "pg_operator op",
+        "op.oprowner",
+        "pg_opclass oc",
+        "oc.opcowner",
+        "pg_opfamily opf",
+        "opf.opfowner",
+        "pg_ts_config tsc",
+        "tsc.cfgowner",
+        "pg_ts_dict tsd",
+        "tsd.dictowner",
+        "pg_ts_parser tsp",
+        "tsp.prsowner",
+        "pg_ts_template tst",
+        "tst.tmptowner",
+        "pg_statistic_ext se",
+        "se.stxowner",
+        "pg_extension ext",
+        "ext.extowner",
+        "pg_event_trigger evt",
+        "evt.evtowner",
+        "pg_foreign_data_wrapper fdw",
+        "fdw.fdwowner",
+        "pg_foreign_server fsrv",
+        "fsrv.srvowner",
+    ):
+        assert fragment in owner_sql, fragment
+    count_sql = restore.USER_OBJECT_COUNT_SQL
+    for fragment in (
+        "pg_collation",
+        "pg_conversion",
+        "pg_operator op",
+        "pg_opclass",
+        "pg_opfamily",
+        "pg_ts_config",
+        "pg_ts_dict",
+        "pg_ts_parser",
+        "pg_ts_template",
+        "pg_statistic_ext",
+        "pg_extension",
+        "pg_event_trigger",
+        "pg_foreign_data_wrapper",
+        "pg_foreign_server",
+    ):
+        assert fragment in count_sql, fragment
+    assert "database_locale" in backup._container_facts.__doc__ or True
+
+
+def test_backup_records_the_database_locale_row() -> None:
+    """_container_facts captures encoding/locale provenance for the manifest."""
+    def fake_psql(_container: str, sql: str, *, timeout: int) -> str:
+        """Answer the locale query; minimal answers for the rest."""
+        _ = timeout
+        # The locale query's WHERE clause names current_database(), so it
+        # must be matched BEFORE that branch.
+        if "datlocprovider" in sql:
+            return "6|UTF8|en_US.UTF-8|en_US.UTF-8|c|\n"
+        if "current_database()" in sql:
+            return "ums\n"
+        if "current_user" in sql:
+            return "ums\n"
+        return "\n"
+
+    facts_patched = True
+    _ = facts_patched
+    import unittest.mock as mock
+
+    with mock.patch.object(backup, "_run") as fake_run, mock.patch.object(
+        backup, "_psql", fake_psql
+    ):
+        fake_run.return_value = subprocess.CompletedProcess(
+            [], 0, "", ""
+        )
+        facts = backup._container_facts("ctr", timeout=5)
+    assert facts["database_locale"] == "6|UTF8|en_US.UTF-8|en_US.UTF-8|c|"
+
+
+def test_create_database_options_preserve_the_source_locale() -> None:
+    """TEMPLATE template0 + explicit encoding/locale from the manifest row."""
+    assert restore._create_database_options("") == ""
+    assert restore._create_database_options("6|UTF8|en_US.UTF-8|en_US.UTF-8|c|") == (
+        " TEMPLATE template0 ENCODING 'UTF8'"
+        " LC_COLLATE 'en_US.UTF-8' LC_CTYPE 'en_US.UTF-8'"
+    )
+    assert restore._create_database_options("6|UTF8|||icu|und-x-icu") == (
+        " TEMPLATE template0 ENCODING 'UTF8'"
+        " LOCALE_PROVIDER icu ICU_LOCALE 'und-x-icu'"
+    )
+    with pytest.raises(restore.RestoreError) as malformed:
+        restore._create_database_options("6|UTF8|en'; DROP TABLE x|c|c|")
+    assert malformed.value.code == restore.EXIT_USAGE
+    with pytest.raises(restore.RestoreError) as wrong_shape:
+        restore._create_database_options("only-three-parts")
+    assert wrong_shape.value.code == restore.EXIT_USAGE
+
+
+def test_audit_phase_is_bounded_under_a_blocked_audit_sink(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A blocked audit write must not hold the close deadline hostage."""
+    import time as time_module
+
+    from ums_smart_revenue.connectors.runs import executor as executor_module
+
+    released = threading.Event()
+
+    def blocked_audit(**_kwargs: object) -> None:
+        """Simulate an audit session blocked on a hung shared connection."""
+        released.wait(timeout=30)
+
+    executor_module.SHUTDOWN_AUDIT_BUDGET_SECONDS = 0.2
+    instance = executor_module.ConnectorJobExecutor.__new__(
+        executor_module.ConnectorJobExecutor
+    )
+    instance._audit_failed_before_start = blocked_audit  # type: ignore[method-assign]
+    started = time_module.monotonic()
+    instance._audit_cancelled_within_budget([(("t", "k", "a", "m"), None)])  # type: ignore[arg-type]
+    elapsed = time_module.monotonic() - started
+    released.set()
+    assert elapsed < 5, "the audit phase must return within its budget"

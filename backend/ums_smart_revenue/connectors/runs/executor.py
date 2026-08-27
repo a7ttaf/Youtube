@@ -87,6 +87,15 @@ logger = logging.getLogger(__name__)
 #   - File: backend/ums_smart_revenue/app.py -> lifespan calls close().
 # ============================================================================
 CLOSE_DRAIN_TIMEOUT_SECONDS = 90.0
+# FIX(codex round-23 P2): the cancelled-job audits used to run synchronously
+# before close() ever reached the bounded drain, so a single audit write
+# blocked on the shared SQLite StaticPool connection -- held by the very
+# worker being drained -- could stall shutdown unboundedly until Docker
+# SIGKILLed the process. The audit phase now runs on a daemon thread joined
+# with this budget; audits that fit inside it land durably, and the ones
+# that do not are logged and abandoned rather than taking the drain budget
+# hostage.
+SHUTDOWN_AUDIT_BUDGET_SECONDS = 30.0
 
 _JobKey = tuple[UUID, str, str, str]
 
@@ -589,20 +598,27 @@ class ConnectorJobExecutor:
             elif not entry.future.done():
                 running_futures.append(entry.future)
 
+        # FIX(codex round-23 P2): bounded, on a daemon thread -- see
+        # _audit_cancelled_within_budget. A cancelled-at-shutdown GROUP-SYNC
+        # job is audited by this same pull-shaped path, on purpose: its key
+        # carries connector_key ``cms_group_sync`` and report_month ``-``,
+        # so the row stays fully attributable, and ``job_failed_before_start``
+        # + ``ExecutorShutdown`` honestly describe a job that never ran.
+        self._audit_cancelled_within_budget(cancelled)
+        return running_futures
+
+    def _write_shutdown_audits(
+        self, cancelled: list[tuple[_JobKey, ConnectorJobActor]]
+    ) -> None:
+        """Write every cancelled-job audit; runs on the bounded audit thread.
+
+        Each row keeps the shared ``job_failed_before_start`` /
+        ``ExecutorShutdown`` taxonomy: a job the pool cancelled before it ran
+        never started, so re-tagging it with a run-time failure class would
+        mislabel it.
+        """
         for job_key, actor_identity in cancelled:
             tenant_id, connector_key, account_id, report_month = job_key
-            # A cancelled-at-shutdown GROUP-SYNC job is audited by this SAME
-            # pull-shaped path, on purpose. Its key carries connector_key
-            # ``cms_group_sync`` and report_month ``-``, so the emitted row is
-            # fully attributable to the sync job via its connector-key-bearing
-            # entity_id + scope and the month sentinel; and
-            # ``action="job_failed_before_start"`` + ``error_class="ExecutorShutdown"``
-            # honestly describes a job the pool cancelled before it ran. It is
-            # NOT a run-time failure, so re-tagging it with the sync taxonomy's
-            # ``group_sync_job_failed`` (credential/fetch/conflict) would
-            # mislabel a job that never started. Kind-awareness here would fork a
-            # near-identical audit for zero governance gain, so the shared row
-            # stays.
             self._audit_failed_before_start(
                 tenant_id=tenant_id,
                 connector_key=connector_key,
@@ -611,7 +627,38 @@ class ConnectorJobExecutor:
                 error_class="ExecutorShutdown",
                 actor_identity=actor_identity,
             )
-        return running_futures
+
+    def _audit_cancelled_within_budget(
+        self, cancelled: list[tuple[_JobKey, ConnectorJobActor]]
+    ) -> None:
+        """Audit cancelled jobs under a hard budget (codex round-23 P2).
+
+        The writes run on a daemon thread joined for at most
+        ``SHUTDOWN_AUDIT_BUDGET_SECONDS``. A write blocked on the shared
+        connection -- e.g. a hung SQLite worker still holds StaticPool --
+        therefore delays shutdown by at most the budget instead of
+        unboundedly; the drain's own bounded wait is reached either way, and
+        abandoned audits are logged loudly rather than silently skipped.
+        """
+        if not cancelled:
+            return
+        audit_thread = threading.Thread(
+            target=self._write_shutdown_audits,
+            args=(cancelled,),
+            name="executor-shutdown-audits",
+            daemon=True,
+        )
+        audit_thread.start()
+        audit_thread.join(timeout=SHUTDOWN_AUDIT_BUDGET_SECONDS)
+        if audit_thread.is_alive():
+            logger.error(
+                "Executor shutdown audit writes did not finish within %.0fs; "
+                "%d cancelled job(s) may lack their ExecutorShutdown audit "
+                "row (a blocked audit session cannot hold the close deadline "
+                "hostage).",
+                SHUTDOWN_AUDIT_BUDGET_SECONDS,
+                len(cancelled),
+            )
 
     def _run_job(
         self,

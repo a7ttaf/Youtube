@@ -737,6 +737,21 @@ def _container_facts(container: str, *, timeout: int) -> dict[str, str]:
     system_identifier = _psql(container, IDENTITY_SQL, timeout=timeout).strip()
     if system_identifier:
         facts["system_identifier"] = system_identifier
+    # FIX(codex round-22 P2): recorded so the restore can recreate the target
+    # with the SOURCE's encoding/locale instead of the target template's
+    # defaults -- pg_dump without --create carries none of them. One pipe-
+    # separated row: encoding id|encoding name|collate|ctype|provider|icu.
+    locale_row = _psql(
+        container,
+        "SELECT b.encoding::text || '|' || pg_encoding_to_char(b.encoding) "
+        "|| '|' || coalesce(b.datcollate, '') || '|' || coalesce(b.datctype, '') "
+        "|| '|' || coalesce(b.datlocprovider::text, '') "
+        "|| '|' || coalesce(b.daticulocale, '') "
+        "FROM pg_catalog.pg_database b WHERE b.datname = current_database();",
+        timeout=timeout,
+    ).strip()
+    if locale_row:
+        facts["database_locale"] = locale_row
     return facts
 
 
@@ -1106,6 +1121,67 @@ FROM (
   UNION ALL
   SELECT lm.lomowner
   FROM pg_catalog.pg_largeobject_metadata lm
+  UNION ALL
+  SELECT col.collowner
+  FROM pg_catalog.pg_collation col
+  JOIN pg_catalog.pg_namespace n ON n.oid = col.collnamespace
+  WHERE n.nspname NOT IN ('pg_catalog', 'information_schema')
+  UNION ALL
+  SELECT cvt.conowner
+  FROM pg_catalog.pg_conversion cvt
+  JOIN pg_catalog.pg_namespace n ON n.oid = cvt.connamespace
+  WHERE n.nspname NOT IN ('pg_catalog', 'information_schema')
+  UNION ALL
+  SELECT op.oprowner
+  FROM pg_catalog.pg_operator op
+  JOIN pg_catalog.pg_namespace n ON n.oid = op.oprnamespace
+  WHERE n.nspname NOT IN ('pg_catalog', 'information_schema')
+  UNION ALL
+  SELECT oc.opcowner
+  FROM pg_catalog.pg_opclass oc
+  JOIN pg_catalog.pg_namespace n ON n.oid = oc.opcnamespace
+  WHERE n.nspname NOT IN ('pg_catalog', 'information_schema')
+  UNION ALL
+  SELECT opf.opfowner
+  FROM pg_catalog.pg_opfamily opf
+  JOIN pg_catalog.pg_namespace n ON n.oid = opf.opfnamespace
+  WHERE n.nspname NOT IN ('pg_catalog', 'information_schema')
+  UNION ALL
+  SELECT tsc.cfgowner
+  FROM pg_catalog.pg_ts_config tsc
+  JOIN pg_catalog.pg_namespace n ON n.oid = tsc.cfgnamespace
+  WHERE n.nspname NOT IN ('pg_catalog', 'information_schema')
+  UNION ALL
+  SELECT tsd.dictowner
+  FROM pg_catalog.pg_ts_dict tsd
+  JOIN pg_catalog.pg_namespace n ON n.oid = tsd.dictnamespace
+  WHERE n.nspname NOT IN ('pg_catalog', 'information_schema')
+  UNION ALL
+  SELECT tsp.prsowner
+  FROM pg_catalog.pg_ts_parser tsp
+  JOIN pg_catalog.pg_namespace n ON n.oid = tsp.prsnamespace
+  WHERE n.nspname NOT IN ('pg_catalog', 'information_schema')
+  UNION ALL
+  SELECT tst.tmptowner
+  FROM pg_catalog.pg_ts_template tst
+  JOIN pg_catalog.pg_namespace n ON n.oid = tst.tmptnamespace
+  WHERE n.nspname NOT IN ('pg_catalog', 'information_schema')
+  UNION ALL
+  SELECT se.stxowner
+  FROM pg_catalog.pg_statistic_ext se
+  JOIN pg_catalog.pg_namespace n ON n.oid = se.stxnamespace
+  WHERE n.nspname NOT IN ('pg_catalog', 'information_schema')
+  UNION ALL
+  SELECT ext.extowner
+  FROM pg_catalog.pg_extension ext
+  JOIN pg_catalog.pg_namespace n ON n.oid = ext.extnamespace
+  WHERE n.nspname NOT IN ('pg_catalog', 'information_schema')
+  UNION ALL
+  SELECT evt.evtowner FROM pg_catalog.pg_event_trigger evt
+  UNION ALL
+  SELECT fdw.fdwowner FROM pg_catalog.pg_foreign_data_wrapper fdw
+  UNION ALL
+  SELECT fsrv.srvowner FROM pg_catalog.pg_foreign_server fsrv
 ) o
 JOIN pg_catalog.pg_roles r ON r.oid = o.owner_oid
 WHERE r.rolname NOT LIKE 'pg\\_%'
@@ -3067,7 +3143,22 @@ def _lock_age_exceeds_bound(lock_dir: Path) -> bool:
 
 
 def _reclaim_stale_backup_lock(lock_dir: Path) -> bool:
-    """Remove an abandoned ``.backup.lock``: owner dead, or lock over-age."""
+    """Remove an abandoned ``.backup.lock``: owner provably dead, or over-age
+    with no readable live owner.
+
+    DESIGN(round-27, operator-delegated): LIVENESS BEATS AGE. A lock whose
+    recorded owner PID is alive is NEVER reclaimed, however old it is. The
+    previous rule let the age bound override a live PID, so a manual backup
+    that legitimately ran past ``LOCK_STALE_AFTER`` had its lock deleted and
+    replaced mid-run; the original's finally then declined to delete the
+    replacement (ownership check) but two backups were already publishing
+    against one watermark. The cost of the rare counter-case -- the owner
+    died AND its PID was recycled within the lock's lifetime, wedging the
+    lock until an operator removes it -- is strictly smaller than a silent
+    double publish: the refusal is loud, names the directory, and says
+    exactly what to do. The age bound still governs locks with a MISSING or
+    corrupt owner record, where no liveness probe is possible.
+    """
     owner = lock_dir / LOCK_OWNER_NAME
     try:
         raw = owner.read_text(encoding="utf-8").strip()
@@ -3080,17 +3171,9 @@ def _reclaim_stale_backup_lock(lock_dir: Path) -> bool:
         pid = None
     except (OSError, ValueError):
         pid = None
-    if pid is not None and _pid_is_alive(pid) and not _lock_age_exceeds_bound(lock_dir):
+    if pid is not None and _pid_is_alive(pid):
         return False
-    if pid is not None and not _pid_is_alive(pid):
-        try:
-            owner.unlink(missing_ok=True)
-            (lock_dir / LOCK_STARTED_NAME).unlink(missing_ok=True)
-            lock_dir.rmdir()
-        except OSError:
-            return False
-        return True
-    if not _lock_age_exceeds_bound(lock_dir):
+    if pid is None and not _lock_age_exceeds_bound(lock_dir):
         return False
     try:
         owner.unlink(missing_ok=True)
@@ -3113,8 +3196,10 @@ def _reclaim_stale_backup_lock(lock_dir: Path) -> bool:
 #            may still exit 0 -- its backup IS valid -- but tonight's leftover
 #            lock is tomorrow's reclaim, and the operator must be able to see
 #            where it came from. Stale locks are reclaimed when the recorded
-#            owner pid is dead (``_pid_is_alive``) or the recorded start
-#            instant is over ``LOCK_STALE_AFTER`` old.
+#            owner pid is provably dead (``_pid_is_alive``); LIVENESS BEATS
+#            AGE, so a live owner past ``LOCK_STALE_AFTER`` keeps the lock and
+#            the contender is refused loudly. The age bound governs only
+#            locks whose owner record is missing or unreadable.
 # Blast Radius: Backup watermark / identity bookkeeping only.
 # Connections:
 #   - File: scripts/backup_database.py -> ``_execute`` wraps the whole run in
@@ -5035,9 +5120,24 @@ def run_backup(args: argparse.Namespace, out_dir: Path) -> BackupOutcome:
         # the publish gate can judge the bootstrap-superuser lockout shape
         # against the same identity the restore will connect as.
         facts = _container_facts(container, timeout=args.docker_timeout)
+        roles_body = (staging / ROLES_NAME).read_text(encoding="utf-8", errors="replace")
+        if args.include_role_passwords and "PASSWORD" in _collect_role_attribute_tokens(
+            roles_body
+        ).get(facts.get("superuser", ""), set()):
+            # Not a refusal: the archive is sound and restores cleanly into a
+            # target whose POSTGRES_PASSWORD matches this source's. The
+            # restore-side preflight refuses the mismatched case because only
+            # it can see the target's live credential behavior.
+            print(
+                "WARNING: roles.sql carries the bootstrap role's PASSWORD. A "
+                "restore refuses to replay it unless the target's "
+                "POSTGRES_PASSWORD already matches this backup's; a mismatched "
+                "target would lose every connection mid-restore.",
+                file=sys.stderr,
+            )
         _validate_dump_roles_covered(
             listing=dump_listing,
-            roles_body=(staging / ROLES_NAME).read_text(encoding="utf-8", errors="replace"),
+            roles_body=roles_body,
             acl_grantees=acl_grantees,
             snapshot_owners=snapshot_owners,
             superuser=facts.get("superuser", ""),

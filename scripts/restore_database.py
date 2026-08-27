@@ -84,6 +84,7 @@ import argparse
 import hashlib
 import json
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -225,6 +226,53 @@ USER_OBJECT_COUNT_SQL = r"""
            AND n.nspname NOT LIKE 'pg\_temp\_%' ESCAPE '\'
            AND n.nspname NOT LIKE 'pg\_toast\_temp\_%' ESCAPE '\'
            AND n.nspname <> 'public')
+      + (SELECT count(*) FROM pg_catalog.pg_collation col
+         JOIN pg_catalog.pg_namespace n ON n.oid = col.collnamespace
+         WHERE n.nspname NOT IN ('pg_catalog', 'information_schema')
+           AND n.nspname NOT LIKE 'pg\_temp\_%' ESCAPE '\')
+      + (SELECT count(*) FROM pg_catalog.pg_conversion cvt
+         JOIN pg_catalog.pg_namespace n ON n.oid = cvt.connamespace
+         WHERE n.nspname NOT IN ('pg_catalog', 'information_schema')
+           AND n.nspname NOT LIKE 'pg\_temp\_%' ESCAPE '\')
+      + (SELECT count(*) FROM pg_catalog.pg_operator op
+         JOIN pg_catalog.pg_namespace n ON n.oid = op.oprnamespace
+         WHERE n.nspname NOT IN ('pg_catalog', 'information_schema')
+           AND n.nspname NOT LIKE 'pg\_temp\_%' ESCAPE '\')
+      + (SELECT count(*) FROM pg_catalog.pg_opclass oc
+         JOIN pg_catalog.pg_namespace n ON n.oid = oc.opcnamespace
+         WHERE n.nspname NOT IN ('pg_catalog', 'information_schema')
+           AND n.nspname NOT LIKE 'pg\_temp\_%' ESCAPE '\')
+      + (SELECT count(*) FROM pg_catalog.pg_opfamily opf
+         JOIN pg_catalog.pg_namespace n ON n.oid = opf.opfnamespace
+         WHERE n.nspname NOT IN ('pg_catalog', 'information_schema')
+           AND n.nspname NOT LIKE 'pg\_temp\_%' ESCAPE '\')
+      + (SELECT count(*) FROM pg_catalog.pg_ts_config tsc
+         JOIN pg_catalog.pg_namespace n ON n.oid = tsc.cfgnamespace
+         WHERE n.nspname NOT IN ('pg_catalog', 'information_schema')
+           AND n.nspname NOT LIKE 'pg\_temp\_%' ESCAPE '\')
+      + (SELECT count(*) FROM pg_catalog.pg_ts_dict tsd
+         JOIN pg_catalog.pg_namespace n ON n.oid = tsd.dictnamespace
+         WHERE n.nspname NOT IN ('pg_catalog', 'information_schema')
+           AND n.nspname NOT LIKE 'pg\_temp\_%' ESCAPE '\')
+      + (SELECT count(*) FROM pg_catalog.pg_ts_parser tsp
+         JOIN pg_catalog.pg_namespace n ON n.oid = tsp.prsnamespace
+         WHERE n.nspname NOT IN ('pg_catalog', 'information_schema')
+           AND n.nspname NOT LIKE 'pg\_temp\_%' ESCAPE '\')
+      + (SELECT count(*) FROM pg_catalog.pg_ts_template tst
+         JOIN pg_catalog.pg_namespace n ON n.oid = tst.tmptnamespace
+         WHERE n.nspname NOT IN ('pg_catalog', 'information_schema')
+           AND n.nspname NOT LIKE 'pg\_temp\_%' ESCAPE '\')
+      + (SELECT count(*) FROM pg_catalog.pg_statistic_ext se
+         JOIN pg_catalog.pg_namespace n ON n.oid = se.stxnamespace
+         WHERE n.nspname NOT IN ('pg_catalog', 'information_schema')
+           AND n.nspname NOT LIKE 'pg\_temp\_%' ESCAPE '\')
+      + (SELECT count(*) FROM pg_catalog.pg_extension ext
+         JOIN pg_catalog.pg_namespace n ON n.oid = ext.extnamespace
+         WHERE n.nspname NOT IN ('pg_catalog', 'information_schema')
+           AND n.nspname NOT LIKE 'pg\_temp\_%' ESCAPE '\')
+      + (SELECT count(*) FROM pg_catalog.pg_event_trigger evt)
+      + (SELECT count(*) FROM pg_catalog.pg_foreign_data_wrapper fdw)
+      + (SELECT count(*) FROM pg_catalog.pg_foreign_server fsrv)
     )::bigint;
 """
 LIST_TABLES_SQL = (
@@ -319,11 +367,17 @@ def _psql(
 ) -> str:
     """Run SQL via psql inside the container and return stdout.
 
-    ``dbname`` targets a specific database (single quoted identifier handled
-    by the caller); the container default ``$POSTGRES_DB`` is used otherwise.
+    ``dbname`` targets a specific database; the container default
+    ``$POSTGRES_DB`` is used otherwise.
     """
     stop = "1" if stop_on_error else "0"
-    target = f'-d "{dbname}" ' if dbname else '-d "$POSTGRES_DB" '
+    # FIX(Qodo round-26): dbname was interpolated verbatim into a
+    # double-quoted sh -c string, so a POSTGRES_DB value carrying $(...),
+    # backticks or quotes executed as shell inside the target container
+    # before psql ever ran. shlex.quote single-quotes the value so no
+    # metacharacter can escape, while every legitimate database name --
+    # including hyphenated ones -- keeps working unquoted-in-effect.
+    target = f"-d {shlex.quote(dbname)} " if dbname else '-d "$POSTGRES_DB" '
     argv = _container_sh(
         container,
         f'exec psql -U "$POSTGRES_USER" {target}'
@@ -1820,6 +1874,28 @@ def _protected_role_setting_declarations(body: str) -> dict[str, set[str]]:
     return declared
 
 
+def _bootstrap_password_reset_problem(body: str, superuser: str) -> str | None:
+    """Refuse roles.sql that rewrites the bootstrap role's PASSWORD.
+
+    FIX(codex round-26 P1): a backup taken with ``--include-role-passwords``
+    carries ``ALTER ROLE <superuser> PASSWORD ...``. Replaying it against a
+    target whose POSTGRES_PASSWORD differs replaces the target verifier
+    mid-restore: the current psql stays connected, but every NEXT connection
+    -- this restore's own catalog queries, the application, health checks --
+    authenticates with the unchanged container credential and fails, right
+    after ``--allow-nonempty`` destroyed the original database. The scanner
+    masks literal bodies, so the refusal message carries no secret.
+    """
+    tokens = _collect_role_attribute_tokens(body).get(superuser)
+    if tokens and "PASSWORD" in tokens:
+        return (
+            f"{superuser}: PASSWORD rewrite would replace the target's "
+            "credential mid-restore while the container still authenticates "
+            "with the old one"
+        )
+    return None
+
+
 def _preflight_roles_file(container: str, roles_path: Path, *, timeout: int) -> None:
     """Validate roles.sql read-only, so it can run BEFORE anything destructive.
 
@@ -1908,6 +1984,18 @@ def _preflight_roles_file(container: str, roles_path: Path, *, timeout: int) -> 
             + ". The restore replays the file as that identity, so it would "
             "disable its own connection after the target was dropped. "
             "Regenerate roles.sql from the backup source cluster.",
+        )
+    # FIX(round-26 P1): only the RESTORE refuses this -- the archive itself
+    # is sound, and the statement is harmless against a target whose
+    # POSTGRES_PASSWORD already matches the backup's.
+    password_reset = _bootstrap_password_reset_problem(body, superuser)
+    if password_reset is not None:
+        raise RestoreError(
+            EXIT_ROLES_FAILED,
+            f"roles.sql rewrites the bootstrap credential: {password_reset}. "
+            "Restore into a target whose POSTGRES_PASSWORD already matches "
+            "the backup source, or regenerate roles.sql WITHOUT "
+            "--include-role-passwords.",
         )
     # FIX: membership is not an attribute, so every check above is structurally
     # blind to it -- a GRANT statement can never match a CREATE/ALTER ROLE
@@ -2417,7 +2505,54 @@ def _container_default_database(container: str, *, timeout: int) -> str:
     return completed.stdout.strip()
 
 
-def _recreate_target_database(container: str, target_db: str, *, timeout: int) -> None:
+_LOCALE_FIELD_RE = re.compile(r"^[A-Za-z0-9_@+\-.]*$")
+
+
+def _create_database_options(locale_row: str) -> str:
+    """Return CREATE DATABASE options reproducing the source locale, or "".
+
+    FIX(codex round-22 P2): a bare CREATE DATABASE inherits the TARGET
+    template's encoding/locale; the backup uses pg_dump without --create, so
+    the archive carries none of them and a source/target locale mismatch
+    silently changed collation semantics -- ORDER BY and unique indexes
+    behaved differently after restore. The manifest's database_locale row
+    (encoding|collate|ctype|provider|icu) now drives TEMPLATE template0 plus
+    explicit ENCODING/LC_COLLATE/LC_CTYPE (libc) or LOCALE_PROVIDER/ICU_LOCALE
+    (icu). Every field is charset-validated and the literals are quoted, so
+    the unsigned manifest cannot inject through it; a row that is present but
+    malformed REFUSES rather than silently dropping the locale.
+    """
+    if not locale_row:
+        return ""
+    parts = locale_row.split("|")
+    if len(parts) != 6 or any(not _LOCALE_FIELD_RE.match(part) for part in parts):
+        raise RestoreError(
+            EXIT_USAGE,
+            f"manifest source.database_locale is malformed: {locale_row!r}; "
+            "refusing to recreate the target with an unpreserved locale",
+        )
+    _enc_id, encoding, collate, ctype, provider, icu = parts
+    if not encoding:
+        raise RestoreError(
+            EXIT_USAGE,
+            "manifest source.database_locale carries no encoding name; "
+            "refusing to recreate the target with an unpreserved locale",
+        )
+    options = ["TEMPLATE template0", f"ENCODING {_quote_literal(encoding)}"]
+    if provider == "icu":
+        if icu:
+            options.append(f"LOCALE_PROVIDER icu ICU_LOCALE {_quote_literal(icu)}")
+    else:
+        if collate:
+            options.append(f"LC_COLLATE {_quote_literal(collate)}")
+        if ctype:
+            options.append(f"LC_CTYPE {_quote_literal(ctype)}")
+    return " " + " ".join(options)
+
+
+def _recreate_target_database(
+    container: str, target_db: str, *, timeout: int, locale_row: str = ""
+) -> None:
     """Drop and recreate ``target_db``, leaving an empty shell to restore."""
     if target_db.lower() == "postgres":
         raise RestoreError(
@@ -2427,10 +2562,11 @@ def _recreate_target_database(container: str, target_db: str, *, timeout: int) -
         )
     quoted_db = _quote_identifier(target_db)
     # FIX: assembled as joined static fragments so the B608 string-built-query
-    # detector stays satisfied; target_db is validated and identifier-quoted.
+    # detector stays satisfied; target_db is validated and identifier-quoted,
+    # and the locale options are charset-validated and literal-quoted.
     drop_lines = [
         f"DROP DATABASE IF EXISTS {quoted_db} WITH (FORCE);",
-        f"CREATE DATABASE {quoted_db};",
+        f"CREATE DATABASE {quoted_db}{_create_database_options(locale_row)};",
     ]
     _psql(
         container,
@@ -2572,7 +2708,15 @@ def _execute_restore(
                 "compose stop app app-dev`), then re-run.",
             )
         target_db = _container_default_database(container, timeout=args.timeout)
-        _recreate_target_database(container, target_db, timeout=args.timeout)
+        source_block = manifest.get("source")
+        locale_row = (
+            str(source_block.get("database_locale") or "")
+            if isinstance(source_block, dict)
+            else ""
+        )
+        _recreate_target_database(
+            container, target_db, timeout=args.timeout, locale_row=locale_row
+        )
     roles = _restore_roles(container, backup_dir / ROLES_NAME, timeout=args.timeout)
     print(f"roles present after roles.sql: {', '.join(roles)}")
     _restore_data(
