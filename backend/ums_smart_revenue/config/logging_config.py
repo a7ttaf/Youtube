@@ -393,10 +393,18 @@ def configure_logging(
 def restore_logging(configuration: LoggingConfiguration) -> None:
     """Release one logging lease; remove the handler when the last lease ends.
 
-    Reference-counted and idempotent: each :func:`configure_logging` call takes
-    one lease, and only the release that drops the count to zero touches global
-    logging state. Overlapping app lifespans therefore share a single handler
-    and the first shutdown cannot silence a still-active second app.
+    Reference-counted: each :func:`configure_logging` call takes one lease, and
+    only the release that drops the count to zero touches global logging state.
+    Overlapping app lifespans therefore share a single handler and the first
+    shutdown cannot silence a still-active second app.
+
+    CALL AT MOST ONCE PER TOKEN. The count is process-wide and the token
+    carries no released state, so releasing the same ``configuration`` twice
+    decrements twice and consumes another lifespan's lease -- with two apps
+    configured, a double release drops the count to zero, removes the shared
+    handler and restores the previous levels while the second app is still
+    running, silencing its logs. The guard below only makes a release with NO
+    outstanding lease a no-op; it cannot detect a token that already released.
 
     Args:
         configuration: The undo token returned by :func:`configure_logging`.
