@@ -401,6 +401,68 @@ def test_csv_adapter_rejects_empty_or_headerless_csv(raw_bytes: bytes) -> None:
         )
 
 
+# ============================================================================
+# Purpose: Prove the CSV adapter no longer accepts the ``ad_revenue`` column as
+#          a revenue source, and that the rejection is caused by the alias
+#          itself rather than by anything else in the fixture.
+# Database/ORM: None -- pure adapter call, no session.
+# Standards: Asserts the exact existing failure mode (header validation raising
+#            GoogleApiResponseError "csv missing revenue column") instead of a
+#            generic exception type.
+# Blast Radius: Finance -- guards which CSV columns may become revenue amounts.
+# Connections:
+#   - Constant: orchestrator._CSV_REVENUE_COLUMNS -> the alias table under test.
+#   - File: backend/ums_smart_revenue/connectors/google/report_type_whitelist.py
+#     -> the raw ad-revenue report type this alias would have pre-authorised.
+# ============================================================================
+def test_csv_adapter_rejects_ad_revenue_as_a_revenue_column() -> None:
+    """``ad_revenue`` is not a supported revenue column and must not be ingested.
+
+    The alias used to sit in ``_CSV_REVENUE_COLUMNS`` even though no parser was
+    reviewed against the raw ad-revenue schema that
+    ``report_type_whitelist.SUPPORTED_REPORT_TYPES`` holds out. A CSV whose only
+    revenue-like column is ``ad_revenue`` must therefore fail header validation.
+
+    The second half of the test is the control: the byte-identical CSV with the
+    canonical ``estimated_partner_revenue`` header parses to a real revenue row,
+    which proves the rejection above is attributable to the column name alone
+    and not to the date, channel, currency, or month of the fixture.
+    """
+    ad_revenue_csv = (
+        b"date,channel_id,content_owner,ad_revenue,currencyCode\n"
+        b"2026-05-01,UC_orch_alpha,cms-orch-1,1.10,USD\n"
+    )
+    with pytest.raises(GoogleApiResponseError, match="csv missing revenue column"):
+        _csv_to_parser_payload(
+            raw_bytes=ad_revenue_csv,
+            report_id="r-ad-revenue-alias",
+            report_type="content_owner_estimated_revenue_a1",
+            month="2026-05",
+        )
+
+    canonical_csv = ad_revenue_csv.replace(b"ad_revenue", b"estimated_partner_revenue")
+    payload = _csv_to_parser_payload(
+        raw_bytes=canonical_csv,
+        report_id="r-ad-revenue-alias",
+        report_type="content_owner_estimated_revenue_a1",
+        month="2026-05",
+    )
+    assert payload["rows"] == [
+        {
+            "line_index": 0,
+            "date_range": {"start": "2026-05-01", "end": "2026-05-31"},
+            "dimensions": {
+                "channel": "UC_orch_alpha",
+                "content_owner": "cms-orch-1",
+            },
+            "metrics": {
+                "estimatedRevenue": "1.10",
+                "currencyCode": "USD",
+            },
+        }
+    ]
+
+
 def test_youtube_reporting_runner_aggregates_daily_reports_before_parser_handoff(
     session: Session,
 ) -> None:

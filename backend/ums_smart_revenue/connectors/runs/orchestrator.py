@@ -188,18 +188,37 @@ __all__ = [
     "run_one",
 ]
 
-# CSV adapter column aliases. YouTube Reporting estimated-revenue reports are
-# daily and may include extra breakdown dimensions / metric columns (video,
-# country, ad_impressions, CPM fields, etc.). The C1 normalizer consumes
-# monthly channel totals, so the adapter consumes only the identity + money
-# columns it needs and aggregates every breakdown row into that monthly shape.
+# ============================================================================
+# Purpose: Column-alias tables the YouTube Reporting CSV adapter matches against
+#          a downloaded report's header row. Reporting estimated-revenue exports
+#          are daily and may carry extra breakdown dimensions / metric columns
+#          (video, country, ad_impressions, CPM fields); the C1 normalizer
+#          consumes monthly channel totals, so the adapter reads only the
+#          identity + money columns and aggregates the rest into that shape.
+# Database/ORM: None -- these feed parser payload construction, not a query.
+# Standards: Revenue aliases stay restricted to schemas a shipped parser
+#            actually consumes. The test-fixture shorthand ``ad_revenue`` was
+#            removed here: nothing shipped it and no test asserted it, but it
+#            pre-authorised the raw ad-revenue CSV schema that
+#            report_type_whitelist.SUPPORTED_REPORT_TYPES deliberately holds
+#            out, so widening that whitelist would have silently armed a
+#            revenue column no parser was reviewed against. A CSV whose only
+#            revenue-like column is ``ad_revenue`` now fails header validation
+#            with "csv missing revenue column".
+# Blast Radius: Finance -- decides which downloaded CSV columns become revenue
+#               amounts. No graph projection impact detected.
+# Connections:
+#   - Function: _validate_csv_headers -> rejects headers missing every alias.
+#   - Function: _accumulate_csv_row -> reads the row value through these aliases.
+#   - File: backend/ums_smart_revenue/connectors/google/report_type_whitelist.py
+#     -> holds the matching report_type_id allowlist these schemas belong to.
+# ============================================================================
 _CSV_DATE_COLUMNS = ("date", "day")
 _CSV_CHANNEL_COLUMNS = ("channel", "channel_id")
 _CSV_REVENUE_COLUMNS = (
     "estimated_partner_revenue",
     "estimatedRevenue",
     "estimatedrevenue",
-    "ad_revenue",
 )
 _CSV_CURRENCY_COLUMNS = ("currency_code", "currencyCode")
 _CSV_DEFAULT_CURRENCY_BY_REPORT_TYPE = {
@@ -2854,17 +2873,17 @@ def _accumulate_csv_row(
         )
     content_owner = _first_present(csv_row, "content_owner") or default_content_owner
 
-    # Pull the estimated revenue amount. Accept either Google's documented
-    # ``estimated_partner_revenue`` / ``estimatedRevenue`` columns or the
-    # test-fixture shorthand ``ad_revenue``. The aggregate is kept as Decimal
-    # and stringified after summation so precision and trailing scale survive.
+    # Pull the estimated revenue amount from Google's documented
+    # ``estimated_partner_revenue`` / ``estimatedRevenue`` columns only; see the
+    # _CSV_REVENUE_COLUMNS contract block for why no other alias is accepted.
+    # The aggregate is kept as Decimal and stringified after summation so
+    # precision and trailing scale survive.
     amount = _first_present(csv_row, *_CSV_REVENUE_COLUMNS)
     if amount is None:
         raise _parser_payload_error(
             report_id=report_id,
             reason="csv row missing revenue column "
-            "(expected one of: estimated_partner_revenue, "
-            "estimatedRevenue, ad_revenue)",
+            "(expected one of: estimated_partner_revenue, estimatedRevenue)",
         )
     try:
         amount_decimal = Decimal(amount)

@@ -91,6 +91,12 @@ branch now also carry their merged PR number. PRs #136–#148, #150, #151, #153
 and #154 are absent from this doc on purpose — they are Dependabot PRs that were
 closed unmerged and superseded by the consolidated batch in #156.
 
+**Connector-risk note (2026-08-27, branch `fix/p1-remove-ad-revenue-alias`):** the
+test-fixture shorthand `ad_revenue` was removed from the YouTube Reporting CSV
+revenue-column aliases in `connectors/runs/orchestrator.py`. Nothing shipped it, but it
+pre-authorised the raw ad-revenue schema `report_type_whitelist` deliberately holds out;
+a CSV whose only revenue-like column is `ad_revenue` now fails header validation.
+
 ## P0 — Must build first
 
 - ⏳ Dynamic org hierarchy — remaining: ORG models (PR #25); hierarchy
