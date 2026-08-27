@@ -1690,6 +1690,33 @@ def _role_privilege_drift_problems(body: str) -> list[str]:
     return problems
 
 
+_BOOTSTRAP_LOCKOUT_ATTRIBUTE_TOKENS = frozenset({"NOLOGIN", "NOSUPERUSER"})
+
+
+def _bootstrap_role_lockout_problems(body: str, superuser: str) -> list[str]:
+    """Refuse roles.sql that strips LOGIN/SUPERUSER from the bootstrap role.
+
+    FIX(codex round-24 P1): ``ALTER ROLE <superuser> WITH NOLOGIN`` passed
+    every gate -- the foreign-role check reads CREATE statements only and the
+    drift gate covers the application roles only -- and under --allow-nonempty
+    the replay then disabled the very identity the restore connects as, after
+    the target database had already been dropped: an empty replacement
+    database and a cluster needing out-of-band superuser recovery. Genuine
+    pg_dumpall output never disables the bootstrap role, so any
+    NOLOGIN/NOSUPERUSER on it is refused on both sides of the round trip.
+    """
+    tokens = _collect_role_attribute_tokens(body).get(superuser)
+    if tokens is None:
+        return []
+    lockouts = sorted(tokens & _BOOTSTRAP_LOCKOUT_ATTRIBUTE_TOKENS)
+    if not lockouts:
+        return []
+    return [
+        f"{superuser}: attributes {', '.join(lockouts)} would lock the "
+        "bootstrap identity out of the cluster"
+    ]
+
+
 def _created_role_names(body: str) -> list[str]:
     r"""Return every role name a CREATE ROLE/USER/GROUP in roles.sql declares.
 
@@ -1841,6 +1868,19 @@ def _preflight_roles_file(container: str, roles_path: Path, *, timeout: int) -> 
             "superuser before the archive loads, and the migration history will "
             "not rerun to clear them. Regenerate roles.sql from a source cluster "
             "whose application roles are NOLOGIN, NOSUPERUSER, NOBYPASSRLS.",
+        )
+    # FIX(round-24 P1): the replay runs AS this identity; a file that
+    # disables it bricks the cluster right after --allow-nonempty destroyed
+    # the target database.
+    lockouts = _bootstrap_role_lockout_problems(body, superuser)
+    if lockouts:
+        raise RestoreError(
+            EXIT_ROLES_FAILED,
+            "roles.sql locks the bootstrap identity out of the cluster: "
+            + "; ".join(lockouts)
+            + ". The restore replays the file as that identity, so it would "
+            "disable its own connection after the target was dropped. "
+            "Regenerate roles.sql from the backup source cluster.",
         )
     # FIX: membership is not an attribute, so every check above is structurally
     # blind to it -- a GRANT statement can never match a CREATE/ALTER ROLE

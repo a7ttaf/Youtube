@@ -4552,6 +4552,7 @@ def test_restore_and_backup_share_one_role_sql_gate() -> None:
         "_role_attribute_clause",
         "_collect_role_attribute_tokens",
         "_role_privilege_drift_problems",
+        "_bootstrap_role_lockout_problems",
         "_created_role_names",
     )
     for name in shared:
@@ -5989,6 +5990,55 @@ def test_rehearse_image_flag_requires_rehearse() -> None:
             ["--backup-dir", "x", "--container", "c", "--rehearse-image", "postgres:18"]
         )
     assert caught.value.code == 2
+
+
+def test_bootstrap_role_lockout_is_refused_on_both_sides(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ALTER ROLE <superuser> NOLOGIN/NOSUPERUSER must never replay (round-24 P1).
+
+    The foreign-role check reads CREATE only and the drift gate covers only
+    the app roles, so a file disabling the bootstrap identity passed every
+    gate; under --allow-nonempty the replay then locked the restore out of
+    the cluster after the target database was already dropped.
+    """
+    monkeypatch.setattr(restore, "_psql", _restore_psql())
+    base = "CREATE ROLE app_tenant;\nCREATE ROLE app_platform;\n"
+    for module in (restore, backup):
+        for hostile in (
+            "ALTER ROLE ums WITH NOLOGIN;\n",
+            "ALTER ROLE ums WITH NOSUPERUSER;\n",
+            "CREATE ROLE ums WITH NOLOGIN;\n",
+        ):
+            problems = module._bootstrap_role_lockout_problems(base + hostile, "ums")
+            assert problems and "lock the bootstrap identity out" in problems[0], (
+                module.__name__,
+                hostile,
+            )
+        # Genuine pg_dumpall shapes for the bootstrap role keep passing.
+        for genuine in (
+            "CREATE ROLE ums WITH SUPERUSER INHERIT LOGIN;\n",
+            "ALTER ROLE ums WITH PASSWORD 'SCRAM-SHA-256$4096:ab==$cd:ef';\n",
+            "ALTER ROLE app_tenant WITH NOLOGIN;\n",
+        ):
+            assert module._bootstrap_role_lockout_problems(base + genuine, "ums") == []
+
+    # And the full restore preflight refuses it before anything destructive.
+    roles_path = _write_roles_file(base + "ALTER ROLE ums WITH NOLOGIN;\n")
+    with pytest.raises(restore.RestoreError) as caught:
+        restore._preflight_roles_file("fake", roles_path, timeout=5)
+    assert caught.value.code == restore.EXIT_ROLES_FAILED
+    assert "locks the bootstrap identity out" in str(caught.value)
+
+
+def _write_roles_file(body: str, tmp_path: Path | None = None) -> Path:
+    """Write roles.sql content to a temp file for preflight tests."""
+    import tempfile
+
+    root = tmp_path if tmp_path is not None else Path(tempfile.mkdtemp())
+    target = root / restore.ROLES_NAME
+    target.write_text(body, encoding="utf-8")
+    return target
 
 
 # ==========================================================================

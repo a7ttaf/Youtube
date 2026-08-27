@@ -2100,6 +2100,33 @@ def _role_privilege_drift_problems(body: str) -> list[str]:
     return problems
 
 
+_BOOTSTRAP_LOCKOUT_ATTRIBUTE_TOKENS = frozenset({"NOLOGIN", "NOSUPERUSER"})
+
+
+def _bootstrap_role_lockout_problems(body: str, superuser: str) -> list[str]:
+    """Refuse roles.sql that strips LOGIN/SUPERUSER from the bootstrap role.
+
+    FIX(codex round-24 P1): ``ALTER ROLE <superuser> WITH NOLOGIN`` passed
+    every gate -- the foreign-role check reads CREATE statements only and the
+    drift gate covers the application roles only -- and under --allow-nonempty
+    the replay then disabled the very identity the restore connects as, after
+    the target database had already been dropped: an empty replacement
+    database and a cluster needing out-of-band superuser recovery. Genuine
+    pg_dumpall output never disables the bootstrap role, so any
+    NOLOGIN/NOSUPERUSER on it is refused on both sides of the round trip.
+    """
+    tokens = _collect_role_attribute_tokens(body).get(superuser)
+    if tokens is None:
+        return []
+    lockouts = sorted(tokens & _BOOTSTRAP_LOCKOUT_ATTRIBUTE_TOKENS)
+    if not lockouts:
+        return []
+    return [
+        f"{superuser}: attributes {', '.join(lockouts)} would lock the "
+        "bootstrap identity out of the cluster"
+    ]
+
+
 def _created_role_names(body: str) -> list[str]:
     r"""Return every role name a CREATE ROLE/USER/GROUP in roles.sql declares.
 
@@ -2135,6 +2162,7 @@ def _validate_dump_roles_covered(
     roles_body: str,
     acl_grantees: set[str] | None = None,
     snapshot_owners: set[str] | None = None,
+    superuser: str = "",
 ) -> None:
     """Refuse a backup when the archive references roles absent from roles.sql.
 
@@ -2186,6 +2214,15 @@ def _validate_dump_roles_covered(
             + ". The restore replays these attributes before loading the "
             "archive and the migration history will not rerun to clear them; "
             "refusing to publish.",
+        )
+    lockouts = _bootstrap_role_lockout_problems(roles_body, superuser) if superuser else []
+    if lockouts:
+        raise BackupError(
+            EXIT_ARTIFACT_INVALID,
+            "roles.sql locks the bootstrap identity out of the cluster: "
+            + "; ".join(lockouts)
+            + ". The restore replays the file as that identity; refusing to "
+            "publish an archive whose own restore bricks the cluster.",
         )
     memberships = _role_membership_problems(roles_body)
     if memberships:
@@ -4961,11 +4998,16 @@ def run_backup(args: argparse.Namespace, out_dir: Path) -> BackupOutcome:
             if args.verify_dump
             else None
         )
+        # Collected here rather than after the verdict (as it used to be) so
+        # the publish gate can judge the bootstrap-superuser lockout shape
+        # against the same identity the restore will connect as.
+        facts = _container_facts(container, timeout=args.docker_timeout)
         _validate_dump_roles_covered(
             listing=dump_listing,
             roles_body=(staging / ROLES_NAME).read_text(encoding="utf-8", errors="replace"),
             acl_grantees=acl_grantees,
             snapshot_owners=snapshot_owners,
+            superuser=facts.get("superuser", ""),
         )
         toc_entries = -1
         if dump_listing is not None:
@@ -4976,10 +5018,9 @@ def run_backup(args: argparse.Namespace, out_dir: Path) -> BackupOutcome:
                     if line.strip() and not line.startswith(";")
                 ]
             )
-        # Provenance is collected BEFORE the verdict, not after: the identity it
-        # carries is one of the gate's inputs, and the manifest has to record the
-        # same facts the gate judged.
-        facts = _container_facts(container, timeout=args.docker_timeout)
+        # Provenance above was collected BEFORE the verdict: the identity it
+        # carries is one of the gate's inputs, and the manifest has to record
+        # the same facts the gate judged.
         observed_identity = _identity_from_source(facts)
         if observed_identity is None:
             raise BackupError(
