@@ -267,6 +267,28 @@ def build_log_formatter() -> logging.Formatter:
 #     THIRD_PARTY_LOG_LEVEL keeps out of the log.
 #   - File: docker-compose.yml -> `UMS_LOG_LEVEL` pass-through in x-app-env.
 # ============================================================================
+def _third_party_floor_filter(floor: int) -> logging.Filter:
+    """Return a handler filter enforcing the third-party floor by name.
+
+    First-party (``ums_smart_revenue.*``) records pass unconditionally --
+    the application knob governs them through the first-party logger level.
+    Every other record must clear ``floor``: propagation never re-checks an
+    ancestor logger's level, so an explicitly leveled dependency would
+    otherwise publish below-floor output through the shared handler.
+    """
+
+    class _FloorFilter(logging.Filter):
+        def filter(self, record: logging.LogRecord) -> bool:
+            """Pass first-party records; gate everything else at the floor."""
+            if record.name == FIRST_PARTY_LOGGER_NAME or record.name.startswith(
+                FIRST_PARTY_LOGGER_NAME + "."
+            ):
+                return True
+            return record.levelno >= floor
+
+    return _FloorFilter()
+
+
 def configure_logging(
     *,
     level: str | None = None,
@@ -357,6 +379,18 @@ def configure_logging(
         handler = logging.StreamHandler(sys.stderr if stream is None else stream)
         handler.set_name(UMS_LOG_HANDLER_NAME)
         handler.setFormatter(build_log_formatter())
+        # FIX(codex round-27 P2): a dependency that sets its OWN logger level
+        # (SQLAlchemy sets WARNING) bypasses the root-logger floor -- logger
+        # levels gate only the originating logger, and a NOTSET handler
+        # passes whatever reaches it. Filtering AT THE HANDLER keeps the
+        # documented asymmetry intact: first-party records pass at the
+        # configured application level, every other logger must clear the
+        # third-party floor no matter what level it set on itself. A handler
+        # LEVEL cannot express this -- it would also block first-party
+        # DEBUG/INFO under the WARNING floor.
+        handler.addFilter(
+            _third_party_floor_filter(root_level)
+        )
         # Survive importlib.reload: module globals reset, handler attributes do not.
         setattr(handler, _HANDLER_PREVIOUS_ROOT_ATTR, previous_root_level)
         setattr(handler, _HANDLER_PREVIOUS_FIRST_PARTY_ATTR, previous_first_party_level)

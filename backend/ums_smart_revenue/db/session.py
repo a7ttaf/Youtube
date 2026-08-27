@@ -142,26 +142,29 @@ def _enable_sqlite_transactional_savepoints(engine: Engine) -> None:
         dbapi_connection.isolation_level = None
 
     def _release_writer_lock(dbapi_connection: Any = None) -> None:
-        """Release the StaticPool writer lock -- only when the shared
-        connection is quiescent.
+        """Release the StaticPool writer lock -- only by its owning thread,
+        and only when the shared connection is quiescent.
 
-        FIX(codex rounds 22-25, three threads): the pool ``reset`` event
-        fires BEFORE SQLAlchemy's reset-on-return ROLLBACK executes, so an
+        FIX(codex rounds 22-27, four threads): the pool ``reset`` event fires
+        BEFORE SQLAlchemy's reset-on-return ROLLBACK executes, so an
         unconditional release there handed the lock to a waiting Session
         whose fresh ``BEGIN`` was then rolled back by the first session's
         still-running reset -- on StaticPool both "transactions" share ONE
-        DBAPI connection. And because ``lock_held`` is engine-global, the
-        ORIGINAL checkout's later ``checkin`` released the NEW owner's lock,
-        admitting a third writer. The release now requires the shared
-        connection to report ``in_transaction == False``: a reset arriving
-        mid-transaction is skipped (the following checkin releases), a
-        checkin arriving while a successor already began is skipped (the
-        successor's own return releases), and the quiescent fast path still
-        releases on whichever event lands first, preserving the reset-only
-        path that a checkin-only release used to deadlock.
+        DBAPI connection. The release therefore requires BOTH: (a) the
+        calling thread is the recorded lock owner -- pool events fire on
+        whichever thread returns the connection, so the ORIGINAL checkout's
+        checkin on another thread can never release a successor's lock, even
+        in the narrow window where the successor holds the lock but has not
+        emitted its BEGIN yet; and (b) the shared connection reports
+        ``in_transaction == False`` -- a reset arriving mid-transaction is
+        skipped (the following checkin releases), and the quiescent fast
+        path still releases on whichever event lands first, preserving the
+        reset-only path that a checkin-only release used to deadlock.
         """
         nonlocal lock_held, lock_owner_thread
         if not lock_held:
+            return
+        if lock_owner_thread is not None and lock_owner_thread != get_ident():
             return
         if dbapi_connection is not None and getattr(
             dbapi_connection, "in_transaction", False

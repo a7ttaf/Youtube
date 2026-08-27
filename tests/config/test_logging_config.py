@@ -1167,3 +1167,32 @@ def test_configure_logging_reads_the_level_from_settings(monkeypatch):
 
         assert logging.getLogger(FIRST_PARTY_LOGGER_NAME).level == logging.DEBUG
         assert root.level == THIRD_PARTY_LOG_LEVEL
+
+
+def test_leveled_third_party_logger_is_filtered_at_the_handler():
+    """A dependency that sets its own WARNING level must still clear the floor.
+
+    Propagation never re-checks an ancestor logger's level, so an explicitly
+    leveled library (SQLAlchemy sets WARNING) published through the NOTSET
+    shared handler even at UMS_LOG_LEVEL=ERROR (codex round-27 P2). The
+    handler filter gates third-party records at the floor while first-party
+    records keep passing at the configured application level.
+    """
+    from ums_smart_revenue.config.logging_config import configure_logging
+
+    capture = io.StringIO()
+    with production_shaped_root():
+        configure_logging(level="ERROR", stream=capture)
+        third_party = logging.getLogger("sqlalchemy.engine")
+        original_level = third_party.level
+        try:
+            third_party.setLevel(logging.WARNING)
+            third_party.warning("below-floor library warning must not print")
+            logging.getLogger(FIRST_PARTY_LOGGER_NAME).error(
+                "first-party error passes at the application level"
+            )
+        finally:
+            third_party.setLevel(original_level)
+        out = capture.getvalue()
+        assert "below-floor library warning" not in out
+        assert "first-party error passes" in out
