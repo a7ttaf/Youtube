@@ -4304,6 +4304,15 @@ def test_roles_sql_gate_refuses_statements_pg_dumpall_never_emits(
         "a rename out of a protected name": _BOTH_APP_ROLES
         + "ALTER ROLE app_tenant RENAME TO app_tenant_old;\n",
         "SET ROLE": _BOTH_APP_ROLES + "SET ROLE postgres;\n",
+        # SET SESSION AUTHORIZATION is three words; SET
+        # session_authorization is TWO, because the underscore form is a
+        # single token. Both change who the rest of the file runs as.
+        "SET SESSION AUTHORIZATION": _BOTH_APP_ROLES
+        + "SET SESSION AUTHORIZATION postgres;\n",
+        "SET session_authorization, one token": _BOTH_APP_ROLES
+        + "SET session_authorization = postgres;\n",
+        "RESET session_authorization": _BOTH_APP_ROLES
+        + "RESET session_authorization;\n",
         # An unquoted identifier folds, so the wildcard spelling is not fixed.
         "ALTER ROLE all, lowercase": _BOTH_APP_ROLES
         + "ALTER ROLE all SET statement_timeout TO '1ms';\n",
@@ -4351,8 +4360,16 @@ def test_roles_sql_gate_refuses_statements_pg_dumpall_never_emits(
     )
     # The verb allowlist must not eat the shapes pg_dumpall really writes:
     # the session GUC header, a role comment, and the parameter-ACL section.
+    # A role-DDL statement too short to have a subject must be REFUSED, not
+    # crash the preflight: reaching for the subject token unguarded raised
+    # IndexError out of _preflight_roles_file instead of returning a problem.
+    for truncated in ("DROP ROLE;\n", "ALTER ROLE;\n", "CREATE ROLE;\n"):
+        assert restore._unsupported_role_statement_problems(truncated) == []
+        assert backup._unsupported_role_statement_problems(truncated) == []
     for allowed in (
         "SET default_transaction_read_only = off;\n",
+        # An ordinary session GUC is not a session-IDENTITY statement.
+        "SET search_path = public;\n",
         "SET standard_conforming_strings = on;\n",
         "COMMENT ON ROLE app_tenant IS 'lane';\n",
         "SECURITY LABEL FOR anon ON ROLE app_tenant IS 'MASKED';\n",
@@ -4420,6 +4437,8 @@ def test_restore_and_backup_share_one_role_sql_gate() -> None:
         "_role_membership_problems",
         "_role_sql_setting_name",
         "_role_sql_statement_is_role_shaped",
+        "_role_ddl_statement_problem",
+        "_unsupported_role_statement_problem",
         "_unsupported_role_statement_problems",
         "_role_attribute_clause",
         "_collect_role_attribute_tokens",

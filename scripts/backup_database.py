@@ -1755,6 +1755,65 @@ def _role_sql_statement_is_role_shaped(words: list[str]) -> bool:
     return False
 
 
+def _role_ddl_statement_problem(
+    statement: str, tokens: list[tuple[str, str]], words: list[str]
+) -> str | None:
+    """Return why one CREATE/ALTER/DROP ROLE statement is illegitimate, else None.
+
+    ``tokens`` may be as short as two entries -- ``DROP ROLE;`` is a real thing
+    to find in a tampered file -- so the subject is read defensively. Reaching
+    for ``tokens[2]`` unguarded raised IndexError out of the preflight instead
+    of refusing the file.
+    """
+    if "RENAME" in words:
+        if any(_role_sql_identifier(t) in _PROTECTED_APP_ROLES for t in tokens):
+            return f"RENAME touching a protected role: {statement}"
+        return None
+    # FIX: this compared the RAW token to "ALL", so `ALTER ROLE all SET
+    # statement_timeout TO '1ms'` -- which PostgreSQL applies to every role in
+    # the cluster -- walked straight past. Unquoted identifiers fold; a QUOTED
+    # "ALL" is a role genuinely named ALL and must NOT be treated as the
+    # wildcard, which is why the token KIND is still checked.
+    subject = tokens[2] if len(tokens) > 2 else ("other", "")
+    wildcard = subject[0] == "word" and subject[1].upper() == "ALL"
+    if words[0] == "ALTER" and wildcard:
+        return f"ALTER ROLE ALL is not allowed in roles.sql: {statement}"
+    setting = _role_sql_setting_name(tokens)
+    if setting in _UNSAFE_ROLE_SETTINGS:
+        return f"role setting {setting} loads code at login: {statement}"
+    return None
+
+
+def _unsupported_role_statement_problem(statement: str) -> str | None:
+    """Return why ONE scanned statement is illegitimate in roles.sql, else None."""
+    tokens = _role_sql_tokens(statement)
+    words = _role_sql_words(tokens)
+    if not words:
+        return None
+    if words[0] == "DO":
+        return f"DO blocks are not allowed in roles.sql: {statement}"
+    # FIX: `SET SESSION AUTHORIZATION` is three words but `SET
+    # session_authorization` is TWO -- the underscore form is a single token,
+    # so matching only ["SET", "SESSION"] caught one spelling of the same
+    # statement and not the other. Both change who the remainder of the file
+    # runs as, which is what this arm claims to prevent.
+    if words[0] in {"SET", "RESET"} and words[1:2] in (
+        ["ROLE"],
+        ["SESSION"],
+        ["SESSION_AUTHORIZATION"],
+    ):
+        return f"session-identity statements are not allowed: {statement}"
+    # FIX: this used to `continue` on anything that was not role DDL, so
+    # ordinary SQL in a tampered roles.sql was replayed as the bootstrap
+    # superuser -- including `COPY (SELECT '') TO PROGRAM '...'`, which is
+    # command execution as the postgres OS user.
+    if not _role_sql_statement_is_role_shaped(words):
+        return f"statement pg_dumpall --roles-only never emits: {statement}"
+    if words[0] not in {"CREATE", "ALTER", "DROP"} or words[1] not in _ROLE_SQL_ROLE_NOUNS:
+        return None
+    return _role_ddl_statement_problem(statement, tokens, words)
+
+
 def _unsupported_role_statement_problems(body: str) -> list[str]:
     r"""Return roles.sql statements that are never legitimate here.
 
@@ -1772,8 +1831,10 @@ def _unsupported_role_statement_problems(body: str) -> list[str]:
       WARNING and leaves a role NAMED app_tenant that is ``rolsuper=true
       rolcanlogin=true`` -- which then satisfies the post-apply
       ``ROLES_PRESENT_SQL`` existence check, so the restore reports success.
-    * ``SET ROLE`` / ``SET SESSION AUTHORIZATION`` change who the remainder of
-      the file runs as.
+    * ``SET ROLE``, ``SET SESSION AUTHORIZATION`` and the single-token
+      ``SET session_authorization`` all change who the remainder of the file
+      runs as. All three spellings are refused; matching only the two-word
+      form caught one spelling and not the other.
     * ``DO`` is already refused by ``_unsupported_role_ddl_in_roles_sql``, but
       that check is a raw-text ``^\s*DO`` search that a leading block comment
       walks past; this one reads the scanned statement.
@@ -1782,43 +1843,9 @@ def _unsupported_role_statement_problems(body: str) -> list[str]:
     for statement in _scan_role_sql(body):
         if statement.startswith("\\"):
             continue
-        tokens = _role_sql_tokens(statement)
-        words = _role_sql_words(tokens)
-        if not words:
-            continue
-        if words[0] == "DO":
-            problems.append(f"DO blocks are not allowed in roles.sql: {statement}")
-            continue
-        if words[:2] in (["SET", "ROLE"], ["RESET", "ROLE"], ["SET", "SESSION"]):
-            problems.append(f"session-identity statements are not allowed: {statement}")
-            continue
-        # FIX: this used to `continue` on anything that was not role DDL, so
-        # ordinary SQL in a tampered roles.sql was replayed as the bootstrap
-        # superuser -- including `COPY (SELECT '') TO PROGRAM '...'`, which is
-        # command execution as the postgres OS user.
-        if not _role_sql_statement_is_role_shaped(words):
-            problems.append(
-                f"statement pg_dumpall --roles-only never emits: {statement}"
-            )
-            continue
-        if words[0] not in {"CREATE", "ALTER", "DROP"} or words[1] not in _ROLE_SQL_ROLE_NOUNS:
-            continue
-        if "RENAME" in words:
-            if any(_role_sql_identifier(t) in _PROTECTED_APP_ROLES for t in tokens):
-                problems.append(f"RENAME touching a protected role: {statement}")
-            continue
-        # FIX: this compared the RAW token to "ALL", so `ALTER ROLE all SET
-        # statement_timeout TO '1ms'` -- which PostgreSQL applies to every role
-        # in the cluster -- walked straight past. Unquoted identifiers fold;
-        # a QUOTED "ALL" is a role genuinely named ALL and must NOT be treated
-        # as the wildcard, which is why the word/ident kind is still checked.
-        wildcard = tokens[2][0] == "word" and tokens[2][1].upper() == "ALL"
-        if words[0] == "ALTER" and wildcard:
-            problems.append(f"ALTER ROLE ALL is not allowed in roles.sql: {statement}")
-            continue
-        setting = _role_sql_setting_name(tokens)
-        if setting in _UNSAFE_ROLE_SETTINGS:
-            problems.append(f"role setting {setting} loads code at login: {statement}")
+        problem = _unsupported_role_statement_problem(statement)
+        if problem is not None:
+            problems.append(problem)
     return problems
 
 
