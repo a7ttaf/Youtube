@@ -47,7 +47,7 @@ from ums_smart_revenue.db.security_models import (
     UserORM,
     UserRoleAssignmentORM,
 )
-from ums_smart_revenue.db.session import dispose_cached_engine
+from ums_smart_revenue.db.session import build_session_factory, dispose_cached_engine
 from ums_smart_revenue.db.tenant_models import TenantBase, TenantORM
 from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
 from ums_smart_revenue.tenancy.context import get_current_tenant
@@ -1418,6 +1418,12 @@ def test_ensure_org_unit_recovers_from_a_concurrent_deterministic_insert(tmp_pat
     The race is reproduced faithfully: the row really is in the database (the
     winner committed), and get() is made to miss it exactly once, which is what
     a SELECT issued before the winner's commit sees.
+
+    Driven through build_session_factory with an explicit outer transaction,
+    NOT a raw create_engine Session. That matters: only build_engine installs
+    _enable_sqlite_transactional_savepoints, so a raw engine would exercise a
+    savepoint that is not the one production uses, and _run_bootstrap always
+    opens the outer transaction this nests under.
     """
     module = _load_script()
     database_url = _make_database(tmp_path)
@@ -1438,7 +1444,9 @@ def test_ensure_org_unit_recovers_from_a_concurrent_deterministic_insert(tmp_pat
             )
             seed.commit()
 
-        with Session(engine) as session:
+        session_factory = build_session_factory(database_url)
+        with session_factory() as session:
+            session.begin()
             real_get = session.get
             misses = {"n": 0}
 
@@ -1470,4 +1478,72 @@ def test_ensure_org_unit_recovers_from_a_concurrent_deterministic_insert(tmp_pat
             assert session.get(OrgUnitORM, unit_id) is not None
             session.commit()
     finally:
+        dispose_cached_engine(database_url)
+        engine.dispose()
+
+
+def test_ensure_org_unit_still_fails_closed_when_the_race_winner_is_drifted(tmp_path):
+    """The conflict-recovery path must run drift validation, not just accept.
+
+    Recovering from a concurrent insert reloads the winning row and falls
+    through to `if not created:` so the winner gets the SAME _org_unit_drift
+    check an ordinary EXISTING row gets. Without that, a concurrent writer that
+    created a drifted or inactive unit would be silently accepted on the race
+    path while being refused on the normal one -- a fail-open split.
+
+    The sibling race test seeds a winner identical to the request, so deleting
+    the drift call would NOT fail it. This is the arm that does.
+    """
+    module = _load_script()
+    database_url = _make_database(tmp_path)
+    unit_id = uuid4()
+
+    engine = create_engine(database_url)
+    try:
+        with Session(engine) as seed:
+            seed.add(
+                OrgUnitORM(
+                    id=unit_id,
+                    tenant_id=_TENANT_ID,
+                    parent_id=None,
+                    type="SECTOR",
+                    name="Some Other Sector",  # drifted: not what we asked for
+                    active=True,
+                )
+            )
+            seed.commit()
+
+        session_factory = build_session_factory(database_url)
+        with session_factory() as session:
+            session.begin()
+            real_get = session.get
+            misses = {"n": 0}
+
+            def _get_missing_once(entity, ident, **kwargs):
+                """Simulate a SELECT issued before the winner's commit landed."""
+                if entity is OrgUnitORM and misses["n"] == 0:
+                    misses["n"] += 1
+                    return None
+                return real_get(entity, ident, **kwargs)
+
+            session.get = _get_missing_once
+
+            with pytest.raises(ValueError) as raised:
+                module._ensure_org_unit(
+                    session,
+                    OrgUnitORM,
+                    unit_id=unit_id,
+                    tenant_id=_TENANT_ID,
+                    parent_id=None,
+                    unit_type="SECTOR",
+                    name="Winning Sector",
+                    name_flag="--sector-name",
+                )
+
+            assert misses["n"] == 1, "the race must actually have been exercised"
+            assert "--sector-name" in str(raised.value), (
+                "the refusal must name the flag whose value drifted"
+            )
+    finally:
+        dispose_cached_engine(database_url)
         engine.dispose()

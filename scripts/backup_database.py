@@ -2217,13 +2217,23 @@ def _is_allowlisted_principal(principal_key: str) -> bool:
 
     The trailing-space form is what accepts ``icacls``'s first output row,
     which fuses the run-directory path onto the principal
-    (``C:\...\run NT AUTHORITY\SYSTEM``). A space boundary admits that while
-    still rejecting ``corp\owner rights``, which ends in a backslash instead.
+    (``C:\...\run NT AUTHORITY\SYSTEM``).
+
+    FIX: that space form is restricted to the DOMAIN-QUALIFIED entries. Applied
+    to a bare token it re-opened the very impersonation this function exists to
+    stop, just through a space instead of a backslash: Windows account names may
+    legally contain spaces, so ``HOST\Backup System:(F)`` ends with " system"
+    and was allowlisted as infrastructure while holding Full control. A trailing
+    " system" does not prove the SYSTEM well-known SID. The fused path always
+    precedes a domain-qualified name, so requiring a backslash in the allowlist
+    entry keeps the real first row working and nothing else.
     """
-    return any(
-        principal_key == allowed or principal_key.endswith(f" {allowed}")
-        for allowed in _WINDOWS_DACLS_ALLOWED_PRINCIPALS
-    )
+    for allowed in _WINDOWS_DACLS_ALLOWED_PRINCIPALS:
+        if principal_key == allowed:
+            return True
+        if "\\" in allowed and principal_key.endswith(f" {allowed}"):
+            return True
+    return False
 
 
 def _principal_matches_owner(principal_key: str, owner_key: str) -> bool:

@@ -4153,6 +4153,36 @@ def test_windows_dacl_rejects_lookalike_infrastructure_principals() -> None:
         )
 
 
+def test_windows_dacl_rejects_space_boundary_lookalike_principals() -> None:
+    """A principal whose NAME merely ends in "system" is not infrastructure.
+
+    The whole-identity allowlist accepts ``icacls``'s fused first row by
+    matching after a space boundary. Applied to the BARE tokens ("system",
+    "owner rights") that re-opened the impersonation it was meant to close,
+    just through a space instead of a backslash: Windows account names may
+    legally contain spaces, so ``HOST\\Backup System:(F)`` ends with " system"
+    and was allowlisted while holding Full control.
+
+    This class is what the backslash-only lookalike test misses, and the code
+    it guards is strictly narrower than the pre-fix basename match -- these
+    were all correctly rejected before, so accepting them was a NET-NEW hole.
+    """
+    for ace in (
+        "EVIL\\Evil System:(F)",
+        "HOST\\Backup System:(R)",
+        "CORP\\Foo owner rights:(R)",
+    ):
+        listing = "\n".join(["accepted-run", "desktop\\winuser:(F)", ace])
+        assert backup._windows_dacl_problems(listing, "winuser"), (
+            f"{ace} ends in an infrastructure word but is NOT infrastructure"
+        )
+
+    # The space boundary must still do its actual job: the fused first row.
+    assert backup._is_allowlisted_principal(
+        "c:\\backups\\ums-backup-20260827t000000z nt authority\\system"
+    ), "the fused echoed-path row is why the space form exists"
+
+
 def test_windows_dacl_accepts_the_owner_on_the_merged_echoed_path_row() -> None:
     """icacls fuses the run-dir path onto its FIRST ACE row.
 

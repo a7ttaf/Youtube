@@ -508,13 +508,18 @@ def _ensure_user(
     existing = repository.get_user_by_email(email=email)
     if existing is not None:
         return _accept_existing_user(existing, deps, email=email)
+    # Bound BEFORE the try: `except deps["..."]` evaluates the subscript for
+    # every exception raised in the block, so a deps map missing this key would
+    # surface a KeyError that masks the real error -- including an unrelated
+    # storage failure. Resolving it here fails at setup instead.
+    conflict_error = deps["UserAccountConflictError"]
     try:
         entry = repository.create_user(
             email=email,
             display_name=display_name,
             is_service_account=False,
         )
-    except deps["UserAccountConflictError"]:
+    except conflict_error:
         # FIX: a concurrent bootstrap for the same email committed between our
         # lookup and our insert. UserAccountConflictError is a SIBLING of
         # UserAccountStorageError under UserAccountError, so the retry envelope
