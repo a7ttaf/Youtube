@@ -20,19 +20,23 @@ scheduled group sync is reconciled inline under its branch name
 deliberately OUTSIDE that high-water mark; on merge its entries convert to
 `✅ PR #171`.
 
-**US-withholding plan note (2026-08-28, branch `docs/us-withholding-plan`):** adds
-`Docs/24_US_WITHHOLDING_AND_US_REVENUE_PLAN.md` — the verified rate ruling (Egypt–US
-treaty copyright-royalty withholding is **15%**, not the operator's guessed 16%; no-form
-default is 24%/30% on worldwide earnings) plus the program that makes per-channel
-US-viewer revenue and the estimated-withholding calculation visible: U1 read-only probe
-(country-dimension Analytics queries must decompose the trusted totals), U2 additive
-country-sliced ingestion (distinct source_row_keys; EGP-sequencing tripwire), U3 display
-+ `US revenue × UMS_US_WITHHOLDING_RATE` (config, default 0.15, estimate-labeled, never
-in net math), U4 optional manual actual-withholding anchor (the actual line is
-AdSense-UI-only). Verified today: the Analytics lane fetches `dimensions=month` only; the
-Reporting CSV already carries `country_code` but the adapter drops it; `payments.list`
-has no line items, so no withholding is ingested anywhere. Docs-only branch; on merge
-these entries convert to its PR number.
+**US-withholding plan note (2026-08-28, branch `docs/us-withholding-plan`, PR #219):**
+adds `Docs/24_US_WITHHOLDING_AND_US_REVENUE_PLAN.md` — the verified rate ruling
+(Egypt–US treaty copyright-royalty withholding is **15%**, not the operator's guessed
+16%; no-form default is 24%/30% on worldwide earnings) plus the program that makes
+per-channel US-viewer revenue and the estimated-withholding calculation visible: U1
+read-only probe (country-dimension Analytics queries must decompose the trusted totals),
+U2 additive country-sliced ingestion (distinct source_row_keys; EGP-sequencing tripwire),
+U3 **backend-emitted** estimate fields + `UMS_US_WITHHOLDING_RATE` (config, default 0.15,
+estimate-labeled; SPA renders only — never `US × rate` in the browser; never in net math),
+U4 optional manual actual-withholding anchor (the actual line is AdSense-UI-only).
+**Fence:** existing recon `DEFAULT_US_WITHHOLDING_RATE = 0.30`
+(`finance/reconciliation_workflow.py`, dormant via `NullUsViewShareProvider`) stays out of
+scope — Docs/21 P3 / refine-later “withholding-rate calibration”; do not arm recon from
+this plan. D-U1 (AdSense tax-info confirm) blocks trusting the 0.15 default. Parent:
+Docs/21 (#209/#210); sibling: Docs/23 (#218). Verified today: Analytics
+`dimensions=month` only; Reporting CSV carries `country_code` but the adapter drops it;
+`payments.list` has no line items. Docs-only; stays draft until D-U1.
 
 **Test-harness note (2026-06-11, branch `fix/pg-migration-test-lock-timeout`):** the PG
 migration round-trip tests' `fresh_engine` schema reset now sets `SET LOCAL lock_timeout`
@@ -2161,7 +2165,8 @@ single P-tier above.
   reason-required -> 422, 404 unknown/cross-tenant, 409 re-purge) marks PURGED
   keeping metadata; additive `purged_at`/`purged_by` columns + CHECK swap.
   ⏳ Refine-later: real US-view-share feed, withholding-rate calibration, and
-  multi-API-key ingestion scaling.
+  multi-API-key ingestion scaling. **Rate ruling + display-estimate program:**
+  Docs/24 / PR #219 (15% treaty estimate; recon `0.30` path stays fenced / Docs/21 P3).
 - ✅ Phase 5 analytics & monitoring surface (PR #98, 2026-06-13, branch
   `feat/phase5-analytics-monitoring`) — one combined PR closing the
   highest-value Phase 1 / 5 / 7 acceptance-gate gaps plus this doc
