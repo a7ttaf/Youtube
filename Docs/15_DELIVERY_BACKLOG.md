@@ -93,6 +93,15 @@ closed unmerged and superseded by the consolidated batch in #156.
 
 ## P0 — Must build first
 
+- ⏳ EGP program Phase 1 (currency spine) — branch
+  `feat/egp-phase1-currency-spine`: `tenants.primary_currency` gets its first
+  consumers without flipping anything. `_bootstrap_tenant` reads the new
+  fail-fast `UMS_TENANT_PRIMARY_CURRENCY` setting (default stays `USD`); the
+  fail-closed `tenancy.currency.get_tenant_primary_currency()` helper reads the
+  active tenant's declared code; `GET /tenants/me` and `GET /session/me` expose
+  it additively. A declared LABEL only — no conversion, no FX, no fact-table or
+  CHECK change; the no-FX AST guard stays green. Remaining: the deliberate flip
+  to `EGP` (one setting) after EGP Phases 2–3, per Docs/21 on the P0 branch.
 - ⏳ Dynamic org hierarchy — remaining: ORG models (PR #25); hierarchy
   assignment workflow not built.
 - ✅ Channel registry (tenant-scoped, PR #25).
