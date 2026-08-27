@@ -1202,7 +1202,65 @@ and the reconciled-net content (Phase 4 allocation/tax) feeding report bodies.
   (PR #8) plus the `CHANNELS_MISSING_REVENUE_FACTS` per-channel coverage check
   (PR #98, active+revenue_required channels with no monthly fact); broader
   quality checks not built.
-- ⏳ Backup/export retention — remaining: not started.
+- ⏳ Backup/export retention — remaining: not started. **Audited 2026-08-24 and
+  raised to a beta BLOCKER** (`Docs/20_DEPLOYMENT_READINESS_AUDIT.md`, B3): no
+  `pg_dump` script exists anywhere in the repo, while `docker-compose.yml:7`
+  documents `docker compose down -v` as an ordinary teardown — that deletes the
+  `postgres-data` volume and every revenue fact in it. Must be fixed before real
+  CMS data is ingested. Export artifacts are separately at risk (B4): they default
+  to the container temp dir with no volume mounted.
+- ✅ **RETRACTED 2026-08-25 — "Analytics revenue currency is fabricated as USD."**
+  This entry previously carried a 🔴 blocker claiming live ingest would record EGP
+  amounts as USD. **That was wrong.** `currency` on YouTube Analytics `reports.query`
+  is a *request* parameter selecting the output currency, not a description of what
+  the account natively earns: omit it and Google returns USD; send `EGP` and Google
+  converts server-side. Google's response carries **no currency field at all** — the
+  recorded fixture `sample_query_response_2026_04.json` has its only
+  `"currency": "USD"` inside the echoed `query_request` — so "record the currency
+  Google returned" was never something the code could do. The repo's own
+  `test_missing_currency_defaults_to_usd` documents the API default, and the
+  2026-06-22 live smoke returned USD-shaped figures (~$79k across 25 channels; EGP
+  would be ~47x larger). **No data is mis-denominated and nothing needs re-ingesting.**
+  What remains, at the correct severity:
+  - ⏳ **MEDIUM — make the requested currency explicit.** Send `"currency": "USD"` in
+    `_build_query_request` (`connectors/google/youtube_analytics_client.py:108-115`)
+    so the label is asserted rather than inherited from an undocumented default, as
+    `Docs/05_CONNECTORS_YOUTUBE_ADSENSE.md:99-100` and
+    `Docs/18_MULTI_CURRENCY_ENGINE.md:181-182` ask. **Byte-identical downstream** —
+    `source_row_key` hashes are unchanged, so no re-ingest and no migration. ~2h.
+    Same class, second site: the Reporting CSV default at
+    `connectors/runs/orchestrator.py:205-210`.
+  - ⏳ **FEATURE GAP — UMS cannot represent EGP at all.** No currency column on the
+    finance path, ~2,154 `*_usd` identifiers, USD-only *test-locked* by
+    `tests/finance/test_finance_no_fx_dependency.py:40-53`. 3–6 weeks, gated on the
+    open decision below. This is a feature, not a bug.
+  - ⏳ **DECISION — `Docs/16_OPEN_DECISIONS.md:70-71` is still unanswered:** are USD
+    facts acceptable with the EGP bank settlement explained as FX variance? The code
+    has assumed "yes" since PR #42 without anyone saying so.
+- ⏳ Deployment readiness for a first beta — **audited 2026-08-24/25 in four rounds,
+  see `Docs/20_DEPLOYMENT_READINESS_AUDIT.md`; the costed plan is
+  `Docs/21_BETA_IMPLEMENTATION_PLAN.md` (38–55 hours to a runnable beta).**
+  Verdict: the application is feature-ready, the deployment is not. Round 2 briefly
+  overturned that on the currency finding; **Round 4 retracted it** (see the entry
+  above), restoring the Round 1 verdict. Also found: no logging configuration exists
+  (corrected — `logging.lastResort` does emit WARNING+ to stderr, so warnings and
+  tracebacks print without timestamps while all INFO/DEBUG is lost), the frontend is
+  a single page with no router, and a connector job killed mid-run 409-blocks its
+  month for six hours. Round 3 traced "no buttons work / it looks like a mockup" to
+  three causes, the largest being that the dev proxy ships `assistant_analyst` —
+  **2 of 26 permissions** (`frontend/vite.config.ts:69`, `auth/seed.py`, `auth/permissions.py`) — so the
+  product has been demoed through its second-most-restricted role. Five blockers,
+  none requiring redesign:
+  no authentication front door (the app takes identity from gateway headers and
+  the compose stack ships no gateway), the default `headers` authz mode lets a
+  caller assert their own role, no database backup, ephemeral artifact storage,
+  and no non-dev path to serve the browser app. Two viable beta shapes are
+  documented there; real revenue can be ingested without any Google/GCP
+  dependency via the first-class `MANUAL_UPLOAD` import path.
+  **Freshness (2026-08-28):** P0 execution + living Docs/21 status are on PR #210.
+  Docs/20–21/23/24 ship together on branch `docs/program-plans-consolidated`
+  (supersedes closed drafts #209/#218/#219). Do not schedule unchecked P0 items
+  from the Docs/21 snapshot alone.
 - ⏳ Google credential token monitoring — remaining: credentials repo (PRs #33, #34) +
   four `api_connector_credentials` refresh-telemetry columns (last-attempt,
   token-expiry, last-status, last-error-class) stamped at the

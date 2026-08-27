@@ -20,6 +20,22 @@ scheduled group sync is reconciled inline under its branch name
 deliberately OUTSIDE that high-water mark; on merge its entries convert to
 `✅ PR #171`.
 
+**Program plans note (2026-08-28, branch `docs/program-plans-consolidated`):** consolidates
+the three former draft plan PRs (#209 Docs/20–21, #218 Docs/23, #219 Docs/24) into one
+docs PR after the gap-fix review. See:
+[`20_DEPLOYMENT_READINESS_AUDIT.md`](20_DEPLOYMENT_READINESS_AUDIT.md),
+[`21_BETA_IMPLEMENTATION_PLAN.md`](21_BETA_IMPLEMENTATION_PLAN.md),
+[`23_ADMIN_ACCESS_AND_CONFIG_PLAN.md`](23_ADMIN_ACCESS_AND_CONFIG_PLAN.md),
+[`24_US_WITHHOLDING_AND_US_REVENUE_PLAN.md`](24_US_WITHHOLDING_AND_US_REVENUE_PLAN.md).
+Living P0 execution remains on [#210](https://github.com/a7ttaf/Youtube/pull/210).
+
+**US-withholding plan note (2026-08-28):** Docs/24 — Egypt–US treaty copyright-royalty
+withholding is **15%** (not 16%); no-form default 24%/30% on worldwide earnings. Program
+U1–U4: probe → additive country-sliced ingest → backend-emitted estimate
+(`UMS_US_WITHHOLDING_RATE` default 0.15; SPA renders only) → optional actual anchor.
+**Fence:** recon `DEFAULT_US_WITHHOLDING_RATE = 0.30` stays dormant (Docs/21 P3). D-U1
+(AdSense tax-info confirm) blocks trusting 0.15.
+
 **Test-harness note (2026-06-11, branch `fix/pg-migration-test-lock-timeout`):** the PG
 migration round-trip tests' `fresh_engine` schema reset now sets `SET LOCAL lock_timeout`
 so a contended `DROP SCHEMA public CASCADE` fails fast with a diagnosable error instead of
@@ -622,6 +638,15 @@ closed unmerged and superseded by the consolidated batch in #156.
 
 ## P2 — Advanced features
 
+- ⏳ Admin, access & configuration UI — Docs/23 (this consolidated program-plans PR;
+  supersedes draft #218): backend already ships the account/access surface
+  (list/create/patch users — no DELETE; scoped role assignment + scoped permission
+  grants + catalog reads, audited with required reasons) and NO view exposes it.
+  Program: **prerequisite #210**; A1 Admin MVP (+ session `can_manage_users` /
+  `can_assign_roles`); A2 matrix + `/security` proxy residual; A6 delegated admin with
+  no-amplification ceiling + competitor read-isolation (closes role-family hole); A7
+  Google-only sign-in (domain allowlist); A3–A5. Tripwires: no role editor, no secrets,
+  no delegation before A6. Remaining: whole program (plan only).
 - ⏳ Display-only currency conversion foundation — remaining: display-only
   conversion is not started. Note the distinction: bank-side FX + transfer-fee
   effects ARE derived as evidence-only `deduction_components` by Track F
@@ -2147,7 +2172,8 @@ single P-tier above.
   reason-required -> 422, 404 unknown/cross-tenant, 409 re-purge) marks PURGED
   keeping metadata; additive `purged_at`/`purged_by` columns + CHECK swap.
   ⏳ Refine-later: real US-view-share feed, withholding-rate calibration, and
-  multi-API-key ingestion scaling.
+  multi-API-key ingestion scaling. **Rate ruling + display-estimate program:**
+  Docs/24 (15% treaty estimate; recon `0.30` path stays fenced / Docs/21 P3).
 - ✅ Phase 5 analytics & monitoring surface (PR #98, 2026-06-13, branch
   `feat/phase5-analytics-monitoring`) — one combined PR closing the
   highest-value Phase 1 / 5 / 7 acceptance-gate gaps plus this doc
