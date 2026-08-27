@@ -36,6 +36,7 @@ import logging
 import sys
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TextIO
 
@@ -267,26 +268,26 @@ def build_log_formatter() -> logging.Formatter:
 #     THIRD_PARTY_LOG_LEVEL keeps out of the log.
 #   - File: docker-compose.yml -> `UMS_LOG_LEVEL` pass-through in x-app-env.
 # ============================================================================
-def _third_party_floor_filter(floor: int) -> logging.Filter:
+def _third_party_floor_filter(floor: int) -> Callable[[logging.LogRecord], bool]:
     """Return a handler filter enforcing the third-party floor by name.
 
     First-party (``ums_smart_revenue.*``) records pass unconditionally --
     the application knob governs them through the first-party logger level.
     Every other record must clear ``floor``: propagation never re-checks an
     ancestor logger's level, so an explicitly leveled dependency would
-    otherwise publish below-floor output through the shared handler.
+    otherwise publish below-floor output through the shared handler. The
+    filter cannot silence first-party or audit output by construction.
     """
 
-    class _FloorFilter(logging.Filter):
-        def filter(self, record: logging.LogRecord) -> bool:
-            """Pass first-party records; gate everything else at the floor."""
-            if record.name == FIRST_PARTY_LOGGER_NAME or record.name.startswith(
-                FIRST_PARTY_LOGGER_NAME + "."
-            ):
-                return True
-            return record.levelno >= floor
+    def _floor_filter(record: logging.LogRecord) -> bool:
+        """Pass first-party records; gate everything else at the floor."""
+        if record.name == FIRST_PARTY_LOGGER_NAME or record.name.startswith(
+            FIRST_PARTY_LOGGER_NAME + "."
+        ):
+            return True
+        return record.levelno >= floor
 
-    return _FloorFilter()
+    return _floor_filter
 
 
 def configure_logging(

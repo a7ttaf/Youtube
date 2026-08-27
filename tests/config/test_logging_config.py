@@ -1178,8 +1178,6 @@ def test_leveled_third_party_logger_is_filtered_at_the_handler():
     handler filter gates third-party records at the floor while first-party
     records keep passing at the configured application level.
     """
-    from ums_smart_revenue.config.logging_config import configure_logging
-
     capture = io.StringIO()
     with production_shaped_root():
         configure_logging(level="ERROR", stream=capture)
