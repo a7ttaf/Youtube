@@ -42,6 +42,7 @@ from ums_smart_revenue.config.settings import (
     GOOGLE_CONNECTOR_SERVICE_ACTOR_ID_ENV,
     GROUP_SYNC_INTERVAL_HOURS_ENV,
     GROUP_SYNC_SCHEDULE_ENABLED_ENV,
+    TENANT_PRIMARY_CURRENCY_ENV,
     AppSettings,
     load_app_settings,
 )
@@ -267,3 +268,59 @@ def test_load_app_settings_rejects_negative_group_sync_interval_hours(
     with pytest.raises(ValueError) as excinfo:
         load_app_settings()
     assert GROUP_SYNC_INTERVAL_HOURS_ENV in str(excinfo.value)
+
+
+# ---------------------------------------------------------------------------
+# UMS_TENANT_PRIMARY_CURRENCY — EGP program Phase 1 (currency spine)
+# ---------------------------------------------------------------------------
+# The setting declares the bootstrap tenant's ISO-4217 reporting currency. It
+# is a LABEL: nothing in UMS converts currency, so these tests pin parsing and
+# fail-fast behaviour only. The unset default MUST stay "USD" — Phase 1 builds
+# the spine without flipping it.
+# ---------------------------------------------------------------------------
+
+
+def test_load_app_settings_tenant_primary_currency_defaults_to_usd(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unset currency env resolves to USD — Phase 1 flips nothing."""
+    monkeypatch.delenv(TENANT_PRIMARY_CURRENCY_ENV, raising=False)
+    load_app_settings.cache_clear()
+    assert load_app_settings().tenant_primary_currency == "USD"
+
+
+@pytest.mark.parametrize("blank", ["", "   ", "\n\t"])
+def test_load_app_settings_tenant_primary_currency_blank_falls_back_to_default(
+    monkeypatch: pytest.MonkeyPatch, blank: str
+) -> None:
+    """A blank/whitespace-only currency env falls back to the default, not an error."""
+    monkeypatch.setenv(TENANT_PRIMARY_CURRENCY_ENV, blank)
+    load_app_settings.cache_clear()
+    assert load_app_settings().tenant_primary_currency == "USD"
+
+
+@pytest.mark.parametrize("code", ["EGP", "USD", "  AED  "])
+def test_load_app_settings_tenant_primary_currency_accepts_iso_codes(
+    monkeypatch: pytest.MonkeyPatch, code: str
+) -> None:
+    """A valid 3-letter uppercase code is accepted and whitespace-stripped."""
+    monkeypatch.setenv(TENANT_PRIMARY_CURRENCY_ENV, code)
+    load_app_settings.cache_clear()
+    settings = load_app_settings()
+    assert isinstance(settings, AppSettings)
+    assert settings.tenant_primary_currency == code.strip()
+
+
+@pytest.mark.parametrize(
+    "bad",
+    ["usd", "Egp", "US", "USDD", "US1", "US$", "US D", "EGP,USD"],
+)
+def test_load_app_settings_rejects_malformed_tenant_primary_currency(
+    monkeypatch: pytest.MonkeyPatch, bad: str
+) -> None:
+    """Anything but exactly three uppercase letters fails fast, naming the env var."""
+    monkeypatch.setenv(TENANT_PRIMARY_CURRENCY_ENV, bad)
+    load_app_settings.cache_clear()
+    with pytest.raises(ValueError) as excinfo:
+        load_app_settings()
+    assert TENANT_PRIMARY_CURRENCY_ENV in str(excinfo.value)

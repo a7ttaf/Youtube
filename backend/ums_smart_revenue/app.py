@@ -470,6 +470,31 @@ async def _send_http_exception(
     )(scope, receive, send)
 
 
+# ============================================================================
+# Purpose: Fabricate the single-tenant bootstrap Tenant bound by
+#   DefaultTenantMiddleware in headers/trusted-gateway mode, where no
+#   ``tenants`` row is read. Its declared primary currency is now CONFIGURED
+#   (UMS_TENANT_PRIMARY_CURRENCY) instead of hardcoded, so a deployment can
+#   declare its reporting currency without a code change.
+# Database/ORM: None -- deliberately no ``tenants`` read. Database-authz mode
+#   does not use this function at all: TenantResolverMiddleware loads the real
+#   row, and ``tenants.primary_currency`` stays the source of truth there.
+# Standards: Settings are read through load_app_settings() (lru_cached, so the
+#   per-request call is a dict lookup), never os.environ. The env value is
+#   validated as a 3-letter uppercase ISO 4217 code at settings-load time, so
+#   an invalid code fails the process at boot rather than fabricating a tenant
+#   the ck_tenants_primary_currency_iso4217 CHECK would reject.
+# Blast Radius: The declared currency LABEL on the bootstrap tenant, surfaced
+#   read-only by GET /tenants/me and GET /session/me. No conversion, no FX, no
+#   fact table, no CHECK constraint, no finance math -- the default is still
+#   "USD", so this wiring changes no observable behaviour on its own.
+# Connections:
+#   - File: backend/ums_smart_revenue/config/settings.py -> AppSettings
+#     .tenant_primary_currency and its fail-fast loader.
+#   - File: backend/ums_smart_revenue/tenancy/currency.py ->
+#     get_tenant_primary_currency reads this back off TENANT_CTX.
+#   - File: backend/ums_smart_revenue/api/tenants.py -> GET /tenants/me.
+# ============================================================================
 def _bootstrap_tenant() -> Tenant:
     """Return the bootstrap UMS tenant for single-tenant trusted-header requests."""
     now = datetime.now(UTC)
@@ -477,7 +502,7 @@ def _bootstrap_tenant() -> Tenant:
         id=UUID(UMS_TENANT_ID),
         slug="ums",
         display_name="UMS",
-        primary_currency="USD",
+        primary_currency=load_app_settings().tenant_primary_currency,
         status=TenantStatus.ACTIVE,
         onboarding_at=now,
         created_at=now,

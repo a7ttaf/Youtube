@@ -583,6 +583,9 @@ def test_session_me_db_mode_finance_admin_capabilities(client_db_mode):
         "id": str(BOOTSTRAP_TENANT_ID),
         "slug": "ums",
         "display_name": BOOTSTRAP_DISPLAY,
+        # Additive tenant-currency label (EGP program Phase 1); mirrors the
+        # seeded `tenants.primary_currency` row value, converts nothing.
+        "primary_currency": "USD",
     }
 
     caps = payload["capabilities"]

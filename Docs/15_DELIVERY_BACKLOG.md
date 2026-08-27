@@ -630,6 +630,13 @@ closed unmerged and superseded by the consolidated batch in #156.
   Google/YouTube/AdSense reported amounts and currencies per `Docs/18`;
   public/provider FX rates are not an official source for monthly revenue, tax,
   deduction, AdSense payment, or reconciliation values.
+
+  **EGP Phase 1 note (2026-08-27, branch `feat/egp-phase1-currency-spine`):** the tenant
+  currency SPINE now exists and flips nothing — `UMS_TENANT_PRIMARY_CURRENCY` (validated
+  ISO-4217, default still `USD`) feeds `app._bootstrap_tenant`,
+  `tenancy/currency.get_tenant_primary_currency()` reads it fail-closed off `TENANT_CTX`, and
+  `/tenants/me` + `/session/me` expose `primary_currency`. Still no conversion of any kind.
+
 - ⏳ Anomaly detection foundation for source-backed month-over-month
   revenue movement — remaining: not started.
 - ⏳ Detailed Shorts revenue handling foundation — remaining: not started.

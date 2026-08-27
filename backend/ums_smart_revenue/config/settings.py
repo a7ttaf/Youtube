@@ -2,7 +2,8 @@
 # Purpose: Load process-level runtime settings from UMS_* environment
 #   variables into the frozen AppSettings dataclass (cached via lru_cache),
 #   including the connector job-executor and group-sync scheduler flags the
-#   app boot wiring enforces fail-fast.
+#   app boot wiring enforces fail-fast, and the bootstrap tenant's declared
+#   ISO-4217 primary currency.
 # Database/ORM: None.
 # Standards: every setting is read through an explicit UMS_* env constant;
 #   strict truthy/falsy token parsing; no implicit defaults for identity or
@@ -10,13 +11,17 @@
 #   directly.
 # Blast Radius: App boot wiring only -- the feature flags gate thread-
 #   spawning workers at startup. No authorization, finance, audit, or export
-#   behavior.
+#   behavior. The primary-currency setting is a DECLARED label only: it never
+#   converts an amount and never reaches a fact row.
 # Connections:
 #   - File: backend/ums_smart_revenue/app.py -> create_app consumes
-#     AppSettings and enforces the cross-flag fail-fast contract.
+#     AppSettings and enforces the cross-flag fail-fast contract;
+#     _bootstrap_tenant stamps tenant_primary_currency on the headers-mode
+#     bootstrap tenant.
 # ============================================================================
 """Runtime configuration loaded from UMS_* environment variables."""
 
+import re
 from dataclasses import dataclass
 from functools import lru_cache
 from os import environ
@@ -31,9 +36,22 @@ CONNECTOR_JOB_MAX_WORKERS_ENV = "UMS_CONNECTOR_JOB_MAX_WORKERS"
 CONNECTOR_JOB_STALE_RUNNING_HOURS_ENV = "UMS_CONNECTOR_JOB_STALE_RUNNING_HOURS"
 GROUP_SYNC_SCHEDULE_ENABLED_ENV = "UMS_GROUP_SYNC_SCHEDULE_ENABLED"
 GROUP_SYNC_INTERVAL_HOURS_ENV = "UMS_GROUP_SYNC_INTERVAL_HOURS"
+TENANT_PRIMARY_CURRENCY_ENV = "UMS_TENANT_PRIMARY_CURRENCY"
 
 _TRUTHY_TOKENS = frozenset({"1", "true", "yes", "on"})
 _FALSY_TOKENS = frozenset({"0", "false", "no", "off", ""})
+
+# ISO 4217 alphabetic codes are exactly three uppercase letters. Deliberately
+# stricter than the ``ck_tenants_primary_currency_iso4217`` CHECK (which only
+# asserts length 3 + uppercase), so a deployment cannot boot with a code the
+# tenants table would accept but no operator ever meant to type.
+_ISO_4217_ALPHA_CODE = re.compile(r"[A-Z]{3}")
+
+# Phase 1 of the EGP program builds the currency spine WITHOUT flipping it:
+# this default stays "USD" so wiring the setting changes no behaviour. The
+# operator-decided flip to EGP is a later, deliberate edit of this one value
+# (or a UMS_TENANT_PRIMARY_CURRENCY entry in the deployment environment).
+DEFAULT_TENANT_PRIMARY_CURRENCY = "USD"
 
 AUTHZ_SOURCE_HEADERS = "headers"
 AUTHZ_SOURCE_DATABASE = "database"
@@ -75,6 +93,14 @@ class AppSettings:
     # same contract as max_workers.
     group_sync_schedule_enabled: bool = False
     group_sync_interval_hours: int = 24
+    # ISO-4217 alphabetic code DECLARED as the bootstrap tenant's primary
+    # currency by ``app._bootstrap_tenant`` (headers/trusted-gateway mode,
+    # which fabricates its tenant instead of reading the ``tenants`` row).
+    # Database-authz mode ignores this entirely -- the resolver reads
+    # ``tenants.primary_currency``, which stays the source of truth there.
+    # This is a LABEL, never a rate: UMS performs no currency conversion, so
+    # changing it re-labels the declared tenant currency and converts nothing.
+    tenant_primary_currency: str = DEFAULT_TENANT_PRIMARY_CURRENCY
 
 
 @lru_cache(maxsize=1)
@@ -103,6 +129,9 @@ def load_app_settings() -> AppSettings:
         ),
         group_sync_schedule_enabled=_load_bool(GROUP_SYNC_SCHEDULE_ENABLED_ENV, default=False),
         group_sync_interval_hours=_load_int(GROUP_SYNC_INTERVAL_HOURS_ENV, default=24),
+        tenant_primary_currency=_load_currency_code(
+            TENANT_PRIMARY_CURRENCY_ENV, default=DEFAULT_TENANT_PRIMARY_CURRENCY
+        ),
     )
 
 
@@ -217,3 +246,43 @@ def _load_int(env_name: str, *, default: int) -> int:
     if parsed <= 0:
         raise ValueError(f"{env_name} must be a positive integer")
     return parsed
+
+
+# ============================================================================
+# Purpose: Parse a UMS_* ISO-4217 currency-code env var at settings-load time
+#          with the same two-tier contract as the other loaders: missing/blank
+#          -> default; present-but-malformed -> ValueError carrying the env
+#          name, so a typo ("US", "usd", "US$") fails the process at boot
+#          rather than producing a tenant whose declared currency the
+#          ``ck_tenants_primary_currency_iso4217`` CHECK would reject.
+# Database/ORM: None. The parsed code is a declared label copied onto the
+#               fabricated bootstrap Tenant dataclass; it is never written to
+#               a fact table and never compared against a stored amount.
+# Standards: Mirrors _load_int / _load_bool's "missing -> default vs malformed
+#            -> fail-closed" idiom. Case is NOT coerced: lowercase input is
+#            rejected rather than silently upper-cased, because a currency code
+#            an operator typed wrong is a configuration error worth surfacing,
+#            and the tenants CHECK requires uppercase anyway.
+# Blast Radius: The declared primary currency label on the headers-mode
+#               bootstrap tenant. NO conversion, NO FX, no finance math, no
+#               fact-pipeline currency gate -- UMS converts nothing, so this
+#               value can only re-label, never re-value.
+# Connections:
+#   - File: backend/ums_smart_revenue/app.py -> _bootstrap_tenant stamps the
+#     parsed code onto the fabricated Tenant.
+#   - File: backend/ums_smart_revenue/db/tenant_models.py -> the
+#     ck_tenants_primary_currency_iso4217 CHECK this validation stays inside.
+# ============================================================================
+def _load_currency_code(env_name: str, *, default: str) -> str:
+    """Parse a UMS_* ISO-4217 code, failing fast on anything but three capitals."""
+    raw = environ.get(env_name)
+    if raw is None:
+        return default
+    candidate = raw.strip()
+    if not candidate:
+        return default
+    if _ISO_4217_ALPHA_CODE.fullmatch(candidate) is None:
+        raise ValueError(
+            f"{env_name} must be a 3-letter uppercase ISO 4217 code (e.g. USD, EGP)"
+        )
+    return candidate

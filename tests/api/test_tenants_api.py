@@ -21,6 +21,10 @@ from ums_smart_revenue.app import (
     create_app,
 )
 from ums_smart_revenue.auth.models import UserPrincipal
+from ums_smart_revenue.config.settings import (
+    TENANT_PRIMARY_CURRENCY_ENV,
+    load_app_settings,
+)
 from ums_smart_revenue.db.security_models import (
     AccessScopeORM,
     RoleORM,
@@ -181,6 +185,7 @@ def test_tenants_me_returns_bootstrap_tenant_for_resolved_slug(
         "id": str(BOOTSTRAP_TENANT_ID),
         "slug": "ums",
         "display_name": BOOTSTRAP_DISPLAY,
+        "primary_currency": "USD",
     }
     assert response.headers.get("Vary") and "X-UMS-Tenant" in response.headers["Vary"]
 
@@ -411,6 +416,74 @@ def test_tenants_me_headers_mode_returns_bootstrap_after_gateway_auth(
     payload = response.json()
     assert payload["slug"] == "ums"
     assert payload["id"] == str(BOOTSTRAP_TENANT_ID)
+
+
+# ---------------------------------------------------------------------------
+# EGP program Phase 1 — the bootstrap tenant's declared currency is CONFIGURED
+# ---------------------------------------------------------------------------
+# Headers mode fabricates its tenant instead of reading the `tenants` row, so
+# UMS_TENANT_PRIMARY_CURRENCY is the only thing that can decide the declared
+# currency there. These two tests pin both halves of that contract: the
+# configured code reaches the wire, and the unset default is still "USD" so
+# Phase 1 flips nothing. Nothing here converts an amount — UMS never does.
+# ---------------------------------------------------------------------------
+
+
+def _headers_mode_primary_currency(seeded_engine) -> str:
+    """Return the primary_currency GET /tenants/me reports in headers mode."""
+    app = create_app(database_url=str(seeded_engine.url), authz_source="headers")
+    with TestClient(app) as client:
+        response = client.get("/tenants/me", headers=_full_principal_headers())
+    assert response.status_code == 200, response.text
+    currency = response.json()["primary_currency"]
+    assert isinstance(currency, str)
+    return currency
+
+
+def test_tenants_me_headers_mode_carries_the_configured_primary_currency(
+    seeded_engine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The bootstrap tenant declares UMS_TENANT_PRIMARY_CURRENCY, not a literal.
+
+    Deliberately asserts a NON-USD code: a regression that re-hardcodes "USD"
+    in ``app._bootstrap_tenant`` fails here, which a USD-valued assertion
+    could not detect.
+    """
+    monkeypatch.setenv(TENANT_PRIMARY_CURRENCY_ENV, "EGP")
+    load_app_settings.cache_clear()
+    assert _headers_mode_primary_currency(seeded_engine) == "EGP"
+
+
+def test_tenants_me_headers_mode_primary_currency_defaults_to_usd(
+    seeded_engine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With the env unset the declared currency stays USD — Phase 1 flips nothing."""
+    monkeypatch.delenv(TENANT_PRIMARY_CURRENCY_ENV, raising=False)
+    load_app_settings.cache_clear()
+    assert _headers_mode_primary_currency(seeded_engine) == "USD"
+
+
+def test_tenants_me_db_mode_reports_the_tenant_row_currency_not_the_setting(
+    seeded_engine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Database mode reads ``tenants.primary_currency``; the env must not leak in.
+
+    The seeded row declares USD while the env declares EGP, so a wiring
+    mistake that fed the setting into the resolver path would surface as EGP.
+    """
+    monkeypatch.setenv(TENANT_PRIMARY_CURRENCY_ENV, "EGP")
+    load_app_settings.cache_clear()
+    app = create_app(database_url=str(seeded_engine.url), authz_source="database")
+    with TestClient(app) as client:
+        response = client.get(
+            "/tenants/me",
+            headers={"X-UMS-Tenant": "ums", **_gateway_headers()},
+        )
+    assert response.status_code == 200, response.text
+    assert response.json()["primary_currency"] == "USD"
 
 
 # ---------------------------------------------------------------------------
