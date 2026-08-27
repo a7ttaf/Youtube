@@ -2131,10 +2131,17 @@ _WINDOWS_DACLS_UNEXPECTED_GROUPS = (
 # Only these infra principals may hold access besides the current user;
 # anything else (incl. Everyone/Users/Authenticated Users/domain readers)
 # fails the owner-only verification below.
+# FIX: these are matched as WHOLE identities, never as the leaf name after the
+# last backslash. The previous basename match allowlisted any domain account
+# whose leaf happened to be one of these, so `CORP\SYSTEM:(R)` -- and even
+# `EVIL\SYSTEM:(F)`, full control -- were reported as an owner-only DACL and the
+# backup published as secure while that identity could still read it.
+# `builtin\administrators` was also written unescaped: "\a" is a BEL byte, so
+# that entry was really "builtin\x07dministrators" and never matched anything.
 _WINDOWS_DACLS_ALLOWED_PRINCIPALS = (
     "system",
     r"nt authority\system",
-    "builtin\administrators",
+    r"builtin\administrators",
     "owner rights",
 )
 
@@ -2179,18 +2186,21 @@ def _parse_icacls_listing_line(
 
 
 def _is_allowlisted_principal(principal_key: str) -> bool:
-    """Match principals that legitimately persist after /inheritance:r.
+    r"""Match principals that legitimately persist after /inheritance:r.
 
-    A principal qualifies by its tail name after the last backslash OR by its
-    full identity; see _WINDOWS_DACLS_ALLOWED_PRINCIPALS.
+    A principal qualifies only by its WHOLE identity, never by the leaf name
+    after the last backslash: matching the basename let any domain account
+    named ``<DOMAIN>\SYSTEM`` or ``<DOMAIN>\OWNER RIGHTS`` pass as
+    infrastructure and keep read -- or full -- access to the backup.
+
+    The trailing-space form is what accepts ``icacls``'s first output row,
+    which fuses the run-directory path onto the principal
+    (``C:\...\run NT AUTHORITY\SYSTEM``). A space boundary admits that while
+    still rejecting ``corp\owner rights``, which ends in a backslash instead.
     """
-    short_name = principal_key.rsplit("\\", 1)[-1]
-    return (
-        short_name in _WINDOWS_DACLS_ALLOWED_PRINCIPALS
-        or principal_key in {"system", "builtin\\administrators"}
-        or principal_key.endswith(
-            ("nt authority\\system", "builtin\\administrators")
-        )
+    return any(
+        principal_key == allowed or principal_key.endswith(f" {allowed}")
+        for allowed in _WINDOWS_DACLS_ALLOWED_PRINCIPALS
     )
 
 

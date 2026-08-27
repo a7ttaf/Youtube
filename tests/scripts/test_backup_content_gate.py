@@ -3903,6 +3903,50 @@ def test_publish_staging_run_quarantine_survives_a_taken_rejected_name(
     assert "could not quarantine to" in message
 
 
+def test_publish_quarantines_when_a_strict_acl_refusal_raises_backuperror(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A strict-ACL refusal arrives as BackupError, not OSError.
+
+    ``_restrict_run_dir_mode(..., strict=True)`` raises BackupError when icacls
+    is missing, fails, or reports a permissive DACL. The staging directory has
+    already been renamed by then, so if that escapes the handler the run stays
+    under its accepted ``ums-backup-...Z`` name and later watermark scans and
+    restores treat an explicitly-failed, potentially exposed backup as valid.
+
+    The sibling quarantine tests both fail via OSError, so narrowing the
+    handler back to ``except OSError`` leaves them green while reopening this
+    hole. This is the arm that goes red.
+    """
+    staging = tmp_path / "accepted-run.partial"
+    staging.mkdir()
+    for name in (backup.DUMP_NAME, backup.ROLES_NAME, backup.MANIFEST_NAME):
+        (staging / name).write_bytes(b"x")
+    destination = tmp_path / "accepted-run"
+
+    def _refuse(path: Path, out_dir: Path, *, strict: bool = False) -> None:
+        """Fail exactly the way a permissive Windows DACL does."""
+        if strict:
+            raise backup.BackupError(
+                backup.EXIT_ARTIFACT_INVALID,
+                f"could not restrict {path} to owner-only permissions; "
+                "refusing to publish to an insecure destination",
+            )
+
+    monkeypatch.setattr(backup, "_restrict_run_dir_mode", _refuse)
+
+    with pytest.raises(backup.BackupError):
+        backup._publish_staging_run(staging, destination, tmp_path)
+
+    assert not destination.exists(), (
+        "a strict-ACL refusal must not leave the run under its accepted name"
+    )
+    quarantined = [
+        p for p in tmp_path.iterdir() if backup.REJECTED_SUFFIX in p.name and p.is_dir()
+    ]
+    assert len(quarantined) == 1, "the refused run must be quarantined, not published"
+
+
 def test_run_is_published_backup_requires_artifact_metadata(tmp_path: Path) -> None:
     """Two nonempty artifact files alone must not read as a published backup;
     hand-planted manifests without recorded bytes/sha256 previously poisoned
@@ -4032,6 +4076,56 @@ def test_windows_dacl_parser_fail_closed() -> None:
 
     secure_listing = "\n".join(["accepted-run", "desktop\\winuser:(F)"])
     assert backup._windows_dacl_problems(secure_listing, "winuser") == []
+
+
+def test_windows_dacl_rejects_lookalike_infrastructure_principals() -> None:
+    """A domain account whose LEAF name is SYSTEM or OWNER RIGHTS is not infra.
+
+    The allowlist used to match the basename after the last backslash, so
+    ``CORP\\SYSTEM:(R)`` -- and ``EVIL\\SYSTEM:(F)``, full control -- were
+    reported as an owner-only DACL. A complete finance/audit/authorization
+    backup was then published as secure while that identity could still read
+    it. Only whole identities may match.
+    """
+    for ace in ("CORP\\SYSTEM:(R)", "CORP\\OWNER RIGHTS:(R)", "EVIL\\SYSTEM:(F)"):
+        listing = "\n".join(["accepted-run", "desktop\\winuser:(F)", ace])
+        assert backup._windows_dacl_problems(listing, "winuser"), (
+            f"{ace} must be flagged, not allowlisted as infrastructure"
+        )
+
+    # The genuine fully-qualified principals must still pass, or every healthy
+    # nightly backup on Windows would be quarantined instead.
+    for ace in (
+        "NT AUTHORITY\\SYSTEM:(F)",
+        "BUILTIN\\Administrators:(F)",
+        "OWNER RIGHTS:(RC)",
+    ):
+        listing = "\n".join(["accepted-run", "desktop\\winuser:(F)", ace])
+        assert backup._windows_dacl_problems(listing, "winuser") == [], (
+            f"{ace} is standard Windows infrastructure and must be accepted"
+        )
+
+
+def test_windows_dacl_accepts_the_owner_on_the_merged_echoed_path_row() -> None:
+    """icacls fuses the run-dir path onto its FIRST ACE row.
+
+    ``_parse_icacls_listing_line`` keeps that path attached to the principal,
+    so the owner is recognised by suffix rather than equality. Pinning it here
+    because the whole-identity allowlist above must not turn that valid row
+    into a false quarantine of a healthy backup.
+    """
+    merged = "C:\\backups\\ums-backup-20260827T000000Z DESKTOP\\winuser:(OI)(CI)(F)"
+    assert backup._windows_dacl_problems(merged, "winuser") == []
+
+    # A merged SYSTEM row is infrastructure, not an unexpected principal: the
+    # only complaint may be the missing owner grant, never the SYSTEM ACE.
+    merged_system = "C:\\backups\\ums-backup-20260827T000000Z NT AUTHORITY\\SYSTEM:(F)"
+    assert backup._windows_dacl_problems(merged_system, "winuser") == [
+        "no explicit Full-control grant for 'winuser' was found"
+    ]
+
+    with_owner = "\n".join([merged_system, "desktop\\winuser:(F)"])
+    assert backup._windows_dacl_problems(with_owner, "winuser") == []
 
     # A stranger carrying Full control (not just a restricted ACE) must hit
     # the dedicated non-owner refusal, and the missing owner grant stays
