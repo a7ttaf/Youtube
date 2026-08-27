@@ -121,15 +121,30 @@ def _backup_superuser_psql(superuser: str = "ums"):
     return fake_psql
 
 
-def _restore_psql(*, superuser: str = "ums", present: list[str] | None = None):
-    """Return a psql stub for restore tests with superuser and role-catalog answers."""
+def _restore_psql(
+    *,
+    superuser: str = "ums",
+    present: list[str] | None = None,
+    memberships: list[str] | None = None,
+):
+    """Return a psql stub answering each read-only query _restore_roles makes.
+
+    ``memberships`` models ``ROLE_MEMBERSHIPS_SQL`` -- the post-apply assertion
+    that an application role is a member of nothing. It defaults to EMPTY,
+    which is the healthy cluster; a test that wants that failure passes the
+    edges explicitly. Answering it from the role list, as the single catch-all
+    branch used to, made every caller look like a compromised cluster.
+    """
     roles = list(restore.REQUIRED_ROLES) if present is None else list(present)
+    edges = list(memberships or [])
 
     def fake_psql(_container: str, sql: str, *, timeout: int) -> str:
-        """Answer ``current_user`` or the configured required-role catalog."""
+        """Answer ``current_user``, the membership graph, or the role catalog."""
         _ = (_container, timeout)
         if "current_user" in sql:
             return superuser
+        if "pg_auth_members" in sql:
+            return ("\n".join(edges) + "\n") if edges else ""
         return "\n".join(roles) + "\n"
 
     return fake_psql
@@ -4097,6 +4112,52 @@ def test_restore_preflight_refuses_a_role_membership_for_an_app_role(
     assert restore._role_privilege_drift_problems("GRANT postgres TO app_tenant;\n") == []
 
 
+def test_restore_refuses_a_membership_the_target_cluster_already_had(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The dangerous edge is not always IN the archive -- it can predate it.
+
+    Memberships are cluster-global. Dropping and recreating the DATABASE does
+    not remove a ``pg_auth_members`` row, and a clean ``roles.sql`` carries no
+    REVOKE for an edge only the TARGET has. So restoring a perfectly clean
+    archive into a cluster where ``app_tenant`` had already been granted the
+    bootstrap superuser used to report SUCCESS while the lane kept that role's
+    object privileges -- table-owner rights included, with no attribute change
+    anywhere for the drift gate to see.
+
+    The text scanner cannot reach this: the edge is not in the file. Only a
+    catalog assertion after the replay can, which is what this pins.
+    """
+    monkeypatch.setattr(
+        restore,
+        "_run_with_file",
+        lambda *_a, **_k: subprocess.CompletedProcess([], 0, "", ""),
+    )
+    clean = tmp_path / restore.ROLES_NAME
+    clean.write_text(_REAL_ROLES_SQL, encoding="utf-8")
+
+    # A healthy cluster: the archive is clean AND the graph is clean.
+    monkeypatch.setattr(restore, "_psql", _restore_psql(superuser="postgres"))
+    assert "app_tenant" in restore._restore_roles("fake", clean, timeout=5)
+
+    # The SAME clean archive, into a cluster that already carried the edge.
+    monkeypatch.setattr(
+        restore,
+        "_psql",
+        _restore_psql(superuser="postgres", memberships=["app_tenant -> postgres"]),
+    )
+    with pytest.raises(restore.RestoreError) as raised:
+        restore._restore_roles("fake", clean, timeout=5)
+    assert raised.value.code == restore.EXIT_ROLES_FAILED
+    assert "app_tenant -> postgres" in str(raised.value)
+    assert "cluster-global" in str(raised.value)
+
+    # The query must ask about the MEMBER side. A login being a member of a
+    # lane is the deployed restricted-login model and must not trip this.
+    assert "pg_auth_members" in restore.ROLE_MEMBERSHIPS_SQL
+    assert "m.rolname IN ('app_tenant', 'app_platform')" in restore.ROLE_MEMBERSHIPS_SQL
+
+
 def test_backup_refuses_to_publish_a_role_membership_for_an_app_role() -> None:
     """The publish gate was blind in exactly the same way the restore gate was.
 
@@ -4244,6 +4305,12 @@ def test_roles_sql_gate_refuses_psql_meta_commands(
         "include": _BOTH_APP_ROLES + "\\i /etc/passwd\n",
         "copy": _BOTH_APP_ROLES + "\\copy pg_authid TO '/tmp/authid'\n",
         "a lookalike of an allowed name": _BOTH_APP_ROLES + "\\restrictfoo TOK\n",
+        # psql does NOT treat a second backslash as a command separator --
+        # MEASURED, it reports `invalid command \` and runs nothing -- so
+        # this is defence in depth, not a live bypass. Only the FIRST name
+        # on the line is allowlisted, and a real nonce is alphanumeric.
+        "an allowed name carrying a second backslash": _BOTH_APP_ROLES
+        + "\\unrestrict tok \\\\ \\! id\n",
     }
     for index, (label, body) in enumerate(refused.items()):
         assert restore._role_sql_meta_command_problems(body) != [], label
@@ -4304,6 +4371,26 @@ def test_roles_sql_gate_refuses_statements_pg_dumpall_never_emits(
         "a rename out of a protected name": _BOTH_APP_ROLES
         + "ALTER ROLE app_tenant RENAME TO app_tenant_old;\n",
         "SET ROLE": _BOTH_APP_ROLES + "SET ROLE postgres;\n",
+        # The verb allowlist admits DROP ROLE; nothing looked at WHAT was
+        # dropped, so under --allow-nonempty the target was already gone by
+        # the time the role vanished and the post-apply check refused.
+        "DROP of a protected role": _BOTH_APP_ROLES
+        + "DROP ROLE app_tenant;\n",
+        "DROP IF EXISTS of a protected role": _BOTH_APP_ROLES
+        + "DROP ROLE IF EXISTS app_platform;\n",
+        # pg_dumpall emits no RENAME at all. Refusing only renames that
+        # NAMED an app role left the bootstrap superuser renameable, which
+        # invalidates POSTGRES_USER for every later connection while the
+        # post-apply check still passes.
+        "a rename of the bootstrap superuser": _BOTH_APP_ROLES
+        + "ALTER ROLE ums_admin RENAME TO retired;\n",
+        # An object grant, so the membership gate ignores it by design, and
+        # it names no attribute, so the drift gate cannot see it -- but it
+        # hands the lane a GUC that loads code at login.
+        "a parameter ACL on a code-loading GUC": _BOTH_APP_ROLES
+        + "GRANT SET ON PARAMETER session_preload_libraries TO app_tenant;\n",
+        "the ALTER SYSTEM form of the same": _BOTH_APP_ROLES
+        + "GRANT ALTER SYSTEM ON PARAMETER local_preload_libraries TO app_platform;\n",
         # SET SESSION AUTHORIZATION is three words; SET
         # session_authorization is TWO, because the underscore form is a
         # single token. Both change who the rest of the file runs as.
@@ -4374,8 +4461,11 @@ def test_roles_sql_gate_refuses_statements_pg_dumpall_never_emits(
         "COMMENT ON ROLE app_tenant IS 'lane';\n",
         "SECURITY LABEL FOR anon ON ROLE app_tenant IS 'MASKED';\n",
         "GRANT ALTER SYSTEM ON PARAMETER shared_buffers TO app_tenant;\n",
+        # A code-loading GUC granted to the BOOTSTRAP SUPERUSER is fine --
+        # it already has it; only the protected roles are constrained.
+        "GRANT SET ON PARAMETER session_preload_libraries TO postgres;\n",
         "REVOKE app_tenant FROM app_platform;\n",
-        "DROP ROLE IF EXISTS app_tenant;\n",
+        "DROP ROLE IF EXISTS some_other_role;\n",
     ):
         assert restore._unsupported_role_statement_problems(allowed) == [], allowed
         assert backup._unsupported_role_statement_problems(allowed) == [], allowed
@@ -4437,6 +4527,7 @@ def test_restore_and_backup_share_one_role_sql_gate() -> None:
         "_role_membership_problems",
         "_role_sql_setting_name",
         "_role_sql_statement_is_role_shaped",
+        "_unsafe_parameter_grant_problem",
         "_role_ddl_statement_problem",
         "_unsupported_role_statement_problem",
         "_unsupported_role_statement_problems",

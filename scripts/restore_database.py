@@ -126,6 +126,26 @@ ROLES_PRESENT_SQL = (
     "SELECT rolname FROM pg_catalog.pg_roles "
     "WHERE rolname IN ('app_tenant', 'app_platform') ORDER BY rolname;"
 )
+# FIX: the presence check above reads role NAMES only, so it cannot see the
+# authorization graph. Dropping and recreating the DATABASE does not remove a
+# cluster-global pg_auth_members edge, and a clean roles.sql carries no REVOKE
+# for a membership only the TARGET has -- so restoring a clean archive into a
+# cluster where app_tenant had already been granted the bootstrap superuser
+# reported success while the app role kept table-owner rights. The text gate
+# on roles.sql cannot help: the edge is not in the file.
+#
+# 20260608_0001 creates both roles with NOLOGIN and grants them nothing, and
+# its downgrade enumerates exactly this catalog to revoke memberships, so the
+# invariant is "an application role is a member of nothing". Logins are members
+# of THEM, which is the opposite direction and is not matched here.
+ROLE_MEMBERSHIPS_SQL = (
+    "SELECT m.rolname || ' -> ' || g.rolname "
+    "FROM pg_catalog.pg_auth_members am "
+    "JOIN pg_catalog.pg_roles m ON m.oid = am.member "
+    "JOIN pg_catalog.pg_roles g ON g.oid = am.roleid "
+    "WHERE m.rolname IN ('app_tenant', 'app_platform') "
+    "ORDER BY 1;"
+)
 # Count user objects across every non-system schema so a database that only
 # has tables/enums/functions/empty custom schemas cannot look empty and
 # bypass --allow-nonempty.
@@ -1050,6 +1070,15 @@ def _role_sql_meta_command_problems(body: str) -> list[str]:
         name = (match.group(1) if match is not None else "").lower()
         if name not in _ALLOWED_ROLE_SQL_META_COMMANDS:
             problems.append(statement)
+            continue
+        # Defence in depth. MEASURED: psql does NOT treat a second backslash on
+        # the line as a command separator -- `\unrestrict tok \\ \! id` makes it
+        # report `invalid command \` and run nothing. So this is not a live
+        # bypass. But only the FIRST name on the line is allowlisted above, and
+        # a real `\restrict`/`\unrestrict` nonce is alphanumeric, so refusing a
+        # further backslash costs nothing and removes the argument entirely.
+        if "\\" in statement[1:]:
+            problems.append(statement)
     return problems
 
 
@@ -1321,6 +1350,42 @@ def _role_sql_statement_is_role_shaped(words: list[str]) -> bool:
     return False
 
 
+def _unsafe_parameter_grant_problem(
+    statement: str, tokens: list[tuple[str, str]], words: list[str]
+) -> str | None:
+    """Refuse a parameter ACL handing a protected role a code-loading GUC.
+
+    FIX: ``GRANT SET ON PARAMETER session_preload_libraries TO app_tenant;`` is
+    an OBJECT grant, so the membership gate ignores it by design, and it names
+    no role attribute, so the drift gate cannot see it either. The verb
+    allowlist admits every GRANT because pg_dumpall really does emit a
+    ``-- Role privileges on configuration parameters`` section. Replayed, this
+    one lets the application role set a GUC that loads code at login -- exactly
+    the boundary ``_UNSAFE_ROLE_SETTINGS`` exists to hold.
+
+    Only the dangerous GUCs are refused, and only for the protected roles, so
+    the genuine section (``GRANT ALTER SYSTEM ON PARAMETER shared_buffers TO
+    app_tenant``) keeps restoring.
+    """
+    if "PARAMETER" not in words:
+        return None
+    at = _role_sql_word_index(tokens, "PARAMETER")
+    to = _role_sql_word_index(tokens, "TO")
+    if at is None or to is None or at + 1 >= len(tokens):
+        return None
+    setting = _role_sql_identifier(tokens[at + 1])
+    if setting not in _UNSAFE_ROLE_SETTINGS:
+        return None
+    grantees = {_role_sql_identifier(t) for t in tokens[to + 1 :]}
+    protected = sorted(grantees & set(_PROTECTED_APP_ROLES))
+    if protected:
+        return (
+            f"parameter ACL on {setting} for {', '.join(protected)} "
+            f"loads code at login: {statement}"
+        )
+    return None
+
+
 def _role_ddl_statement_problem(
     statement: str, tokens: list[tuple[str, str]], words: list[str]
 ) -> str | None:
@@ -1331,9 +1396,24 @@ def _role_ddl_statement_problem(
     for ``tokens[2]`` unguarded raised IndexError out of the preflight instead
     of refusing the file.
     """
+    # FIX: this used to refuse a RENAME only when it NAMED a protected role, so
+    # `ALTER ROLE <bootstrap superuser> RENAME TO x` was accepted -- it renames
+    # the configured POSTGRES_USER out from under every future application and
+    # operator connection, and the post-apply check only looks for the two app
+    # roles so the restore still reports success. pg_dumpall --roles-only emits
+    # no RENAME of any kind, which is the rule this gate is meant to enforce.
     if "RENAME" in words:
-        if any(_role_sql_identifier(t) in _PROTECTED_APP_ROLES for t in tokens):
-            return f"RENAME touching a protected role: {statement}"
+        return f"RENAME is not a statement pg_dumpall --roles-only emits: {statement}"
+    # FIX: the verb allowlist admits DROP ROLE, and nothing below looked at what
+    # was being dropped. `DROP ROLE app_tenant;` therefore passed the read-only
+    # preflight, and under --allow-nonempty the target was already destroyed by
+    # the time _restore_roles dropped the role and the post-apply presence check
+    # refused -- leaving an empty replacement database.
+    if words[0] == "DROP":
+        dropped = {_role_sql_identifier(t) for t in tokens[2:]}
+        protected = sorted(dropped & set(_PROTECTED_APP_ROLES))
+        if protected:
+            return f"DROP of protected role {', '.join(protected)}: {statement}"
         return None
     # FIX: this compared the RAW token to "ALL", so `ALTER ROLE all SET
     # statement_timeout TO '1ms'` -- which PostgreSQL applies to every role in
@@ -1375,6 +1455,8 @@ def _unsupported_role_statement_problem(statement: str) -> str | None:
     # command execution as the postgres OS user.
     if not _role_sql_statement_is_role_shaped(words):
         return f"statement pg_dumpall --roles-only never emits: {statement}"
+    if words[0] == "GRANT":
+        return _unsafe_parameter_grant_problem(statement, tokens, words)
     if words[0] not in {"CREATE", "ALTER", "DROP"} or words[1] not in _ROLE_SQL_ROLE_NOUNS:
         return None
     return _role_ddl_statement_problem(statement, tokens, words)
@@ -1689,6 +1771,23 @@ def _restore_roles(container: str, roles_path: Path, *, timeout: int) -> list[st
             f"{', '.join(missing)}. The dump's RLS policies and GRANT "
             "statements reference those roles, so restoring the data now "
             "would fail part-way and leave a half-populated database.",
+        )
+    # FIX: assert the graph, not just the names. See ROLE_MEMBERSHIPS_SQL --
+    # a membership the TARGET cluster already had survives DROP DATABASE and
+    # appears in no archive, so this is the only place it can be caught.
+    memberships = [
+        line.strip()
+        for line in _psql(container, ROLE_MEMBERSHIPS_SQL, timeout=timeout).splitlines()
+        if line.strip()
+    ]
+    if memberships:
+        raise RestoreError(
+            EXIT_ROLES_FAILED,
+            "after applying roles.sql an application role is a member of "
+            f"another role: {'; '.join(memberships)}. Memberships are "
+            "cluster-global, so this one predates the archive and survived the "
+            "database drop. It grants the lane the other role's object "
+            "privileges without any attribute change. REVOKE it and re-run.",
         )
     return present
 

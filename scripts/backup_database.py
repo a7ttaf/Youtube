@@ -1484,6 +1484,15 @@ def _role_sql_meta_command_problems(body: str) -> list[str]:
         name = (match.group(1) if match is not None else "").lower()
         if name not in _ALLOWED_ROLE_SQL_META_COMMANDS:
             problems.append(statement)
+            continue
+        # Defence in depth. MEASURED: psql does NOT treat a second backslash on
+        # the line as a command separator -- `\unrestrict tok \\ \! id` makes it
+        # report `invalid command \` and run nothing. So this is not a live
+        # bypass. But only the FIRST name on the line is allowlisted above, and
+        # a real `\restrict`/`\unrestrict` nonce is alphanumeric, so refusing a
+        # further backslash costs nothing and removes the argument entirely.
+        if "\\" in statement[1:]:
+            problems.append(statement)
     return problems
 
 
@@ -1755,6 +1764,42 @@ def _role_sql_statement_is_role_shaped(words: list[str]) -> bool:
     return False
 
 
+def _unsafe_parameter_grant_problem(
+    statement: str, tokens: list[tuple[str, str]], words: list[str]
+) -> str | None:
+    """Refuse a parameter ACL handing a protected role a code-loading GUC.
+
+    FIX: ``GRANT SET ON PARAMETER session_preload_libraries TO app_tenant;`` is
+    an OBJECT grant, so the membership gate ignores it by design, and it names
+    no role attribute, so the drift gate cannot see it either. The verb
+    allowlist admits every GRANT because pg_dumpall really does emit a
+    ``-- Role privileges on configuration parameters`` section. Replayed, this
+    one lets the application role set a GUC that loads code at login -- exactly
+    the boundary ``_UNSAFE_ROLE_SETTINGS`` exists to hold.
+
+    Only the dangerous GUCs are refused, and only for the protected roles, so
+    the genuine section (``GRANT ALTER SYSTEM ON PARAMETER shared_buffers TO
+    app_tenant``) keeps restoring.
+    """
+    if "PARAMETER" not in words:
+        return None
+    at = _role_sql_word_index(tokens, "PARAMETER")
+    to = _role_sql_word_index(tokens, "TO")
+    if at is None or to is None or at + 1 >= len(tokens):
+        return None
+    setting = _role_sql_identifier(tokens[at + 1])
+    if setting not in _UNSAFE_ROLE_SETTINGS:
+        return None
+    grantees = {_role_sql_identifier(t) for t in tokens[to + 1 :]}
+    protected = sorted(grantees & set(_PROTECTED_APP_ROLES))
+    if protected:
+        return (
+            f"parameter ACL on {setting} for {', '.join(protected)} "
+            f"loads code at login: {statement}"
+        )
+    return None
+
+
 def _role_ddl_statement_problem(
     statement: str, tokens: list[tuple[str, str]], words: list[str]
 ) -> str | None:
@@ -1765,9 +1810,24 @@ def _role_ddl_statement_problem(
     for ``tokens[2]`` unguarded raised IndexError out of the preflight instead
     of refusing the file.
     """
+    # FIX: this used to refuse a RENAME only when it NAMED a protected role, so
+    # `ALTER ROLE <bootstrap superuser> RENAME TO x` was accepted -- it renames
+    # the configured POSTGRES_USER out from under every future application and
+    # operator connection, and the post-apply check only looks for the two app
+    # roles so the restore still reports success. pg_dumpall --roles-only emits
+    # no RENAME of any kind, which is the rule this gate is meant to enforce.
     if "RENAME" in words:
-        if any(_role_sql_identifier(t) in _PROTECTED_APP_ROLES for t in tokens):
-            return f"RENAME touching a protected role: {statement}"
+        return f"RENAME is not a statement pg_dumpall --roles-only emits: {statement}"
+    # FIX: the verb allowlist admits DROP ROLE, and nothing below looked at what
+    # was being dropped. `DROP ROLE app_tenant;` therefore passed the read-only
+    # preflight, and under --allow-nonempty the target was already destroyed by
+    # the time _restore_roles dropped the role and the post-apply presence check
+    # refused -- leaving an empty replacement database.
+    if words[0] == "DROP":
+        dropped = {_role_sql_identifier(t) for t in tokens[2:]}
+        protected = sorted(dropped & set(_PROTECTED_APP_ROLES))
+        if protected:
+            return f"DROP of protected role {', '.join(protected)}: {statement}"
         return None
     # FIX: this compared the RAW token to "ALL", so `ALTER ROLE all SET
     # statement_timeout TO '1ms'` -- which PostgreSQL applies to every role in
@@ -1809,6 +1869,8 @@ def _unsupported_role_statement_problem(statement: str) -> str | None:
     # command execution as the postgres OS user.
     if not _role_sql_statement_is_role_shaped(words):
         return f"statement pg_dumpall --roles-only never emits: {statement}"
+    if words[0] == "GRANT":
+        return _unsafe_parameter_grant_problem(statement, tokens, words)
     if words[0] not in {"CREATE", "ALTER", "DROP"} or words[1] not in _ROLE_SQL_ROLE_NOUNS:
         return None
     return _role_ddl_statement_problem(statement, tokens, words)
