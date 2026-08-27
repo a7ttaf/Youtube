@@ -875,8 +875,12 @@ This will:
 
 1. re-hash `database.dump` and `roles.sql` against `manifest.json` and stop if either
    has rotted (exit `8`);
-2. `docker run` a disposable Postgres from the image recorded in the manifest, with
-   `POSTGRES_HOST_AUTH_METHOD=trust` and no published ports;
+2. `docker run` a disposable Postgres from the image recorded at backup time —
+   verified to still exist locally first — with `POSTGRES_HOST_AUTH_METHOD=trust`
+   and no published ports. Once that image has been pruned the rehearsal refuses
+   to start (exit `2`): pull a Postgres image yourself and pass
+   `--rehearse-image <reference>`. The manifest is unsigned, so its
+   `source.image` reference is never executed on its own authority;
 3. wait for the *real* server, not the initdb bootstrap server;
 4. apply **`roles.sql` first**, tolerating the expected
    `ERROR: role "ums" already exists` (`pg_dumpall` emits `CREATE ROLE` for the

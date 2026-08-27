@@ -126,17 +126,21 @@ def _restore_psql(
     superuser: str = "ums",
     present: list[str] | None = None,
     memberships: list[str] | None = None,
+    settings: list[str] | None = None,
 ):
     """Return a psql stub answering each read-only query _restore_roles makes.
 
     ``memberships`` models ``ROLE_MEMBERSHIPS_SQL`` -- the post-apply assertion
-    that an application role is a member of nothing. It defaults to EMPTY,
-    which is the healthy cluster; a test that wants that failure passes the
-    edges explicitly. Answering it from the role list, as the single catch-all
-    branch used to, made every caller look like a compromised cluster.
+    that an application role is a member of nothing. ``settings`` models
+    ``ROLE_SETTINGS_KEYS_SQL`` the same way, as ``role = guc`` lines. Both
+    default to EMPTY, which is the healthy cluster; a test that wants those
+    failures passes the lines explicitly. Answering them from the role list,
+    as the single catch-all branch used to, made every caller look like a
+    compromised cluster.
     """
     roles = list(restore.REQUIRED_ROLES) if present is None else list(present)
     edges = list(memberships or [])
+    gucs = list(settings or [])
 
     def fake_psql(_container: str, sql: str, *, timeout: int) -> str:
         """Answer ``current_user``, the membership graph, or the role catalog."""
@@ -145,6 +149,8 @@ def _restore_psql(
             return superuser
         if "pg_auth_members" in sql:
             return ("\n".join(edges) + "\n") if edges else ""
+        if "pg_db_role_setting" in sql:
+            return ("\n".join(gucs) + "\n") if gucs else ""
         return "\n".join(roles) + "\n"
 
     return fake_psql
@@ -2975,11 +2981,11 @@ class _FakeContainer:
 
     def _dump_database_and_count(
         self, _container: str, target: Path, *, timeout: int
-    ) -> tuple[dict[str, int], set[str]]:
+    ) -> tuple[dict[str, int], set[str], set[str]]:
         """dump database and count."""
         _ = timeout
         target.write_bytes(backup.CUSTOM_FORMAT_MAGIC + b"-fake-archive")
-        return dict(self.counts), set()
+        return dict(self.counts), set(), set()
 
     def _pg_restore_list(self, _container: str, _dump_path: Path, *, timeout: int) -> str:
         """Return a minimal pg_restore listing for fake CLI archives."""
@@ -3983,6 +3989,13 @@ def test_roles_sql_gate_accepts_real_pg_dumpall_output() -> None:
     lines are ``GRANT <privilege> ON PARAMETER <guc> TO <role>`` -- an OBJECT
     grant that names an application role. Reading those as memberships would
     refuse a file this repository's own backup publishes.
+
+    Round 22 removed the plain ``GRANT SELECT ON TABLE`` arm from this
+    corpus: pg_dumpall --roles-only never emits object grants outside the
+    parameter section, and replaying one as the bootstrap superuser is a
+    privilege escalation (codex round-21 P1). ``GRANT ... ON PARAMETER``
+    stays accepted above; everything else with an ON clause is refused in
+    ``test_object_grants_are_refused_on_both_sides``.
     """
     accepted = (
         ("the captured container-shape dump", _REAL_ROLES_SQL, "postgres"),
@@ -4001,11 +4014,6 @@ def test_roles_sql_gate_accepts_real_pg_dumpall_output() -> None:
         (
             "a parameter ACL granted to an app role",
             _BOTH_APP_ROLES + "GRANT SET ON PARAMETER work_mem TO app_platform;\n",
-            "postgres",
-        ),
-        (
-            "an object grant naming an app role",
-            _BOTH_APP_ROLES + "GRANT SELECT ON TABLE public.channels TO app_tenant;\n",
             "postgres",
         ),
         (
@@ -4527,6 +4535,7 @@ def test_restore_and_backup_share_one_role_sql_gate() -> None:
         "_role_membership_problems",
         "_role_sql_setting_name",
         "_role_sql_statement_is_role_shaped",
+        "_object_grant_problem",
         "_unsafe_parameter_grant_problem",
         "_role_ddl_statement_problem",
         "_unsupported_role_statement_problem",
@@ -5455,17 +5464,39 @@ def test_require_manifest_table_row_counts_accepts_exact_nonnegative_integers() 
     ) == {"public.channels": 12, "public.revenue_facts": 3456}
 
 
-def test_resolve_rehearsal_image_falls_back_when_id_missing(
+def test_resolve_rehearsal_image_refuses_manifest_fallback_when_id_pruned(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Pruned local image_id must fall back to the pullable source.image."""
+    """A pruned image_id must refuse the manifest, not run its source.image.
+
+    The old assertion here pinned the vulnerability itself: it required the
+    resolver to return the manifest's unsigned ``source.image`` digest once
+    the locally recorded config ID was gone. Anyone who could alter the
+    backup could therefore pick the image whose entrypoint runs as root in
+    the rehearsal container. The contract is now: no operator image and no
+    local config ID -> empty string, which ``_create_throwaway`` turns into
+    an EXIT_USAGE refusal.
+    """
     monkeypatch.setattr(restore, "_docker_image_exists", lambda *_a, **_k: False)
+    assert (
+        restore._resolve_rehearsal_image(
+            image_id="sha256:deadbeef", operator_image="", timeout=5
+        )
+        == ""
+    )
+
+
+def test_resolve_rehearsal_image_honors_operator_choice(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An explicit --rehearse-image wins even when the local ID still exists."""
+    monkeypatch.setattr(restore, "_docker_image_exists", lambda *_a, **_k: True)
     chosen = restore._resolve_rehearsal_image(
         image_id="sha256:deadbeef",
-        image="postgres:18-alpine@sha256:abc",
+        operator_image="postgres:18-alpine",
         timeout=5,
     )
-    assert chosen == "postgres:18-alpine@sha256:abc"
+    assert chosen == "postgres:18-alpine"
 
 
 def test_resolve_rehearsal_image_prefers_local_id(
@@ -5475,7 +5506,7 @@ def test_resolve_rehearsal_image_prefers_local_id(
     monkeypatch.setattr(restore, "_docker_image_exists", lambda *_a, **_k: True)
     chosen = restore._resolve_rehearsal_image(
         image_id="sha256:deadbeef",
-        image="postgres:18-alpine@sha256:abc",
+        operator_image="",
         timeout=5,
     )
     assert chosen == "sha256:deadbeef"
@@ -5656,3 +5687,265 @@ def test_the_ownership_check_never_swallows_the_run_s_own_failure(
     )
     assert lock_dir.is_dir(), "and the replacement lock is still not deleted"
     second.__exit__(None, None, None)
+
+
+# ==========================================================================
+# Round-22 wave: the five findings that landed on head 090865352 during the
+# handoff -- three Qodo items (bootstrap main() docstring contract, target-only
+# role settings surviving restore, --no-verify-dump publishing ownerless
+# backups) and two codex P1s (object GRANTs passing the verb allowlist,
+# --rehearse trusting the unsigned manifest's source.image).
+# ==========================================================================
+
+
+def test_object_grants_are_refused_on_both_sides() -> None:
+    """GRANT ... ON <object> must be refused; the two dumpable shapes pass.
+
+    The verb allowlist admitted every GRANT because pg_dumpall --roles-only
+    really emits memberships and parameter ACLs; ``GRANT EXECUTE ON FUNCTION
+    pg_catalog.pg_read_file(text) TO app_tenant`` was neither and still
+    passed every gate (codex round-21 P1).
+    """
+    for module in (restore, backup):
+        refused = "\n".join(
+            [
+                "GRANT EXECUTE ON FUNCTION pg_catalog.pg_read_file(text) TO app_tenant;",
+                "GRANT SELECT ON TABLE public.tenants TO app_tenant;",
+                "GRANT USAGE ON SCHEMA public TO app_platform;",
+                "GRANT ALL ON SEQUENCE public.tenants_id_seq TO app_tenant;",
+            ]
+        )
+        problems = module._unsupported_role_statement_problems(refused)
+        assert len(problems) == 4, (module.__name__, problems)
+        assert all("object GRANT" in problem for problem in problems)
+        # The two shapes pg_dumpall --roles-only actually emits keep passing,
+        # including a role genuinely named "ON" (quoted, so not the keyword).
+        accepted = "\n".join(
+            [
+                "GRANT app_platform TO ums WITH ADMIN OPTION;",
+                "GRANT SET ON PARAMETER work_mem TO app_platform;",
+                "GRANT ALTER SYSTEM ON PARAMETER shared_buffers TO app_tenant WITH GRANT OPTION;",
+                'GRANT "app_tenant" TO "ON";',
+            ]
+        )
+        assert module._unsupported_role_statement_problems(accepted) == []
+
+
+def test_restore_roles_resets_existing_protected_roles_before_replay(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A cluster that already has the app roles must be RESET ALL'd first.
+
+    Cluster-global role settings survive DROP DATABASE exactly like
+    memberships; without the normalization a target-only ``ALTER ROLE
+    app_tenant SET statement_timeout`` outlived the restore (Qodo round-21).
+    """
+    roles_path = tmp_path / restore.ROLES_NAME
+    roles_path.write_text(
+        "CREATE ROLE app_tenant;\nCREATE ROLE app_platform;\n", encoding="utf-8"
+    )
+    issued: list[str] = []
+
+    def recording_psql(_container: str, sql: str, *, timeout: int) -> str:
+        """Record every statement; answer as a healthy cluster."""
+        _ = timeout
+        issued.append(sql)
+        if "current_user" in sql:
+            return "ums"
+        if "pg_auth_members" in sql or "pg_db_role_setting" in sql:
+            return ""
+        return "app_tenant\napp_platform\n"
+
+    applied: list[str] = []
+
+    def fake_run_with_file(argv: list[str], *, timeout: int, source: Path) -> object:
+        """Record that the replay started; the reset must already be issued."""
+        _ = (argv, timeout, source)
+        applied.append("replay")
+        return subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(restore, "_psql", recording_psql)
+    monkeypatch.setattr(restore, "_run_with_file", fake_run_with_file)
+    assert restore._restore_roles("fake", roles_path, timeout=5) == [
+        "app_tenant",
+        "app_platform",
+    ]
+    reset_statements = [sql for sql in issued if "RESET ALL" in sql]
+    assert reset_statements == [
+        'ALTER ROLE "app_tenant" RESET ALL;\nALTER ROLE "app_platform" RESET ALL;\n'
+    ]
+    assert applied == ["replay"] and reset_statements
+
+
+def test_restore_roles_rejects_settings_the_file_does_not_declare(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A live target-only GUC on a protected role fails the restore closed."""
+    roles_path = tmp_path / restore.ROLES_NAME
+    roles_path.write_text(
+        "CREATE ROLE app_tenant;\nCREATE ROLE app_platform;\n", encoding="utf-8"
+    )
+    monkeypatch.setattr(
+        restore, "_psql", _restore_psql(settings=["app_tenant = statement_timeout"])
+    )
+    monkeypatch.setattr(
+        restore,
+        "_run_with_file",
+        lambda *_a, **_k: subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="", stderr=""
+        ),
+    )
+    with pytest.raises(restore.RestoreError) as caught:
+        restore._restore_roles("fake", roles_path, timeout=5)
+    assert caught.value.code == restore.EXIT_ROLES_FAILED
+    assert "app_tenant SET statement_timeout" in str(caught.value)
+    assert "roles.sql does not declare" in str(caught.value)
+
+
+def test_restore_roles_accepts_settings_the_file_declares(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A source role that genuinely carried a GUC keeps restoring.
+
+    pg_dumpall --roles-only emits ``ALTER ROLE app_tenant SET ...`` when the
+    SOURCE role had the setting; refusing every setting would reject genuine
+    archives, so the comparison is against the file's own declarations.
+    """
+    roles_path = tmp_path / restore.ROLES_NAME
+    roles_path.write_text(
+        "CREATE ROLE app_tenant;\n"
+        "ALTER ROLE app_tenant SET statement_timeout TO '2min';\n"
+        "CREATE ROLE app_platform;\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        restore, "_psql", _restore_psql(settings=["app_tenant = statement_timeout"])
+    )
+    monkeypatch.setattr(
+        restore,
+        "_run_with_file",
+        lambda *_a, **_k: subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="", stderr=""
+        ),
+    )
+    assert restore._restore_roles("fake", roles_path, timeout=5) == [
+        "app_tenant",
+        "app_platform",
+    ]
+
+
+def test_protected_role_setting_declarations_scopes_the_scan() -> None:
+    """Only cluster-level ALTER ROLE <protected> SET lines count as declared."""
+    declared = restore._protected_role_setting_declarations(
+        "ALTER ROLE app_tenant SET statement_timeout TO '1min';\n"
+        "ALTER ROLE app_platform SET work_mem = '64MB';\n"
+        "ALTER ROLE ums SET statement_timeout TO '1min';\n"
+        "ALTER ROLE app_tenant IN DATABASE ums SET work_mem = '64MB';\n"
+        "ALTER ROLE app_tenant WITH NOLOGIN;\n"
+        "ALTER ROLE \"app_tenant\" SET idle_in_transaction_session_timeout TO '1min';\n"
+    )
+    assert declared == {
+        "app_tenant": {"statement_timeout", "idle_in_transaction_session_timeout"},
+        "app_platform": {"work_mem"},
+    }
+
+
+def test_role_settings_sql_reads_only_cluster_level_rows() -> None:
+    """setdatabase = 0 only: per-database rows die with the replaced database."""
+    assert "setdatabase = 0" in restore.ROLE_SETTINGS_KEYS_SQL
+    assert "pg_db_role_setting" in restore.ROLE_SETTINGS_KEYS_SQL
+
+
+def test_owner_roles_sql_covers_every_dumped_owner_catalog() -> None:
+    """Owner collection must span every owner catalog pg_dump archives.
+
+    Mirrors the ACL-grantee corpus test: fragments pin the arms so a later
+    edit cannot quietly drop schemas, relations, types, procedures or large
+    objects -- and the pg_ exclusion keeps predefined roles out (Qodo #3).
+    """
+    sql = backup.OWNER_ROLES_SQL
+    for fragment in (
+        "n.nspowner",
+        "c.relowner",
+        "t.typowner",
+        "p.proowner",
+        "lm.lomowner",
+        "NOT LIKE 'pg\\_%'",
+    ):
+        assert fragment in sql, fragment
+
+
+def test_validate_dump_roles_covered_uses_snapshot_owners_without_a_listing() -> None:
+    """--no-verify-dump must no longer drop OWNER coverage (Qodo #3).
+
+    The TOC owner scan is skipped by contract under --no-verify-dump; the
+    snapshot owner query is now the owner source on that path, so an
+    undeclared owner refuses publication instead of publishing an archive
+    whose objects belong to a role roles.sql never declares.
+    """
+    declared = "CREATE ROLE app_tenant;\nCREATE ROLE app_platform;\n"
+    with pytest.raises(backup.BackupError) as caught:
+        backup._validate_dump_roles_covered(
+            listing=None,
+            roles_body=declared,
+            snapshot_owners={"orphan_owner"},
+        )
+    assert caught.value.code == backup.EXIT_ARTIFACT_INVALID
+    assert "orphan_owner" in str(caught.value)
+    # A declared owner passes, and an empty owner set does not weaken the
+    # other coverage arms.
+    backup._validate_dump_roles_covered(
+        listing=None, roles_body=declared, snapshot_owners={"app_tenant"}
+    )
+    backup._validate_dump_roles_covered(listing=None, roles_body=declared)
+
+
+def test_dump_listing_owner_collection_skips_predefined_roles() -> None:
+    """pg_database_owner (PG15+ public schema) exists on every cluster.
+
+    An archive's OWNER TO pg_* needs no CREATE ROLE, and a roles.sql
+    declaring one would itself be refused by the restore-side allowlist, so
+    counting them as referenced made genuine archives unpublishable.
+    """
+    listing = "\n".join(
+        [
+            "215; 1259 16393 SCHEMA - public pg_database_owner",
+            "216; 1259 16421 TABLE public tenants app_tenant",
+            "217; 1259 16422 TABLE DATA public tenants -",
+        ]
+    )
+    assert backup._roles_referenced_in_dump_listing(listing) == {"app_tenant"}
+
+
+def test_create_throwaway_refuses_when_no_image_remains(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A pruned image and no --rehearse-image must refuse, not run source.image."""
+    monkeypatch.setattr(restore, "_docker_image_exists", lambda *_a, **_k: False)
+    with pytest.raises(restore.RestoreError) as caught:
+        restore._create_throwaway(
+            {
+                "source": {
+                    "image": "attacker.example/evil:latest",
+                    "image_id": "sha256:deadbeef",
+                    "database": "ums",
+                    "superuser": "ums",
+                }
+            },
+            timeout=5,
+        )
+    assert caught.value.code == restore.EXIT_USAGE
+    message = str(caught.value)
+    assert "--rehearse-image" in message
+    assert "attacker.example" not in message, (
+        "the untrusted reference must not be echoed back"
+    )
+
+
+def test_rehearse_image_flag_requires_rehearse() -> None:
+    """--rehearse-image with another target mode is a usage error (exit 2)."""
+    with pytest.raises(SystemExit) as caught:
+        restore._parse_args(
+            ["--backup-dir", "x", "--container", "c", "--rehearse-image", "postgres:18"]
+        )
+    assert caught.value.code == 2

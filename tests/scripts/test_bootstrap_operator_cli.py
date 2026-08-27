@@ -1671,3 +1671,21 @@ def test_bootstrap_trims_a_padded_org_name(tmp_path):
         engine.dispose()
     assert "Padded Sector" in names
     assert "  Padded Sector  " not in names
+
+
+def test_main_docstring_documents_the_cli_contract() -> None:
+    """The public entrypoint must document argv, exit codes and failure handling.
+
+    ``main(argv) -> int`` is the module's public API; a one-line docstring
+    left callers to read the body to learn the contract (Qodo round-21).
+    """
+    doc = _load_script().main.__doc__ or ""
+    for required in (
+        "argv",
+        "sys.argv[1:]",
+        "Returns:",
+        "handled failure",
+        "credential-free",
+    ):
+        assert required in doc, required
+    assert "0 when" in doc and "2 for every handled failure" in doc

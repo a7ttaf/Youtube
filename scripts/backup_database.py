@@ -1065,22 +1065,79 @@ WHERE g.gid <> 0
 ORDER BY 1;
 """.strip()
 
+# Snapshot-time object OWNERS for roles.sql coverage. The pg_restore --list
+# owner scan is the only other owner source, and --no-verify-dump skips it by
+# contract, so under that flag an owner holding no explicit ACL (the common
+# case: plain ownership) escaped every coverage check and the run published
+# even though restoring the archive would fail when it re-created objects
+# owned by a role roles.sql never declared. Collected on the same held
+# REPEATABLE READ snapshot as the dump, so a role dropped between the two
+# captures cannot hide. Predefined ``pg_`` roles are excluded: they exist on
+# every cluster (pg_database_owner owns the public schema on PG15+), so the
+# archive's OWNER TO them restores with no CREATE ROLE -- and a roles.sql
+# declaring one would itself be refused by the restore-side allowlist.
+OWNER_ROLES_SQL = """
+SELECT DISTINCT r.rolname
+FROM (
+  SELECT n.nspowner AS owner_oid
+  FROM pg_catalog.pg_namespace n
+  WHERE n.nspname NOT IN ('pg_catalog', 'information_schema', 'pg_toast')
+    AND n.nspname NOT LIKE 'pg\\_temp\\_%' ESCAPE '\\'
+    AND n.nspname NOT LIKE 'pg\\_toast\\_temp\\_%' ESCAPE '\\'
+  UNION ALL
+  SELECT c.relowner
+  FROM pg_catalog.pg_class c
+  JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+  WHERE n.nspname NOT IN ('pg_catalog', 'information_schema', 'pg_toast')
+    AND n.nspname NOT LIKE 'pg\\_temp\\_%' ESCAPE '\\'
+    AND n.nspname NOT LIKE 'pg\\_toast\\_temp\\_%' ESCAPE '\\'
+    AND c.relkind IN ('r', 'p', 'v', 'm', 'S', 'f')
+  UNION ALL
+  SELECT t.typowner
+  FROM pg_catalog.pg_type t
+  JOIN pg_catalog.pg_namespace n ON n.oid = t.typnamespace
+  WHERE n.nspname NOT IN ('pg_catalog', 'information_schema')
+    AND n.nspname NOT LIKE 'pg\\_temp\\_%' ESCAPE '\\'
+  UNION ALL
+  SELECT p.proowner
+  FROM pg_catalog.pg_proc p
+  JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace
+  WHERE n.nspname NOT IN ('pg_catalog', 'information_schema')
+  UNION ALL
+  SELECT lm.lomowner
+  FROM pg_catalog.pg_largeobject_metadata lm
+) o
+JOIN pg_catalog.pg_roles r ON r.oid = o.owner_oid
+WHERE r.rolname NOT LIKE 'pg\\_%'
+ORDER BY 1;
+""".strip()
+
 
 def _dump_database_and_count(
     container: str, target: Path, *, timeout: int
-) -> tuple[dict[str, int], set[str]]:
-    """Dump the database; return row counts and ACL grantees from the same snapshot."""
+) -> tuple[dict[str, int], set[str], set[str]]:
+    """Dump the database; return counts, ACL grantees and owners from the snapshot."""
     with _held_repeatable_read_session(container, timeout=timeout) as (snapshot, run_sql):
         _dump_database(container, target, timeout=timeout, snapshot=snapshot)
         acl_grantees = _parse_role_name_lines(run_sql(ACL_GRANTEE_SQL))
+        # FIX: owners are collected HERE, on the same held snapshot, so
+        # --no-verify-dump (which never runs pg_restore --list) can no longer
+        # publish an archive whose objects belong to a role roles.sql does
+        # not declare -- the TOC scan was previously the ONLY owner source,
+        # and an owner holding no explicit ACL appeared in none of them.
+        snapshot_owners = _parse_role_name_lines(run_sql(OWNER_ROLES_SQL))
         raw_tables = run_sql(
             "SELECT tablename FROM pg_catalog.pg_tables "
             "WHERE schemaname = 'public' ORDER BY tablename;"
         )
         tables = [line.strip() for line in raw_tables.splitlines() if line.strip()]
         if not tables:
-            return {}, acl_grantees
-        return _parse_counts_output(run_sql(_count_sql_for_tables(tables))), acl_grantees
+            return {}, acl_grantees, snapshot_owners
+        return (
+            _parse_counts_output(run_sql(_count_sql_for_tables(tables))),
+            acl_grantees,
+            snapshot_owners,
+        )
 
 
 # ============================================================================
@@ -1157,7 +1214,12 @@ def _roles_referenced_in_dump_listing(listing: str) -> set[str]:
         if not stripped or stripped.startswith(";") or not stripped[0].isdigit():
             continue
         owner = stripped.rsplit(None, 1)[-1]
-        if owner != "-":
+        # FIX: predefined ``pg_`` roles (pg_database_owner owns the public
+        # schema on PG15+) exist on every cluster -- an archive's OWNER TO
+        # them restores with no CREATE ROLE, and a roles.sql declaring one
+        # would itself be refused by the restore-side allowlist, so counting
+        # them as referenced made genuine archives unpublishable.
+        if owner != "-" and not owner.startswith("pg_"):
             roles.add(owner)
     return roles
 
@@ -1764,6 +1826,30 @@ def _role_sql_statement_is_role_shaped(words: list[str]) -> bool:
     return False
 
 
+def _object_grant_problem(statement: str, tokens: list[tuple[str, str]]) -> str | None:
+    """Refuse a GRANT whose target is an object, not a role or a GUC.
+
+    FIX: the verb allowlist admits every GRANT because pg_dumpall --roles-only
+    really emits two GRANT sections -- role memberships (``GRANT app_platform
+    TO postgres WITH ADMIN OPTION``) and parameter ACLs (``GRANT SET ON
+    PARAMETER work_mem TO app_platform``). ``GRANT EXECUTE ON FUNCTION
+    pg_catalog.pg_read_file(text) TO app_tenant;`` is neither, yet it passed
+    every gate: it names no role attribute, it is not a membership edge, and
+    the parameter gate only judges statements that name PARAMETER. Replayed
+    by the bootstrap superuser it hands the tenant lane permanent
+    server-file reads while the restore reports success. The two dumpable
+    shapes are exactly ``no ON at all`` and ``ON PARAMETER``; any other ON
+    clause targets an object.
+    """
+    on = _role_sql_word_index(tokens, "ON")
+    if on is None:
+        return None
+    after = tokens[on + 1] if on + 1 < len(tokens) else ("other", "")
+    if after[0] == "word" and after[1].upper() == "PARAMETER":
+        return None
+    return f"object GRANT is not a role membership or parameter ACL: {statement}"
+
+
 def _unsafe_parameter_grant_problem(
     statement: str, tokens: list[tuple[str, str]], words: list[str]
 ) -> str | None:
@@ -1870,6 +1956,14 @@ def _unsupported_role_statement_problem(statement: str) -> str | None:
     if not _role_sql_statement_is_role_shaped(words):
         return f"statement pg_dumpall --roles-only never emits: {statement}"
     if words[0] == "GRANT":
+        # FIX: the parameter gate below only judges statements naming
+        # PARAMETER, so every other object grant -- GRANT EXECUTE ON FUNCTION
+        # pg_catalog.pg_read_file(text) TO app_tenant included -- sailed
+        # through the verb allowlist. _object_grant_problem admits only the
+        # two shapes pg_dumpall --roles-only emits and refuses the rest.
+        object_grant = _object_grant_problem(statement, tokens)
+        if object_grant is not None:
+            return object_grant
         return _unsafe_parameter_grant_problem(statement, tokens, words)
     if words[0] not in {"CREATE", "ALTER", "DROP"} or words[1] not in _ROLE_SQL_ROLE_NOUNS:
         return None
@@ -2036,18 +2130,26 @@ def _created_role_names(body: str) -> list[str]:
 
 
 def _validate_dump_roles_covered(
-    *, listing: str | None, roles_body: str, acl_grantees: set[str] | None = None
+    *,
+    listing: str | None,
+    roles_body: str,
+    acl_grantees: set[str] | None = None,
+    snapshot_owners: set[str] | None = None,
 ) -> None:
     """Refuse a backup when the archive references roles absent from roles.sql.
 
     Args:
         listing: ``pg_restore --list`` output, or None under ``--no-verify-dump``.
             None skips only the TOC-derived owner scan; it never relaxes the
-            privilege-drift check or the snapshot ACL-grantee coverage check,
-            both of which read sources the TOC listing is not needed for.
+            privilege-drift check, the snapshot ACL-grantee coverage check or
+            the snapshot owner-coverage check, all of which read sources the
+            TOC listing is not needed for.
         roles_body: Contents of ``roles.sql`` as captured by ``_dump_roles``.
         acl_grantees: Grantee roles collected from the dump snapshot via
             ``ACL_GRANTEE_SQL``. Independent of the TOC listing.
+        snapshot_owners: Owner roles collected from the dump snapshot via
+            ``OWNER_ROLES_SQL``. Under ``--no-verify-dump`` this is the only
+            owner source, so owner coverage no longer depends on the flag.
 
     Raises:
         BackupError: On drifted privileges, or on a referenced role that
@@ -2114,6 +2216,11 @@ def _validate_dump_roles_covered(
     referenced = _roles_referenced_in_dump_listing(listing) if listing is not None else set()
     if acl_grantees:
         referenced |= acl_grantees
+    # FIX: --no-verify-dump skips the TOC owner scan by contract, so the
+    # snapshot owner query is the only owner source on that path; folding it
+    # into the same union means the flag no longer drops owner coverage.
+    if snapshot_owners:
+        referenced |= snapshot_owners
     missing = sorted(
         role for role in referenced if not _role_declared_in_roles_sql(roles_body, role)
     )
@@ -4758,9 +4865,11 @@ def run_backup(args: argparse.Namespace, out_dir: Path) -> BackupOutcome:
         # Capture the archive first, then roles.sql. Role DDL committed after a
         # pre-dump roles capture but before the snapshot would otherwise leave
         # ACL/owner references in database.dump with no matching CREATE ROLE.
-        # FIX: Collect ACL grantees on the dump snapshot; TOC ACL lines only
-        # name the object owner, so a dropped grantee still fails closed here.
-        counts, acl_grantees = _dump_database_and_count(
+        # FIX: Collect ACL grantees AND object owners on the dump snapshot;
+        # TOC ACL lines only name the object owner, and --no-verify-dump never
+        # reads the TOC at all, so a dropped grantee or owner still fails
+        # closed here on both paths.
+        counts, acl_grantees, snapshot_owners = _dump_database_and_count(
             container, staging / DUMP_NAME, timeout=args.timeout
         )
         roles = _dump_roles(
@@ -4773,9 +4882,10 @@ def run_backup(args: argparse.Namespace, out_dir: Path) -> BackupOutcome:
         # verification runs: skipping them would let LOGIN/SUPERUSER/BYPASSRLS
         # drift reach restore under --no-verify-dump (round-9 review P1).
         # FIX: those checks do NOT need the TOC listing -- privilege drift reads
-        # roles.sql and grantee coverage reads the dump snapshot -- so honoring
-        # --no-verify-dump here keeps both enforced while the flag once again
-        # means what it documents: pg_restore --list is not run at all.
+        # roles.sql and grantee/owner coverage read the dump snapshot -- so
+        # honoring --no-verify-dump here keeps all of them enforced while the
+        # flag once again means what it documents: pg_restore --list is not
+        # run at all.
         dump_listing = (
             _pg_restore_list(container, staging / DUMP_NAME, timeout=args.timeout)
             if args.verify_dump
@@ -4785,6 +4895,7 @@ def run_backup(args: argparse.Namespace, out_dir: Path) -> BackupOutcome:
             listing=dump_listing,
             roles_body=(staging / ROLES_NAME).read_text(encoding="utf-8", errors="replace"),
             acl_grantees=acl_grantees,
+            snapshot_owners=snapshot_owners,
         )
         toc_entries = -1
         if dump_listing is not None:

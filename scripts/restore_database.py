@@ -13,10 +13,14 @@ before it will start the data restore.
 Two modes:
 
 ``--rehearse``
-    Create a throwaway Postgres container from the image recorded in the
-    manifest, restore into it, compare every table's row count against the
+    Create a throwaway Postgres container from the image recorded at backup
+    time, restore into it, compare every table's row count against the
     manifest, then destroy the container. Nothing existing is touched. This is
-    the drill; run it after the first real backup and then quarterly.
+    the drill; run it after the first real backup and then quarterly. The
+    recorded image must still exist locally (verified before the container
+    starts); once it has been pruned, pass ``--rehearse-image <reference>``
+    to name a replacement yourself. The manifest's ``source.image`` field is
+    unsigned and is never executed on its own authority.
 
 ``--container NAME``
     Restore into a container you name. Refuses a non-empty database unless
@@ -144,6 +148,24 @@ ROLE_MEMBERSHIPS_SQL = (
     "JOIN pg_catalog.pg_roles m ON m.oid = am.member "
     "JOIN pg_catalog.pg_roles g ON g.oid = am.roleid "
     "WHERE m.rolname IN ('app_tenant', 'app_platform') "
+    "ORDER BY 1;"
+)
+# FIX: like memberships, role-level GUC settings are CLUSTER-global -- DROP
+# DATABASE recreates nothing here. A target-only ``ALTER ROLE app_tenant SET
+# statement_timeout`` applied by hand on the target cluster therefore
+# survived every gate: replaying a clean roles.sql installs nothing over it,
+# and neither the presence check nor the membership check reads
+# pg_db_role_setting. The restore then reported success while the stale
+# setting kept breaking application queries. Cluster-level rows only
+# (setdatabase = 0): per-database rows die with the database this restore
+# just replaced, so they cannot be leftovers.
+ROLE_SETTINGS_KEYS_SQL = (
+    "SELECT r.rolname || ' = ' || split_part(setting, '=', 1) "
+    "FROM pg_catalog.pg_db_role_setting s "
+    "JOIN pg_catalog.pg_roles r ON r.oid = s.setrole "
+    "CROSS JOIN LATERAL unnest(s.setconfig) AS setting "
+    "WHERE s.setdatabase = 0 "
+    "AND r.rolname IN ('app_tenant', 'app_platform') "
     "ORDER BY 1;"
 )
 # Count user objects across every non-system schema so a database that only
@@ -555,16 +577,20 @@ def _await_postgres(container: str, *, wait_seconds: int, timeout: int) -> None:
 
 # ============================================================================
 # Purpose: Create the disposable container the rehearsal restores into, using
-#          the image, database name and superuser recorded at backup time.
+#          the locally verified image config ID recorded at backup time or an
+#          image the operator named with --rehearse-image, plus the database
+#          name and superuser recorded at backup time.
 # Database/ORM: Creates an empty cluster only.
 # Standards: POSTGRES_HOST_AUTH_METHOD=trust and no published ports, so the
 #            rehearsal needs no password anywhere and nothing on the host
 #            network can reach the container. The name carries a UTC stamp so
-#            two rehearsals cannot collide.
+#            two rehearsals cannot collide. The manifest is unsigned, so its
+#            source.image reference is never executed: only a locally
+#            verified image_id or an operator-typed --rehearse-image runs.
 # Blast Radius: Creates and destroys one container. Touches no existing
 #               container, volume, or compose project.
 # Connections:
-#   - File: scripts/backup_database.py -> records source.image,
+#   - File: scripts/backup_database.py -> records source.image_id,
 #     source.database and source.superuser in manifest.json.
 # ============================================================================
 
@@ -579,32 +605,49 @@ def _docker_image_exists(reference: str, *, timeout: int) -> bool:
     return completed.returncode == 0 and bool(completed.stdout.strip())
 
 
-def _resolve_rehearsal_image(*, image_id: str, image: str, timeout: int) -> str:
-    """Pick a runnable rehearsal image: local config ID, else pullable tag/digest."""
+def _resolve_rehearsal_image(*, image_id: str, operator_image: str, timeout: int) -> str:
+    """Pick the rehearsal image the OPERATOR chose, never the manifest.
+
+    FIX: this used to fall back to the manifest's ``source.image`` tag/digest
+    when the locally recorded config ID had been pruned. The manifest is
+    unsigned, so anyone who could alter or supply the backup could swap that
+    field for an attacker-controlled image and have its entrypoint executed
+    in a root container; ``--network none`` limits connectivity but not
+    CPU, memory or Docker-storage exhaustion. Only two authorities can
+    select the image now: the still-local recorded config ID (verified via
+    ``docker image inspect``) or an explicit ``--rehearse-image`` the
+    operator typed.
+    """
+    if operator_image:
+        return operator_image
     if image_id and _docker_image_exists(image_id, timeout=timeout):
         return image_id
-    if image:
-        return image
-    return image_id
+    return ""
 
 
-def _create_throwaway(manifest: dict[str, object], *, timeout: int) -> str:
-    """Start a disposable Postgres container from the backup manifest source."""
+def _create_throwaway(
+    manifest: dict[str, object], *, timeout: int, operator_image: str = ""
+) -> str:
+    """Start a disposable Postgres container from an operator-trusted image."""
     source = manifest.get("source")
     if not isinstance(source, dict):
         raise RestoreError(EXIT_USAGE, "manifest has no source block")
-    image = str(source.get("image") or "").strip()
     image_id = str(source.get("image_id") or "").strip()
-    # FIX: prefer a still-local image_id, else fall back to the pullable digest/tag
-    # recorded as source.image after prune/upgrade removed the config ID.
-    run_image = _resolve_rehearsal_image(image_id=image_id, image=image, timeout=timeout)
+    run_image = _resolve_rehearsal_image(
+        image_id=image_id, operator_image=operator_image, timeout=timeout
+    )
     database = str(source.get("database") or "")
     superuser = str(source.get("superuser") or "")
     if not run_image or not database or not superuser:
         raise RestoreError(
             EXIT_USAGE,
-            "manifest.source is missing image/image_id/database/superuser; pass "
-            "--container and restore into a container you prepared yourself",
+            "no runnable rehearsal image: the image recorded at backup time is "
+            "no longer present locally, and the manifest is unsigned, so its "
+            "source.image reference is never executed on its own authority. "
+            "Pull a Postgres image yourself and pass --rehearse-image "
+            "<reference>, or use --container with a container you prepared "
+            "yourself. (manifest.source otherwise lacks image_id, database or "
+            "superuser.)",
         )
     name = (
         THROWAWAY_PREFIX
@@ -1350,6 +1393,30 @@ def _role_sql_statement_is_role_shaped(words: list[str]) -> bool:
     return False
 
 
+def _object_grant_problem(statement: str, tokens: list[tuple[str, str]]) -> str | None:
+    """Refuse a GRANT whose target is an object, not a role or a GUC.
+
+    FIX: the verb allowlist admits every GRANT because pg_dumpall --roles-only
+    really emits two GRANT sections -- role memberships (``GRANT app_platform
+    TO postgres WITH ADMIN OPTION``) and parameter ACLs (``GRANT SET ON
+    PARAMETER work_mem TO app_platform``). ``GRANT EXECUTE ON FUNCTION
+    pg_catalog.pg_read_file(text) TO app_tenant;`` is neither, yet it passed
+    every gate: it names no role attribute, it is not a membership edge, and
+    the parameter gate only judges statements that name PARAMETER. Replayed
+    by the bootstrap superuser it hands the tenant lane permanent
+    server-file reads while the restore reports success. The two dumpable
+    shapes are exactly ``no ON at all`` and ``ON PARAMETER``; any other ON
+    clause targets an object.
+    """
+    on = _role_sql_word_index(tokens, "ON")
+    if on is None:
+        return None
+    after = tokens[on + 1] if on + 1 < len(tokens) else ("other", "")
+    if after[0] == "word" and after[1].upper() == "PARAMETER":
+        return None
+    return f"object GRANT is not a role membership or parameter ACL: {statement}"
+
+
 def _unsafe_parameter_grant_problem(
     statement: str, tokens: list[tuple[str, str]], words: list[str]
 ) -> str | None:
@@ -1456,6 +1523,14 @@ def _unsupported_role_statement_problem(statement: str) -> str | None:
     if not _role_sql_statement_is_role_shaped(words):
         return f"statement pg_dumpall --roles-only never emits: {statement}"
     if words[0] == "GRANT":
+        # FIX: the parameter gate below only judges statements naming
+        # PARAMETER, so every other object grant -- GRANT EXECUTE ON FUNCTION
+        # pg_catalog.pg_read_file(text) TO app_tenant included -- sailed
+        # through the verb allowlist. _object_grant_problem admits only the
+        # two shapes pg_dumpall --roles-only emits and refuses the rest.
+        object_grant = _object_grant_problem(statement, tokens)
+        if object_grant is not None:
+            return object_grant
         return _unsafe_parameter_grant_problem(statement, tokens, words)
     if words[0] not in {"CREATE", "ALTER", "DROP"} or words[1] not in _ROLE_SQL_ROLE_NOUNS:
         return None
@@ -1634,6 +1709,40 @@ def _foreign_roles_in_roles_sql(body: str, *, superuser: str) -> list[str]:
     return [name for name in _created_role_names(body) if name not in allowed]
 
 
+def _protected_role_setting_declarations(body: str) -> dict[str, set[str]]:
+    """Return the cluster-level GUC names roles.sql itself installs per role.
+
+    ``ALTER ROLE app_tenant SET statement_timeout TO '1ms';`` is a legitimate
+    pg_dumpall --roles-only line when the SOURCE role carried that setting, so
+    the post-apply validation in ``_restore_roles`` must compare the live
+    catalog against what the FILE declares -- refusing every setting would
+    reject genuine archives, and refusing none is exactly the hole the
+    RESET-ALL normalization below exists to close.
+    """
+    declared: dict[str, set[str]] = {}
+    for statement in _scan_role_sql(body):
+        if statement.startswith("\\"):
+            continue
+        tokens = _role_sql_tokens(statement)
+        if len(tokens) < 3:
+            continue
+        if tokens[0][0] != "word" or tokens[0][1].upper() != "ALTER":
+            continue
+        if tokens[1][0] != "word" or tokens[1][1].upper() not in _ROLE_SQL_ROLE_NOUNS:
+            continue
+        if _role_sql_word_index(tokens, "DATABASE") is not None:
+            # IN DATABASE settings are per-database rows; the cluster-level
+            # post-apply check never sees them and must not count them.
+            continue
+        role = _role_sql_identifier(tokens[2])
+        if role not in _PROTECTED_APP_ROLES:
+            continue
+        setting = _role_sql_setting_name(tokens)
+        if setting:
+            declared.setdefault(role, set()).add(setting)
+    return declared
+
+
 def _preflight_roles_file(container: str, roles_path: Path, *, timeout: int) -> None:
     """Validate roles.sql read-only, so it can run BEFORE anything destructive.
 
@@ -1732,6 +1841,24 @@ def _preflight_roles_file(container: str, roles_path: Path, *, timeout: int) -> 
 def _restore_roles(container: str, roles_path: Path, *, timeout: int) -> list[str]:
     """Apply roles.sql and return the required roles present afterward."""
     _preflight_roles_file(container, roles_path, timeout=timeout)
+    # FIX: cluster-global role settings survive DROP DATABASE just like
+    # memberships do, and a clean roles.sql carries no ALTER ROLE app_* SET
+    # line to overwrite a target-only leftover. RESET ALL on the protected
+    # roles BEFORE the replay makes the file the sole authority over their
+    # settings: whatever the replay declares is exactly what remains. Only
+    # roles that already exist are reset -- on a fresh cluster the CREATE
+    # ROLE lines in the file create them with no settings at all.
+    existing_protected = [
+        line.strip()
+        for line in _psql(container, ROLES_PRESENT_SQL, timeout=timeout).splitlines()
+        if line.strip()
+    ]
+    if existing_protected:
+        reset_lines = [
+            f"ALTER ROLE {_quote_identifier(role)} RESET ALL;"
+            for role in existing_protected
+        ]
+        _psql(container, "\n".join(reset_lines) + "\n", timeout=timeout)
     argv = _container_sh(
         container,
         'exec psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" --no-password -v ON_ERROR_STOP=0 -q -f -',
@@ -1788,6 +1915,35 @@ def _restore_roles(container: str, roles_path: Path, *, timeout: int) -> list[st
             "cluster-global, so this one predates the archive and survived the "
             "database drop. It grants the lane the other role's object "
             "privileges without any attribute change. REVOKE it and re-run.",
+        )
+    # FIX: belt and braces for the RESET-ALL normalization above. After it,
+    # the only settings that can remain are the ones the file itself
+    # declares, so anything extra means the normalization missed or the file
+    # installed something the scanner misparsed -- both fail closed here
+    # rather than reporting a successful restore over stale role settings.
+    declared = _protected_role_setting_declarations(
+        roles_path.read_text(encoding="utf-8", errors="replace")
+    )
+    live_settings: dict[str, set[str]] = {}
+    for line in _psql(container, ROLE_SETTINGS_KEYS_SQL, timeout=timeout).splitlines():
+        if not line.strip():
+            continue
+        role, _, key = line.strip().partition(" = ")
+        live_settings.setdefault(role, set()).add(key)
+    undeclared_settings = sorted(
+        f"{role} SET {key}"
+        for role, keys in live_settings.items()
+        for key in keys - declared.get(role, set())
+    )
+    if undeclared_settings:
+        raise RestoreError(
+            EXIT_ROLES_FAILED,
+            "after applying roles.sql the protected roles still carry "
+            "cluster-global settings roles.sql does not declare: "
+            f"{'; '.join(undeclared_settings)}. Role settings survive "
+            "DROP DATABASE, so these predate the archive or were installed "
+            "by something other than the replayed file. Clear them with "
+            "ALTER ROLE <role> RESET ALL and re-run.",
         )
     return present
 
@@ -2010,6 +2166,16 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         help="With --rehearse, leave the throwaway container running for inspection.",
     )
     parser.add_argument(
+        "--rehearse-image",
+        default=None,
+        help=(
+            "With --rehearse, run this image instead of the one recorded at "
+            "backup time. Required once the recorded image was pruned: the "
+            "manifest is unsigned, so its source.image reference is never "
+            "executed on its own authority."
+        ),
+    )
+    parser.add_argument(
         "--wait-for-postgres",
         type=int,
         default=300,
@@ -2027,7 +2193,10 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         default=120,
         help="Seconds allowed for each docker CLI call.",
     )
-    return parser.parse_args(argv)
+    parsed = parser.parse_args(argv)
+    if parsed.rehearse_image and not parsed.rehearse:
+        parser.error("--rehearse-image is only valid together with --rehearse")
+    return parsed
 
 
 # ============================================================================
@@ -2121,7 +2290,11 @@ def _prepare_restore_target(
 ) -> tuple[str, str | None]:
     """Resolve the restore container; return (container, throwaway_or_none)."""
     if args.rehearse:
-        throwaway = _create_throwaway(manifest, timeout=args.docker_timeout)
+        throwaway = _create_throwaway(
+            manifest,
+            timeout=args.docker_timeout,
+            operator_image=args.rehearse_image or "",
+        )
         print(f"rehearsal container: {throwaway}")
         return throwaway, throwaway
     container = _resolve_container(

@@ -1186,7 +1186,23 @@ def _print_org_summary(org_units: list[_OrgUnitOutcome]) -> None:
 #   - File: Docs/21_BETA_IMPLEMENTATION_PLAN.md -> P0.8 / P0.9.
 # ============================================================================
 def main(argv: list[str] | None = None) -> int:
-    """Bootstrap the operator identity and return the operator exit code."""
+    """Bootstrap the operator identity and return the process exit code.
+
+    Args:
+        argv: CLI argument list to parse. ``None`` reads ``sys.argv[1:]`` so
+            the shell invocation and any test/wrapper drive the exact same
+            parser; an empty list is honored as "no arguments".
+
+    Returns:
+        0 when the operator identity (and the optional ``--role`` grant and
+        ``--org-skeleton`` writes) committed and the runbook summary was
+        printed. 2 for every handled failure: invalid operator settings, a
+        missing database URL, an unusable SQLAlchemy URL / dialect / DBAPI
+        driver, a missing or inactive tenant, and the typed domain errors
+        translated by this entrypoint. Handled failures print a stable,
+        credential-free message on stderr and never raise; anything else
+        propagates and exits 1 via the Python default.
+    """
     args = _parse_args(argv if argv is not None else sys.argv[1:])
     deps = _load_dependencies()
     try:
