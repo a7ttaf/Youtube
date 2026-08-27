@@ -68,6 +68,7 @@ against a faked container and asserts the PROCESS outcome.
 from __future__ import annotations
 
 import ast
+import errno
 import importlib.util
 import json
 import os
@@ -77,7 +78,7 @@ import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import ModuleType
-from typing import Self
+from typing import Any, Self
 
 import pytest
 
@@ -2116,8 +2117,29 @@ def _no_status_backoff(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(backup.time, "sleep", lambda _seconds: None)
 
 
-def _unwritable(path: Path) -> None:
-    """Make one status file refuse writes, the way a share-mode lock does.
+def _unwritable(path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make one status file refuse writes, deterministically, on every platform.
+
+    FIX: this used to ``chmod(0o444)`` and ``pytest.skip`` when the bit did not
+    take. For uid 0 -- the default in most Linux CI containers -- ``os.access``
+    reports the file writable whatever the mode bits say, AND root's DAC
+    override means the write would have succeeded anyway, so skipping was the
+    honest branch. The cost was that every test below it silently vanished in
+    exactly the unattended environment whose durability contract they exist to
+    guard.
+
+    Every write to these status files reaches the filesystem through
+    ``Path.open`` in a write mode -- ``_append_log`` opens "a", and
+    ``_replace_status_file`` probe-opens "r+" before swapping the temp file in
+    -- so refusing that one call for this one path reproduces the real
+    ``PermissionError(EACCES)`` regardless of uid or filesystem. Reads fall
+    through, because a read-only file is still readable, and the temp aside and
+    the stamped sidecar are different paths, so those writes must still land.
+
+    ``Path.open`` is deliberately NOT one of the names ``_FakeContainer.install``
+    rebinds, so this stub survives ``_run_cli`` whichever is applied first --
+    a re-bind-after-monkeypatch helper is what made an earlier guard here
+    vacuous.
 
     Existing content is preserved on purpose: the defect is precisely that the
     PREVIOUS run's record survives, and a fixture that blanked it first would be
@@ -2125,24 +2147,36 @@ def _unwritable(path: Path) -> None:
     """
     if not path.exists():
         path.write_text("{}\n", encoding="utf-8")
-    path.chmod(0o444)
-    if os.access(path, os.W_OK):  # pragma: no cover - platform dependent
-        pytest.skip("this filesystem ignores the read-only bit")
+    target = path.resolve()
+    real_open = Path.open
+
+    def _refuse_writes(self: Path, *args: Any, **kwargs: Any) -> Any:
+        """Refuse writes to the one locked path, the way the OS would."""
+        mode = str(args[0]) if args else str(kwargs.get("mode", "r"))
+        if self.resolve() == target and any(f in mode for f in ("w", "a", "+", "x")):
+            raise PermissionError(errno.EACCES, "Permission denied", str(self))
+        return real_open(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", _refuse_writes)
 
 
-def test_an_unwritable_status_file_is_reported_not_swallowed(tmp_path: Path) -> None:
+def test_an_unwritable_status_file_is_reported_not_swallowed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Guard: test_an_unwritable_status_file_is_reported_not_swallowed."""
     backup._write_last_run(tmp_path, {"status": "OK", "exit_code": 0})
-    _unwritable(tmp_path / backup.LAST_RUN_NAME)
+    _unwritable(tmp_path / backup.LAST_RUN_NAME, monkeypatch)
 
     assert backup._write_last_run(tmp_path, {"status": "REJECTED", "exit_code": 8}) is False
 
 
 def test_this_runs_record_lands_in_a_stamped_sidecar_when_the_file_is_locked(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A NEW file name is the one write a lock on the canonical file cannot block."""
-    _unwritable(tmp_path / backup.LAST_RUN_NAME)
+    _unwritable(tmp_path / backup.LAST_RUN_NAME, monkeypatch)
     stamp = "20260801T020000Z"
 
     assert (
@@ -2159,11 +2193,12 @@ def test_this_runs_record_lands_in_a_stamped_sidecar_when_the_file_is_locked(
 
 def test_a_successful_run_whose_status_did_not_land_cannot_exit_zero(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The exit code is the one channel a file lock cannot block."""
     report = backup._RunReport(tmp_path, NOW)
     report.start()
-    _unwritable(tmp_path / backup.LAST_RUN_NAME)
+    _unwritable(tmp_path / backup.LAST_RUN_NAME, monkeypatch)
     report.finalise("line", {"status": "OK", "exit_code": 0})
 
     assert report.status_durable is False
@@ -2172,11 +2207,12 @@ def test_a_successful_run_whose_status_did_not_land_cannot_exit_zero(
 
 def test_escalation_never_overwrites_a_more_specific_failure_code(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Turning 8 into 7 would hide TOTAL DATA LOSS behind a bookkeeping message."""
     report = backup._RunReport(tmp_path, NOW)
     report.start()
-    _unwritable(tmp_path / backup.LAST_RUN_NAME)
+    _unwritable(tmp_path / backup.LAST_RUN_NAME, monkeypatch)
     report.finalise("line", {"status": "REJECTED", "exit_code": 8})
 
     assert report.status_durable is False
@@ -2193,11 +2229,14 @@ def test_a_run_whose_status_landed_normally_is_not_escalated(tmp_path: Path) -> 
     assert report.escalate(backup.EXIT_OK) == backup.EXIT_OK
 
 
-def test_an_unwritable_log_alone_is_enough_to_escalate(tmp_path: Path) -> None:
+def test_an_unwritable_log_alone_is_enough_to_escalate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """backup.log is half of the runbook's "every run writes" claim."""
     report = backup._RunReport(tmp_path, NOW)
     report.start()
-    _unwritable(tmp_path / backup.LOG_NAME)
+    _unwritable(tmp_path / backup.LOG_NAME, monkeypatch)
     report.finalise("line", {"status": "OK", "exit_code": 0})
 
     assert report.escalate(backup.EXIT_OK) == backup.EXIT_BOOKKEEPING_FAILED
@@ -2206,10 +2245,11 @@ def test_an_unwritable_log_alone_is_enough_to_escalate(tmp_path: Path) -> None:
 
 def test_a_failure_to_clear_the_previous_green_is_carried_to_the_exit_code(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The moment that matters most: until RUNNING lands, yesterday's OK stands."""
     backup._write_last_run(tmp_path, {"status": "OK", "exit_code": 0})
-    _unwritable(tmp_path / backup.LAST_RUN_NAME)
+    _unwritable(tmp_path / backup.LAST_RUN_NAME, monkeypatch)
 
     report = backup._RunReport(tmp_path, NOW)
     report.start()
@@ -3089,7 +3129,7 @@ def test_the_cli_escalates_a_published_run_whose_status_did_not_land(
     assert _run_cli(monkeypatch, tmp_path, REAL, "--establish-watermark") == backup.EXIT_OK
     stale = _last_run(tmp_path)
     assert stale["status"] == "OK"
-    _unwritable(tmp_path / backup.LAST_RUN_NAME)
+    _unwritable(tmp_path / backup.LAST_RUN_NAME, monkeypatch)
     clock.advance(timedelta(days=1))
 
     code = _run_cli(monkeypatch, tmp_path, REAL)
@@ -3107,7 +3147,7 @@ def test_the_cli_escalates_even_when_only_the_log_is_locked(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, clock: _Clock
 ) -> None:
     """The audit log is a channel too; losing it alone still cannot exit 0."""
-    _unwritable(tmp_path / backup.LOG_NAME)
+    _unwritable(tmp_path / backup.LOG_NAME, monkeypatch)
 
     code = _run_cli(monkeypatch, tmp_path, REAL, "--establish-watermark")
 
@@ -3424,7 +3464,7 @@ def test_the_cli_reports_a_watermark_that_could_not_be_written(
     what was lost, so the exit code is 7 and the status is not OK.
     """
     assert _run_cli(monkeypatch, tmp_path, REAL, "--establish-watermark") == backup.EXIT_OK
-    _unwritable(tmp_path / backup.WATERMARK_NAME)
+    _unwritable(tmp_path / backup.WATERMARK_NAME, monkeypatch)
     clock.advance(timedelta(days=1))
 
     code = _run_cli(monkeypatch, tmp_path, REAL)
