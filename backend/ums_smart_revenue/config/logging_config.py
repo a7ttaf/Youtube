@@ -391,7 +391,26 @@ def configure_logging(
 #     outer finally, after scheduler.close() and executor.close().
 # ============================================================================
 def restore_logging(configuration: LoggingConfiguration) -> None:
-    """Release one logging lease; remove the handler when the last lease ends."""
+    """Release one logging lease; remove the handler when the last lease ends.
+
+    Reference-counted and idempotent: each :func:`configure_logging` call takes
+    one lease, and only the release that drops the count to zero touches global
+    logging state. Overlapping app lifespans therefore share a single handler
+    and the first shutdown cannot silence a still-active second app.
+
+    Args:
+        configuration: The undo token returned by :func:`configure_logging`.
+            Its ``handler`` is used when ``installed`` is True; otherwise the
+            currently installed handler is resolved instead, so a caller
+            holding a non-installing lease still restores the right one. Its
+            recorded previous levels are the fallback when the module-level
+            state has none.
+
+    Returns:
+        None. The call is a no-op when no lease is outstanding (``refcount``
+        already zero), when leases remain after this release, or when no
+        handler is installed.
+    """
     with _logging_lock:
         if _logging_state.refcount <= 0:
             return
