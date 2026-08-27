@@ -45,6 +45,12 @@ REVENUE_RECONCILIATION_METRIC = "revenue_reconciliation_usd"
 SUPPORTED_METRICS = frozenset({ADJUSTED_GROSS_REVENUE_METRIC, NET_REVENUE_METRIC})
 _DEFAULT_TENANT_UUID = UUID(UMS_TENANT_ID)
 
+# Band floors for the explain confidence label. ``_HIGH_CONFIDENCE_SCORE``
+# doubles as the warned-fact score ceiling: a warned fact's score is clamped
+# down to it and ``_confidence_label`` then refuses the HIGH band anyway.
+_HIGH_CONFIDENCE_SCORE = Decimal("0.9000")
+_MEDIUM_CONFIDENCE_SCORE = Decimal("0.7000")
+
 _NET_CONFIDENCE_TO_EXPLAIN: dict[str, dict[str, object]] = {
     "B_RECONCILED": {"label": "HIGH", "score": "0.95"},
     "D_ESTIMATED": {"label": "MEDIUM", "score": "0.80"},
@@ -494,17 +500,42 @@ def _primary_fact(facts: list[RevenueFactEntry]) -> RevenueFactEntry | None:
 def _confidence(
     primary_fact: RevenueFactEntry | None, warnings: list[dict[str, object]]
 ) -> dict[str, object]:
-    """Compute confidence metadata for a revenue fact."""
+    """Compute the {label, score} confidence block for a gross-revenue explanation."""
+    # ========================================================================
+    # Purpose: Band the primary fact's confidence_score into the explain
+    #   {label, score} wire shape. Invariant: warnings => label != HIGH. A
+    #   warned fact is capped at MEDIUM regardless of its score, so an operator
+    #   can tell a flagged channel-month from a clean one by the badge alone.
+    # Database/ORM: None (operates on the loaded RevenueFactEntry read model).
+    # Standards: Pure; total function (no facts -> LOW/0); Decimal comparisons
+    #   only -- no float, no currency conversion.
+    # Blast Radius: Finance confidence badge on adjusted_gross_revenue_usd
+    #   explanations (persisted and returned by the explain endpoints).
+    # Connections:
+    #   - File: Docs/08_CONFIDENCE_EXPLAINABILITY.md -> explain {label, score}
+    #     contract and the warned-fact label rule.
+    #   - File: frontend/src/lib/confidence.ts -> HIGH/MEDIUM/LOW badge tones.
+    # ========================================================================
+    # FIX: The score clamp alone was a no-op badge-wise -- it pinned a warned
+    # fact to exactly 0.9000, which the old `score >= 0.9000` label rule still
+    # called HIGH, making a flagged fact indistinguishable from a clean one.
+    # The label rule is now warnings-aware; the score clamp is unchanged.
     score = primary_fact.confidence_score if primary_fact else Decimal("0")
-    if warnings and score > Decimal("0.9000"):
-        score = Decimal("0.9000")
-    label = (
-        "HIGH" if score >= Decimal("0.9000") else "MEDIUM" if score >= Decimal("0.7000") else "LOW"
-    )
+    if warnings and score > _HIGH_CONFIDENCE_SCORE:
+        score = _HIGH_CONFIDENCE_SCORE
     return {
-        "label": label,
+        "label": _confidence_label(score, has_warnings=bool(warnings)),
         "score": _decimal_to_api(score),
     }
+
+
+def _confidence_label(score: Decimal, *, has_warnings: bool) -> str:
+    """Band a confidence score into HIGH/MEDIUM/LOW; a warned fact never reaches HIGH."""
+    if score >= _HIGH_CONFIDENCE_SCORE and not has_warnings:
+        return "HIGH"
+    if score >= _MEDIUM_CONFIDENCE_SCORE:
+        return "MEDIUM"
+    return "LOW"
 
 
 def _dump_confidence(confidence: dict[str, object]) -> str:

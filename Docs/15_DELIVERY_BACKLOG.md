@@ -338,6 +338,10 @@ closed unmerged and superseded by the consolidated batch in #156.
   score (PR #69) and CommandView now renders human confidence badges
   (`confidenceDisplay` helper, raw code in title/aria — Track C,
   `feat/audit-track-c`). Remaining: finance adoption/validation of the labels.
+  Branch `fix/p1-confidence-cap`: the explain confidence cap was a no-op — a
+  warned fact clamped to exactly `0.9000` and the `>= 0.9000` label rule still
+  called it HIGH, badge-identical to a clean fact. The label rule is now
+  warnings-aware (`warnings => label != HIGH`); the score clamp is unchanged.
 - ✅ Explain-number API — shipped: POST
   /revenue/channels/{channel_id}/months/{month}/explain
   (build_channel_month_revenue_explanation; per-metric source/formula/

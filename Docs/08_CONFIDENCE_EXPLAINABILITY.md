@@ -42,6 +42,12 @@ Confidence levels table are the domain-level tier tokens; the net-revenue API
 emit the bare tier code string (e.g. `B_RECONCILED`, `D_ESTIMATED`, `E_MISSING`),
 whereas the explain endpoint reports the `{label, score}` object shown above.
 
+For `adjusted_gross_revenue_usd`, the label bands the primary fact's
+`confidence_score` at `>= 0.9000` (HIGH) and `>= 0.7000` (MEDIUM), and a warned
+explanation can never be HIGH: when `warnings` is non-empty the score is capped
+at `0.9000` **and** the label is capped at MEDIUM, so a flagged channel-month is
+never badge-identical to a clean one.
+
 ## UI rules
 
 - Every money number has an **Explain** action.

@@ -639,14 +639,21 @@ def test_build_explanation_pluralizes_pending_override_warning():
     ]
 
 
-def test_build_explanation_clamps_high_confidence_when_warnings_present():
-    """Confidence is clamped below HIGH when warnings are present."""
+def test_build_explanation_never_labels_a_warned_fact_high():
+    """A warned fact caps at MEDIUM even at the manual-import default score of 1.
+
+    Regression guard for the no-op confidence cap: the score clamp pinned a
+    warned fact to exactly 0.9000, which the old ``score >= 0.9000`` label rule
+    still called HIGH -- badge-identical to a clean fact. The manual-import beta
+    stores ``confidence_score=Decimal("1")`` on every fact, so this badge is the
+    only signal that anything was flagged.
+    """
     entry = build_channel_month_revenue_explanation(
         facts=[
             revenue_fact(
                 source_kind="YOUTUBE_CMS",
                 gross_revenue_usd="1000.00",
-                confidence_score="0.9800",
+                confidence_score="1",
             )
         ],
         manual_overrides=[manual_override(status="PENDING", adjustment_revenue_usd="50.00")],
@@ -655,7 +662,68 @@ def test_build_explanation_clamps_high_confidence_when_warnings_present():
         metric=ADJUSTED_GROSS_REVENUE_METRIC,
     )
 
+    assert [w["code"] for w in entry.warnings] == ["PENDING_MANUAL_OVERRIDES"]
+    assert entry.confidence == {"label": "MEDIUM", "score": "0.9"}
+
+
+def test_build_explanation_labels_a_clean_fact_high():
+    """A fact with no warnings keeps the HIGH badge at the default score of 1."""
+    entry = build_channel_month_revenue_explanation(
+        facts=[
+            revenue_fact(
+                source_kind="YOUTUBE_CMS",
+                gross_revenue_usd="1000.00",
+                confidence_score="1",
+            )
+        ],
+        manual_overrides=[],
+        month="2026-03",
+        youtube_channel_id="channel-tv-a",
+        metric=ADJUSTED_GROSS_REVENUE_METRIC,
+    )
+
+    assert entry.warnings == []
+    assert entry.confidence == {"label": "HIGH", "score": "1"}
+
+
+def test_build_explanation_labels_a_clean_fact_at_the_high_floor_high():
+    """A clean fact sitting exactly on the 0.9000 HIGH floor still labels HIGH."""
+    entry = build_channel_month_revenue_explanation(
+        facts=[
+            revenue_fact(
+                source_kind="YOUTUBE_CMS",
+                gross_revenue_usd="1000.00",
+                confidence_score="0.9000",
+            )
+        ],
+        manual_overrides=[],
+        month="2026-03",
+        youtube_channel_id="channel-tv-a",
+        metric=ADJUSTED_GROSS_REVENUE_METRIC,
+    )
+
+    assert entry.warnings == []
     assert entry.confidence == {"label": "HIGH", "score": "0.9"}
+
+
+def test_build_explanation_keeps_the_low_band_for_a_warned_low_score_fact():
+    """A warned fact already below the MEDIUM floor keeps its LOW band and score."""
+    entry = build_channel_month_revenue_explanation(
+        facts=[
+            revenue_fact(
+                source_kind="MANUAL_UPLOAD",
+                gross_revenue_usd="1000.00",
+                confidence_score="0.5000",
+            )
+        ],
+        manual_overrides=[manual_override(status="PENDING", adjustment_revenue_usd="50.00")],
+        month="2026-03",
+        youtube_channel_id="channel-tv-a",
+        metric=ADJUSTED_GROSS_REVENUE_METRIC,
+    )
+
+    assert [w["code"] for w in entry.warnings] == ["PENDING_MANUAL_OVERRIDES"]
+    assert entry.confidence == {"label": "LOW", "score": "0.5"}
 
 
 def test_build_explanation_does_not_clamp_when_score_already_below_ceiling():

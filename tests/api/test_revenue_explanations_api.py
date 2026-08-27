@@ -177,7 +177,9 @@ def test_finance_viewer_gets_adjusted_revenue_explanation_with_audit_and_snapsho
         response.json()["formula"]
         == "baseline_gross_revenue_usd + approved_manual_override_total_usd"
     )
-    assert response.json()["confidence"]["label"] == "HIGH"
+    # The seeded month carries a PENDING override, so the response warns; a
+    # warned explanation can never carry the HIGH badge (see _confidence).
+    assert response.json()["confidence"] == {"label": "MEDIUM", "score": "0.9"}
     assert response.json()["components"] == [
         {
             "key": "baseline_gross_revenue_usd",
