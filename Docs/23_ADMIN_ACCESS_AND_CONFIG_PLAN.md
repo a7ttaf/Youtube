@@ -146,11 +146,12 @@ corporate_admin (CLI) → verify via `GET /users/{id}/access` → flip the env �
 gateway now supplies identity only. Cross-references Docs/21 P2 — this band documents,
 it does not re-scope.
 
-**Suggested order: A1 → A2 → (beta ships) → A6 → A3 → A4 → A5.** A1+A2 are worth
+**Suggested order: A1 → A2 → (beta ships) → A6 → A7 + A5 → A3 → A4.** A1+A2 are worth
 doing right after the P1 band merges — they are the same "stop looking like a mockup"
 story applied to administration. A6 (delegated administration, §4b) comes before A3
 because the scoped-grants UI should be built on the delegation model's ceiling, not
-retrofitted under it. A3–A5 sit naturally with P2.
+retrofitted under it. A7 (Google sign-in, §4c) pairs with A5 — together they are the
+external-access milestone; the first competitor account waits for A5+A6+A7 all green.
 
 ---
 
@@ -179,6 +180,10 @@ retrofitted under it. A3–A5 sit naturally with P2.
 - **T7 — Until A6 lands, delegation is a policy decision, not a feature.** Do not
   grant `users.manage` / `roles.assign` beyond HQ trust; the current gates act
   tenant-wide.
+- **T8 — No password store, permanently.** UMS never stores, hashes, prompts for, or
+  resets a password. Sign-in is Google OIDC behind the operator's allowlist, and the
+  no-password property holds by construction — there is nothing to phish, leak, or
+  "save". Any future feature that needs a credential field is designed wrong.
 
 ## 4b — A6: Delegated administration with a hard ceiling (operator-required, 2026-08-27)
 
@@ -218,12 +223,31 @@ program. What the code enforces today was verified line by line
    generalizes the family lists (which stay as a second belt). Subset-of-permissions is
    the recommended ceiling test — it is checkable mechanically and never needs a
    hand-maintained rank ladder (decision D-A6).
-4. **Read-isolation proof.** "It will never see others" must be **proven per view**,
-   not assumed: a test matrix where a company-scoped principal exercises channels /
-   revenue / close / exports / audit / groups / connectors and every response is
-   verified to contain only their company's rows. Tenant isolation is RLS-enforced;
-   THIS is org-scope isolation inside one tenant, enforced at the app layer, and it has
-   never been systematically proven. Whatever leaks, A6 fixes.
+4. **Read-isolation proof — competitor grade.** The operator's clarification
+   (2026-08-27, verbatim): *"sub-companies as same competitors whose data should not be
+   viewed … can't see any data for others, only see the X (his company only or sectors
+   — multiple channels)."* Sub-companies are **competitors to each other**; a
+   cross-company leak is a confidentiality breach between competitors, not a UX bug.
+   Consequences:
+   - The matrix is a **release gate**: no sub-company account is issued until it is
+     green. A company-scoped principal is driven through every view — channels /
+     revenue / close / exports / audit / groups / connectors — and every response is
+     proven to contain only their company's (or their sector's) rows.
+   - **Aggregates count as data.** Row filtering is not enough: holdings-wide panels
+     (the Command view's "all scopes" gap narrative, tenant-wide rankings and totals,
+     tenant-wide audit trails) embed competitors' numbers in the aggregate. The
+     enforcement pattern for this already exists and fails closed —
+     `require_permission(user, VIEW_REVENUE, target_scope, org_index)`
+     (`api/revenue.py:571`), and the holdings-wide gap surfaces demand global scope
+     (`api/revenue.py:13`) — so a company-scoped CEO is refused; the matrix proves it
+     endpoint by endpoint AND the UI renders those refusals as absent panels, not
+     error cards.
+   - Exports are scope-bound: a company-scoped principal can request exports only at
+     or below their own scope. Sector scope ("multiple channels") is the same
+     mechanism one level up.
+   Tenant isolation is RLS-enforced; THIS is org-scope isolation inside one tenant,
+   enforced at the app layer, and it has never been systematically proven. Whatever
+   leaks, A6 fixes before any competitor account exists.
 5. **"Add by email"** is the existing create flow (email is the account key). Actual
    invitation email is out of scope: UMS has no mailer and no login of its own —
    identity arrives from the gateway. When a real IdP/login lands (post-beta), invites
@@ -233,6 +257,47 @@ program. What the code enforces today was verified line by line
 matrix + fixes 8–16h, honest unknown until measured; delegated mode in the A1 UI
 4–8h). Sequence: **after A1** — A1 serves the global admin (the operator) immediately;
 A6 is what makes it safe to hand pieces of it to sub-company people.
+
+## 4c — A7: Google-only sign-in with an operator-owned domain allowlist
+
+The operator's final requirement, verbatim: *"I don't need someone have user and
+password … login will be by Google only, as per domains I will add — without those
+domains no one can login."*
+
+**The architecture is already shaped for this.** UMS deliberately has no login and no
+password store: identity arrives from a **trusted gateway** that injects
+`X-User-ID` / `X-User-Email` + the gateway token. Google SSO is that gateway made
+real — an OIDC front (Google sign-in) standing where the dev proxy stands today,
+injecting the same headers. Zero change to UMS's internal auth model; the no-password
+property is preserved by construction, because there is nothing to store.
+
+**The gate is two layers, both fail-closed:**
+
+1. **Domain gate (login at all).** After Google authenticates, the gateway checks the
+   verified identity against the operator's allowlist. ⚠️ The one subtlety that needs
+   a ruling (D-A7): Google only asserts a verifiable hosted domain (`hd` claim) for
+   **Workspace domains** (`ceo@companyx.com`). A bare `@gmail.com` account has no
+   domain of its own — allowlisting `gmail.com` would admit every Gmail user in the
+   world. Safe model: **allowlist Workspace domains, plus exact email addresses for
+   individuals on plain Gmail; never a public mail domain wholesale.**
+2. **Account gate (access).** Passing the domain gate authenticates, it does not
+   authorize: the email must also match an existing UMS account (created by the
+   operator or, post-A6, a delegated admin) with its roles and scopes. Unknown email
+   from an allowed domain → clean 403, no auto-provisioning. "I add X for sub-company
+   X" stays literal: no account, no access, regardless of domain.
+
+**Build shape:** an off-the-shelf OIDC proxy (e.g. oauth2-proxy) in compose with a
+thin adapter mapping its verified-identity headers onto UMS's trusted-header contract,
+or a small dedicated auth service if the mapping fights the proxy. Allowlist lives in
+gateway config first (deploy-audited); managing it from the Admin UI is a later A1
+extension (D-A8). **Estimate: 10–18h** including compose wiring, the domain/email
+gate tests (mutation-proven: wrong domain RED, allowed-domain-unknown-account RED),
+and the runbook.
+
+**The external-access milestone.** Handing the first sub-company account to a real
+competitor requires ALL THREE: **A5** (database-authz: DB owns roles) + **A6**
+(ceiling + isolation proof green) + **A7** (Google-only login behind the domain
+gate). None of the three is optional for that step, and the beta needs none of them.
 
 > ⚠️ **Interim rule, effective now:** until A6 lands, `users.manage` and `roles.assign`
 > must not be granted to anyone outside HQ trust. Today's gates would let a delegated
@@ -249,6 +314,8 @@ A6 is what makes it safe to hand pieces of it to sub-company people.
 | D-A4 | When A1 lands | Immediately after the P1 band merges, before beta polish |
 | D-A5 | A6 ceiling mechanism | **Subset-of-effective-permissions at the scope** (mechanical, no rank ladder to maintain); family lists stay as a second belt |
 | D-A6 | Where a delegated admin's new users land | Born inside the delegator's scope subtree, always; only a global admin can move them |
+| D-A7 | Allowlist semantics for Google sign-in | **Workspace domains + exact emails for plain-Gmail individuals; never a public mail domain wholesale** |
+| D-A8 | Where the allowlist lives | Gateway config first (deploy-audited); Admin-UI management as a later A1 extension |
 
 ## 6 — Ideas added to the project (operator-invited)
 

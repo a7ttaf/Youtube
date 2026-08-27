@@ -631,7 +631,11 @@ closed unmerged and superseded by the consolidated batch in #156.
   MVP (10–15h, frontend-only), A2 access matrix + "who am I", A6 delegated
   administration with a no-amplification ceiling (operator-required: sub-company
   CEO sees only their company, can add users, "no one can take higher layer" —
-  24–44h, backend policy + read-isolation proof), A3 scoped-grants UI, A4
+  24–44h, backend policy + competitor-grade read-isolation proof — sub-companies
+  are competitors, aggregates count as data), A7 Google-only sign-in behind an
+  operator-owned domain allowlist (no password store ever; Workspace domains +
+  exact emails, never gmail.com wholesale; 10–18h; external-access milestone =
+  A5+A6+A7 all green), A3 scoped-grants UI, A4
   read-only deployment-status panel, A5 database-authz cutover runbook;
   tripwires forbid a role/permission editor, any secret display, and any
   delegation before A6's mutation-tested ceiling lands. Remaining: the whole
