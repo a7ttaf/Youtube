@@ -79,6 +79,12 @@ SOURCE_SYSTEM_TO_SOURCE_KIND: Mapping[str, RevenueFactSourceKind] = MappingProxy
     }
 )
 
+# Country-dimensional Analytics rows are evidence-only. They must never enter
+# canonical fact projection (U2 / Docs/24).
+NON_PROJECTING_SOURCE_SYSTEMS: frozenset[str] = frozenset(
+    {"youtube_analytics_country_evidence"}
+)
+
 
 CANONICAL_METRIC_RULE: Mapping[str, tuple[str, ...]] = MappingProxyType(
     {
@@ -210,6 +216,8 @@ def _source_row_buckets(
     """Bucket source rows by normalized fact identity: channel and source system."""
     buckets: dict[tuple[str | None, str], list[GoogleRevenueSourceRowEntry]] = {}
     for row in rows:
+        if row.source_system in NON_PROJECTING_SOURCE_SYSTEMS:
+            continue
         key = (row.youtube_channel_id, row.source_system)
         buckets.setdefault(key, []).append(row)
     return buckets

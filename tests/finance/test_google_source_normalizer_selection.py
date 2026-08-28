@@ -14,7 +14,9 @@ from ums_smart_revenue.connectors.google_source_rows.dataclasses import (
 )
 from ums_smart_revenue.finance.google_source_normalizer import (
     CANONICAL_METRIC_RULE,
+    NON_PROJECTING_SOURCE_SYSTEMS,
     SOURCE_SYSTEM_TO_SOURCE_KIND,
+    _source_row_buckets,
     select_canonical_row,
 )
 from ums_smart_revenue.finance.revenue_facts import (
@@ -169,3 +171,45 @@ def test_select_canonical_row_raises_on_unsupported_source_system():
     )
     with pytest.raises(RevenueFactValidationError, match="Unsupported source_system"):
         select_canonical_row([bogus])
+
+
+def test_country_evidence_source_system_is_non_projecting():
+    assert "youtube_analytics_country_evidence" in NON_PROJECTING_SOURCE_SYSTEMS
+    assert "youtube_analytics_country_evidence" not in SOURCE_SYSTEM_TO_SOURCE_KIND
+
+
+def test_source_row_buckets_excludes_country_evidence_rows():
+    worldwide = _entry(
+        source_system="youtube_analytics",
+        metric_key="estimatedRevenue",
+        source_row_key="w" * 64,
+    )
+    country_us = _entry(
+        source_system="youtube_analytics_country_evidence",
+        metric_key="estimatedRevenue",
+        source_row_key="u" * 64,
+    )
+    buckets = _source_row_buckets([worldwide, country_us])
+    assert list(buckets.keys()) == [("UC_test_1", "youtube_analytics")]
+    assert buckets[("UC_test_1", "youtube_analytics")] == [worldwide]
+
+
+def test_country_evidence_cannot_win_canonical_when_guard_removed_is_red():
+    """Mutation contract: without the bucket exclusion, country rows would compete."""
+    worldwide = _entry(
+        source_system="youtube_analytics",
+        metric_key="estimatedRevenue",
+        source_row_key="a" * 64,
+    )
+    country_us = _entry(
+        source_system="youtube_analytics_country_evidence",
+        metric_key="estimatedRevenue",
+        source_row_key="b" * 64,
+    )
+    naive_buckets: dict[tuple[str | None, str], list] = {}
+    for row in [worldwide, country_us]:
+        key = (row.youtube_channel_id, row.source_system)
+        naive_buckets.setdefault(key, []).append(row)
+    assert len(naive_buckets) == 2
+    guarded = _source_row_buckets([worldwide, country_us])
+    assert len(guarded) == 1
