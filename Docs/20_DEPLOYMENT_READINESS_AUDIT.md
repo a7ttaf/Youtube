@@ -228,26 +228,42 @@ contain a cluster. Per case:
   marker and keeps refusing until the cluster is migrated or discarded. Data here
   is disposable pre-alpha (Docs/22), so discarding is the documented default
   (`docker volume rm ums-smart-revenue_postgres-data`, then `up -d`). To keep the
-  data instead, migrate it out of the volume and into a fresh 18 cluster
-  (`UMS_DB_USER` / `UMS_DB_NAME` come from your `.env`; for the dump, use the
-  superuser name the *old* cluster was created with):
+  data instead, go through this repository's own backup/restore scripts — a raw
+  `pg_dump` is NOT enough, because it does not carry the cluster-global
+  `app_tenant` / `app_platform` roles, their memberships or the RLS surface the
+  application `SET ROLE`s into; the backup's `roles.sql` does. The legacy volume
+  is therefore dumped and then discarded — never moved in place: a pre-18
+  cluster created at the legacy mount path occupies the volume ROOT, so any
+  in-place move would land it where the fresh-stack entrypoint finds and refuses
+  it again (`UMS_DB_USER` / `UMS_DB_NAME` / `UMS_DB_PASSWORD_URLENC` come from
+  your `.env`; the temporary container uses the OLD major image at the legacy
+  mount path):
 
   ```bash
-  # 1. dump the old cluster with the OLD major image (its PGDATA is the volume root)
-  docker run --rm -v ums-smart-revenue_postgres-data:/var/lib/postgresql/data \
-    postgres:16-alpine pg_dump -U "$UMS_DB_USER" -d "$UMS_DB_NAME" -Fc > pre18.dump
-  # 2. move the old cluster aside inside the volume so the entrypoint stops seeing it
-  docker run --rm -v ums-smart-revenue_postgres-data:/var/lib/postgresql alpine \
-    mv /var/lib/postgresql/data /var/lib/postgresql/data-pre18
-  # 3. boot the fresh 18 cluster and restore into it
+  # 1. boot the old cluster once more, from the OLD major image at the legacy path
+  docker run -d --name ums-pre18-migrate \
+    -v ums-smart-revenue_postgres-data:/var/lib/postgresql/data \
+    -e POSTGRES_USER="$UMS_DB_USER" -e POSTGRES_DB="$UMS_DB_NAME" \
+    -e POSTGRES_PASSWORD="$UMS_DB_PASSWORD_URLENC" \
+    postgres:16-alpine
+  # 2. back it up with this repo's script: database.dump AND roles.sql
+  #    (roles, memberships, RLS policies, object owners) — the first run exits 8
+  #    and prints the row counts; re-run adding --establish-watermark as told
+  python scripts/backup_database.py --container ums-pre18-migrate --out-dir D:/UMS-Backups
+  # 3. the run directory now holds everything: discard the legacy volume
+  docker rm -f ums-pre18-migrate
+  docker volume rm ums-smart-revenue_postgres-data
+  # 4. boot the fresh 18 stack and restore the run directory into it
   docker compose up -d postgres
-  docker compose exec -T postgres pg_restore -U "$UMS_DB_USER" -d "$UMS_DB_NAME" < pre18.dump
+  python scripts/restore_database.py --backup-dir D:/UMS-Backups/ums-backup-<stamp>Z \
+    --container ums-smart-revenue-postgres-1
   docker compose up -d
   ```
 
-  `pg_dump` alone does not carry the `app_tenant` / `app_platform` roles — see
-  [22_BACKUP_RESTORE_AND_REHEARSAL.md](22_BACKUP_RESTORE_AND_REHEARSAL.md),
-  "What is *not* in it", before relying on a migrated cluster.
+  If the data matters, rehearse first: `--rehearse` restores the same run
+  directory into a throwaway container and verifies every table against the
+  manifest before anything real is touched
+  ([22_BACKUP_RESTORE_AND_REHEARSAL.md](22_BACKUP_RESTORE_AND_REHEARSAL.md)).
 
 - **Fresh stack.** No volume exists yet: compose creates `postgres-data`, mounts it
   at `/var/lib/postgresql`, and `initdb` writes `/var/lib/postgresql/18/docker`
