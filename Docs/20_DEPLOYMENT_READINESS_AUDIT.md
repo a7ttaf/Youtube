@@ -8,6 +8,13 @@ carries `file:line` evidence, and **every round was re-checked by an independent
 adversarial pass** whose job was to refute it. Those passes reversed or downgraded
 findings in every round; the corrections are recorded rather than quietly dropped.
 
+> ⚠️ **Freshness banner (2026-08-28).** P0 **execution** and the living Docs/21 status
+> table live on PR **#210** (`feat/beta-p0-durability`). This document is the
+> **pre-execution snapshot** at `main` = `d8418cea2`. Do **not** schedule unchecked
+> open items from this text alone — B0 (Postgres 18 `PGDATA`) and most of W0.2 /
+> P0.1–P0.9 are already done on #210. For scheduling work, use Docs/21 as maintained
+> on #210.
+
 - **Round 1 — deployment surface:** auth, secrets, data lifecycle, bootstrap, config.
 - **Round 2 — deep audit:** PC/host lifecycle, frontend completeness, observability,
   performance at scale, **data correctness**, and failure modes.
@@ -33,6 +40,18 @@ findings in every round; the corrections are recorded rather than quietly droppe
 > not survive that.
 
 **The plan built from this audit is [`21_BETA_IMPLEMENTATION_PLAN.md`](21_BETA_IMPLEMENTATION_PLAN.md).**
+
+### Related plans (program triad)
+
+| Doc | PR | Role |
+| --- | --- | --- |
+| Docs/21 (living status) | [#210](https://github.com/a7ttaf/Youtube/pull/210) | P0 execution + current schedule source of truth |
+| Docs/22 backup rehearsal | [#210](https://github.com/a7ttaf/Youtube/pull/210) | Backup/restore runbook shipped with P0 |
+| Docs/23 Admin access plan | [#218](https://github.com/a7ttaf/Youtube/pull/218) | Admin / access / config UI (Docs/21 is silent here) |
+| Docs/24 US withholding plan | [#219](https://github.com/a7ttaf/Youtube/pull/219) | US revenue slice + withholding estimate (fills P3 rate gap) |
+
+**Residual proxy note:** after #210 adds `/org-units` and `/users`, `/security` is
+still missing from `TENANT_SCOPED_ROUTES` — required by Docs/23 A2.
 
 ---
 
@@ -810,7 +829,8 @@ dead. They fail at the API, not in the DOM.
 ```
 
 `auth/seed.py` grants that role exactly two permissions — `VIEW_ANALYTICS` and
-`VIEW_CONFIDENCE` — out of 26 defined. Only `audit_viewer` (1) has fewer; it ties with
+`VIEW_CONFIDENCE` — out of **26** defined (`auth/permissions.py` Permission enum).
+Only `audit_viewer` (1) has fewer; it ties with
 `system_integration_user` for second-weakest. For comparison, measured the same way:
 `finance_admin` 15, `corporate_admin` 12, `finance_approver` 11, `data_steward` 5,
 `super_owner` 26.
@@ -821,9 +841,11 @@ export, manage users) is denied, and so is every read gated on `VIEW_REVENUE`,
 by its most restricted role.**
 
 **Fix:** set `VITE_DEV_GATEWAY_ROLE` to a role that can actually operate —
-`finance_admin` for the finance surface, `corporate_admin` for setup. One line, no
-code change. This should be the first thing any beta runbook says, and its absence
-from the README is arguably the single highest-impact documentation gap here.
+`finance_admin` for the finance surface, `corporate_admin` for setup
+(including `POST /users` — `finance_admin` holds `roles.assign` but **not**
+`users.manage`; see Docs/23). One line, no code change. This should be the first
+thing any beta runbook says, and its absence from the README is arguably the
+single highest-impact documentation gap here.
 
 > **Correction (Round 4).** An earlier revision of this section said to put that
 > line in `frontend/.env`. **That file is not read.** `vite.config.ts:41-51` pins

@@ -34,15 +34,35 @@ is **W0.1**, **W0.3**, the `.env.example` file itself, and the whole **P1** band
 | P0.9 | ✅ done | Folded into P0.8 as `--org-skeleton`, as planned. |
 | P1 (all) | ⏳ open | — |
 
+> ⚠️ **Freshness banner (2026-08-28).** P0 **execution** and the living status table
+> for this plan live on PR **#210** (`feat/beta-p0-durability`). This PR (#209) is the
+> **pre-execution snapshot** at `main` = `d8418cea2`. Do **not** schedule unchecked
+> open items from the hour tables below alone — B0 and most of W0.2 / P0.1–P0.9 are
+> already done on #210. For “what is still open,” read Docs/21 as maintained on #210.
+
+### Related plans (program triad)
+
+| Doc | PR | Role |
+| --- | --- | --- |
+| Docs/20 (this audit’s parent) | [#209](https://github.com/a7ttaf/Youtube/pull/209) | Historical audit snapshot |
+| Docs/21 living + Docs/22 | [#210](https://github.com/a7ttaf/Youtube/pull/210) | P0 code + current schedule source of truth |
+| Docs/23 Admin access plan | [#218](https://github.com/a7ttaf/Youtube/pull/218) | Admin / access / config UI extension |
+| Docs/24 US withholding plan | [#219](https://github.com/a7ttaf/Youtube/pull/219) | US revenue + withholding estimate (P3 rate ruling) |
+
+**Residual after #210:** `/security` still missing from Vite `TENANT_SCOPED_ROUTES`
+(Docs/23 A2).
+
 ---
 
 ## The headline
 
-**The remaining work is 38–55 hours. Six to eight focused days.**
+**At snapshot time the remaining work was 38–55 hours. Six to eight focused days.**
 
-That is the whole distance between today's `main` and a beta you can put real money
+That was the distance between `main` @ `d8418cea2` and a beta you can put real money
 data into. Not another phase, not a rewrite. The application is genuinely built; what
-is missing is the layer that lets one person *run* it and not lose data.
+was missing is the layer that lets one person *run* it and not lose data. **Much of
+the P0 band has since landed on #210** — treat the tables below as the original
+costing, not the live backlog.
 
 Three things are worth saying plainly before the table:
 
@@ -50,8 +70,8 @@ Three things are worth saying plainly before the table:
    backup script. The second largest is a bootstrap script. The rest is configuration,
    deletion, and one logging call.
 2. **The biggest *visible* problem is one line.** The app looks like a dead mockup
-   largely because the dev identity ships with 2 of 26 permissions. Fixing that costs
-   a minute and changes the entire impression of the product.
+   largely because the dev identity ships with 2 of **26** permissions. Fixing that
+   costs a minute and changes the entire impression of the product.
    *(Correction: this plan and the audit both published "2 of 28". The `Permission`
    enum has **26** members — `auth/permissions.py:5-31`, counted mechanically. The
    argument is unaffected; the denominator was wrong.)*
@@ -59,7 +79,11 @@ Three things are worth saying plainly before the table:
    2026-08-25: the operator decided the main currency is EGP**, so the EGP program is
    now ON the plan — 66–111h to the minimum EGP beta, 81–136h full — and it gates the
    beta unless the USD-interim path is explicitly chosen. See
-   [the EGP program](#the-egp-program--main-currency-is-egp-decided-2026-08-25).
+   [the EGP program](#the-egp-program--main-currency-is-egp-decided-2026-08-25). The
+   snapshot section [The one decision only you can
+   make](#the-one-decision-only-you-can-make) still records the open question as of
+   `d8418cea2`; do not re-decide EGP from that frozen text — the decision and the
+   living program are maintained here on #210.
 
 > **A fourth thing, added after the first day of execution.** The estimate above was
 > built from four rounds of reading. The first hour of *running* produced a blocker
@@ -94,13 +118,13 @@ item is easier to judge once you can actually operate the UI.
 
 | # | Change | File | Time | State |
 | --- | --- | --- | --- | --- |
-| W0.1 | Create repo-root `.env`; set `VITE_DEV_GATEWAY_ROLE=finance_admin` and `UMS_TRUSTED_GATEWAY_TOKEN` | `.env` (new, repo root) | 15 min | ⏳ open |
-| W0.2 | Add `"/org-units"` and `"/users"` to `TENANT_SCOPED_ROUTES` | `frontend/vite.config.ts:16-49` | 5 min | ✅ **done** |
+| W0.1 | Create repo-root `.env`; set `VITE_DEV_GATEWAY_ROLE=finance_admin` (or `corporate_admin` when creating users) and `UMS_TRUSTED_GATEWAY_TOKEN` | `.env` (new, repo root) | 15 min | ⏳ open |
+| W0.2 | Add `"/org-units"` and `"/users"` to `TENANT_SCOPED_ROUTES` (residual: also `"/security"` for Docs/23 A2) | `frontend/vite.config.ts:16-49` | 5 min | ✅ **done** |
 | W0.3 | Restart the dev server, click through every view, write down what is still dead | — | 30 min | ⏳ open |
 
 **W0.1 is the single highest-leverage change in this document.** The shipped default
 role is `assistant_analyst` (`vite.config.ts:86`), which `auth/seed.py` grants exactly
-two permissions — `VIEW_ANALYTICS` and `VIEW_CONFIDENCE` — out of 26. Every write
+two permissions — `VIEW_ANALYTICS` and `VIEW_CONFIDENCE` — out of **26**. Every write
 action and most reads are denied before they reach any logic. You have been demoing
 the product through one of its two most-restricted roles (only `audit_viewer`, with
 one permission, is weaker).
@@ -125,6 +149,10 @@ one permission, is weaker).
 > **derives** the required set from the path literals under `frontend/src/lib/api/**`
 > rather than comparing the list to a hand-copy of itself. The old test caught removal
 > and could never have caught the omission that caused this defect.
+
+> **Role split (Docs/23):** `finance_admin` is right for the finance UI
+> (`roles.assign` yes). User creation (`POST /users`) needs `users.manage` → use
+> `corporate_admin` (or `super_owner`) for that session.
 
 > ⚠️ **The file is the repo-root `.env`, not `frontend/.env`.** `envDir` is pinned to
 > the repo root (`vite.config.ts:41-51,93,151`) and the comment at `:38` records that
@@ -615,10 +643,30 @@ re-request workaround, and a note that a connector-only month cannot be locked a
 
 > **DECIDED 2026-08-25: the answer is NO — the main currency is EGP.** USD facts with
 > the EGP bank settlement explained as FX variance are not acceptable. This closes
-> `Docs/16_OPEN_DECISIONS.md:70-75` (open since PR #42) and supersedes this section's
+> `Docs/16_OPEN_DECISIONS.md:70-75` (open since PR #42) and supersedes this section’s
 > earlier "if yes: nothing changes" branch. The program that follows from the "no"
 > branch is [the EGP program](#the-egp-program--main-currency-is-egp-decided-2026-08-25)
 > below, scoped against the code and adversarially refuted on 2026-08-25.
+>
+> ⚠️ **Status vs #209 snapshot.** What follows is the **snapshot-time** open question
+> at `d8418cea2`. PR **#210**’s living Docs/21 records that the operator decided
+> **EGP is the main currency** and scopes the EGP program there. Prefer #210 for
+> current EGP sequencing; keep the text below as the historical decision frame (and
+> the standing no-FX tripwire).
+
+Everything about currency hung on one question that had been open since PR #42 and is
+recorded at `Docs/16_OPEN_DECISIONS.md:70-71`:
+
+> **Are USD facts acceptable for the beta, with the EGP bank settlement explained as FX
+> variance — yes or no?**
+
+**If yes** (was recommended for the beta at snapshot time): nothing changes. The
+pipeline is internally consistent and the numbers are real. Do P2.2 when convenient.
+
+**If no:** that is the EGP program — 3–6 weeks, ~2,154 `*_usd` identifiers, and a
+USD-only design that is *test-locked* by
+`tests/finance/test_finance_no_fx_dependency.py:40-53`. It should be its own milestone
+after the beta proves the rest works. **#210 adopted this path.**
 
 > ⚠️ **The standing prohibition is unchanged — no UMS-side conversion, ever.** No
 > `$1 × 47.5`. `tests/finance/test_finance_no_fx_dependency.py:40-53` AST-walks
@@ -1013,8 +1061,11 @@ Recorded so they are not re-proposed:
   already has"; is really "introduce a second producer of channel revenue facts and
   defend it against double-counting CMS."
 - **Reconciliation-derived TAX** — 12–20h *plus* an unbounded policy question. The
-  hardcoded `0.30` is the no-treaty rate; **no code change answers what US withholding
-  actually is for an Egyptian content owner.**
+  hardcoded `0.30` is the no-treaty rate in
+  `finance/reconciliation_workflow.py`. The **rate ruling and display-estimate
+  program** (15% treaty copyright royalty; never arm recon from the estimate alone)
+  now live in Docs/24 (PR [#219](https://github.com/a7ttaf/Youtube/pull/219)).
+  Keep recon dormant until a separate ruling.
 - **`POST /org-units`** — 8–16h; two seeded rows do the job.
 - **react-router** — unnecessary for one operator.
 - **Wiring the currency selector** — that is the EGP program wearing a dropdown.
