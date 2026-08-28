@@ -1,0 +1,47 @@
+name: ci-fast
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ci-fast-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  fast:
+    name: Lint and unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install Python 3.14
+        run: uv python install 3.14
+
+      - name: Sync toolchain
+        run: uv sync --extra dev --extra test --extra lint
+
+      - name: Ruff
+        run: uv run ruff check backend tests scripts
+
+      - name: Mypy (backend package)
+        run: uv run mypy backend/ums_smart_revenue --ignore-missing-imports
+
+      - name: Frontend typecheck
+        working-directory: frontend
+        run: |
+          corepack enable
+          bun install --frozen-lockfile
+          bun run typecheck
+
+      - name: Pytest (non-Postgres suites)
+        run: uv run pytest -q --ignore-glob='*postgres*'
+
+      - name: Diff hygiene
+        run: git diff --check

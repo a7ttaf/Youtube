@@ -1,0 +1,59 @@
+name: ci-database
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ci-database-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  database:
+    name: Postgres migrations and authz
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: ums
+          POSTGRES_DB: test_ums
+        ports:
+          - 55432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d test_ums"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      UMS_TEST_DATABASE_URL: postgresql+psycopg://postgres:ums@127.0.0.1:55432/test_ums
+      UMS_DATABASE_URL: postgresql+psycopg://postgres:ums@127.0.0.1:55432/test_ums
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install Python 3.14
+        run: uv python install 3.14
+
+      - name: Sync toolchain
+        run: uv sync --extra dev --extra test --extra lint
+
+      - name: Alembic upgrade head
+        run: uv run alembic upgrade head
+
+      - name: RLS and tenant authz pytest subset
+        run: |
+          uv run pytest -q \
+            tests/db/test_tenant_rls_migration.py \
+            tests/db/test_security_orm.py \
+            tests/db/test_tenant_models.py \
+            tests/auth/test_api_guards.py \
+            tests/auth/test_policy.py \
+            tests/auth/test_user_account_tenant_scope.py \
+            tests/auth/test_user_principal_tenant_id.py
