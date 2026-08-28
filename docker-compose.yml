@@ -28,7 +28,8 @@
 #     `up` and the data volumes are reattached untouched. Only use `-v` when
 #     you deliberately want empty volumes (postgres-data AND app-data), and
 #     only after a verified *database* backup AND a rehearsed restore for
-#     postgres-data. That backup does not protect app-data — see Docs/22.
+#     postgres-data. Artifact blobs on the host bind mount need a separate
+#     backup — see Docs/22.
 #     Note that `pg_dump` alone does not capture the `app_tenant` /
 #     `app_platform` roles the RLS policies depend on, so a roles-only dump
 #     has to exist too — see P0.1 in Docs/21_BETA_IMPLEMENTATION_PLAN.md.
