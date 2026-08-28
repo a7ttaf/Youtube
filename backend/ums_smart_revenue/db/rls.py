@@ -30,6 +30,7 @@ TENANT_SCOPED_TABLES: tuple[str, ...] = (
     "deduction_components",
     "export_jobs",
     "export_templates",
+    "external_identities",
     "finance_month_close",
     "google_revenue_source_rows",
     "monthly_channel_revenue_facts",
@@ -40,6 +41,7 @@ TENANT_SCOPED_TABLES: tuple[str, ...] = (
     "user_permission_grants",
     "user_role_assignments",
     "users",
+    "us_withholding_rate_configs",
     "youtube_channels",
 )
 

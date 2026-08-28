@@ -1,4 +1,5 @@
-from datetime import datetime
+from datetime import date, datetime
+from decimal import Decimal
 from uuid import UUID
 
 from sqlalchemy import (
@@ -9,6 +10,7 @@ from sqlalchemy import (
     ForeignKey,
     ForeignKeyConstraint,
     Index,
+    Numeric,
     Text,
     UniqueConstraint,
     Uuid,
@@ -64,6 +66,7 @@ class UserORM(SecurityBase):
         default=_TENANT_ID_DEFAULT_VALUE,
         server_default=_TENANT_ID_DEFAULT,
     )
+    home_org_unit_id: Mapped[UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
 
     __table_args__ = (
         UniqueConstraint("tenant_id", "id", name="uq_users_tenant_id_id"),
@@ -75,6 +78,7 @@ class UserORM(SecurityBase):
         ),
         Index("uq_users_email_lower", "tenant_id", func.lower(email), unique=True),
         Index("ix_users_tenant_id", "tenant_id"),
+        Index("ix_users_home_org_unit_id", "tenant_id", "home_org_unit_id"),
     )
 
 
@@ -450,4 +454,97 @@ class ApiConnectorCredentialORM(SecurityBase):
             unique=True,
         ),
         Index("ix_api_connector_credentials_tenant_id", "tenant_id"),
+    )
+
+
+class ExternalIdentityORM(SecurityBase):
+    """Maps external IdP subjects to internal UMS user UUIDs (A7)."""
+
+    __tablename__ = "external_identities"
+
+    id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")
+    )
+    tenant_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        nullable=False,
+        default=_TENANT_ID_DEFAULT_VALUE,
+        server_default=_TENANT_ID_DEFAULT,
+    )
+    provider: Mapped[str] = mapped_column(Text, nullable=False)
+    provider_subject: Mapped[str] = mapped_column(Text, nullable=False)
+    normalized_email: Mapped[str] = mapped_column(Text, nullable=False)
+    user_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "tenant_id",
+            "provider",
+            "provider_subject",
+            name="uq_external_identities_provider_subject",
+        ),
+        ForeignKeyConstraint(
+            ["tenant_id", "user_id"],
+            ["users.tenant_id", "users.id"],
+            name="fk_external_identities_tenant_user",
+            ondelete="CASCADE",
+        ),
+        Index("ix_external_identities_tenant_user_id", "tenant_id", "user_id"),
+        Index(
+            "uq_external_identities_tenant_email_lower",
+            "tenant_id",
+            func.lower(normalized_email),
+            unique=True,
+        ),
+    )
+
+
+class UsWithholdingRateConfigORM(SecurityBase):
+    """Operator-confirmed, effective-dated US withholding display rate (U3 / D-U1)."""
+
+    __tablename__ = "us_withholding_rate_configs"
+
+    id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")
+    )
+    tenant_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        nullable=False,
+        default=_TENANT_ID_DEFAULT_VALUE,
+        server_default=_TENANT_ID_DEFAULT,
+    )
+    effective_from: Mapped[date] = mapped_column(nullable=False)
+    rate: Mapped[Decimal] = mapped_column(Numeric(8, 6), nullable=False)
+    account_type: Mapped[str] = mapped_column(Text, nullable=False)
+    confirmed_by_user_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "account_type IN ('business', 'individual')",
+            name="ck_us_withholding_rate_configs_account_type",
+        ),
+        CheckConstraint("rate >= 0 AND rate <= 0.30", name="ck_us_withholding_rate_configs_rate"),
+        ForeignKeyConstraint(
+            ["tenant_id", "confirmed_by_user_id"],
+            ["users.tenant_id", "users.id"],
+            name="fk_us_withholding_rate_configs_confirmed_by",
+            ondelete="RESTRICT",
+        ),
+        Index(
+            "ix_us_withholding_rate_configs_tenant_effective",
+            "tenant_id",
+            "effective_from",
+        ),
     )

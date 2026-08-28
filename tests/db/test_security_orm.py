@@ -15,6 +15,8 @@ def test_security_orm_metadata_contains_required_tables():
         "user_permission_grants",
         "audit_logs",
         "api_connector_credentials",
+        "external_identities",
+        "us_withholding_rate_configs",
     }
 
 
