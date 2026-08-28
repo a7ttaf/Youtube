@@ -23,6 +23,7 @@ class RoleKey(StrEnum):
     CORPORATE_ADMIN = "corporate_admin"
     REVENUE_OPERATIONS_ADMIN = "revenue_operations_admin"
     FINANCE_ADMIN = "finance_admin"
+    BETA_OPERATOR = "beta_operator"
     FINANCE_APPROVER = "finance_approver"
     FINANCE_VIEWER = "finance_viewer"
     TV_SECTOR_MANAGER = "tv_sector_manager"
@@ -73,6 +74,12 @@ ROLE_DEFINITIONS: dict[RoleKey, RoleDefinition] = {
         RoleKey.FINANCE_ADMIN,
         "Finance Admin",
         "Finance owner for revenue, reconciliation, overrides, and month close.",
+        allowed_scope_types=_GLOBAL,
+    ),
+    RoleKey.BETA_OPERATOR: RoleDefinition(
+        RoleKey.BETA_OPERATOR,
+        "Beta Operator",
+        "First-beta finance operator with manual-import connector access.",
         allowed_scope_types=_GLOBAL,
     ),
     RoleKey.FINANCE_APPROVER: RoleDefinition(
