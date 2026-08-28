@@ -6,8 +6,8 @@ import { useChannelMappingAction } from "@/lib/api/useChannelMapping";
 import { useChannels } from "@/lib/api/useChannels";
 import { useProposeAccountLinkAction } from "@/lib/api/useChannelAccountLinks";
 import { useOrgUnits } from "@/lib/api/useOrgUnits";
-import type { Severity } from "@/lib/mock/data";
-import { REGISTRY_CONTROLS, REGISTRY_SUMMARY } from "@/lib/mock/data";
+import type { Severity } from "@/types/domain";
+import { REGISTRY_CONTROLS, REGISTRY_SUMMARY } from "@/fixtures/snapshotPanels";
 import {
   Badge,
   Dot,

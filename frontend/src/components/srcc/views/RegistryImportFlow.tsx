@@ -15,7 +15,7 @@ import {
 } from "@/lib/api/useChannelImport";
 import { displayDigestMatchesDisclosedAsync } from "@/lib/displayDigest";
 import { useContentOwners } from "@/lib/api/useContentOwners";
-import type { Severity } from "@/lib/mock/data";
+import type { Severity } from "@/types/domain";
 import { ActionStepper } from "../ActionStepper";
 import { OutcomeTable, type OutcomeTableRow } from "../OutcomeTable";
 import { Badge } from "../shared";

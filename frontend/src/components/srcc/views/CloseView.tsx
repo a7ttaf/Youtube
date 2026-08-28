@@ -12,8 +12,8 @@ import {
   useMonthCloseActions,
   useMonthCloseReadiness,
 } from "@/lib/api/useMonthClose";
-import type { Severity } from "@/lib/mock/data";
-import { RECON_NOTES } from "@/lib/mock/data";
+import type { Severity } from "@/types/domain";
+import { RECON_NOTES } from "@/fixtures/snapshotPanels";
 import {
   Badge,
   DEFAULT_MONTH,

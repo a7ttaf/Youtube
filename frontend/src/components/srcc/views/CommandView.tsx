@@ -33,8 +33,8 @@ import {
   CLOSE_STEPS,
   EXPORT_READINESS,
   ISSUES,
-} from "@/lib/mock/data";
-import type { Severity } from "@/lib/mock/data";
+} from "@/fixtures/snapshotPanels";
+import type { Severity } from "@/types/domain";
 import { confidenceDisplay } from "@/lib/confidence";
 import { LockIcon } from "../icons";
 import {

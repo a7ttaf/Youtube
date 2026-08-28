@@ -1,6 +1,6 @@
 import type { ReactNode } from "react";
 
-import type { Severity, WorkflowTone } from "@/lib/mock/data";
+import type { Severity, WorkflowTone } from "@/types/domain";
 
 // ============================================================================
 // Purpose: Shared presentational helpers for the SRCC shell views. Extracted

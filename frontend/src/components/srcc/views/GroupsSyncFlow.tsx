@@ -4,7 +4,7 @@ import { ApiError } from "@/lib/api/client";
 import { describeApiError, describeCanned503 } from "@/lib/api/errors";
 import type { GroupSyncGroupResult, GroupSyncResult } from "@/lib/api/types";
 import { useGroupSyncAction } from "@/lib/api/useGroupSync";
-import type { Severity } from "@/lib/mock/data";
+import type { Severity } from "@/types/domain";
 import { ActionStepper } from "../ActionStepper";
 import { OutcomeTable, type OutcomeTableRow } from "../OutcomeTable";
 import { Badge } from "../shared";

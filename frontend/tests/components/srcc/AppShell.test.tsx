@@ -1,6 +1,9 @@
 // frontend/src/components/srcc/__tests__/AppShell.test.tsx
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import type { ReactNode } from "react";
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { StrictMode } from "react";
+import { MemoryRouter } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import AppShell, { isImportScopeSettled } from "@/components/srcc/AppShell";
@@ -166,10 +169,10 @@ describe("AppShell tenant proof tag", () => {
         }),
       ),
     );
-    render(
+    renderShellTree(
       <SessionProvider>
         <TenantProvider initialSlug="ums">
-          <AppShell />
+          <AppShell initialView="command" />
         </TenantProvider>
       </SessionProvider>,
     );
@@ -185,10 +188,10 @@ describe("AppShell tenant proof tag", () => {
     (globalThis.fetch as ReturnType<typeof vi.fn>).mockImplementation(
       routeFetch(() => jsonResponse({ detail: "Tenant registry unavailable" }, 503)),
     );
-    render(
+    renderShellTree(
       <SessionProvider>
         <TenantProvider initialSlug="ums">
-          <AppShell />
+          <AppShell initialView="command" />
         </TenantProvider>
       </SessionProvider>,
     );
@@ -202,10 +205,10 @@ describe("AppShell tenant proof tag", () => {
     (globalThis.fetch as ReturnType<typeof vi.fn>).mockImplementation(
       routeFetch(() => jsonResponse({ detail: "Tenant registry unavailable" }, 503)),
     );
-    render(
+    renderShellTree(
       <SessionProvider>
         <TenantProvider initialSlug="ums">
-          <AppShell />
+          <AppShell initialView="command" />
         </TenantProvider>
       </SessionProvider>,
     );
@@ -229,11 +232,11 @@ describe("AppShell tenant proof tag", () => {
         }),
       ),
     );
-    render(
+    renderShellTree(
       <StrictMode>
         <SessionProvider>
           <TenantProvider>
-            <AppShell />
+            <AppShell initialView="command" />
           </TenantProvider>
         </SessionProvider>
       </StrictMode>,
@@ -261,10 +264,10 @@ describe("AppShell tenant proof tag", () => {
             });
       }),
     );
-    render(
+    renderShellTree(
       <SessionProvider>
         <TenantProvider initialSlug="ums">
-          <AppShell />
+          <AppShell initialView="command" />
         </TenantProvider>
       </SessionProvider>,
     );
@@ -293,10 +296,10 @@ describe("AppShell tenant proof tag", () => {
         }),
       ),
     );
-    render(
+    renderShellTree(
       <SessionProvider>
         <TenantProvider initialSlug="ums">
-          <AppShell />
+          <AppShell initialView="command" />
         </TenantProvider>
       </SessionProvider>,
     );
@@ -322,10 +325,10 @@ describe("AppShell tenant proof tag", () => {
         }),
       ),
     );
-    render(
+    renderShellTree(
       <SessionProvider>
         <TenantProvider>
-          <AppShell />
+          <AppShell initialView="command" />
         </TenantProvider>
       </SessionProvider>,
     );
@@ -439,12 +442,30 @@ const routeFetchWithSession = (sessionResponder: () => Response) => {
 };
 
 const renderShell = () => {
+  const queryClient = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  });
   return render(
-    <SessionProvider>
-      <TenantProvider initialSlug="ums">
-        <AppShell />
-      </TenantProvider>
-    </SessionProvider>,
+    <QueryClientProvider client={queryClient}>
+      <MemoryRouter initialEntries={["/command"]}>
+        <SessionProvider>
+          <TenantProvider initialSlug="ums">
+            <AppShell initialView="command" />
+          </TenantProvider>
+        </SessionProvider>
+      </MemoryRouter>
+    </QueryClientProvider>,
+  );
+};
+
+const renderShellTree = (tree: ReactNode) => {
+  const queryClient = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  });
+  return render(
+    <QueryClientProvider client={queryClient}>
+      <MemoryRouter initialEntries={["/command"]}>{tree}</MemoryRouter>
+    </QueryClientProvider>,
   );
 };
 

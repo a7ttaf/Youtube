@@ -1,6 +1,6 @@
 import type { ReactNode } from "react";
 
-import type { Severity } from "@/lib/mock/data";
+import type { Severity } from "@/types/domain";
 import { Dot } from "./shared";
 
 // ============================================================================

@@ -1,4 +1,5 @@
 import { type ReactNode, useCallback, useEffect, useRef, useState } from "react";
+import { useNavigate } from "react-router-dom";
 
 import { ApiError, useApiClient } from "@/lib/api/client";
 import type {
@@ -16,12 +17,8 @@ import {
   WriteInFlightProvider,
   useWriteInFlightLatch,
 } from "@/contexts/WriteInFlightContext";
-import {
-  NAV_GROUPS,
-  VIEW_COPY,
-  WORKFLOW_STEPS,
-} from "@/lib/mock/data";
-import type { Role, ViewKey } from "@/lib/mock/data";
+import { NAV_GROUPS, VIEW_COPY, WORKFLOW_STEPS } from "@/config/navigation";
+import type { Role, ViewKey } from "@/types/domain";
 import { BrandIcon, NAV_ICONS, RefreshIcon } from "./icons";
 import AuditView from "./views/AuditView";
 import CloseView from "./views/CloseView";
@@ -972,8 +969,9 @@ export const isImportScopeSettled = (session: SessionMe, tenantSettled: boolean)
 //   - File: frontend/src/contexts/SessionContext.tsx -> useSessionBootstrap.
 //   - File: backend/ums_smart_revenue/api/session.py -> GET /session/me.
 // ============================================================================
-const AppShell = () => {
-  const [view, setView] = useState<ViewKey>("command");
+const AppShell = ({ initialView = "command" }: { initialView?: ViewKey }) => {
+  const navigate = useNavigate();
+  const [view, setView] = useState<ViewKey>(initialView);
   const [previewRole, setPreviewRole] = useState<Role>(DEFAULT_PREVIEW_ROLE);
   // Registry "Review" navigation target: seeds TraceView's initial channel
   // selection. Navigation-only state — carries no authorization meaning.
@@ -1005,13 +1003,18 @@ const AppShell = () => {
   const writeInFlight = useWriteInFlightLatch();
   const navBlockedReason = writeInFlight.reason;
 
+  useEffect(() => {
+    setView(initialView);
+  }, [initialView]);
+
   const handleViewChange = useCallback(
     (next: ViewKey) => {
       if (navBlockedReason !== null) return;
       if (next !== "trace") setTraceChannelId(null);
       setView(next);
+      navigate(`/${next}`);
     },
-    [navBlockedReason, setView, setTraceChannelId],
+    [navBlockedReason, navigate, setTraceChannelId],
   );
 
   if (sessionBootstrap.status === "loading") {
@@ -1077,6 +1080,7 @@ const AppShell = () => {
           onOpenTrace={(channelId) => {
             setTraceChannelId(channelId);
             setView("trace");
+            navigate("/trace");
           }}
         />
         {view === "command" && <WorkflowRail />}

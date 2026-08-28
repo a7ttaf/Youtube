@@ -1,0 +1,10 @@
+{
+  "name": "@ums/design-system",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "main": "./src/index.tsx",
+  "exports": {
+    ".": "./src/index.tsx"
+  }
+}
