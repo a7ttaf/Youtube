@@ -27,14 +27,16 @@ docs PR after the gap-fix review. See:
 [`21_BETA_IMPLEMENTATION_PLAN.md`](21_BETA_IMPLEMENTATION_PLAN.md),
 [`23_ADMIN_ACCESS_AND_CONFIG_PLAN.md`](23_ADMIN_ACCESS_AND_CONFIG_PLAN.md),
 [`24_US_WITHHOLDING_AND_US_REVENUE_PLAN.md`](24_US_WITHHOLDING_AND_US_REVENUE_PLAN.md).
-Living P0 execution remains on [#210](https://github.com/a7ttaf/Youtube/pull/210).
+Living P0 execution is tracked on **P0 split PRs (P0-a…P0-e)** restacked onto `main`
+(replaces blocked #210). See [`25_PROGRAM_DEPENDENCY_GRAPH.md`](25_PROGRAM_DEPENDENCY_GRAPH.md).
 
 **US-withholding plan note (2026-08-28):** Docs/24 — Egypt–US treaty copyright-royalty
-withholding is **15%** (not 16%); no-form default 24%/30% on worldwide earnings. Program
-U1–U4: probe → additive country-sliced ingest → backend-emitted estimate
-(`UMS_US_WITHHOLDING_RATE` default 0.15; SPA renders only) → optional actual anchor.
-**Fence:** recon `DEFAULT_US_WITHHOLDING_RATE = 0.30` stays dormant (Docs/21 P3). D-U1
-(AdSense tax-info confirm) blocks trusting 0.15.
+withholding is **15%** when confirmed on AdSense tax info (not 16%); no-form defaults:
+**30% on US-source earnings (business)** / **24% on worldwide (individual)**. Program
+U1–U4: probe → additive country-sliced ingest (normalization fence) → backend-emitted
+estimate (**no default rate**; `UMS_US_WITHHOLDING_RATE` unset suppresses UI) → optional
+actual anchor. **Fence:** recon `DEFAULT_US_WITHHOLDING_RATE = 0.30` stays dormant
+(Docs/21 P3). D-U1 (AdSense tax-info confirm + effective-dated config) blocks U3.
 
 **Test-harness note (2026-06-11, branch `fix/pg-migration-test-lock-timeout`):** the PG
 migration round-trip tests' `fresh_engine` schema reset now sets `SET LOCAL lock_timeout`
@@ -642,10 +644,11 @@ closed unmerged and superseded by the consolidated batch in #156.
   supersedes draft #218): backend already ships the account/access surface
   (list/create/patch users — no DELETE; scoped role assignment + scoped permission
   grants + catalog reads, audited with required reasons) and NO view exposes it.
-  Program: **prerequisite #210**; A1 Admin MVP (+ session `can_manage_users` /
-  `can_assign_roles`); A2 matrix + `/security` proxy residual; A6 delegated admin with
-  no-amplification ceiling + competitor read-isolation (closes role-family hole); A7
-  Google-only sign-in (domain allowlist); A3–A5. Tripwires: no role editor, no secrets,
+  Program: **prerequisite P0-c**; A1 Admin MVP (+ `users.read_scoped` for assignment drawer;
+  session `can_manage_users` / `can_assign_roles`); A2 matrix + `/security` proxy
+  residual; A6 delegated admin with `home_org_unit_id` + no-amplification ceiling +
+  competitor read-isolation (closes role-family hole); A7 Google-only sign-in +
+  `external_identities` mapping; A3–A5. Tripwires: no role editor, no secrets,
   no delegation before A6. Remaining: whole program (plan only).
 - ⏳ Display-only currency conversion foundation — remaining: display-only
   conversion is not started. Note the distinction: bank-side FX + transfer-fee

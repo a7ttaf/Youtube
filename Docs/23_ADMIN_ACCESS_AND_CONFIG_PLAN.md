@@ -16,15 +16,16 @@ surface, and the tripwires that keep it safe.
 
 | Doc / where | Role |
 | --- | --- |
-| [`20_DEPLOYMENT_READINESS_AUDIT.md`](20_DEPLOYMENT_READINESS_AUDIT.md) / [`21_BETA_IMPLEMENTATION_PLAN.md`](21_BETA_IMPLEMENTATION_PLAN.md) | Parent beta audit/plan (snapshot; living status on #210) |
-| [#210](https://github.com/a7ttaf/Youtube/pull/210) | **Hard prerequisite** for A1/A5 (bootstrap, seed migration, `/users` proxy) |
+| [`20_DEPLOYMENT_READINESS_AUDIT.md`](20_DEPLOYMENT_READINESS_AUDIT.md) / [`21_BETA_IMPLEMENTATION_PLAN.md`](21_BETA_IMPLEMENTATION_PLAN.md) | Parent beta audit/plan (snapshot; living status on P0 split PRs) |
+| [`25_PROGRAM_DEPENDENCY_GRAPH.md`](25_PROGRAM_DEPENDENCY_GRAPH.md) | Execution DAG |
+| P0 split PRs (P0-a…P0-e) | `main` (TBD) | **Hard prerequisite** for A1/A5 (bootstrap, seed migration, `/users` proxy) |
 | [`24_US_WITHHOLDING_AND_US_REVENUE_PLAN.md`](24_US_WITHHOLDING_AND_US_REVENUE_PLAN.md) | Sibling finance program (no overlap) |
 
-> ⚠️ **Hard dependency on #210.** `scripts/bootstrap_operator.py`, Alembic migration
+> ⚠️ **Hard dependency on P0 split PRs.** `scripts/bootstrap_operator.py`, Alembic migration
 > `20260825_0001` (roles/permissions seed), and Vite proxy `/users` (plus `/org-units`)
-> land on #210 — **not on bare `main`**. Do not start A1 or A5 until #210 is merged
-> (or cherry-picked). After #210, A2 still needs `/security` added to
-> `TENANT_SCOPED_ROUTES`.
+> land on **P0-c / P0-e** — **not on bare `main`**. Do not start A1 or A5 until P0-c
+> merges (or cherry-picks). After P0-e, A2 still needs `/security` added to
+> `TENANT_SCOPED_ROUTES`. Blocked PR #210 is **not** living source of truth.
 >
 > **Consolidation:** Docs/20/21/23/24 ship together in `docs/program-plans-consolidated`
 > (supersedes closed drafts #209 / #218 / #219).
@@ -62,9 +63,9 @@ roles to existing users but cannot create users.
 1. **CLI (first admin / repeatable):** `scripts/bootstrap_operator.py`
    `--email … --display-name … --role …` (repeatable per user), plus `--org-skeleton`
    for the sector/company tree. This is how the first `corporate_admin` comes to exist.
-   **Ships on #210** — absent from bare `main`.
+   **Ships on P0-c** — absent from bare `main`.
 2. **API (from the dev dashboard environment):** the Vite dev proxy forwards `/users`
-   with the trusted-gateway headers once W0.2 / #210 lands, so `POST /users` works
+   with the trusted-gateway headers once W0.2 / P0-e lands, so `POST /users` works
    from the browser dev setup — **but only when the dev gateway role holds
    `users.manage`**. The recommended finance-demo role `finance_admin` does NOT; user
    creation from the dev proxy needs `VITE_DEV_GATEWAY_ROLE=corporate_admin` for the
@@ -76,7 +77,7 @@ roles to existing users but cannot create users.
 - `GET /security/roles` and `GET /security/permissions` (`api/security.py`) expose the
   catalog read-only (currently gated by `audit.view`).
 - The catalog itself is **code-owned and migration-seeded** (`auth/roles.py`,
-  `auth/permissions.py`, `auth/seed.py`, migration `20260825_0001` on **#210**). There
+  `auth/permissions.py`, `auth/seed.py`, migration `20260825_0001` on **P0-c**). There
   is no API to create a role or permission, on purpose — see tripwire T1. On bare
   `main`, `db/security_seed.sql` exists but is not wired into Alembic first-run.
 
@@ -122,9 +123,17 @@ main, and none blocks the beta data path. Hours assume the established view patt
 
 ### A1 — Admin view MVP: Users & Roles — **10–15h** ⭐ the operator's actual ask
 
+**Not frontend-only.** The assignment drawer needs a scoped user list endpoint. Today
+`GET /users` requires `users.manage`; `finance_admin` holds `roles.assign` but **not**
+`users.manage`, so the drawer cannot populate assignable users without either:
+
+1. **Preferred:** add **`users.read_scoped`** — list/access read without `users.manage`
+   (scoped to the actor's subtree post-A6; global for HQ until then); **or**
+2. Remove `finance_admin` from the assignment drawer until that endpoint exists.
+
 A ninth view, nav-gated to principals holding `users.manage` (decision D-A1):
 
-- User list (`GET /users`): email, display name, status, service-account badge.
+- User list (`GET /users` or scoped read): email, display name, status, service-account badge.
 - Create user: email + display name + human/service toggle (`POST /users`).
 - Activate / deactivate (`PATCH /users/{id}`) — not a hard delete.
 - Per-user drawer: current roles + assign/revoke with role picker, scope picker, and
@@ -140,9 +149,15 @@ capabilities (same pattern as `can_view_audit` / `can_manage_groups`). Alternati
 document reading raw permission lists from the session payload — weaker and easier to
 drift.
 
-New backend work for the six user endpoints: none (APIs exist). New wiring: Admin view
-in `ViewRouter`/nav + hooks; **plus** the session-capability extension above (small
-backend touch). Do not start until #210 is merged.
+New backend work: **`users.read_scoped`** (or equivalent) for the assignment drawer;
+session-capability booleans. The six user write endpoints already exist. New wiring:
+Admin view in `ViewRouter`/nav + hooks. Do not start until **P0-c** merges.
+
+**Acceptance criteria (A1):**
+- [ ] Admin nav hidden unless session reports `can_manage_users`
+- [ ] `finance_admin` can open assignment drawer **only if** scoped user list returns 200
+- [ ] Create/assign/revoke flows require audit reason; blank reason → 422 surfaced in UI
+- [ ] No client-side permission widening beyond session capabilities
 
 > ⚠️ **A1 must not present today's role-assignment policy as safe for delegation.**
 > Family ceilings on **role** assign fence `super_owner` + finance roles only —
@@ -156,10 +171,15 @@ backend touch). Do not start until #210 is merged.
   session already carries (`GET /session/me`) — kills the "why is this button dead"
   confusion at the root.
 - **Proxy residual:** on bare `main`, `/users` and `/security` are both missing from
-  `TENANT_SCOPED_ROUTES`. #210 adds `/users` (and `/org-units`); **A2 still must add
+  `TENANT_SCOPED_ROUTES`. P0-e adds `/users` (and `/org-units`); **A2 still must add
   `/security`**, or the matrix 404s in dev. Decide whether `audit.view` is the right
   gate for catalog reads or whether they should move under `users.manage`
   (decision D-A2).
+
+**Acceptance criteria (A2):**
+- [ ] `/security` proxied in dev; matrix loads without 404
+- [ ] "Your access" panel matches session principal and effective permissions
+- [ ] Catalog reads fail-closed for principals lacking the chosen gate
 
 ### A3 — Scoped grants UI — **6–10h**
 
@@ -253,6 +273,12 @@ program. What the code enforces today was verified line by line
 
 **Missing (the A6 work):**
 
+0. **Home scope at birth.** Delegated user creation must never leave a tenant-wide
+   principal without an org anchor. Require persisted **`home_org_unit_id`** on user
+   creation **or** an atomic **`create_user + scoped_role_assignment`** in one
+   transaction. Acceptance: an unassigned tenant-wide user **never** exists after
+   delegated create flows.
+
 1. **Scoped admin gates.** `_require_role_assignment_permission` and
    `_require_user_management_permission` demand the permission at **GLOBAL scope
    only** — bounded delegation is impossible today: authority to add users or assign
@@ -302,6 +328,12 @@ matrix + fixes 8–16h, honest unknown until measured; delegated mode in the A1 
 4–8h). Sequence: **after A1** — A1 serves the global admin (the operator) immediately;
 A6 is what makes it safe to hand pieces of it to sub-company people.
 
+**Acceptance criteria (A6):**
+- [ ] Delegated create always sets `home_org_unit_id` or atomically assigns scoped role
+- [ ] Mutation tests RED when home-scope guard removed
+- [ ] Competitor read-isolation matrix green across all views/exports
+- [ ] No-amplification invariant proven for role assign, grant, revoke, self-modification
+
 ## 4c — A7: Google-only sign-in with an operator-owned domain allowlist
 
 The operator's final requirement, verbatim: *"I don't need someone have user and
@@ -310,10 +342,19 @@ domains no one can login."*
 
 **The architecture is already shaped for this.** UMS deliberately has no login and no
 password store: identity arrives from a **trusted gateway** that injects
-`X-User-ID` / `X-User-Email` + the gateway token. Google SSO is that gateway made
-real — an OIDC front (Google sign-in) standing where the dev proxy stands today,
-injecting the same headers. Zero change to UMS's internal auth model; the no-password
-property is preserved by construction, because there is nothing to store.
+`X-User-ID` / `X-User-Email` + the gateway token. **`X-User-ID` must remain the
+internal UMS UUID** — Google `sub` and email are **not** valid principal IDs.
+
+**Required persistence (A7 backend):** an **`external_identities`** table mapping
+`(provider, provider_subject, normalized_email) → user_id` with timestamps. The gateway
+adapter resolves Google OIDC claims → UMS UUID **before** trusted headers reach FastAPI
+(`dependencies.py` UUID validation). Unknown allowlisted identity → clean 403; no
+auto-provisioning.
+
+Google SSO is that gateway made real — an OIDC front (Google sign-in) standing where
+the dev proxy stands today, injecting the same headers. Zero change to UMS's internal
+auth model; the no-password property is preserved by construction, because there is
+nothing to store.
 
 **The gate is two layers, both fail-closed:**
 
@@ -338,6 +379,11 @@ extension (D-A8). **Estimate: 10–18h** including compose wiring, the domain/em
 gate tests (mutation-proven: wrong domain RED, allowed-domain-unknown-account RED),
 and the runbook.
 
+**Acceptance criteria (A7):**
+- [ ] `external_identities` migration + repository; Google `sub` maps to UMS UUID
+- [ ] Gateway never forwards raw Google subject as `X-User-ID`
+- [ ] Allowlisted unknown email → 403; known mapped user → session with DB authz (post-A5)
+
 **The external-access milestone.** Handing the first sub-company account to a real
 competitor requires ALL THREE: **A5** (database-authz: DB owns roles) + **A6**
 (ceiling + isolation proof green) + **A7** (Google-only login behind the domain
@@ -352,7 +398,7 @@ gate). None of the three is optional for that step, and the beta needs none of t
 
 | # | Decision | Recommendation |
 | --- | --- | --- |
-| D-A1 | Which roles see the Admin nav | Principals holding `users.manage` (super_owner, corporate_admin); finance_admin sees only the role-assignment drawer via `roles.assign` if we want the split visible |
+| D-A1 | Which roles see the Admin nav | Principals holding `users.manage` (super_owner, corporate_admin); finance_admin sees assignment drawer **only** with `users.read_scoped` (or hide until that gate exists) |
 | D-A2 | Gate for the catalog reads (`/security/*`) | Move to `users.manage` alongside the matrix UI; `audit.view` was a placeholder |
 | D-A3 | A4 status endpoint scope | Read-only allowlist, `platform.manage_settings` gate |
 | D-A4 | When A1 lands | Immediately after the P1 band merges, before beta polish |
@@ -377,8 +423,8 @@ gate). None of the three is optional for that step, and the beta needs none of t
 
 ---
 
-*Relationship to Docs/21 (snapshot in this PR / living on #210): this program is additive
+*Relationship to Docs/21 (snapshot in this PR; living status on P0 split PRs): this program is additive
 and currency-neutral; it does not touch the P0/P1 bands or the EGP phases. A1/A5 assume
-#210 merged. Only A4's status endpoint (plus the A1 session-capability booleans) adds
-backend surface, and the status endpoint is read-only. Independent of
+**P0-c merged**. Only A4's status endpoint (plus the A1 session-capability booleans and
+`users.read_scoped`) adds backend surface, and the status endpoint is read-only. Independent of
 [`24_US_WITHHOLDING_AND_US_REVENUE_PLAN.md`](24_US_WITHHOLDING_AND_US_REVENUE_PLAN.md).*

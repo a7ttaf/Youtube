@@ -8,12 +8,11 @@ localhost only**, operator-run, with **real** YouTube CMS revenue data.
 refute it. Those passes reversed or downgraded findings in every round; the
 corrections are recorded rather than quietly dropped.
 
-> ⚠️ **Freshness banner (2026-08-28).** P0 **execution** and the living Docs/21 status
-> table live on PR **#210** (`feat/beta-p0-durability`). This document is the
-> **pre-execution snapshot** at `main` = `d8418cea2`. Do **not** schedule unchecked
-> open items from this text alone — B0 (Postgres 18 `PGDATA`) and most of W0.2 /
-> P0.1–P0.9 are already done on #210. For scheduling work, use Docs/21 as maintained
-> on #210.
+> ⚠️ **Freshness banner (2026-08-28).** P0 **implementation** is tracked on **restacked
+> P0 split PRs (P0-a…P0-e)** onto `main` — **not** on blocked PR #210. This document is
+> the **pre-execution snapshot** at `main` = `d8418cea2`. Do **not** schedule unchecked
+> open items from this text alone. For scheduling work, use Docs/21 as maintained on
+> `main` after each P0 split merges (see [`25_PROGRAM_DEPENDENCY_GRAPH.md`](25_PROGRAM_DEPENDENCY_GRAPH.md)).
 >
 > **Consolidation:** this file ships with Docs/21/23/24 in branch
 > `docs/program-plans-consolidated` (supersedes closed drafts #209 / #218 / #219).
@@ -43,13 +42,14 @@ corrections are recorded rather than quietly dropped.
 
 | Doc | Where | Role |
 | --- | --- | --- |
-| Docs/21 (living status) | [#210](https://github.com/a7ttaf/Youtube/pull/210) | P0 execution + current schedule source of truth |
-| Docs/22 backup rehearsal | [#210](https://github.com/a7ttaf/Youtube/pull/210) | Backup/restore runbook shipped with P0 |
+| Docs/21 (living status) | P0 split PRs on `main` | P0 execution + current schedule |
+| Docs/22 backup rehearsal | P0-b split PR | Backup/restore runbook |
+| [`25_PROGRAM_DEPENDENCY_GRAPH.md`](25_PROGRAM_DEPENDENCY_GRAPH.md) | this PR | Execution DAG |
 | [`21_BETA_IMPLEMENTATION_PLAN.md`](21_BETA_IMPLEMENTATION_PLAN.md) | this PR (snapshot) | Original costed beta plan at `d8418cea2` |
 | [`23_ADMIN_ACCESS_AND_CONFIG_PLAN.md`](23_ADMIN_ACCESS_AND_CONFIG_PLAN.md) | this PR | Admin / access / config UI (Docs/21 is silent here) |
 | [`24_US_WITHHOLDING_AND_US_REVENUE_PLAN.md`](24_US_WITHHOLDING_AND_US_REVENUE_PLAN.md) | this PR | US revenue slice + withholding estimate (fills P3 rate gap) |
 
-**Residual proxy note:** after #210 adds `/org-units` and `/users`, `/security` is
+**Residual proxy note:** after P0-e adds `/org-units` and `/users`, `/security` is
 still missing from `TENANT_SCOPED_ROUTES` — required by Docs/23 A2.
 
 ---
@@ -582,8 +582,9 @@ export, manage users) is denied, and so is every read gated on `VIEW_REVENUE`,
 `VIEW_FINALIZED_PAYMENTS`, or `VIEW_RAW_FILES`. **The product is being demonstrated
 by its most restricted role.**
 
-**Fix:** set `VITE_DEV_GATEWAY_ROLE` to a role that can actually operate —
-`finance_admin` for the finance surface, `corporate_admin` for setup
+**Fix:** set `VITE_DEV_GATEWAY_ROLE` to a role that can actually operate — for the
+finance import loop use **`beta_operator`** (P0-c: finance surface **plus**
+`connectors.run_jobs` for manual upload); use `corporate_admin` for setup
 (including `POST /users` — `finance_admin` holds `roles.assign` but **not**
 `users.manage`; see Docs/23). One line, no code change. This should be the first
 thing any beta runbook says, and its absence from the README is arguably the

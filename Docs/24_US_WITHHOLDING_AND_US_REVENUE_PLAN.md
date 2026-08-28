@@ -13,13 +13,13 @@ calculation as display/evidence surfaces. Gap-patched 2026-08-28 (triad review).
 
 | Doc / where | Role |
 | --- | --- |
-| [`20_DEPLOYMENT_READINESS_AUDIT.md`](20_DEPLOYMENT_READINESS_AUDIT.md) / [`21_BETA_IMPLEMENTATION_PLAN.md`](21_BETA_IMPLEMENTATION_PLAN.md) | Parent beta audit; P3 parked recon TAX (living status on #210) |
-| [#210](https://github.com/a7ttaf/Youtube/pull/210) | Living schedule; EGP sequencing for U2 |
+| [`20_DEPLOYMENT_READINESS_AUDIT.md`](20_DEPLOYMENT_READINESS_AUDIT.md) / [`21_BETA_IMPLEMENTATION_PLAN.md`](21_BETA_IMPLEMENTATION_PLAN.md) | Parent beta audit; P3 parked recon TAX (living status on P0 split PRs) |
+| [`25_PROGRAM_DEPENDENCY_GRAPH.md`](25_PROGRAM_DEPENDENCY_GRAPH.md) | Execution DAG |
+| P0 split PRs (P0-a…P0-e) | `main` (TBD) | Living P0 — replaces blocked #210 |
 | [`23_ADMIN_ACCESS_AND_CONFIG_PLAN.md`](23_ADMIN_ACCESS_AND_CONFIG_PLAN.md) | Sibling admin program (independent) |
 
-> ⚠️ **D-U1 is blocking.** Do not trust the `0.15` default for U3 until the operator
-> confirms the live AdSense → Payments → "United States tax info" rate. Keep estimate
-> surfaces draft-quality until that confirmation (or an explicit operator override).
+> ⚠️ **D-U1 is blocking.** No estimate surfaces until the operator confirms the live
+> AdSense tax-info rate and records it in effective-dated config. **No default rate.**
 >
 > **Consolidation:** Docs/20/21/23/24 ship together in `docs/program-plans-consolidated`
 > (supersedes closed drafts #209 / #218 / #219).
@@ -46,17 +46,21 @@ calculation as display/evidence surfaces. Gap-patched 2026-08-28 (triad review).
 
 **The traps (why "check first" was the right instinct):**
 
-- **No valid form on file** → default withholding is **24% for individuals / 30% for
-  business accounts**, applied to **total worldwide earnings, not just US earnings**.
-- **Lapsed/expired form** falls back to the same default. The form has to be re-validated
-  when Google asks.
+- **Business account, no valid form on file** → default withholding is **30% on
+  US-source earnings only** (not worldwide).
+- **Individual account, no valid form** → backup withholding is **24% on total
+  worldwide earnings**.
+- **Lapsed/expired form** falls back to the same account-type default. The form has
+  to be re-validated when Google asks.
 - If a payment were classed under **motion picture/TV royalties**, Egypt's treaty gives NO
   reduction (30%). The AdSense form shows which categories were claimed and at what rate.
 
 **Operator action (only Mahmoud can do this):** AdSense → Payments → Manage settings →
 "United States tax info" shows the exact per-category withholding rate Google is applying
 to this account right now. That number — not this document — is the rate the calculation
-must be configured with. Expected value: **15%**.
+must be configured with. For a properly filed Egyptian **business** entity under copyright
+royalties, the **expected** treaty rate is **15% of US-viewer earnings** — but only after
+D-U1 confirms the live page matches.
 
 **Honesty rule for everything below:** YouTube Analytics revenue metrics
 (`estimatedRevenue`) are **pre-withholding**. Any withholding figure UMS computes from
@@ -89,9 +93,9 @@ net finance math.
 
 **Fence on F6 (non-negotiable for this program):** U1–U4 do **not** rename, replace, or
 silently sync with `DEFAULT_US_WITHHOLDING_RATE`. The recon path stays dormant and out of
-scope. U3’s `UMS_US_WITHHOLDING_RATE` (default `0.15`) is a **display-estimate setting
-only**. Arming recon / `UsViewShareProvider` requires a **separate** finance ruling — not
-this plan.
+scope. U3’s **`UMS_US_WITHHOLDING_RATE` has no default** — unset means suppress all
+estimate UI. Arming recon / `UsViewShareProvider` requires a **separate** finance
+ruling — not this plan.
 
 ---
 
@@ -99,46 +103,72 @@ this plan.
 
 Sequenced after the current fleet (#211–#217) and independent of the admin program
 ([`23_ADMIN_ACCESS_AND_CONFIG_PLAN.md`](23_ADMIN_ACCESS_AND_CONFIG_PLAN.md)). Parent
-context: Docs/21 (this PR snapshot / #210 living) P3 “Reconciliation-derived TAX”
-pause. U2 must coordinate with the EGP program (#210 / EGP phases) because both touch
-source-row identity.
+context: Docs/21 (this PR snapshot; living status on P0 split PRs) P3
+“Reconciliation-derived TAX” pause. U2 must coordinate with the EGP program because both
+touch source-row identity.
 
 ### U1 — Probe: prove the numbers before building (2–4h, read-only script)
 
 A standalone script (same shape as the EGP workbook reference script) that, for one month:
 per channel, runs `filters=channel==UC…` + `dimensions=country` + `metrics=estimatedRevenue`,
 extracts the `US` row, and prints channel → US revenue → US share % → estimated
-withholding at the configured rate. Acceptance: the per-channel **worldwide totals** in the
-same responses must equal the existing workbook/UMS numbers channel-by-channel (proves the
-country cut decomposes the number we already trust, no drift). No writes, no UMS changes.
+withholding **only if** an operator-supplied rate is passed on the CLI (no baked-in
+default). Acceptance: the per-channel **worldwide totals** in the same responses must
+equal the existing workbook/UMS numbers channel-by-channel (proves the country cut
+decomposes the number we already trust, no drift). No writes, no UMS changes.
 
-### U2 — Ingest the US slice (10–16h)
+**Acceptance criteria (U1):**
+- [ ] Script runs read-only against live or fixture Analytics responses
+- [ ] Per-channel worldwide totals match existing UMS/workbook numbers
+- [ ] US row extracted; no UMS database writes
+
+### U2 — Ingest the US slice (10–16h) — **blocked until normalization fence**
+
+Country-dimensional rows must **never** enter [`GoogleSourceNormalizer._source_row_buckets`](backend/ums_smart_revenue/finance/google_source_normalizer.py)
+(which groups only by `(channel_id, source_system)`). Distinct `source_row_key` hashes
+prevent upsert collisions but **do not** prevent a country row from winning
+[`select_canonical_row`](backend/ums_smart_revenue/finance/google_source_normalizer.py)
+and replacing the worldwide channel gross fact.
+
+**Required design:** a **non-projecting evidence lane** — separate `source_system` value
+(e.g. `youtube_analytics_country_evidence`) or dedicated evidence table that
+**explicitly excludes** rows from canonical normalization. Parser + normalizer guard tests
+required before ingest lands.
 
 Extend the Analytics lane with a second, additive report shape per channel-month:
-country-dimensioned revenue rows (at minimum the US row; storing the full country
-breakdown is the same cost and future-proofs "top geographies"). New rows carry
-`dimensions={channel, country}` so source_row_keys are distinct from the monthly totals
-(F5). The existing channel-month lane is untouched — the US slice is evidence, never an
-input to reconciliation or close math. Includes: parser + row-key tests, RLS-scoped
-repository reads, full PG suite.
+country-dimensioned revenue rows stored in the evidence lane only (at minimum the US row).
+New rows carry `dimensions={channel, country}` in evidence storage. The existing
+channel-month canonical lane is untouched.
+
+**Acceptance criteria (U2):**
+- [ ] Country rows persist in evidence lane with distinct keys (F5)
+- [ ] `GoogleSourceNormalizer` never selects country-dimensional rows for canonical facts
+- [ ] Mutation test: removing the exclusion guard turns a country-canonical test RED
+- [ ] Full PG suite green; RLS-scoped reads
 
 **Sequencing tripwire:** if the EGP flip (currency change, which re-keys source rows) is
 scheduled, land U2 either clearly before or clearly after — never interleaved with — the
 EGP re-key, so evidence rows don't split across two currency generations mid-month.
 
-### U3 — Display + the calculation (6–10h)
+### U3 — Display + the calculation (6–10h) — **blocked until D-U1 + config service**
 
 Per-channel panel/column: **US revenue**, **US share of channel revenue**, and
-**estimated US withholding**. The rate comes from a fail-fast setting
-(`UMS_US_WITHHOLDING_RATE`, default `0.15`, validated 0 ≤ rate ≤ 0.30) — configured, not
-hardcoded, because the true rate is whatever the AdSense tax-info page shows (§0 / D-U1).
+**estimated US withholding** — **only when** an effective-dated, operator-confirmed rate
+exists in config. **`UMS_US_WITHHOLDING_RATE` unset → suppress estimate UI entirely**
+(fail-closed; no silent 15% default). Rate validated 0 ≤ rate ≤ 0.30 when set.
+
 Every figure is labeled "estimated"; the panel links the §0 explanation.
 
 **Backend-only estimate (AGENTS / finance rule):** the backend emits the labeled estimate
 fields (US revenue, share, estimated withholding, rate used, confidence/source tokens).
-The SPA **renders** those fields — it must **not** compute `US × rate` in the browser as
-an official number. Display only: nothing feeds net revenue, allocation, close, or
-reconciliation (F6 fence).
+The SPA **renders** those fields — it must **not** compute `US × rate` in the browser.
+Display only: nothing feeds net revenue, allocation, close, or reconciliation (F6 fence).
+
+**Acceptance criteria (U3):**
+- [ ] With no confirmed rate in config, estimate fields absent from API (not zero)
+- [ ] With confirmed rate, backend returns labeled estimate fields only
+- [ ] SPA renders backend fields; no client-side withholding math
+- [ ] Recon `DEFAULT_US_WITHHOLDING_RATE` (0.30) unchanged and dormant
 
 ### U4 — Actual-withholding anchor (4–8h, optional, operator decision)
 
@@ -156,9 +186,9 @@ a monthly manual glance at the AdSense payments report.
   enters net finance math, close, allocation, or reconciliation without its own ruling.
   In particular: do **not** wire U2/U3 into `UsViewShareProvider` or change
   `DEFAULT_US_WITHHOLDING_RATE` (0.30) from this program (F6).
-- **T-U2** The display-estimate rate is configuration with a validated range
-  (`UMS_US_WITHHOLDING_RATE`) — never hardcoded in UI or finance math. It is **not** a
-  silent rename of the recon constant.
+- **T-U2** The display-estimate rate is **effective-dated configuration with no default**.
+  `UMS_US_WITHHOLDING_RATE` unset → no estimate surfaces. It is **not** a silent rename of
+  the recon constant (0.30).
 - **T-U3** Country-dimensioned rows never feed the monthly-totals lane (no double count);
   enforced by distinct source_row_key dimensions (F5) and a guard test in U2.
 - **T-U4** No FX anywhere in this program (standing rule); US revenue is displayed in the
@@ -169,10 +199,10 @@ a monthly manual glance at the AdSense payments report.
 
 ## 4. Operator decisions
 
-- **D-U1 (blocking U3's default):** Read the actual per-category rate from AdSense →
-  Payments → "United States tax info" and confirm 15% (copyright royalties, Egypt treaty).
-  If the page shows 24%/30%, stop and fix the tax form before building anything. **Do
-  not trust the 0.15 default until D-U1 is confirmed.**
+- **D-U1 (blocking U3):** Read the actual per-category rate from AdSense → Payments →
+  "United States tax info"; record account type (business vs individual) and confirmed
+  rate in effective-dated config. If the page shows 24%/30% fallback, stop and fix the
+  tax form before enabling estimates. **No estimate UI until D-U1 is recorded.**
 - **D-U2:** Where the US panel lives (Rankings view column vs. per-channel detail panel) —
   design is the operator's per the standing rule; the plan only commits the numbers.
 - **D-U3:** Whether U4 (manual actual-withholding anchor) is worth building now or stays a
