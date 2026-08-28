@@ -12,6 +12,7 @@ from ums_smart_revenue.connectors.runs.executor import ConnectorJobExecutor
 
 
 def _sqlite_url(tmp_path) -> str:
+    """Build a per-test SQLite URL under tmp_path."""
     return f"sqlite+pysqlite:///{(tmp_path / 'app.db').as_posix()}"
 
 
@@ -49,11 +50,15 @@ def test_lifespan_shutdown_closes_executor(tmp_path) -> None:
         # itself (the attribute we are about to replace).
         real_close = app.state.connector_job_executor.close
 
-        def _spy() -> None:
+        def _spy() -> bool:
+            """Count lifespan close() and delegate to the real executor close."""
             closed["count"] += 1
-            real_close()
+            # close() now reports drain health; the lifespan skips the logging
+            # restore on a falsy return, so the spy must forward the real value
+            # or this test leaks the app's root handler into the whole suite.
+            return real_close()
 
-        app.state.connector_job_executor.close = _spy  # type: ignore[method-assign]
+        setattr(app.state.connector_job_executor, "close", _spy)
         with TestClient(app):
             pass
         assert closed["count"] == 1

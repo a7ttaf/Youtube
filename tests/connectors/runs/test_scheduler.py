@@ -32,6 +32,7 @@
 from __future__ import annotations
 
 import gc
+import hashlib
 import logging
 import threading
 import weakref
@@ -322,6 +323,7 @@ def test_tick_isolates_one_tenant_failure(tmp_path: Path, monkeypatch: pytest.Mo
 
     @contextmanager
     def _flaky_ctx(tenant_id: UUID, *, session: Session | None = None) -> Iterator[None]:
+        """Fail tenant A's context so per-tenant fault isolation is observable."""
         if tenant_id == TENANT_A:
             raise RuntimeError("boom for tenant A")
         with real_ctx(tenant_id, session=session):
@@ -356,6 +358,25 @@ def test_tick_skips_activation_for_in_flight_owner(tmp_path: Path) -> None:
     assert (TENANT_B, OWNER_B_ACTIVE) in activated
 
 
+def test_in_flight_debug_log_fingerprints_the_owner(tmp_path: Path, caplog) -> None:
+    """DEBUG output never carries the raw guarded CMS content-owner id; README
+    presents UMS_LOG_LEVEL=DEBUG as operator-safe (PR #210 review round 5).
+    """
+    factory = _seeded_factory(tmp_path)
+    fake = _RecordingExecutor(in_flight=frozenset({(TENANT_A, OWNER_A_ACTIVE)}))
+    scheduler = _scheduler(factory, fake)
+
+    with caplog.at_level(
+        logging.DEBUG, logger="ums_smart_revenue.connectors.runs.scheduler"
+    ):
+        scheduler.tick()
+
+    log_text = "\n".join(rec.getMessage() for rec in caplog.records)
+    assert OWNER_A_ACTIVE not in log_text
+    fingerprint = hashlib.sha256(OWNER_A_ACTIVE.encode("utf-8")).hexdigest()[:12]
+    assert f"owner_fp={fingerprint}" in log_text
+
+
 # ---------------------------------------------------------------------------
 # Catch-all: a tick where enumeration itself raises never escapes _tick_safely.
 # ---------------------------------------------------------------------------
@@ -365,6 +386,7 @@ def test_tick_safely_swallows_enumeration_failure() -> None:
     """tick() itself raises on a broken session_factory; _tick_safely swallows it."""
 
     def _boom_factory() -> Session:
+        """Stand in for a session factory wired to an unavailable database."""
         raise RuntimeError("db unavailable")
 
     scheduler = scheduler_module.GroupSyncScheduler(
