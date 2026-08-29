@@ -78,10 +78,15 @@ export const currentMonthKey = (now: Date = new Date()): string =>
 //   default, not a constraint — the operator can still pick any offered month,
 //   including the current one — and it stores no value itself.
 // Connections:
-//   - File: frontend/src/components/srcc/views/ConnectorsView.tsx -> seeds its
-//     month state (connector-run report_month + AdSense payment month) here.
-//   - File: frontend/src/components/srcc/shared.tsx -> MONTH_OPTIONS; this key
-//     is MONTH_OPTIONS[1] by construction, so it is always a selectable option.
+//   - File: frontend/src/components/srcc/shared.tsx -> WRITE_DEFAULT_MONTH
+//     derives the write default FROM the frozen MONTH_OPTIONS (its index-1
+//     entry), so the two can never disagree. Call this function directly only
+//     when you can inject the same `now` the option list was built from: a
+//     separate wall-clock read (the PR #211 review bug) let a long-lived tab
+//     seed a month the frozen selector no longer offered.
+//   - File: frontend/src/components/srcc/views/ConnectorsView.tsx -> its month
+//     state (connector-run report_month + AdSense payment month) seeds from
+//     WRITE_DEFAULT_MONTH, not from this function's live clock read.
 // ============================================================================
 export const lastCompleteMonthKey = (now: Date = new Date()): string =>
   monthKey(now.getFullYear(), now.getMonth() - 1);
@@ -107,7 +112,9 @@ export const rollingMonthWindow = (
  */
 export const monthKeyLabel = (key: string): string => {
   const parsed = MONTH_KEY_PATTERN.exec(key);
-  if (!parsed) return key;
+  if (!parsed) {
+    return key;
+  }
   const [, year, month] = parsed;
   return MONTH_LABEL_FORMATTER.format(new Date(Number(year), Number(month) - 1, 1));
 };

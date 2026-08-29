@@ -53,6 +53,21 @@ export const MONTH_OPTIONS = rollingMonthWindow();
  */
 export const DEFAULT_MONTH = MONTH_OPTIONS[0];
 
+/**
+ * The month a WRITE control (connector run report_month, AdSense payment
+ * month) defaults to: the last COMPLETE calendar month AT THE MOMENT the month
+ * window above was frozen — MONTH_OPTIONS[1], the month before the current
+ * month the window opens on. Derived FROM the frozen window instead of calling
+ * lastCompleteMonthKey() again when a view mounts, so the write default and the
+ * rendered <option> list share ONE module-load clock snapshot: a tab left open
+ * across month boundaries can never seed a month the selector no longer offers
+ * (a live clock read there rendered a blank selector that still submitted its
+ * invisible month — PR #211 review). Falls back to the newest offered month if
+ * the window ever shrinks to a single entry.
+ */
+export const WRITE_DEFAULT_MONTH =
+  MONTH_OPTIONS.length > 1 ? MONTH_OPTIONS[1] : MONTH_OPTIONS[0];
+
 const USD_FORMATTER = new Intl.NumberFormat("en-US", {
   style: "currency",
   currency: "USD",

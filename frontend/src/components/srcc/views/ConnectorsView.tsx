@@ -23,13 +23,13 @@ import {
 import { useConnectorRuns } from "@/lib/api/useConnectorRuns";
 import { useConnectorTest } from "@/lib/api/useConnectorTest";
 import type { Severity } from "@/lib/mock/data";
-import { lastCompleteMonthKey } from "@/lib/months";
 import {
   Badge,
   Dot,
   financeDisplay,
   formatTimestamp,
   MONTH_OPTIONS,
+  WRITE_DEFAULT_MONTH,
 } from "../shared";
 import { describeError } from "./CommandView";
 
@@ -76,6 +76,11 @@ import { describeError } from "./CommandView";
 // Hint shown wherever a connector-operations control is disabled because the
 // viewer's role cannot run connector jobs (mirrors the honest no-permission UX).
 const CONNECTOR_ROLE_HINT = "Requires a connector-operations role.";
+/**
+ * State updater that clears a run-history cursor param back to undefined so
+ * the next useConnectorRuns fetch restarts from the first page (typed to
+ * return undefined, matching the string | undefined cursor state).
+ */
 const clearCursorValue = (): undefined => undefined;
 
 // Wire-string -> badge-tone map for connector credential statuses. Statuses
@@ -1429,6 +1434,12 @@ const TokenHealthList = ({
  */
 type TokenHealthFeedView = "error" | "loading" | "empty" | "list";
 
+/**
+ * Pick the credential-health feed's render state with strict precedence:
+ * error wins over everything, "loading" applies only while no rows are on
+ * screen yet (a background refetch over existing rows keeps the list — no
+ * skeleton flash), then empty vs list by row count.
+ */
 const tokenHealthFeedView = (
   error: ApiError | Error | null,
   loading: boolean,
@@ -1440,6 +1451,14 @@ const tokenHealthFeedView = (
   return "list";
 };
 
+/**
+ * Render the credential-health feed from GET /connectors/credentials/health:
+ * one of the four states chosen by tokenHealthFeedView, with a 403 surfacing
+ * as the no-permission copy inside the error state. Only mounted inside the
+ * health panel, which itself returns null when the viewer lacks
+ * canViewConnectorHealth, so the fetch never runs for a viewer who cannot see
+ * it.
+ */
 const TokenHealthFeed = () => {
   const { data, loading, error } = useConnectorCredentialHealth();
   const rows = data ?? [];
@@ -1563,10 +1582,16 @@ export const ConnectorsView = ({
   // month. The Google clients pull a whole calendar month and the backend only
   // validates the "YYYY-MM" format, so seeding the IN-PROGRESS month (the
   // rolling DEFAULT_MONTH the read views open on) would ingest a partial month
-  // as if it were final. Seed the last COMPLETE month instead; the selector
-  // still offers every MONTH_OPTIONS entry, current month included, so this
-  // changes the default and not the operator's choice.
-  const [month, setMonth] = useState<string>(lastCompleteMonthKey);
+  // as if it were final. Seed the last COMPLETE month instead — and from the
+  // SAME module-load snapshot as MONTH_OPTIONS: WRITE_DEFAULT_MONTH is that
+  // frozen window's index-1 entry, never a fresh clock read at mount. Reading
+  // the wall clock here again (the previous code) let a tab left open across
+  // two month boundaries seed a month absent from the frozen <option> list,
+  // rendering a blank selector that still submitted its invisible month
+  // (PR #211 review). The selector still offers every MONTH_OPTIONS entry,
+  // current month included, so this fixes the default, not the operator's
+  // choice.
+  const [month, setMonth] = useState<string>(WRITE_DEFAULT_MONTH);
   const [reason, setReason] = useState<string>("");
   const [dryRun, setDryRun] = useState<boolean>(false);
   // Nonce bumped after a successful executing-path submit so the run-history feed
@@ -1586,6 +1611,13 @@ export const ConnectorsView = ({
   // clear them; previously the timers persisted after the component
   // unmounted and could fire setReloadToken on an unmounted React tree.
   const pollTimersRef = useRef<number[]>([]);
+  /**
+   * Bump the run-history reload token now and again at 1/3/5s so the feed
+   * catches the connector_runs row once the worker commits it after its OAuth
+   * refresh (a single immediate refetch can run before the RUNNING row
+   * exists). Timer ids land in pollTimersRef and are cleared on unmount so a
+   * navigation away cannot setState on a dead tree.
+   */
   const runsReloadPoll = () => {
     setReloadToken((n) => n + 1);
     const timers = pollTimersRef.current;

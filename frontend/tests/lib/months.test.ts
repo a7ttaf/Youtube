@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { DEFAULT_MONTH, MONTH_OPTIONS } from "@/components/srcc/shared";
+import { DEFAULT_MONTH, MONTH_OPTIONS, WRITE_DEFAULT_MONTH } from "@/components/srcc/shared";
 import {
   MONTH_WINDOW_SIZE,
   currentMonthKey,
@@ -164,5 +164,16 @@ describe("shared month window exports", () => {
     expect(DEFAULT_MONTH).toBe(MONTH_OPTIONS[0]);
     // Not a frozen literal: the published window is the one the clock implies.
     expect(MONTH_OPTIONS).toEqual(rollingMonthWindow(MONTH_WINDOW_SIZE, new Date()));
+  });
+
+  it("derives WRITE_DEFAULT_MONTH from the frozen window, never a second clock read", () => {
+    // The write default (connector report_month / AdSense payment month) must
+    // come from the SAME module-load snapshot as the option list: derived FROM
+    // MONTH_OPTIONS, it can never be a month the frozen <select> cannot
+    // display (PR #211 review — a live clock read at view mount let a
+    // two-month-old tab seed an invisible month).
+    expect(WRITE_DEFAULT_MONTH).toBe(MONTH_OPTIONS[1]);
+    expect(MONTH_OPTIONS).toContain(WRITE_DEFAULT_MONTH);
+    expect(WRITE_DEFAULT_MONTH).not.toBe(DEFAULT_MONTH);
   });
 });
