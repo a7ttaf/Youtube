@@ -242,6 +242,22 @@ def _validate_export_created(body: Any) -> str:
     return _require(isinstance(body.get("id"), str), "missing id on export job")
 
 
+def _validate_session_capabilities(capabilities: Any) -> str:
+    """Assert the capabilities object carries the camelCase gate booleans."""
+    # Early isinstance return narrows the type for the checker (DeepSource
+    # TYP-050 union-attr): ``body.get("capabilities")`` is Any | None, so the
+    # .get calls below must sit behind a Mapping guard the typechecker sees.
+    if not isinstance(capabilities, Mapping):
+        return "capabilities object missing"
+    return _require(
+        isinstance(capabilities.get("canViewRevenue"), bool),
+        "capabilities.canViewRevenue must be a camelCase bool",
+    ) or _require(
+        isinstance(capabilities.get("canRunConnectorJobs"), bool),
+        "capabilities.canRunConnectorJobs must be a camelCase bool",
+    )
+
+
 def _validate_session_me(body: Any) -> str:
     """Assert GET /session/me carries the principal identity + capabilities.
 
@@ -254,18 +270,15 @@ def _validate_session_me(body: Any) -> str:
     if not isinstance(body, Mapping):
         return "response is not a JSON object"
     capabilities = body.get("capabilities")
+    # FIX: read the fields once and bool()-narrow the truthiness operand so the
+    # _require condition is a bool for the typechecker (DeepSource TYP-050);
+    # a bare ``and body.get(...)`` expression types as bool|Any|None.
+    user_id = body.get("user_id")
+    email = body.get("email")
     return (
-        _require(isinstance(body.get("user_id"), str) and body.get("user_id"), "missing user_id")
-        or _require(isinstance(body.get("email"), str) and body.get("email"), "missing email")
-        or _require(isinstance(capabilities, Mapping), "capabilities object missing")
-        or _require(
-            isinstance(capabilities.get("canViewRevenue"), bool),
-            "capabilities.canViewRevenue must be a camelCase bool",
-        )
-        or _require(
-            isinstance(capabilities.get("canRunConnectorJobs"), bool),
-            "capabilities.canRunConnectorJobs must be a camelCase bool",
-        )
+        _require(isinstance(user_id, str) and bool(user_id), "missing user_id")
+        or _require(isinstance(email, str) and bool(email), "missing email")
+        or _validate_session_capabilities(capabilities)
     )
 
 
