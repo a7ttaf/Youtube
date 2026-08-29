@@ -10,7 +10,10 @@ import { defineConfig, loadEnv } from "vite";
 // never holds the gateway secret and the backend's
 // current_principal_from_headers dependency succeeds. Mirrors the production
 // reverse-proxy model where the trusted gateway injects principal identity.
-const TENANT_SCOPED_ROUTES = [
+// Exported for frontend/tests/devProxyRoutes.test.ts: Vite only consumes the
+// default export, so the named export exists purely so the route list is
+// assertable rather than trusted.
+export const TENANT_SCOPED_ROUTES = [
   "/tenants",
   // /session/me hydrates the authenticated principal's capabilities and uses
   // the same trusted-gateway auth as /tenants/me, so it must be proxied with the
@@ -22,6 +25,14 @@ const TENANT_SCOPED_ROUTES = [
   "/connectors",
   "/adsense",
   "/channels",
+  // /org-units bootstraps on the Registry view mount (useOrgUnits) to resolve
+  // Company/Sector NAMES from the org-unit ids already on each channel, and it
+  // needs the same injected principal headers (the backend gates it on
+  // VIEW_ANALYTICS). Unproxied it never reaches the backend at all: the client
+  // sends Accept: application/json, which Vite's html fallback declines, so the
+  // dev server answers with a bare 404 and the view silently keeps showing raw
+  // ids — see frontend/tests/devProxyRoutes.test.ts.
+  "/org-units",
   // The Groups view's list/clear/archive calls hit /groups and must ride the
   // same injected trusted-principal proxying in dev as the other tenant routes.
   "/groups",
@@ -29,6 +40,12 @@ const TENANT_SCOPED_ROUTES = [
   // trusted-gateway auth, so it must be proxied with the injected principal
   // headers in dev or the bootstrap call would 401.
   "/audit",
+  // /users is the same trusted-gateway lane: the backend resolves the actor and
+  // enforces MANAGE_USERS from the injected principal headers, so a
+  // user-management surface can only work in dev if this route is proxied like
+  // the others. Listed now, ahead of that UI, so the first screen to call it
+  // does not have to rediscover the unproxied-route 404 above.
+  "/users",
 ];
 
 // Repo root is one level above this file (frontend/vite.config.ts -> ..).
@@ -108,8 +125,11 @@ const loadDevProxy = (mode: string) => {
  * Build the Vite proxy config for every tenant-scoped route, injecting the
  * resolved trusted-principal headers on each proxyReq so the backend's
  * current_principal_from_headers dependency succeeds in dev.
+ *
+ * Exported alongside TENANT_SCOPED_ROUTES so the guard test can drive it with
+ * an explicit target and header set instead of the ambient environment.
  */
-const buildTenantScopedProxy = (
+export const buildTenantScopedProxy = (
   routes: readonly string[],
   backendTarget: string,
   gatewayHeaders: [string, string][],

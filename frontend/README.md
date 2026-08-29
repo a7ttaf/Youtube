@@ -203,18 +203,68 @@ cd frontend
 bun run dev
 ```
 
-The dev proxy (`vite.config.ts`) forwards every tenant-scoped route
-(`/revenue`, `/finance-close`, `/exports`, `/connectors`, `/adsense`,
-`/channels`, `/tenants`) to the backend and injects the full trusted-principal
-header set (`X-User-ID`, `X-User-Email`, `X-Role`, `X-Scope-Type`,
-`X-UMS-Trusted-Gateway-Token`, `X-UMS-Tenant`). The browser bundle never holds
-the gateway secret.
+The dev proxy (`vite.config.ts`) forwards every tenant-scoped route to the backend and
+injects the full trusted-principal header set (`X-User-ID`, `X-User-Email`, `X-Role`,
+`X-Scope-Type`, `X-UMS-Trusted-Gateway-Token`, `X-UMS-Tenant`). The browser bundle
+never holds the gateway secret.
+
+`TENANT_SCOPED_ROUTES` (`vite.config.ts:16-49`) is the full list, in declaration order:
+
+```text
+/tenants  /session  /revenue  /finance-close  /exports  /connectors
+/adsense  /channels  /org-units  /groups       /audit    /users
+```
+
+> **This list used to be wrong here, and it was wrong in a way that hid a real bug.**
+> The paragraph above previously named seven of these routes and omitted `/session`,
+> `/org-units`, `/groups`, `/audit` and `/users`. `/org-units` and `/users` were also
+> genuinely missing from the proxy itself until 2026-08-25, which broke the Registry
+> view — see below.
+
+### What happens to a route that is *not* in that list
+
+Not "it is unproxied and reaches the backend anyway". The request **never leaves the
+dev server**, and the way it fails is easy to misread. Measured by booting this exact
+config through Vite's `createServer`:
+
+```text
+# Accept: application/json  — what src/lib/api/client.ts sends on every call
+{"path":"/reports/raw-files","status":404,"contentType":null,"bodyBytes":0}
+
+# Accept: text/html,...     — what a browser address-bar navigation sends
+{"path":"/reports/raw-files","status":200,"contentType":"text/html","bodyBytes":750}
+```
+
+Vite's html fallback **declines** `Accept: application/json`, so the client gets a bare
+**404 with a zero-length body and no `Content-Type` at all**. Paste the same URL into
+the address bar and `index.html` renders, which is exactly how the route ends up
+looking fine while every fetch to it has been failing.
+
+The consequence when this happened for real: `RegistryView` calls `useOrgUnits()` on
+mount, degrades to `orgUnitState.data ?? []`, and shows raw org-unit ids instead of
+Company/Sector names — no error anywhere. Worse, the same empty list feeds the **Mapping
+Change Request** company `<select>`, so the operator could not assign a channel to a
+company from the UI at all.
+
+`frontend/tests/devProxyRoutes.test.ts` now guards this by **deriving** the required
+set from the path literals under `src/lib/api/**`, so a new API call to an unproxied
+prefix fails the suite instead of failing silently in the browser.
+
+**Known, currently harmless gap:** four backend prefixes are mounted and not proxied —
+`/reports`, `/security`, `/exchange-rates`, `/export-templates`. Nothing under
+`src/lib/api/` calls them today, so there is no live defect; add the prefix to
+`TENANT_SCOPED_ROUTES` in the same change that adds the first call to one of them, and
+the guard test will tell you if you forget.
 
 ### Demo headers the dev proxy injects
 
 Defaults live in `vite.config.ts` and are overridable via repo-root `.env`
 (`VITE_DEV_*`). To see finance money cells you MUST use a finance role — the
-default `assistant_analyst` has no finance visibility:
+default `assistant_analyst` has no finance visibility. It holds **2 of the 26**
+permissions in `backend/ums_smart_revenue/auth/permissions.py` (`analytics.view` and
+`analytics.view_confidence`); only `audit_viewer`, with one, is weaker. That is the
+single largest reason the app reads as an unwired mockup on a first run — the buttons
+are wired, the API denies them:
 
 ```dotenv
 # repo-root .env — for a finance demo

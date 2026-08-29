@@ -27,8 +27,9 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 import weakref
-from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from uuid import UUID
 
@@ -72,6 +73,38 @@ from ums_smart_revenue.tenancy.context import TENANT_CTX
 from ums_smart_revenue.tenancy.models import make_placeholder_tenant
 
 logger = logging.getLogger(__name__)
+
+# ============================================================================
+# Purpose: Bound ConnectorJobExecutor.close() so FastAPI lifespan teardown
+#   cannot hang past Compose's stop_grace_period (default 120s). A stalled
+#   connector worker must not block graceful shutdown forever; 90s bounds the
+#   WHOLE close() — the shutdown-audit join and the drain wait share ONE
+#   deadline — leaving headroom for GroupSyncScheduler.close() and logging
+#   restore before SIGKILL.
+# Database/ORM: None.
+# Standards: concurrent.futures.wait timeout only; no unbounded future.result().
+# Blast Radius: Shutdown durability — timed-out workers may still be running
+#   when the process exits; queued-job shutdown audit already ran before drain.
+# Connections:
+#   - File: docker-compose.yml -> stop_grace_period default 120s.
+#   - File: backend/ums_smart_revenue/app.py -> lifespan calls close().
+# ============================================================================
+CLOSE_DRAIN_TIMEOUT_SECONDS = 90.0
+# FIX(codex round-23 P2): the cancelled-job audits used to run synchronously
+# before close() ever reached the bounded drain, so a single audit write
+# blocked on the shared SQLite StaticPool connection -- held by the very
+# worker being drained -- could stall shutdown unboundedly until Docker
+# SIGKILLed the process. The audit phase now runs on a daemon thread joined
+# with this budget; audits that fit inside it land durably, and the ones
+# that do not are logged and abandoned rather than taking the drain budget
+# hostage.
+# FIX(codex round-28 P1): this budget is a CAP inside close()'s single
+# deadline, not an additive phase. Previously the audit join (30s) and the
+# drain wait (90s) ran back-to-back for up to 120s -- the entire Compose
+# stop_grace_period -- before GroupSyncScheduler.close() could even start.
+# close() now captures one monotonic deadline of CLOSE_DRAIN_TIMEOUT_SECONDS
+# and both phases draw from it.
+SHUTDOWN_AUDIT_BUDGET_SECONDS = 30.0
 
 _JobKey = tuple[UUID, str, str, str]
 
@@ -242,19 +275,67 @@ class ConnectorJobExecutor:
             cancel_futures=True,
         )
 
-    def close(self) -> None:
+    def close(self) -> bool:
         """Shut the pool down deterministically (called from the app lifespan).
 
-        First cancels all queued futures via ``shutdown(cancel_futures=True)``,
-        then audits any futures that were definitively cancelled as
-        ``job_failed_before_start`` with ``error_class="ExecutorShutdown"``.
-        Running futures are allowed to finish and deregister themselves; they
-        are never audited as pre-start failures. The weakref finalizer remains
-        as a GC backstop for paths that bypass ``close()``.
+        Cancel queued futures first (``cancel_futures=True``), audit those
+        cancelled jobs immediately as ``job_failed_before_start`` /
+        ``ExecutorShutdown``, then wait for every future that remained
+        non-cancelled after shutdown so a job that transitioned from queued to
+        running between the pre-shutdown snapshot and ``shutdown()`` cannot
+        escape the drain. Auditing before the bounded drain keeps the shutdown
+        audit reachable even if Docker later SIGKILLs the process at
+        ``stop_grace_period``. On drain timeout, log which futures remain and
+        return ``False`` so the lifespan can keep logging configured for
+        workers still running. Running futures that finish in time deregister
+        themselves; they are never audited as pre-start failures. The weakref
+        finalizer remains as a GC backstop for paths that bypass ``close()``.
+
+        FIX(codex round-28 P1): the shutdown-audit join and the drain wait
+        share ONE monotonic deadline of ``CLOSE_DRAIN_TIMEOUT_SECONDS``
+        captured at the top of this method. The audit join gets at most
+        ``min(SHUTDOWN_AUDIT_BUDGET_SECONDS, remaining)``, and the drain wait
+        gets whatever budget is left, so total close() waits stay bounded by
+        CLOSE_DRAIN_TIMEOUT_SECONDS instead of the two phases' budgets
+        summing to the full Compose stop_grace_period.
+
+        Returns:
+            True when every drained worker finished (or none were running).
+            False when the drain timed out with workers still active.
         """
+        # FIX: Drain AFTER shutdown from the post-cancel registry. Snapshotting
+        # running futures before shutdown misses a queued future that starts
+        # between the snapshot and cancel_futures. Bound the wait so a stalled
+        # worker cannot block lifespan past Compose stop_grace_period.
+        deadline = time.monotonic() + CLOSE_DRAIN_TIMEOUT_SECONDS
         self._executor.shutdown(wait=False, cancel_futures=True)
-        self._audit_pending_on_shutdown()
+        running_futures = self._audit_pending_on_shutdown(deadline)
+        if running_futures:
+            drain_timeout = max(0.0, deadline - time.monotonic())
+            done, not_done = wait(
+                running_futures,
+                timeout=drain_timeout,
+            )
+            for future in done:
+                try:
+                    future.result()
+                except Exception:
+                    # FIX: Surface worker failures that completed during drain;
+                    # the previous bare ``except Exception: pass`` hid them.
+                    logger.exception(
+                        "Connector job worker raised during executor close drain"
+                    )
+            if not_done:
+                logger.error(
+                    "Executor close drain timed out after %.0fs; "
+                    "%d worker future(s) still running: %s",
+                    drain_timeout,
+                    len(not_done),
+                    list(not_done),
+                )
+                return False
         self._finalizer.detach()
+        return True
 
     def has_active_job(
         self,
@@ -506,16 +587,19 @@ class ConnectorJobExecutor:
         """
         self._registry[key] = _ActiveJob(future=future, actor_identity=actor_identity)
 
-    def _audit_pending_on_shutdown(self) -> None:
-        """Audit every accepted job that was cancelled before it started.
+    def _audit_pending_on_shutdown(self, deadline: float) -> list[Future]:
+        """Audit cancelled queued jobs; return non-cancelled futures still draining.
 
         Called deterministically from :meth:`close` *after*
-        ``ThreadPoolExecutor.shutdown(cancel_futures=True)`` has run. A
-        future that is ``cancelled()`` was queued but never started; it will
-        never run and therefore never writes its own lifecycle audit. A
-        running or completed future is left alone -- it (or its worker) owns
-        the audit trail. Any ``_SlotReservation`` that was never activated is
-        not an accepted, committed job and is dropped silently.
+        ``ThreadPoolExecutor.shutdown(cancel_futures=True)`` has run, with the
+        close deadline (a ``time.monotonic()`` instant) this phase must
+        respect. A future that is ``cancelled()`` was queued but never
+        started; it will never run and therefore never writes its own
+        lifecycle audit. Futures that remain non-cancelled after shutdown
+        (including ones that started between a pre-shutdown snapshot and
+        ``shutdown()``) are returned so ``close()`` can wait on them. Any
+        ``_SlotReservation`` that was never activated is not an accepted,
+        committed job and is dropped silently.
 
         The registry is cleared because no new work can be accepted after
         shutdown; running futures will deregister harmlessly when they finish.
@@ -525,27 +609,36 @@ class ConnectorJobExecutor:
             self._registry.clear()
 
         cancelled: list[tuple[_JobKey, ConnectorJobActor]] = []
+        running_futures: list[Future] = []
         for job_key, entry in entries:
             if not isinstance(entry, _ActiveJob):
                 continue
-            if not entry.future.cancelled():
-                continue
-            cancelled.append((job_key, entry.actor_identity))
+            if entry.future.cancelled():
+                cancelled.append((job_key, entry.actor_identity))
+            elif not entry.future.done():
+                running_futures.append(entry.future)
 
+        # FIX(codex round-23 P2): bounded, on a daemon thread -- see
+        # _audit_cancelled_within_budget. A cancelled-at-shutdown GROUP-SYNC
+        # job is audited by this same pull-shaped path, on purpose: its key
+        # carries connector_key ``cms_group_sync`` and report_month ``-``,
+        # so the row stays fully attributable, and ``job_failed_before_start``
+        # + ``ExecutorShutdown`` honestly describe a job that never ran.
+        self._audit_cancelled_within_budget(cancelled, deadline=deadline)
+        return running_futures
+
+    def _write_shutdown_audits(
+        self, cancelled: list[tuple[_JobKey, ConnectorJobActor]]
+    ) -> None:
+        """Write every cancelled-job audit; runs on the bounded audit thread.
+
+        Each row keeps the shared ``job_failed_before_start`` /
+        ``ExecutorShutdown`` taxonomy: a job the pool cancelled before it ran
+        never started, so re-tagging it with a run-time failure class would
+        mislabel it.
+        """
         for job_key, actor_identity in cancelled:
             tenant_id, connector_key, account_id, report_month = job_key
-            # A cancelled-at-shutdown GROUP-SYNC job is audited by this SAME
-            # pull-shaped path, on purpose. Its key carries connector_key
-            # ``cms_group_sync`` and report_month ``-``, so the emitted row is
-            # fully attributable to the sync job via its connector-key-bearing
-            # entity_id + scope and the month sentinel; and
-            # ``action="job_failed_before_start"`` + ``error_class="ExecutorShutdown"``
-            # honestly describes a job the pool cancelled before it ran. It is
-            # NOT a run-time failure, so re-tagging it with the sync taxonomy's
-            # ``group_sync_job_failed`` (credential/fetch/conflict) would
-            # mislabel a job that never started. Kind-awareness here would fork a
-            # near-identical audit for zero governance gain, so the shared row
-            # stays.
             self._audit_failed_before_start(
                 tenant_id=tenant_id,
                 connector_key=connector_key,
@@ -553,6 +646,46 @@ class ConnectorJobExecutor:
                 report_month=report_month,
                 error_class="ExecutorShutdown",
                 actor_identity=actor_identity,
+            )
+
+    def _audit_cancelled_within_budget(
+        self, cancelled: list[tuple[_JobKey, ConnectorJobActor]], *, deadline: float
+    ) -> None:
+        """Audit cancelled jobs under a hard budget (codex round-23 P2).
+
+        The writes run on a daemon thread joined for at most
+        ``min(SHUTDOWN_AUDIT_BUDGET_SECONDS, deadline - now)`` seconds, where
+        ``deadline`` is the single close() deadline (round-28 P1: the audit
+        join can never push the total close past CLOSE_DRAIN_TIMEOUT_SECONDS,
+        and the timeout is floored at zero once the deadline is spent). A
+        write blocked on the shared connection -- e.g. a hung SQLite worker
+        still holds StaticPool -- therefore delays shutdown by at most the
+        remaining budget instead of unboundedly; the drain's own bounded wait
+        is reached either way, and abandoned audits are logged loudly rather
+        than silently skipped.
+        """
+        if not cancelled:
+            return
+        audit_budget = min(
+            SHUTDOWN_AUDIT_BUDGET_SECONDS,
+            max(0.0, deadline - time.monotonic()),
+        )
+        audit_thread = threading.Thread(
+            target=self._write_shutdown_audits,
+            args=(cancelled,),
+            name="executor-shutdown-audits",
+            daemon=True,
+        )
+        audit_thread.start()
+        audit_thread.join(timeout=audit_budget)
+        if audit_thread.is_alive():
+            logger.error(
+                "Executor shutdown audit writes did not finish within %.0fs; "
+                "%d cancelled job(s) may lack their ExecutorShutdown audit "
+                "row (a blocked audit session cannot hold the close deadline "
+                "hostage).",
+                audit_budget,
+                len(cancelled),
             )
 
     def _run_job(
@@ -701,9 +834,9 @@ class ConnectorJobExecutor:
             ChannelGroupOwnerReassignmentError,
         ) as exc:
             logger.exception(
-                "Scheduled group sync failed (tenant=%s owner=%s)",
+                "Scheduled group sync failed (tenant=%s error_class=%s)",
                 tenant_id,
-                content_owner_id,
+                type(exc).__name__,
             )
             self._audit_group_sync_failure(
                 tenant_id=tenant_id,
@@ -711,11 +844,13 @@ class ConnectorJobExecutor:
                 error_class=type(exc).__name__,
                 actor_identity=actor_identity,
             )
-        except Exception:  # noqa: BLE001 — fail-closed: never escape the thread
+        except Exception as unexpected_error:
+            # Worker boundary: typed Google/group failures are handled above;
+            # anything else must stay inside the thread so the pool keeps running.
             logger.exception(
-                "Scheduled group sync worker raised (tenant=%s owner=%s)",
+                "Scheduled group sync worker raised (tenant=%s error_class=%s)",
                 tenant_id,
-                content_owner_id,
+                type(unexpected_error).__name__,
             )
         finally:
             self._deregister(key)
@@ -751,9 +886,9 @@ class ConnectorJobExecutor:
             if outcome != GroupSyncOutcome.UNCHANGED.value
         )
         if not changed:
-            logger.info(
-                "Scheduled group sync converged with no changes (owner=%s)", content_owner_id
-            )
+            # FIX: Do not log raw content_owner_id at INFO (retained Docker logs);
+            # audit details still carry the identifier when the apply changes state.
+            logger.info("Scheduled group sync converged with no changes")
             return
         record_audit_event(
             sink=sink,

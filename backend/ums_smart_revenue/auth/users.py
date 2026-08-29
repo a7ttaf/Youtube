@@ -1,3 +1,26 @@
+# ============================================================================
+# Purpose: Guarded user-account lifecycle repository — create, lookup, list,
+#   and update tenant-scoped accounts with normalized inputs and typed domain
+#   errors (conflict / not-found / validation / storage) at the API boundary.
+# Database/ORM: UserORM (users) via an injected Session; every query is pinned
+#   to the resolved tenant id.
+# Standards: each storage attempt runs in its own SAVEPOINT so a failed flush
+#   never discards a shared session's earlier writes; transient failures retry
+#   once and everything else fails closed as UserAccountStorageError; an
+#   invalidated connection is never retried at this granularity (the owning
+#   transaction must retry).
+# Blast Radius: Authorization (account lifecycle, service-account status) and
+#   audit attribution. No finance math.
+# Connections:
+#   - File: backend/ums_smart_revenue/db/session.py -> SQLite BEGIN/SAVEPOINT
+#     recipe the savepoint-per-attempt contract depends on.
+#   - File: scripts/bootstrap_operator.py -> shared-session multi-account
+#     create that must survive one account's failure.
+#   - File: backend/ums_smart_revenue/api/users.py -> route layer mapping the
+#     typed errors to HTTP statuses.
+# ============================================================================
+"""Tenant-scoped user account repository with typed lifecycle errors."""
+
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -95,37 +118,25 @@ class _UserAccountUpdate:
 class UserAccountError(ValueError):
     """Base class for user account domain failures exposed to API handlers."""
 
-    pass
-
 
 class UserAccountConflictError(UserAccountError):
     """Raised when a requested account mutation conflicts with stored data."""
-
-    pass
 
 
 class UserAccountNotFoundError(UserAccountError):
     """Raised when a requested user account does not exist."""
 
-    pass
-
 
 class UserAccountValidationError(UserAccountError):
     """Raised when account input cannot be normalized into a safe value."""
-
-    pass
 
 
 class UserAccountStorageError(UserAccountError):
     """Raised when account storage is unavailable after retryable attempts."""
 
-    pass
-
 
 class UserAccountServiceAccountPolicyError(UserAccountError):
     """Raised when a stale service-account row blocks a non-owner update."""
-
-    pass
 
 
 class SqlAlchemyUserAccountRepository:
@@ -168,10 +179,20 @@ class SqlAlchemyUserAccountRepository:
                 is_service_account=normalized_is_service_account,
             )
             try:
-                self._session.add(row)
-                self._session.flush()
+                # FIX: The write runs in ITS OWN savepoint so the IntegrityError
+                # diagnosis below can still query. A failed INSERT aborts the
+                # PostgreSQL transaction and deactivates the session's current
+                # (savepoint) transaction on every backend, so without this the
+                # _email_exists SELECT raised PendingRollbackError and a typed
+                # conflict surfaced as "storage unavailable". No full
+                # session.rollback() here — multi-write callers (operator
+                # bootstrap with repeated --email) share one session; a full
+                # rollback discards earlier flushes while outcome lists still
+                # report success.
+                with self._session.begin_nested():
+                    self._session.add(row)
+                    self._session.flush()
             except IntegrityError as exc:
-                self._session.rollback()
                 if _is_email_constraint_violation(exc) or self._email_exists(normalized_email):
                     raise UserAccountConflictError("User email already exists") from exc
                 raise UserAccountConflictError(
@@ -252,6 +273,54 @@ class SqlAlchemyUserAccountRepository:
 
         return self._run_with_storage_retries(operation)
 
+    # ============================================================================
+    # Purpose: Resolve one account by its normalized email within the current
+    #   tenant, returning ``None`` when no such account exists. Added so an
+    #   operator bootstrap can be idempotent: ``create_user`` raises
+    #   ``UserAccountConflictError`` on a re-run and the caller still has to
+    #   report the SERVER-GENERATED id of the row that already exists (audit H3),
+    #   which previously had no repository-owned lookup.
+    # Database/ORM: UserORM/users — tenant-scoped read only.
+    # Standards: Repository-owned SQLAlchemy read behind the same storage-retry
+    #   wrapper as every other method here; the email is normalized through the
+    #   shared ``_normalize_email`` so the lookup matches the ``uq_users_email_lower``
+    #   index and the uniqueness rule ``create_user`` enforces. Absence is a
+    #   ``None`` return, not an exception, because "not created yet" is the
+    #   expected first-run state rather than a failure.
+    # Blast Radius: Authorization-adjacent read. Grants nothing, mutates nothing,
+    #   and cannot cross a tenant boundary (``tenant_id`` is always in the WHERE).
+    # Connections:
+    #   - File: scripts/bootstrap_operator.py -> the idempotent first-run caller.
+    #   - File: backend/ums_smart_revenue/auth/users.py -> ``_email_exists`` uses
+    #     the identical normalized-email predicate for the conflict check.
+    # ============================================================================
+    def get_user_by_email(self, *, email: str) -> UserAccountEntry | None:
+        """Return the tenant's account for ``email``, or ``None`` when absent.
+
+        Raises:
+            UserAccountValidationError: If ``email`` fails normalization.
+            UserAccountConflictError: When the lookup's savepoint flush hits a
+                constraint violation inside the storage-retry wrapper.
+            UserAccountStorageError: If transient storage failures exhaust the
+                retry budget.
+        """
+        normalized_email = _normalize_email(email)
+
+        def operation() -> UserAccountEntry | None:
+            """Attempt one normalized-email account lookup against the session."""
+            row = self._session.scalars(
+                select(UserORM)
+                .where(
+                    UserORM.tenant_id == self._tenant_id,
+                    func.lower(UserORM.email) == normalized_email,
+                )
+                .order_by(UserORM.id)
+                .limit(1)
+            ).one_or_none()
+            return None if row is None else self._to_entry(row)
+
+        return self._run_with_storage_retries(operation)
+
     def get_access_profile(self, *, user_id: str) -> UserAccessProfileEntry:
         """Load one account with active role assignments and direct grants."""
         user_uuid = _parse_uuid(user_id, field_name="user_id")
@@ -310,7 +379,8 @@ class SqlAlchemyUserAccountRepository:
     # ============================================================================
     # Purpose: Apply guarded account metadata and lifecycle updates for one tenant.
     # Database/ORM: UserORM/users.
-    # Standards: Repository-owned write, typed domain errors, rollback on conflicts.
+    # Standards: Repository-owned write, typed domain errors, savepoint-scoped
+    #   rollback on conflicts (sibling writes on a shared session are preserved).
     # Blast Radius: Authorization and audit-adjacent account lifecycle state.
     # Connections:
     #   - File: backend/ums_smart_revenue/api/user_accounts.py -> Route error mapping.
@@ -358,10 +428,15 @@ class SqlAlchemyUserAccountRepository:
                 _require_compatible_status(row, update.status)
 
             try:
-                _apply_user_account_update(row, update)
-                self._session.flush()
+                # FIX: Same savepoint isolation as create_user — the failed
+                # UPDATE must be rolled back to a savepoint BEFORE the email
+                # diagnosis below queries, or the deactivated transaction turns
+                # the typed conflict into "storage unavailable". Sibling writes
+                # on the shared session stay flushed either way.
+                with self._session.begin_nested():
+                    _apply_user_account_update(row, update)
+                    self._session.flush()
             except IntegrityError as exc:
-                self._session.rollback()
                 if update.email is not None and (
                     _is_email_constraint_violation(exc)
                     or self._email_exists(update.email, excluding_user_id=user_uuid)
@@ -374,17 +449,62 @@ class SqlAlchemyUserAccountRepository:
 
         return self._run_with_storage_retries(operation)
 
+    # ========================================================================
+    # Purpose: Retry transient storage failures inside a SAVEPOINT so a failed
+    #   flush rolls back only that attempt; sibling writes on a shared session
+    #   (operator bootstrap multi-account) stay flushed. Integrity conflicts stay
+    #   typed — never remapped to "storage unavailable".
+    # Database/ORM: UserORM/users via the caller's Session; begin_nested savepoints.
+    # Standards: Repository-owned retry; typed UserAccountConflictError /
+    #   UserAccountStorageError; no full session.rollback(); SQLite depends on
+    #   db/session.py BEGIN recipe so RELEASE does not early-commit.
+    # Blast Radius: Authorization account lifecycle writes and bootstrap atomicity.
+    # Connections:
+    #   - File: backend/ums_smart_revenue/db/session.py -> SQLite BEGIN/SAVEPOINT.
+    #   - File: scripts/bootstrap_operator.py -> shared-session multi-account create.
+    # ========================================================================
     def _run_with_storage_retries(self, operation: Callable[[], T]) -> T:
-        """Retry transient storage failures once and fail closed otherwise."""
+        """Retry transient storage failures once and fail closed otherwise.
+
+        Each attempt runs inside ``begin_nested()`` so a failed flush rolls
+        back only that savepoint. A full ``session.rollback()`` would discard
+        earlier writes in a shared multi-account bootstrap transaction.
+
+        On SQLite this depends on the engine-level BEGIN recipe in
+        ``db/session.py::build_engine``: without a real outer transaction,
+        pysqlite's RELEASE of the outermost savepoint durably COMMITS, which
+        is an early commit that breaks the caller's one-transaction envelope.
+        """
         for attempt_index in range(USER_ACCOUNT_STORAGE_ATTEMPTS):
             try:
-                return operation()
+                with self._session.begin_nested():
+                    return operation()
+            except IntegrityError as exc:
+                # FIX: A constraint violation is deterministic — never retryable
+                # storage trouble. create_user/update_user diagnose their own
+                # flush failures (email vs other) inside their inner savepoint,
+                # so an IntegrityError surfacing HERE was raised by the savepoint
+                # boundary itself flushing prior pending session state
+                # (SessionTransaction._take_snapshot flushes on entry). The
+                # savepoint rework mapped that onto "storage unavailable",
+                # misreporting a typed conflict; keep the typed contract.
+                raise UserAccountConflictError(
+                    "User account violates database constraints"
+                ) from exc
             except SQLAlchemyError as exc:
-                self._session.rollback()
+                # UserAccountConflictError is a ValueError subclass (not
+                # SQLAlchemy), so typed conflicts propagate without a useless
+                # `except: raise` (PYL-W0706).
+                # Nested savepoint already rolled back on exit from begin_nested.
                 if (
                     attempt_index + 1 >= USER_ACCOUNT_STORAGE_ATTEMPTS
                     or not _is_retryable_user_storage_error(exc)
                 ):
+                    if isinstance(exc, DBAPIError) and exc.connection_invalidated:
+                        # The dead connection left the transaction unusable;
+                        # roll back so the caller's error handling can still
+                        # use the session after catching the typed error.
+                        self._session.rollback()
                     raise UserAccountStorageError("User account storage unavailable") from exc
                 logger.warning("Retrying user account storage operation after transient failure")
         raise RuntimeError("unreachable user account retry state")
@@ -588,11 +708,32 @@ def _is_email_constraint_violation(exc: IntegrityError) -> bool:
     )
 
 
+# ============================================================================
+# Purpose: Classify which SQLAlchemy storage failures may be retried inside
+#   ``UserAccountRepository._run_with_storage_retries`` (savepoint granularity).
+# Database/ORM: None directly; consults ``DBAPIError.connection_invalidated`` and
+#   transient OperationalError / DisconnectionError / TimeoutError types.
+# Standards: Fail closed — ``connection_invalidated`` is NEVER retryable here
+#   because the Session/transaction envelope is dead; only the owning caller
+#   (e.g. bootstrap) may open a fresh session. Integrity conflicts are handled
+#   before this helper is consulted.
+# Blast Radius: Authorization account writes; incorrect True would retry on a
+#   dead connection and mis-report storage availability.
+# Connections:
+#   - File: backend/ums_smart_revenue/auth/users.py -> ``_run_with_storage_retries``.
+#   - File: scripts/bootstrap_operator.py -> owning transaction that must retry.
+# ============================================================================
 def _is_retryable_user_storage_error(exc: SQLAlchemyError) -> bool:
     """Return whether a storage exception is safe to retry within the request."""
-    if isinstance(exc, (DisconnectionError, OperationalError, SQLAlchemyTimeoutError)):
-        return True
-    return isinstance(exc, DBAPIError) and exc.connection_invalidated
+    if isinstance(exc, DBAPIError) and exc.connection_invalidated:
+        # FIX: a lost connection discards the caller's whole transaction
+        # envelope — including earlier flushed writes in a shared bootstrap
+        # session — so a savepoint-granular retry would silently continue
+        # without them. Never retryable here; only the owning transaction can
+        # retry safely. (Checked first: OperationalError is a DBAPIError
+        # subclass and can carry connection_invalidated too.)
+        return False
+    return isinstance(exc, (DisconnectionError, OperationalError, SQLAlchemyTimeoutError))
 
 
 def _resolve_tenant_id(tenant_id: UUID | str | None) -> UUID:

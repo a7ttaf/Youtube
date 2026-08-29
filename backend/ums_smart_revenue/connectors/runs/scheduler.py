@@ -61,6 +61,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import threading
 import weakref
@@ -103,6 +104,23 @@ _CREDENTIAL_STATUS_ACTIVE = "active"
 # per-tenant DB reads to unwind, short enough that a wedged thread cannot hang
 # app shutdown forever.
 _CLOSE_JOIN_TIMEOUT_SECONDS = 10.0
+
+
+# ============================================================================
+# Purpose: Non-reversible log label for a guarded YouTube CMS content-owner
+#   id, so DEBUG-level steady-state lines cannot leak the identifier that
+#   THIRD_PARTY_LOG_LEVEL handling keeps out at other levels.
+# Database/ORM: None.
+# Standards: Short deterministic SHA-256 prefix; mirrors the normalizer's
+#   actor fingerprint treatment for guarded identifiers in logs.
+# Blast Radius: Log content only.
+# Connections:
+#   - File: backend/ums_smart_revenue/connectors/runs/scheduler.py -> the
+#     already-in-flight tick debug record (README documents DEBUG as safe).
+# ============================================================================
+def _owner_log_label(account_id: str) -> str:
+    """Return a non-reversible fingerprint of a CMS content-owner id for logs."""
+    return hashlib.sha256(account_id.encode("utf-8")).hexdigest()[:12]
 
 
 # ============================================================================
@@ -218,6 +236,7 @@ class GroupSyncScheduler:
             return True
 
         def _detached_loop() -> None:
+            """Run ticks off-thread until close(); stop promptly on the flag."""
             while not stop.wait(interval_seconds):
                 if not _tick_once():
                     return
@@ -378,10 +397,13 @@ class GroupSyncScheduler:
                     # it can never be the cause here; see group_sync.py's
                     # concurrency note). Debug, not info: expected steady-
                     # state noise on a short interval, not an operator signal.
+                    # FIX: the guarded CMS content-owner id went out raw; the
+                    # README presents DEBUG as safe for operators, so only the
+                    # SHA-256 fingerprint is logged now.
                     logger.debug(
-                        "group-sync tick: sync already in flight (tenant=%s owner=%s)",
+                        "group-sync tick: sync already in flight (tenant=%s owner_fp=%s)",
                         tenant_id,
-                        entry.account_id,
+                        _owner_log_label(entry.account_id),
                     )
                     in_flight_skipped += 1
                     continue
