@@ -388,7 +388,12 @@ const LockControlsPanel = ({
           <strong>Lock Controls</strong>
           <span>The backend rejects a lock until blockers are cleared</span>
         </div>
-        <Badge tone={statusTone(status?.status)}>{status?.status ?? "—"}</Badge>
+        {/* FIX (PR #211 review): the same absent-row fallback as the summary
+            tiles — a mapped 404 (no close row yet) must read OPEN here too,
+            never "—", or the two status indicators on one screen disagree. */}
+        <Badge tone={statusTone(closeStatusValue(status))}>
+          {closeStatusValue(status)}
+        </Badge>
       </div>
       <LockDetailGrid status={status} />
       <div className="control-row" style={{ marginTop: 8 }}>

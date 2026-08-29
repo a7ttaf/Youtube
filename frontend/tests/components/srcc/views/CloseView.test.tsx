@@ -229,6 +229,11 @@ describe("CloseView wired to finance-close", () => {
     expect(within(summary).getByText("OPEN")).toBeInTheDocument();
     // The Month tile falls back to the month the view is on, not an em dash.
     expect(within(summary).getByText(DEFAULT_MONTH)).toBeInTheDocument();
+    // Both status displays agree on the absent-row fallback: the Lock Controls
+    // badge says OPEN too, not "—" — one screen, one status (PR #211 review).
+    const lockPanel = screen.getByText("Lock Controls").closest("section");
+    expect(lockPanel).not.toBeNull();
+    expect(within(lockPanel as HTMLElement).getByText("OPEN")).toBeInTheDocument();
     // No error tile anywhere, and nothing claiming the request failed.
     expect(screen.queryByRole("alert")).toBeNull();
     expect(screen.queryByText(/request failed/i)).toBeNull();
