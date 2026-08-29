@@ -23,6 +23,7 @@ import {
 import { useConnectorRuns } from "@/lib/api/useConnectorRuns";
 import { useConnectorTest } from "@/lib/api/useConnectorTest";
 import type { Severity } from "@/lib/mock/data";
+import { monthKeyLabel, monthKeyOfDateInput } from "@/lib/months";
 import {
   Badge,
   Dot,
@@ -880,17 +881,20 @@ const adsenseSyncCanSubmit = (
 
 /**
  * The AdSense payment-sync form: collects one payment row plus an audited reason
- * and POSTs it for upsert into the finance source. Disabled with a role hint
- * when the viewer cannot run connectors; the submit button stays disabled until
- * every required field (and the reason) is filled.
+ * and POSTs it for upsert into the finance source. The row's month is DERIVED
+ * from the entered payment date (the same settlement-month derivation the
+ * automated AdSense mapping uses) and shown next to the field — never inherited
+ * from the screen's month state, which opens on the last COMPLETE month for
+ * connector pulls and would misfile a current-month payment under the previous
+ * month. Disabled with a role hint when the viewer cannot run connectors; the
+ * submit button stays disabled until every required field (and the reason) is
+ * filled.
  */
 const AdsenseSyncForm = ({
-  defaultMonth,
   canRunConnectors,
   actions,
   onSynced,
 }: {
-  defaultMonth: string;
   canRunConnectors: boolean;
   actions: ReturnType<typeof useAdsenseSyncActions>;
   onSynced: () => void;
@@ -901,6 +905,12 @@ const AdsenseSyncForm = ({
   const [amount, setAmount] = useState<string>("");
   const [currency, setCurrency] = useState<string>("USD");
   const [reason, setReason] = useState<string>("");
+
+  // FIX (PR #211 review): the month this payment row files under comes from
+  // the entered payment date, so an August 21 payment files under August even
+  // while the screen selector opens on the last complete month (July). Null
+  // until the date field holds a complete YYYY-MM-DD value.
+  const filingMonth = monthKeyOfDateInput(paymentDate);
 
   const canSubmit = adsenseSyncCanSubmit(canRunConnectors, actions.loading, [
     accountId,
@@ -913,8 +923,12 @@ const AdsenseSyncForm = ({
   /** Submit the single entered payment row for audited upsert into finance. */
   const onSubmit = () => {
     if (!canSubmit) return;
+    // Fail-closed guard: canSubmit requires a non-empty paymentDate, but only
+    // this check proves it is a complete date value — never POST a guessed
+    // month for a malformed one.
+    if (!filingMonth) return;
     // The backend rejects an empty batch; supply exactly the one payment row the
-    // operator entered. month is derived from the screen's selected month.
+    // operator entered, filed under the month of its payment date.
     actions
       .syncPayments({
         connector_key: "adsense",
@@ -923,7 +937,7 @@ const AdsenseSyncForm = ({
         payments: [
           {
             source_account_id: accountId.trim(),
-            month: defaultMonth,
+            month: filingMonth,
             payment_name: paymentName.trim(),
             payment_date: paymentDate.trim(),
             payment_amount: amount.trim(),
@@ -982,6 +996,11 @@ const AdsenseSyncForm = ({
           onChange={(e) => setPaymentDate(e.target.value)}
         />
       </div>
+      <p className="item-sub" role="status">
+        {filingMonth
+          ? `Files under ${monthKeyLabel(filingMonth)} — the month of the payment date, matching the automated AdSense mapping.`
+          : "The payment files under the month of its payment date."}
+      </p>
       <div className="field-row">
         <label htmlFor="adsenseAmount">Amount</label>
         <input
@@ -1521,14 +1540,12 @@ const TokenHealth = ({
  * the run-history honesty note. Extracted to keep the root JSX tree shallow.
  */
 const ConnectorSidebar = ({
-  month,
   canRunConnectors,
   canViewConnectorHealth,
   syncActions,
   onSynced,
   reloadToken,
 }: {
-  month: string;
   canRunConnectors: boolean;
   canViewConnectorHealth: boolean;
   syncActions: ReturnType<typeof useAdsenseSyncActions>;
@@ -1540,7 +1557,6 @@ const ConnectorSidebar = ({
       <section className="panel">
         <AdsenseSyncHeader canRunConnectors={canRunConnectors} />
         <AdsenseSyncForm
-          defaultMonth={month}
           canRunConnectors={canRunConnectors}
           actions={syncActions}
           onSynced={onSynced}
@@ -1734,7 +1750,6 @@ export const ConnectorsView = ({
         />
 
         <ConnectorSidebar
-          month={month}
           canRunConnectors={canRunConnectors}
           canViewConnectorHealth={canViewConnectorHealth}
           syncActions={syncActions}

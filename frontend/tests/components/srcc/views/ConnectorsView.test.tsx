@@ -322,10 +322,10 @@ describe("ConnectorsView wired to the connector + AdSense endpoints", () => {
       render(
         <StaleTabTenantProvider initialSlug="ums">
           <StaleTabConnectorsView
-            canRunConnectors={true}
-            canManageConnectors={true}
-            canViewFinance={true}
-            canViewConnectorHealth={true}
+            canRunConnectors
+            canManageConnectors
+            canViewFinance
+            canViewConnectorHealth
           />
         </StaleTabTenantProvider>,
       );
@@ -1010,6 +1010,9 @@ describe("ConnectorsView wired to the connector + AdSense endpoints", () => {
     fireEvent.change(screen.getByLabelText("Payment date"), {
       target: { value: "2026-03-21" },
     });
+    // The form states which month the row will file under, derived from the
+    // entered payment date — the operator sees the same month the POST carries.
+    expect(screen.getByText(/files under mar 2026/i)).toBeInTheDocument();
     fireEvent.change(screen.getByLabelText("Amount"), {
       target: { value: "930" },
     });
@@ -1025,13 +1028,101 @@ describe("ConnectorsView wired to the connector + AdSense endpoints", () => {
     await waitFor(() =>
       expect(screen.getByText("AdSense payment March 2026")).toBeInTheDocument(),
     );
-    expect(
-      fetchMock().mock.calls.some(
+    const syncCall = fetchMock().mock.calls.find(
+      ([input, init]) =>
+        urlOf(input) === "/adsense/sync-payments" && methodOf(init) === "POST",
+    );
+    expect(syncCall).toBeDefined();
+    // The row files under the month of its payment date (2026-03-21 -> 2026-03),
+    // matching the automated AdSense mapping — not the screen's write default.
+    const syncBody = JSON.parse(
+      String((syncCall?.[1] as RequestInit | undefined)?.body ?? "{}"),
+    );
+    expect(syncBody.payments[0].month).toBe("2026-03");
+  });
+
+  // Regression (PR #211 review, codex P1): a manual payment row must file
+  // under the month of its PAYMENT DATE, never under the screen's
+  // last-complete-month write default — on Aug 21 the old code filed the
+  // payment under July because the form inherited the connector-report default.
+  it("files a manual payment under its payment date's month, not the write default", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      // Module load in mid-August 2026: the write default is July 2026.
+      vi.setSystemTime(new Date(2026, 7, 15, 12, 0, 0));
+      vi.resetModules();
+      const { ConnectorsView: DatedConnectorsView } = await import(
+        "@/components/srcc/views/ConnectorsView"
+      );
+      const { TenantProvider: DatedTenantProvider } = await import(
+        "@/contexts/TenantContext"
+      );
+
+      fetchMock().mockImplementation(
+        routeBoth((url, init) => {
+          if (url === "/adsense/sync-payments" && methodOf(init) === "POST") {
+            return jsonResponse({
+              synced_count: 1,
+              items: [],
+              audit_event: {},
+            });
+          }
+          return null;
+        }),
+      );
+      render(
+        <DatedTenantProvider initialSlug="ums">
+          <DatedConnectorsView
+            canRunConnectors
+            canManageConnectors
+            canViewFinance
+            canViewConnectorHealth
+          />
+        </DatedTenantProvider>,
+      );
+
+      // The screen selector still opens on the last COMPLETE month (July) —
+      // that default is right for whole-month connector pulls.
+      const monthSelect =
+        await screen.findByLabelText<HTMLSelectElement>("AdSense month");
+      expect(monthSelect.value).toBe("2026-07");
+
+      fireEvent.change(screen.getByLabelText("Account id"), {
+        target: { value: "pub-1" },
+      });
+      fireEvent.change(screen.getByLabelText("Payment name"), {
+        target: { value: "AdSense payment August 2026" },
+      });
+      // ... but the payment is DATED inside the CURRENT month (August 21).
+      fireEvent.change(screen.getByLabelText("Payment date"), {
+        target: { value: "2026-08-21" },
+      });
+      expect(screen.getByText(/files under aug 2026/i)).toBeInTheDocument();
+      fireEvent.change(screen.getByLabelText("Amount"), {
+        target: { value: "930" },
+      });
+      fireEvent.change(screen.getByLabelText("Reason"), {
+        target: { value: "Manual August payment" },
+      });
+      fireEvent.click(screen.getByRole("button", { name: /^sync payments$/i }));
+
+      await waitFor(() =>
+        expect(screen.getByText("Payments synced")).toBeInTheDocument(),
+      );
+      const syncCall = fetchMock().mock.calls.find(
         ([input, init]) =>
-          urlOf(input) === "/adsense/sync-payments" &&
-          methodOf(init) === "POST",
-      ),
-    ).toBe(true);
+          urlOf(input) === "/adsense/sync-payments" && methodOf(init) === "POST",
+      );
+      expect(syncCall).toBeDefined();
+      const body = JSON.parse(
+        String((syncCall?.[1] as RequestInit | undefined)?.body ?? "{}"),
+      );
+      // Filed under the payment date's month (August), not the July default.
+      expect(body.payments[0].month).toBe("2026-08");
+    } finally {
+      vi.useRealTimers();
+      vi.resetModules();
+    }
   });
 
   it("maps a 403 on the AdSense payments read to a no-permission message", async () => {

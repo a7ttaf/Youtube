@@ -34,6 +34,8 @@ const MONTHS_PER_YEAR = 12;
 
 const MONTH_KEY_PATTERN = /^(\d{4})-(\d{2})$/;
 
+const ISO_DATE_INPUT_PATTERN = /^(\d{4})-(\d{2})-\d{2}$/;
+
 const MONTH_LABEL_FORMATTER = new Intl.DateTimeFormat("en-US", {
   month: "short",
   year: "numeric",
@@ -60,6 +62,33 @@ export const monthKey = (year: number, monthIndex: number): string => {
  */
 export const currentMonthKey = (now: Date = new Date()): string =>
   monthKey(now.getFullYear(), now.getMonth());
+
+// ============================================================================
+// Purpose: The "YYYY-MM" month of a "YYYY-MM-DD" date-input value — the wire
+//   format <input type="date"> produces. Pure string slicing + monthKey
+//   arithmetic: a date-input value is a calendar date with NO timezone
+//   semantics, so reading it this way (instead of new Date(value), which
+//   parses it as UTC midnight) cannot shift the month for negative offsets.
+// Database/ORM: None (frontend, pure function).
+// Standards: Total and fail-closed — returns null for anything that is not
+//   exactly the YYYY-MM-DD shape (empty, partial, or a datetime with a time
+//   part), so a caller never files a finance row under a guessed month.
+// Blast Radius: One finance WRITE default: it decides the month a manually
+//   synced AdSense payment row files under, mirroring the automated AdSense
+//   mapping's payment-date-derived settlement month. It stores nothing itself;
+//   the backend upsert stays the authority.
+// Connections:
+//   - File: frontend/src/components/srcc/views/ConnectorsView.tsx ->
+//     AdsenseSyncForm derives the manual payment row's month from the entered
+//     payment date with this, NOT from the screen's write-month default.
+// ============================================================================
+export const monthKeyOfDateInput = (value: string): string | null => {
+  const parsed = ISO_DATE_INPUT_PATTERN.exec(value.trim());
+  if (!parsed) {
+    return null;
+  }
+  return monthKey(Number(parsed[1]), Number(parsed[2]) - 1);
+};
 
 // ============================================================================
 // Purpose: The month a WRITE should default to — the last COMPLETE calendar

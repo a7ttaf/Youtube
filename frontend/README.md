@@ -138,6 +138,17 @@ already defaults to it, so plain `--create-schema` with no `--month` is enough;
 the explicit forms below just make the month visible (and are what you edit to
 seed a different one):
 
+**The Connectors screen is the write-side exception.** Its selector opens on
+the **last complete calendar month**, not the current one: connector pulls
+address a whole calendar month and the backend validates only the month's
+format, so pulling the in-progress month would ingest a partial month as if it
+were final. The current month is still in the dropdown for deliberate use.
+A manually synced payment is not tied to that default at all — it files under
+the month of its **payment date**, matching the automated AdSense mapping, and
+the form shows that derived month next to the date field. Seeding the current
+month therefore leaves the Connectors write default on the previous month;
+that is intended behavior, not drift.
+
 ```bash
 # From the repo root (bash). Default DB is UMS_DATABASE_URL; for a throwaway SQLite:
 uv run python scripts/seed_demo_month.py \
