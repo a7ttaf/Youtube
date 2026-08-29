@@ -70,9 +70,10 @@ export const currentMonthKey = (now: Date = new Date()): string =>
 //   semantics, so reading it this way (instead of new Date(value), which
 //   parses it as UTC midnight) cannot shift the month for negative offsets.
 // Database/ORM: None (frontend, pure function).
-// Standards: Total and fail-closed — returns null for anything that is not
-//   exactly the YYYY-MM-DD shape (empty, partial, or a datetime with a time
-//   part), so a caller never files a finance row under a guessed month.
+// Standards: Total and fail-closed — returns an EMPTY STRING for anything
+//   that is not exactly the YYYY-MM-DD shape (empty, partial, or a datetime
+//   with a time part), so a required-field/non-empty gate downstream can never
+//   pass a guessed month through to a finance write.
 // Blast Radius: One finance WRITE default: it decides the month a manually
 //   synced AdSense payment row files under, mirroring the automated AdSense
 //   mapping's payment-date-derived settlement month. It stores nothing itself;
@@ -80,12 +81,13 @@ export const currentMonthKey = (now: Date = new Date()): string =>
 // Connections:
 //   - File: frontend/src/components/srcc/views/ConnectorsView.tsx ->
 //     AdsenseSyncForm derives the manual payment row's month from the entered
-//     payment date with this, NOT from the screen's write-month default.
+//     payment date with this, NOT from the screen's write-month default, and
+//     feeds the result into its non-empty required-fields submit gate.
 // ============================================================================
-export const monthKeyOfDateInput = (value: string): string | null => {
+export const monthKeyOfDateInput = (value: string): string => {
   const parsed = ISO_DATE_INPUT_PATTERN.exec(value.trim());
   if (!parsed) {
-    return null;
+    return "";
   }
   return monthKey(Number(parsed[1]), Number(parsed[2]) - 1);
 };

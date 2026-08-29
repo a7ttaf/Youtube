@@ -880,6 +880,17 @@ const adsenseSyncCanSubmit = (
   requiredFields.every((value) => value.trim().length > 0);
 
 /**
+ * The hint under the payment-date field: which month the entered payment will
+ * file under, derived from the payment date itself. Empty until the date field
+ * holds a complete YYYY-MM-DD value.
+ */
+const paymentFilingHint = (filingMonth: string): string => {
+  return filingMonth
+    ? `Files under ${monthKeyLabel(filingMonth)} — the month of the payment date, matching the automated AdSense mapping.`
+    : "The payment files under the month of its payment date.";
+};
+
+/**
  * The AdSense payment-sync form: collects one payment row plus an audited reason
  * and POSTs it for upsert into the finance source. The row's month is DERIVED
  * from the entered payment date (the same settlement-month derivation the
@@ -908,8 +919,10 @@ const AdsenseSyncForm = ({
 
   // FIX (PR #211 review): the month this payment row files under comes from
   // the entered payment date, so an August 21 payment files under August even
-  // while the screen selector opens on the last complete month (July). Null
-  // until the date field holds a complete YYYY-MM-DD value.
+  // while the screen selector opens on the last complete month (July). Empty
+  // until the date field holds a complete YYYY-MM-DD value, and that emptiness
+  // is part of the submit gate — a malformed date can never POST a guessed
+  // month.
   const filingMonth = monthKeyOfDateInput(paymentDate);
 
   const canSubmit = adsenseSyncCanSubmit(canRunConnectors, actions.loading, [
@@ -918,17 +931,15 @@ const AdsenseSyncForm = ({
     paymentDate,
     amount,
     reason,
+    filingMonth,
   ]);
 
   /** Submit the single entered payment row for audited upsert into finance. */
   const onSubmit = () => {
     if (!canSubmit) return;
-    // Fail-closed guard: canSubmit requires a non-empty paymentDate, but only
-    // this check proves it is a complete date value — never POST a guessed
-    // month for a malformed one.
-    if (!filingMonth) return;
     // The backend rejects an empty batch; supply exactly the one payment row the
-    // operator entered, filed under the month of its payment date.
+    // operator entered, filed under the month of its payment date (canSubmit's
+    // required-field gate already proved filingMonth non-empty).
     actions
       .syncPayments({
         connector_key: "adsense",
@@ -997,9 +1008,7 @@ const AdsenseSyncForm = ({
         />
       </div>
       <p className="item-sub" role="status">
-        {filingMonth
-          ? `Files under ${monthKeyLabel(filingMonth)} — the month of the payment date, matching the automated AdSense mapping.`
-          : "The payment files under the month of its payment date."}
+        {paymentFilingHint(filingMonth)}
       </p>
       <div className="field-row">
         <label htmlFor="adsenseAmount">Amount</label>

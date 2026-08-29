@@ -145,11 +145,11 @@ describe("monthKeyOfDateInput", () => {
     expect(monthKeyOfDateInput("  2026-07-04  ")).toBe("2026-07");
   });
 
-  it("returns null for anything that is not a complete YYYY-MM-DD value", () => {
-    expect(monthKeyOfDateInput("")).toBeNull();
-    expect(monthKeyOfDateInput("2026-03")).toBeNull();
-    expect(monthKeyOfDateInput("2026-03-21T00:00:00Z")).toBeNull();
-    expect(monthKeyOfDateInput("not-a-date")).toBeNull();
+  it("returns an empty string for anything that is not a complete YYYY-MM-DD value", () => {
+    expect(monthKeyOfDateInput("")).toBe("");
+    expect(monthKeyOfDateInput("2026-03")).toBe("");
+    expect(monthKeyOfDateInput("2026-03-21T00:00:00Z")).toBe("");
+    expect(monthKeyOfDateInput("not-a-date")).toBe("");
   });
 });
 

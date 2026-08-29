@@ -349,6 +349,24 @@ const lockReasonDisabled = (
   busy: boolean,
 ): boolean => (!canCloseMonth && !canUnlockMonth) || busy;
 
+// FIX (PR #211 review): hoisted above LockControlsPanel, whose badge renders
+// the same absent-row fallback the summary tiles use — defining it lower made
+// the analyzer flag a use-before-define even though the TDZ is unreachable at
+// render time.
+/** The "no close row yet" status label — an untouched month is simply OPEN. */
+const NO_CLOSE_RECORD_STATUS = "OPEN";
+const NO_CLOSE_RECORD_NOTE = "No close record yet";
+
+/** The Status tile's value: the close row's status, or OPEN when no row exists yet. */
+const closeStatusValue = (status: FinanceMonthCloseStatus | null): string =>
+  status?.status ?? NO_CLOSE_RECORD_STATUS;
+
+/** The Status tile's footnote: LOCKED allows exports; no row means not started. */
+const closeStatusNote = (status: FinanceMonthCloseStatus | null): string => {
+  if (!status) return NO_CLOSE_RECORD_NOTE;
+  return status.status === "LOCKED" ? "Exports allowed" : "Open for edits";
+};
+
 /**
  * Lock Controls panel: status badge, lock/unlock actor + timestamp grid, the
  * audited reason input, and the two-step arm/confirm lock & unlock buttons. The
@@ -490,19 +508,6 @@ const ReconciliationPanel = () => {
 // (data=null, error=null), so these two strings are what the summary shows for
 // a month nobody has closed yet — the state the rolling CURRENT-month default
 // lands on.
-const NO_CLOSE_RECORD_STATUS = "OPEN";
-const NO_CLOSE_RECORD_NOTE = "No close record yet";
-
-/** The Status tile's value: the close row's status, or OPEN when no row exists yet. */
-const closeStatusValue = (status: FinanceMonthCloseStatus | null): string =>
-  status?.status ?? NO_CLOSE_RECORD_STATUS;
-
-/** The Status tile's footnote: LOCKED allows exports; no row means not started. */
-const closeStatusNote = (status: FinanceMonthCloseStatus | null): string => {
-  if (!status) return NO_CLOSE_RECORD_NOTE;
-  return status.status === "LOCKED" ? "Exports allowed" : "Open for edits";
-};
-
 /** The Readiness tile value: Ready/Blocked once readiness has loaded, an em dash before. */
 const readinessTileValue = (readiness: FinanceCloseReadinessResponse | null): string => {
   if (!readiness) return "—";
