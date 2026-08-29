@@ -571,6 +571,14 @@ export const warnedIdsForAcknowledgement = (
   return captured.length > 0 ? captured : livePendingIds;
 };
 
+/**
+ * Warning callout rendered while an import response never arrived
+ * (importUnsettled): the rows below may predate the import, so reload before
+ * judging and never re-import blindly. canViewAudit switches only the guidance
+ * copy and the acknowledge button's label — acknowledgement itself is NOT
+ * permission-gated; a viewer without audit access acknowledges on trust that
+ * someone with access confirmed the outcome.
+ */
 const UnsettledImportNotice = ({
   canViewAudit,
   onReload,
