@@ -4,7 +4,7 @@
 // Standards: Fields are matched 1:1 against backend/ums_smart_revenue/api/
 //   tenants.py; the declared currency is a label only and never client-side
 //   finance math or conversion.
-// Blast Radius: Tenant identity/display contract only; no authorization,
+// Blast Radius: Tenant identity/display/declared-currency contract only; no authorization,
 //   finance writes, exports, or browser-side currency calculations.
 // Connections:
 //   - File: backend/ums_smart_revenue/api/tenants.py -> TenantRead.

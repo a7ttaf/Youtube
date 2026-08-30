@@ -339,7 +339,8 @@ const tenantProofLabel = (
 //            no authorization is derived from it. Still no financial mutation.
 // Connections:
 //   - File: frontend/src/lib/api/client.ts -> useApiClient() GET helper.
-//   - File: frontend/src/contexts/TenantContext.tsx -> hydrate() stores id/displayName.
+//   - File: frontend/src/contexts/TenantContext.tsx -> hydrate() stores
+//     id/displayName/primaryCurrency from the tenant DTO.
 //   - File: frontend/src/components/srcc/AppShell.tsx -> isImportScopeSettled,
 //       the admission gate that consumes tenantSettled (contract just below).
 // ============================================================================

@@ -267,7 +267,7 @@ def _load_int(env_name: str, *, default: int) -> int:
 #            -> fail-closed" idiom. Case is NOT coerced: lowercase input is
 #            rejected rather than silently upper-cased, because a currency code
 #            an operator typed wrong is a configuration error worth surfacing,
-#            and the tenants CHECK requires uppercase anyway.
+#            and the tenants CHECK is shape-only (it would accept ``ZZZ``).
 # Blast Radius: The declared primary currency label on the headers-mode
 #               bootstrap tenant. NO conversion, NO FX, no finance math, no
 #               fact-pipeline currency gate -- UMS converts nothing, so this

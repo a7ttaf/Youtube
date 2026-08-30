@@ -481,9 +481,10 @@ async def _send_http_exception(
 #   row, and ``tenants.primary_currency`` stays the source of truth there.
 # Standards: Settings are read through load_app_settings() (lru_cached, so the
 #   per-request call is a dict lookup), never os.environ. The env value is
-#   validated as a 3-letter uppercase ISO 4217 code at settings-load time, so
-#   an invalid code fails the process at boot rather than fabricating a tenant
-#   the ck_tenants_primary_currency_iso4217 CHECK would reject.
+#   validated against the repository's ISO-4217 snapshot at settings-load
+#   time, so an unknown code fails the process at boot. This is stricter than
+#   the ck_tenants_primary_currency_iso4217 CHECK, which is shape-only and
+#   would accept a value such as ``ZZZ``.
 # Blast Radius: The declared currency LABEL on the bootstrap tenant, surfaced
 #   read-only by GET /tenants/me and GET /session/me. No conversion, no FX, no
 #   fact table, no CHECK constraint, no finance math -- the default is still
