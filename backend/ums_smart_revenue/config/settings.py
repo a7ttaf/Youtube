@@ -18,6 +18,8 @@
 #     AppSettings and enforces the cross-flag fail-fast contract;
 #     _bootstrap_tenant stamps tenant_primary_currency on the headers-mode
 #     bootstrap tenant.
+#   - File: backend/ums_smart_revenue/db/iso_4217_2026_05.py -> immutable
+#     repository snapshot used as the currency-code membership authority.
 # ============================================================================
 """Runtime configuration loaded from UMS_* environment variables."""
 
@@ -26,6 +28,8 @@ from dataclasses import dataclass
 from functools import lru_cache
 from os import environ
 from uuid import UUID
+
+from ums_smart_revenue.db.iso_4217_2026_05 import ISO_4217_CURRENCIES_2026_05
 
 DATABASE_URL_ENV = "UMS_DATABASE_URL"
 TRUSTED_GATEWAY_TOKEN_ENV = "UMS_TRUSTED_GATEWAY_TOKEN"
@@ -41,11 +45,13 @@ TENANT_PRIMARY_CURRENCY_ENV = "UMS_TENANT_PRIMARY_CURRENCY"
 _TRUTHY_TOKENS = frozenset({"1", "true", "yes", "on"})
 _FALSY_TOKENS = frozenset({"0", "false", "no", "off", ""})
 
-# ISO 4217 alphabetic codes are exactly three uppercase letters. Deliberately
-# stricter than the ``ck_tenants_primary_currency_iso4217`` CHECK (which only
-# asserts length 3 + uppercase), so a deployment cannot boot with a code the
-# tenants table would accept but no operator ever meant to type.
+# Shape guard for ISO 4217 alphabetic codes. Membership in the immutable
+# repository snapshot below is authoritative; the regex alone must not accept
+# arbitrary three-letter strings such as ``ZZZ``.
 _ISO_4217_ALPHA_CODE = re.compile(r"[A-Z]{3}")
+_ISO_4217_CODES = frozenset(
+    str(entry["code"]) for entry in ISO_4217_CURRENCIES_2026_05
+)
 
 # Phase 1 of the EGP program builds the currency spine WITHOUT flipping it:
 # this default stays "USD" so wiring the setting changes no behaviour. The
@@ -251,10 +257,9 @@ def _load_int(env_name: str, *, default: int) -> int:
 # ============================================================================
 # Purpose: Parse a UMS_* ISO-4217 currency-code env var at settings-load time
 #          with the same two-tier contract as the other loaders: missing/blank
-#          -> default; present-but-malformed -> ValueError carrying the env
-#          name, so a typo ("US", "usd", "US$") fails the process at boot
-#          rather than producing a tenant whose declared currency the
-#          ``ck_tenants_primary_currency_iso4217`` CHECK would reject.
+#          -> default; malformed or absent-from-snapshot -> ValueError carrying
+#          the env name, so a typo ("US", "usd", "US$", "ZZZ") fails the
+#          process at boot rather than producing an invalid tenant label.
 # Database/ORM: None. The parsed code is a declared label copied onto the
 #               fabricated bootstrap Tenant dataclass; it is never written to
 #               a fact table and never compared against a stored amount.
@@ -271,18 +276,24 @@ def _load_int(env_name: str, *, default: int) -> int:
 #   - File: backend/ums_smart_revenue/app.py -> _bootstrap_tenant stamps the
 #     parsed code onto the fabricated Tenant.
 #   - File: backend/ums_smart_revenue/db/tenant_models.py -> the
-#     ck_tenants_primary_currency_iso4217 CHECK this validation stays inside.
+#     ck_tenants_primary_currency_iso4217 shape CHECK remains compatible.
+#   - File: backend/ums_smart_revenue/db/iso_4217_2026_05.py -> the immutable
+#     membership snapshot this loader enforces.
 # ============================================================================
 def _load_currency_code(env_name: str, *, default: str) -> str:
-    """Parse a UMS_* ISO-4217 code, failing fast on anything but three capitals."""
+    """Parse a UMS_* ISO-4217 code, rejecting malformed or unknown values."""
     raw = environ.get(env_name)
     if raw is None:
         return default
     candidate = raw.strip()
     if not candidate:
         return default
-    if _ISO_4217_ALPHA_CODE.fullmatch(candidate) is None:
+    if (
+        _ISO_4217_ALPHA_CODE.fullmatch(candidate) is None
+        or candidate not in _ISO_4217_CODES
+    ):
         raise ValueError(
-            f"{env_name} must be a 3-letter uppercase ISO 4217 code (e.g. USD, EGP)"
+            f"{env_name} must be a 3-letter uppercase ISO 4217 code "
+            "from the repository snapshot"
         )
     return candidate

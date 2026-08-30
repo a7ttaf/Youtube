@@ -42,6 +42,7 @@ BOOTSTRAP_DISPLAY = "UMS"
 
 
 def _gateway_headers(user_id: UUID = TEST_USER_ID) -> dict[str, str]:
+    """Return the minimal trusted-gateway headers used by database-mode tests."""
     return {
         "X-User-ID": str(user_id),
         "X-UMS-Trusted-Gateway-Token": os.environ["UMS_TRUSTED_GATEWAY_TOKEN"],
@@ -69,12 +70,14 @@ def _full_principal_headers(user_id: UUID = TEST_USER_ID) -> dict[str, str]:
 
 @pytest.fixture
 def db_engine_url(tmp_path):
+    """Return an isolated SQLite URL for the tenant API fixtures."""
     db_path = tmp_path / "spec_a.sqlite"
     return f"sqlite:///{db_path}"
 
 
 @pytest.fixture
 def seeded_engine(db_engine_url):
+    """Create and seed an SQLite database for tenant API integration tests."""
     engine = create_engine(db_engine_url, future=True)
     TenantBase.metadata.create_all(engine)
     SecurityBase.metadata.create_all(engine)
@@ -88,6 +91,7 @@ def seeded_engine(db_engine_url):
 
 
 def _seed_bootstrap_tenant(session: Session) -> None:
+    """Insert the active bootstrap tenant used by resolver tests."""
     now = datetime.now(UTC)
     session.add(
         TenantORM(
@@ -157,12 +161,14 @@ def _seed_enabled_user(session: Session) -> None:
 
 @pytest.fixture
 def app_db_mode(seeded_engine):
+    """Build the database-auth app against the seeded SQLite engine."""
     app = create_app(database_url=str(seeded_engine.url), authz_source="database")
     return app
 
 
 @pytest.fixture
 def client_db_mode(app_db_mode):
+    """Yield a database-auth TestClient for tenant endpoint cases."""
     with TestClient(app_db_mode) as client:
         yield client
 
@@ -175,6 +181,7 @@ def client_db_mode(app_db_mode):
 def test_tenants_me_returns_bootstrap_tenant_for_resolved_slug(
     client_db_mode,
 ):
+    """Return the resolved tenant identity and its database currency label."""
     response = client_db_mode.get(
         "/tenants/me",
         headers={"X-UMS-Tenant": "ums", **_gateway_headers()},
@@ -196,6 +203,7 @@ def test_tenants_me_returns_bootstrap_tenant_for_resolved_slug(
 
 
 def test_tenants_me_rejects_missing_tenant_header(client_db_mode):
+    """Reject a request that does not identify a tenant slug."""
     response = client_db_mode.get("/tenants/me", headers=_gateway_headers())
     assert response.status_code == 400
     assert response.json()["detail"] == "Tenant slug must not be blank"
@@ -208,6 +216,7 @@ def test_tenants_me_rejects_missing_tenant_header(client_db_mode):
 
 
 def test_tenants_me_rejects_whitespace_tenant_header(client_db_mode):
+    """Reject a tenant header containing only whitespace."""
     response = client_db_mode.get(
         "/tenants/me",
         headers={"X-UMS-Tenant": "   ", **_gateway_headers()},
@@ -217,6 +226,7 @@ def test_tenants_me_rejects_whitespace_tenant_header(client_db_mode):
 
 
 def test_tenants_me_rejects_overlong_tenant_header(client_db_mode):
+    """Reject a tenant slug longer than the repository limit."""
     response = client_db_mode.get(
         "/tenants/me",
         headers={"X-UMS-Tenant": "a" * 256, **_gateway_headers()},
@@ -231,6 +241,7 @@ def test_tenants_me_rejects_overlong_tenant_header(client_db_mode):
 
 
 def test_tenants_me_rejects_duplicate_tenant_headers(client_db_mode):
+    """Reject duplicate tenant headers before selecting either value."""
     request = client_db_mode.build_request(
         "GET",
         "/tenants/me",
@@ -272,6 +283,7 @@ def test_tenants_me_rejects_mismatched_duplicate_tenant_headers(client_db_mode):
 
 
 def test_tenants_me_returns_404_for_unknown_slug(client_db_mode):
+    """Return not-found when the requested slug is absent from the registry."""
     response = client_db_mode.get(
         "/tenants/me",
         headers={"X-UMS-Tenant": "not-a-tenant", **_gateway_headers()},
@@ -312,6 +324,7 @@ def client_deny_authz(seeded_engine):
     # Blast Radius: Test fixture only; no production path affected.
     # ============================================================================
     def _stub_principal() -> UserPrincipal:
+        """Return a minimal principal so the denial path reaches authorization."""
         return UserPrincipal(
             user_id=str(TEST_USER_ID),
             email="spec-a-deny@example.invalid",
@@ -329,6 +342,7 @@ def client_deny_authz(seeded_engine):
 
 
 def test_tenants_me_returns_403_when_authorizer_denies(client_deny_authz):
+    """Return forbidden when the tenant authorizer denies an active tenant."""
     response = client_deny_authz.get(
         "/tenants/me",
         headers={"X-UMS-Tenant": "ums", **_gateway_headers()},
@@ -349,6 +363,7 @@ def test_tenants_me_returns_403_when_authorizer_denies(client_deny_authz):
 
 
 def test_tenants_me_returns_401_when_gateway_user_id_missing(client_db_mode):
+    """Reject a request with no trusted gateway user identity."""
     headers = _gateway_headers()
     headers.pop("X-User-ID")
     headers["X-UMS-Tenant"] = "ums"
@@ -357,6 +372,7 @@ def test_tenants_me_returns_401_when_gateway_user_id_missing(client_db_mode):
 
 
 def test_tenants_me_returns_401_when_gateway_token_invalid(client_db_mode):
+    """Reject a request carrying an invalid trusted gateway token."""
     response = client_db_mode.get(
         "/tenants/me",
         headers={
@@ -381,6 +397,7 @@ def test_tenants_me_returns_401_when_gateway_token_invalid(client_db_mode):
 
 @pytest.fixture
 def client_headers_mode(seeded_engine):
+    """Yield a headers-auth TestClient using the seeded SQLite engine."""
     app = create_app(database_url=str(seeded_engine.url), authz_source="headers")
     with TestClient(app) as client:
         yield client
@@ -509,6 +526,7 @@ def client_no_tenant_middleware():
 def test_tenants_me_returns_503_when_tenant_middleware_missing(
     client_no_tenant_middleware,
 ):
+    """Map missing tenant middleware to the controlled fail-closed 503 response."""
     response = client_no_tenant_middleware.get(
         "/tenants/me",
         headers=_full_principal_headers(),

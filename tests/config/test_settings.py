@@ -318,8 +318,19 @@ def test_load_app_settings_tenant_primary_currency_accepts_iso_codes(
 def test_load_app_settings_rejects_malformed_tenant_primary_currency(
     monkeypatch: pytest.MonkeyPatch, bad: str
 ) -> None:
-    """Anything but exactly three uppercase letters fails fast, naming the env var."""
+    """Malformed currency shapes fail fast and name the env var."""
     monkeypatch.setenv(TENANT_PRIMARY_CURRENCY_ENV, bad)
+    load_app_settings.cache_clear()
+    with pytest.raises(ValueError) as excinfo:
+        load_app_settings()
+    assert TENANT_PRIMARY_CURRENCY_ENV in str(excinfo.value)
+
+
+def test_load_app_settings_rejects_code_outside_iso_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A shape-valid but unknown code must not enter the currency spine."""
+    monkeypatch.setenv(TENANT_PRIMARY_CURRENCY_ENV, "ZZZ")
     load_app_settings.cache_clear()
     with pytest.raises(ValueError) as excinfo:
         load_app_settings()

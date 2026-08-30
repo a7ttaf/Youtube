@@ -18,7 +18,12 @@ const ORIGINAL_FETCH = globalThis.fetch;
 const FULL_SESSION: SessionMe = {
   user_id: "00000000-0000-0000-0000-0000000000aa",
   email: "dev@ums.local",
-  tenant: { id: "t1", slug: "ums", display_name: "UMS" },
+  tenant: {
+    id: "t1",
+    slug: "ums",
+    display_name: "UMS",
+    primary_currency: "USD",
+  },
   roles: [],
   permissions: [],
   is_service_account: false,
