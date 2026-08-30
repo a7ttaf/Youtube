@@ -36,9 +36,9 @@ fleet **#221–#225 (P0-a…P0-e)**; none was merged as of 2026-08-31. PR #211 i
 to `main`; #212–#216 remain open P1 drafts, while #217 is a separate open EGP draft. See
 [`25_PROGRAM_DEPENDENCY_GRAPH.md`](25_PROGRAM_DEPENDENCY_GRAPH.md) for the exact map.
 
-**US-withholding plan note (2026-08-28):** Docs/24 — Egypt–US treaty copyright-royalty
-withholding is **15%** when confirmed on AdSense tax info (not 16%); no-form defaults:
-**30% on US-source earnings (business)** / **24% on worldwide (individual)**. Program
+**US-withholding plan note (2026-08-28):** Docs/24 — treaty treatment is
+classification-dependent; the Egypt film/TV `n/a` entry is not an automatic 30% rate.
+Only the actual AdSense tax-info category/rate recorded under D-U1 may drive estimates. Program
 U1–U4: probe → additive country-sliced ingest (normalization fence) → backend-emitted
 estimate (**no default rate**; no effective-dated PostgreSQL row suppresses UI) → optional
 actual anchor. **Fence:** recon `DEFAULT_US_WITHHOLDING_RATE = 0.30` stays dormant
@@ -2205,7 +2205,8 @@ single P-tier above.
   keeping metadata; additive `purged_at`/`purged_by` columns + CHECK swap.
   ⏳ Refine-later: real US-view-share feed, withholding-rate calibration, and
   multi-API-key ingestion scaling. **Rate ruling + display-estimate program:**
-  Docs/24 (15% treaty estimate; recon `0.30` path stays fenced / Docs/21 P3).
+  Docs/24 (operator-confirmed, effective-dated AdSense rate only; recon `0.30` path stays
+  fenced / Docs/21 P3).
 - ✅ Phase 5 analytics & monitoring surface (PR #98, 2026-06-13, branch
   `feat/phase5-analytics-monitoring`) — one combined PR closing the
   highest-value Phase 1 / 5 / 7 acceptance-gate gaps plus this doc

@@ -66,7 +66,7 @@ All in `backend/ums_smart_revenue/api/users.py`. There is **no `DELETE /users`**
 lifecycle is activate/deactivate via `PATCH` status. Every write takes a **required
 audit reason** and lands in `audit_logs` through the same sink as finance writes.
 Grants and role assignments carry a `scope_type` (global / sector / company / channel /
-finance-month), so scoped access is already expressible.
+group / finance-month / export / connector), so scoped access is already expressible.
 
 **Who holds the gates** (from the seeded catalog, 16 roles × 26 permissions):
 `users.manage` → **super_owner, corporate_admin**. `roles.assign` → super_owner,
@@ -147,9 +147,9 @@ patterns (useAsync hooks, permission-gated panels, honest empty states).
    (scoped to the actor's subtree post-A6; global for HQ until then); **or**
 2. Remove `finance_admin` from the assignment drawer until that endpoint exists.
 
-A ninth view, nav-gated when the session reports
-`can_manage_users || can_assign_roles` (decision D-A1). Creation/lifecycle controls
-remain hidden unless `can_manage_users`; role-only principals receive an
+A ninth view, nav-gated by the permission contract `users.manage OR roles.assign`,
+represented by session booleans `can_manage_users || can_assign_roles` (decision D-A1).
+Creation/lifecycle controls remain hidden unless `can_manage_users`; role-only principals receive an
 assignment-only surface:
 
 - User list (`GET /users` or scoped read): email, display name, status, service-account badge.
@@ -173,7 +173,8 @@ session-capability booleans. The six user write endpoints already exist. New wir
 Admin view in `ViewRouter`/nav + hooks. Do not start until **P0-c** merges.
 
 **Acceptance criteria (A1):**
-- [ ] Admin nav hidden unless session reports `can_manage_users || can_assign_roles`
+- [ ] Admin nav hidden unless the principal has `users.manage` or `roles.assign`, as
+  reported by `can_manage_users || can_assign_roles`
 - [ ] `finance_admin` with `can_assign_roles` + scoped read can open the assignment drawer
   but cannot see create/activate/deactivate controls
 - [ ] Create/assign/revoke flows require audit reason; blank reason → 422 surfaced in UI
@@ -242,8 +243,10 @@ external-access milestone; the first competitor account waits for A5+A6+A7 all g
   UI would fight the migration model and reopen the exact drift class the frozen
   catalog work closed. Editing = a code change + migration, by design.
 - **T2 — The UI must never widen access.** Admin surfaces render inside the same
-  fail-closed gates as everything else: no `users.manage` → no Admin nav item, and a
-  403 still renders as a 403. Client-side checks are display sugar only.
+  fail-closed gates as everything else: neither `users.manage` nor `roles.assign` → no
+  Admin nav item. `users.manage` controls lifecycle, while `roles.assign` plus scoped
+  read controls the assignment surface; a 403 still renders as a 403. Client-side
+  checks are display sugar only.
 - **T3 — No secret ever reaches a status panel.** The A4 endpoint is allowlist-only;
   gateway token, DSNs, credential references are permanently out.
 - **T4 — Reasons are load-bearing.** Every admin write API requires an audit reason;
@@ -290,9 +293,10 @@ program. What the code enforces today was verified line by line
   **permission grants** each require the matching admin role. Service-account lifecycle
   is super_owner-only. **Gap (T9):** there is no matching fence preventing assignment of
   `connector_admin` / `corporate_admin` roles to lateral peers — A6 must close this.
-- **Scoped assignments.** Role assignments and grants already CARRY a scope
-  (global / sector / company / channel / finance-month), and the read-side authz layer
-  checks permissions **on a scope** — the data model for "company CEO" exists.
+- **Scoped assignments.** Role assignments and grants already CARRY one of the complete
+  scope types: global / sector / company / channel / group / finance-month / export /
+  connector. The read-side authz layer checks permissions **on a scope** — the data
+  model for "company CEO" exists, but not every scope kind follows an org-tree rule.
 
 **Missing (the A6 work):**
 
@@ -313,6 +317,11 @@ program. What the code enforces today was verified line by line
    Therefore delegated activate/deactivate must re-check **all** effective assignments
    and grants in the same transaction and reject if any authority lies outside the
    actor's subtree; global admins retain the unrestricted lifecycle path.
+   A6 must also define containment for non-tree scopes rather than silently treating
+   them as company descendants: group scope resolves its active member channels;
+   export scope is bounded by the export's underlying requested scope/owner; connector
+   scope is bounded by explicit connector identity; finance-month remains its own
+   typed boundary.
 3. **The no-amplification invariant** — the operator's "no one can take higher layer":
    an actor may assign a (role, scope) pair or grant a (permission, scope) pair **only
    if its effective permission set at that scope is a subset of the actor's own
@@ -437,7 +446,7 @@ gate). None of the three is optional for that step, and the beta needs none of t
 
 | # | Decision | Recommendation |
 | --- | --- | --- |
-| D-A1 | Which roles see the Admin nav | Show when either `can_manage_users` or `can_assign_roles` is true; finance_admin gets assignment-only UI with `users.read_scoped`, never lifecycle controls |
+| D-A1 | Which roles see the Admin nav | Show when `users.manage` or `roles.assign` is effective, represented by `can_manage_users || can_assign_roles`; finance_admin gets assignment-only UI with `users.read_scoped`, never lifecycle controls |
 | D-A2 | Gate for the catalog reads (`/security/*`) | Move to `users.manage` alongside the matrix UI; `audit.view` was a placeholder |
 | D-A3 | A4 status endpoint scope | Read-only allowlist, `platform.manage_settings` gate |
 | D-A4 | When A1 lands | Immediately after the P1 band merges, before beta polish |
@@ -462,8 +471,10 @@ gate). None of the three is optional for that step, and the beta needs none of t
 
 ---
 
-*Relationship to Docs/21 (snapshot in this PR; living status on P0 split PRs): this program is additive
+*Relationship to Docs/21 (frozen costing snapshot; Docs/25 + live GitHub own execution status): this program is additive
 and currency-neutral; it does not touch the P0/P1 bands or the EGP phases. A1/A5 assume
-**P0-c merged**. Only A4's status endpoint (plus the A1 session-capability booleans and
-`users.read_scoped`) adds backend surface, and the status endpoint is read-only. Independent of
+**P0-c merged**. A1 adds session-capability/scoped-read backend surface; A4 adds the
+read-only status endpoint; A6 changes authorization gates, containment, repositories,
+and isolation proofs across all eight scope types; A7 adds identity persistence,
+audited enrollment, and OIDC gateway enforcement. Independent of
 [`24_US_WITHHOLDING_AND_US_REVENUE_PLAN.md`](24_US_WITHHOLDING_AND_US_REVENUE_PLAN.md).*

@@ -13,7 +13,7 @@ calculation as display/evidence surfaces. Gap/status-patched 2026-08-31.
 
 | Doc / where | Role |
 | --- | --- |
-| [`20_DEPLOYMENT_READINESS_AUDIT.md`](20_DEPLOYMENT_READINESS_AUDIT.md) / [`21_BETA_IMPLEMENTATION_PLAN.md`](21_BETA_IMPLEMENTATION_PLAN.md) | Parent beta audit; P3 parked recon TAX (living status on P0 split PRs) |
+| [`20_DEPLOYMENT_READINESS_AUDIT.md`](20_DEPLOYMENT_READINESS_AUDIT.md) / [`21_BETA_IMPLEMENTATION_PLAN.md`](21_BETA_IMPLEMENTATION_PLAN.md) | Parent audit + frozen costing snapshot; P3 parks recon TAX |
 | [`25_PROGRAM_DEPENDENCY_GRAPH.md`](25_PROGRAM_DEPENDENCY_GRAPH.md) | Execution DAG |
 | P0-a…P0-e / #221–#225 | Open, non-draft, not merged; only current main-targeted P0 successors |
 | [`23_ADMIN_ACCESS_AND_CONFIG_PLAN.md`](23_ADMIN_ACCESS_AND_CONFIG_PLAN.md) | Sibling admin program (independent) |
@@ -26,41 +26,41 @@ calculation as display/evidence surfaces. Gap/status-patched 2026-08-31.
 
 ---
 
-## 0. The rate ruling — it is 15%, not 16%
+## 0. The classification/rate ruling — the repository must not choose one
 
 **The verified chain:**
 
-1. Google withholds US tax **only on earnings from US viewers**, and only applies a reduced
-   rate when a valid tax form (W-8BEN-E for a business) is on file in AdSense. Withheld
-   amounts surface in the AdSense **payments transactions report**, usually the month after
-   the payment. (Google: "US tax requirements for YouTube earnings",
-   support.google.com/youtube/answer/10391362)
-2. The Egypt–United States income tax treaty caps royalty withholding at source. The IRS
-   treaty table row for Egypt reads **NA / 30 / 15 / NA / 15** across the five royalty
-   categories: industrial equipment NA, know-how **30%**, patent **15%**, motion
-   picture/TV **NA (no treaty reduction → default 30%)**, **copyright 15%**.
-   (irs.gov/pub/irs-trty/egypt.pdf; PwC treaty withholding tables.)
-3. YouTube/AdSense payments claim treaty benefit under the **copyright royalties** category
-   in the AdSense tax-info form. For a properly filed Egyptian entity the applicable rate is
-   therefore **15% of US-viewer earnings**.
+1. [Google's U.S. tax requirements](https://support.google.com/youtube/answer/10391362)
+   say withholding is determined from submitted tax information and that the applied rate
+   is visible under AdSense **Manage tax info**. The repository does not determine that
+   account-specific category or rate.
+2. [IRS Treaty Table 1](https://www.irs.gov/pub/irs-lbi/tax-treaty-table-1.pdf)
+   reports a rate for qualifying Egypt copyright royalties but marks film/TV `n/a`.
+   `n/a` is not an automatic 30% treaty rate and must not be translated into one.
+3. The [Egypt treaty](https://www.irs.gov/pub/irs-trty/egypt.pdf) and its
+   [IRS technical explanation](https://www.irs.gov/pub/irs-trty/egypttech.pdf) exclude
+   motion-picture films and radio/television films or tapes from the treaty's royalty
+   definition and route that classification to the business-profits article. The actual
+   treatment therefore depends on the account's facts and classification, not a hardcoded
+   film/TV fallback.
+4. [Google's tax-information guidance](https://support.google.com/youtube/answer/10390801)
+   directs the payee through the account-specific tax tool and recommends professional tax
+   advice. UMS records the resulting AdSense category/rate; it does not issue the ruling.
 
 **The traps (why "check first" was the right instinct):**
 
-- **Business account, no valid form on file** → default withholding is **30% on
-  US-source earnings only** (not worldwide).
-- **Individual account, no valid form** → backup withholding is **24% on total
-  worldwide earnings**.
-- **Lapsed/expired form** falls back to the same account-type default. The form has
-  to be re-validated when Google asks.
-- If a payment were classed under **motion picture/TV royalties**, Egypt's treaty gives NO
-  reduction (30%). The AdSense form shows which categories were claimed and at what rate.
+- Google's guidance describes generic no-valid-form/default-withholding outcomes that can
+  reach 30% of U.S.-source business earnings or 24% of worldwide individual earnings.
+  Those defaults are not an interpretation of the treaty table's film/TV `n/a` entry and
+  are never the repository's configured treaty rate.
+- Lapsed, incomplete, or changed tax information can change the displayed result. The
+  effective-dated record must be refreshed from AdSense when Google requests re-validation.
 
 **Operator action (only Mahmoud can do this):** AdSense → Payments → Manage settings →
 "United States tax info" shows the exact per-category withholding rate Google is applying
-to this account right now. That number — not this document — is the rate the calculation
-must be configured with. For a properly filed Egyptian **business** entity under copyright
-royalties, the **expected** treaty rate is **15% of US-viewer earnings** — but only after
-D-U1 confirms the live page matches.
+to this account right now. That displayed category and rate — not this document and not an
+interpretation of `n/a` — are what D-U1 records for the calculation. If the classification
+is unclear, consult a qualified tax professional before enabling the estimate.
 
 **Honesty rule for everything below:** YouTube Analytics revenue metrics
 (`estimatedRevenue`) are **pre-withholding**. Any withholding figure UMS computes from
@@ -106,7 +106,7 @@ Sequenced after the current P1 fleet (#211 merged; #212–#216 open drafts) and
 coordinated with the separate EGP Phase 1 draft #217. The finance program is independent
 of the admin program
 ([`23_ADMIN_ACCESS_AND_CONFIG_PLAN.md`](23_ADMIN_ACCESS_AND_CONFIG_PLAN.md)). Parent
-context: Docs/21 (this PR snapshot; living status on P0 split PRs) P3
+context: Docs/21 (frozen costing snapshot; Docs/25 + live GitHub own execution status) P3
 “Reconciliation-derived TAX” pause. U2 must coordinate with the EGP program because both
 touch source-row identity.
 
@@ -127,9 +127,11 @@ decomposes the number we already trust, no drift). No writes, no UMS changes.
 
 ### U2 — Ingest the US slice (10–16h) — **blocked until normalization fence**
 
-**Required contract for pending PR #227:** U2 remains **blocked** until the reviewed
-#227 head implements and tests this behavior. #227 is a normalization-fence foundation;
-it is not U2 country ingestion and must not be marked as that feature.
+**Required contract for pending PR #227:** U2 remains **blocked**. The captured #227
+head `e174c51f` requires redesign: it does **not** satisfy the typed non-projecting fence
+while preserving the allowlisted source-system contract. A redesigned successor must
+implement and test that behavior before merge. Even then, the fence is not U2 country
+ingestion and must not be marked as that feature.
 
 Country evidence stays on the allowlisted `source_system="youtube_analytics"`; do not
 invent a second source-system value without the full migration, parser/source allowlist,
@@ -148,7 +150,8 @@ generic defect count (or emit a separate informational lifecycle); a healthy U2 
 must not produce a HIGH `SOURCE_ROWS_SKIPPED` alert merely because evidence was fenced.
 
 **Acceptance criteria (U2):**
-- [ ] Reviewed #227 head is merged before U2; #227 alone is never labeled U2 complete
+- [ ] A redesigned #227 successor satisfying the typed-fence/source constraint is
+  reviewed and merged before U2; current head `e174c51f` does not satisfy this gate
 - [ ] Parser emits country rows with `source_system="youtube_analytics"` and
   parser-owned `raw_payload.dimensions.country`
 - [ ] Country rows persist as evidence with distinct keys (F5), then receive the typed
@@ -169,7 +172,7 @@ Per-channel panel/column: **US revenue**, **US share of channel revenue**, and
 **estimated US withholding** — **only when** an effective-dated, operator-confirmed rate
 exists in PostgreSQL for the revenue month (and payment account when multiple accounts
 can differ). **No matching row → suppress estimate fields entirely** (fail-closed; no
-silent 15% default). Rate validated 0 ≤ rate ≤ 0.30 when recorded. PR #228 currently
+silent treaty-rate default). Rate validated 0 ≤ rate ≤ 0.30 when recorded. PR #228 currently
 provides only an open ORM/repository scaffold and has an Alembic-head collision with
 #223; it must be restacked after #223 and integrated behind an audited service/API before
 U3 can be called implemented.
@@ -225,10 +228,11 @@ a monthly manual glance at the AdSense report—no durable anchor exists yet.
 
 ## 4. Operator decisions
 
-- **D-U1 (blocking U3):** Read the actual per-category rate from AdSense → Payments →
-  "United States tax info"; record account type (business vs individual) and confirmed
-  rate in effective-dated config. If the page shows 24%/30% fallback, stop and fix the
-  tax form before enabling estimates. **No estimate UI until D-U1 is recorded.**
+- **D-U1 (blocking U3):** Read the actual category/rate from AdSense → Payments →
+  "United States tax info"; record account type and confirmed result in effective-dated
+  config. If the page shows a fallback or the classification is unclear, review the tax
+  information with Google and a qualified adviser before enabling estimates. **No
+  estimate UI until D-U1 is recorded.**
 - **D-U2:** Where the US panel lives (Rankings view column vs. per-channel detail panel) —
   design is the operator's per the standing rule; the plan only commits the numbers.
 - **D-U3:** Whether U4 (manual actual-withholding anchor) is worth building now or stays a

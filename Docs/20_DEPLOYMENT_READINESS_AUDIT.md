@@ -43,7 +43,7 @@ corrections are recorded rather than quietly dropped.
 
 | Doc | Where | Role |
 | --- | --- | --- |
-| Docs/21 (living status) | PR #220 until successor merges | Costing snapshot; not implementation status |
+| Docs/21 (frozen costing snapshot) | PR #220 until successor merges | Historical planning evidence; Docs/25 + live GitHub own execution status |
 | Docs/22 backup rehearsal | P0-b / PR #222 | Backup/restore runbook; PR still open |
 | [`25_PROGRAM_DEPENDENCY_GRAPH.md`](25_PROGRAM_DEPENDENCY_GRAPH.md) | this PR | Execution DAG |
 | [`21_BETA_IMPLEMENTATION_PLAN.md`](21_BETA_IMPLEMENTATION_PLAN.md) | this PR (snapshot) | Original costed beta plan at `d8418cea2` |
@@ -608,11 +608,13 @@ export, manage users) is denied, and so is every read gated on `VIEW_REVENUE`,
 `VIEW_FINALIZED_PAYMENTS`, or `VIEW_RAW_FILES`. **The product is being demonstrated
 by its most restricted role.**
 
-**Fix:** set `VITE_DEV_GATEWAY_ROLE` to a role that can actually operate — for the
-finance import loop use **`beta_operator`** (P0-c: finance surface **plus**
-`connectors.run_jobs` for manual upload); use `corporate_admin` for setup
-(including `POST /users` — `finance_admin` holds `roles.assign` but **not**
-`users.manage`; see Docs/23). One line, no code change. This should be the first
+**Fix:** before database authz, use the existing `finance_admin` header role for the
+finance UI and existing `revenue_operations_admin` only for the manual-upload request.
+After P0-c + A5, use the setup-only `super_owner` (then disable/rotate it), or P0-c's
+atomic privileged bootstrap, to create the real principal with global `finance_admin`
+plus only a connector-scoped `connectors.run_jobs` grant for `manual-upload`. Use
+`corporate_admin` only for setup such as `POST /users` — `finance_admin` holds
+`roles.assign` but **not** `users.manage`; see Docs/23. This should be the first
 thing any beta runbook says, and its absence from the README is arguably the
 single highest-impact documentation gap here.
 

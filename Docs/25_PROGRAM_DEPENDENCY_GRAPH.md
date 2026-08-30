@@ -21,7 +21,7 @@ main-targeted P0 successors.
 | #224 / P0-d | `03e58c49` | OPEN, non-draft, BEHIND | Logging/ops; not on `main` |
 | #225 / P0-e | `270c799f` | OPEN, non-draft, BEHIND | Dev gateway docs + `/org-units` and `/users`; **not** `/security` |
 | #226 | `29a542d2` | OPEN, non-draft, BEHIND | Proposed CI checks; not required on `main` yet |
-| #227 | `e174c51f` | OPEN, non-draft, BEHIND | Normalization-fence foundation only; not U2 ingest |
+| #227 | `e174c51f` | OPEN, non-draft, BEHIND | Requires redesign; current head fails the U2 typed-fence/source-system constraint and is not U2 ingest |
 | #228 | `579c7f13` | OPEN, non-draft, BEHIND | Persistence/repository scaffold only; not A6, A7, or U3 completion |
 | #229 | `4d6967ca` | OPEN, non-draft, DIRTY | Router/query/design-system scaffold with static fixtures; rewrite/restack required |
 
@@ -73,7 +73,7 @@ tab needs reload until a clock/provider follow-up lands.
                            ▼
                  [read-only Revenue Investigation Agent]
 
-[#227 normalization fence merged and verified]
+[#227 redesigned for typed fence + source contract, then merged and verified]
           │
           ▼
 [U2 country ingest — separate implementation]
@@ -113,10 +113,10 @@ Admin, U3, or graph work should treat the current #229 head as a completed prere
 | --- | --- |
 | Current #220 unresolved review threads = 0 and current required checks pass | Claiming #220 merge-ready; undraft is already complete |
 | #223 merged before/restacked with #222 | Safe backup deployment and seed-floor validation |
-| #221–#225 intentionally integrated to `main` | Claiming P0 delivered or running the living beta runbook |
+| #221–#225 intentionally integrated to `main` | Claiming P0 delivered or running the current beta runbook |
 | #226 workflows merged **and branch protection actually requires them** | Calling `ci-fast`, `ci-database`, or `ci-frontend` required checks |
 | Docs/23 A2 adds `/security` | Admin access matrix in dev; #225 does not satisfy this |
-| #227 normalization fence merged and verified | U2 country ingest |
+| Redesigned #227 successor satisfies typed-fence/source constraint, then is merged and verified | U2 country ingest; current `e174c51f` does not clear this gate |
 | #228 restacked after #223 with one Alembic head | Consuming its persistence scaffold |
 | U2 ingest complete + effective-dated config service complete + D-U1 recorded | U3 estimate surfaces |
 | #229 rewritten/restacked after P1 integration | Treating router/query/design-system work as a frontend prerequisite |

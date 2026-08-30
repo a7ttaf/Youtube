@@ -13,6 +13,10 @@ breaks, what it unblocks — not estimated from the finding text.
 > [`25_PROGRAM_DEPENDENCY_GRAPH.md`](25_PROGRAM_DEPENDENCY_GRAPH.md)).
 > This copy is the **costing snapshot** at `main` = `d8418cea2`. Do not schedule open
 > items from the hour tables alone until P0 split PRs land on `main`.
+> **Ownership contract:** except for this dated freshness banner, the live-state table,
+> and the P1.2 delivery note, this document is frozen planning/costing evidence.
+> [`25_PROGRAM_DEPENDENCY_GRAPH.md`](25_PROGRAM_DEPENDENCY_GRAPH.md) plus live GitHub PR
+> state own current execution status; unchecked tasks below are not a living backlog.
 >
 > **Consolidation:** ships with Docs/20/23/24/25 in `docs/program-plans-consolidated`
 > (supersedes closed drafts #209 / #218 / #219).
@@ -90,7 +94,7 @@ permission to `manual-upload`. Split the UI re-walk from the later import bootst
 | # | Change | File | Time |
 | --- | --- | --- | --- |
 | W0.1a | Before P0-c, create repo-root `.env`; set the gateway token and use existing `finance_admin` for the finance re-walk. In accepted-risk header mode, use existing `revenue_operations_admin` only for the manual-import request, then switch back | `.env` (new, repo root) | 15 min |
-| W0.1b | After P0-c **and A5 database-authz cutover**, bootstrap the real DB user, assign `finance_admin` globally, and add a separate direct `connectors.run_jobs` grant scoped to connector `manual-upload` | bootstrap/authz workflow | P0-c + A5 |
+| W0.1b | After P0-c **and A5 database-authz cutover**, use the setup-only `super_owner` to create the DB principal, assign `finance_admin` globally, and add a separate direct `connectors.run_jobs` grant scoped to connector `manual-upload`; alternatively P0-c must provide the same create + assignment + grant atomically in its privileged setup transaction | bootstrap/authz workflow | P0-c + A5 |
 | W0.2 | Let PR #225 add `/org-units` + `/users`; add `/security` separately in Docs/23 A2 | `frontend/vite.config.ts` | P0-e + A2 |
 | W0.3 | Install the bootstrap UUID/email in `VITE_DEV_GATEWAY_USER_ID`/`VITE_DEV_GATEWAY_USER_EMAIL`, restart, click through every view, and record what is still dead | `.env` + runbook | 30 min |
 
@@ -105,15 +109,24 @@ the product through its second-most-restricted role.
 > `FINANCE_ADMIN` does not hold it (`auth/seed.py`). Do **not** solve that with a global
 > `beta_operator` role that bundles the connector permission: every permission from a
 > role assignment receives the same scope, so that shape widens job execution beyond
-> `manual-upload`. Bootstrap one DB principal with a global `finance_admin` assignment
-> plus a separate direct `connectors.run_jobs` grant at connector scope
-> `manual-upload`, after A5 enables database-backed authz. Until then, the localhost-only
+> `manual-upload`. There must be a real initial authority: after A5 enables database-backed
+> authz, either the setup-only `super_owner` creates the principal and grants its access,
+> then is disabled and its credential rotated, or P0-c performs user creation + global
+> `finance_admin` assignment + the direct `connectors.run_jobs` grant at connector scope
+> `manual-upload` in one privileged transaction and emits an audit/bootstrap receipt.
+> A partially privileged principal or circular self-grant is not an executable bootstrap.
+> Until then, the localhost-only
 > accepted-risk header path must use existing roles: `revenue_operations_admin` for the
 > import request and `finance_admin` for finance UI. Use `corporate_admin` only for
 > user-creation sessions.
 
 **Acceptance criteria (W0):**
 - [ ] Before P0-c, `.env` uses an existing role; unknown `beta_operator` is never sent
+- [ ] Database mode starts through setup `super_owner` or an atomic P0-c privileged
+  bootstrap path; the operator never grants itself its first authority
+- [ ] Bootstrap is atomic: failure rolls back the user, assignment, and direct grant, so
+  no partially privileged account remains; setup `super_owner` is disabled and its
+  credential rotated after the receipt and gateway identity are verified
 - [ ] After P0-c + A5, the DB principal has global finance authority plus only the scoped
   `manual-upload` connector grant; other connector job requests remain denied
 - [ ] Bootstrap emits the created user UUID; gateway UUID/email match that row and a
@@ -305,8 +318,8 @@ until each channel has `primary_company_id` set.
 **10–12 hours** for the entire visible win. This band directly answers *"it's really a
 landing page, but mockup."*
 
-**Re-scope this band after W0.3.** With `beta_operator` instead of `assistant_analyst`,
-some of these panels will already render real data.
+**Re-scope this band after W0.3.** With the bootstrapped finance principal instead of
+`assistant_analyst`, some of these panels will already render real data.
 
 Roughly **90% of this work is deletion.**
 
@@ -441,9 +454,9 @@ Recorded so they are not re-proposed:
   already has"; is really "introduce a second producer of channel revenue facts and
   defend it against double-counting CMS."
 - **Reconciliation-derived TAX** — 12–20h *plus* an unbounded policy question. The
-  hardcoded `0.30` is the no-treaty rate in
+  hardcoded `0.30` is a dormant legacy assumption in
   `finance/reconciliation_workflow.py`. The **rate ruling and display-estimate
-  program** (15% treaty copyright royalty; never arm recon from the estimate alone)
+  program** (operator-confirmed AdSense category/rate; never arm recon from the estimate alone)
   now live in [`24_US_WITHHOLDING_AND_US_REVENUE_PLAN.md`](24_US_WITHHOLDING_AND_US_REVENUE_PLAN.md).
   Keep recon dormant until a separate ruling.
 - **`POST /org-units`** — 8–16h; two seeded rows do the job.
