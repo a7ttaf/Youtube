@@ -118,10 +118,14 @@ describe("lastCompleteMonthKey", () => {
   });
 
   it("is always a SELECTABLE option — MONTH_OPTIONS[1] by construction", () => {
-    // The write default must be offered by the same <select> the read views
-    // list, or the seeded value would not match any <option>.
-    expect(MONTH_OPTIONS).toContain(lastCompleteMonthKey());
-    expect(lastCompleteMonthKey()).toBe(MONTH_OPTIONS[1]);
+    // Compare frozen exports with EACH OTHER, never with a live clock read:
+    // this file can straddle a month boundary between import and run, and a
+    // fresh lastCompleteMonthKey() would then disagree with the module-load
+    // MONTH_OPTIONS snapshot (PR #211 review — same class as the pinned
+    // exported-window test below). The relationship itself is still proven
+    // on a pinned clock in the lines after these.
+    expect(MONTH_OPTIONS).toContain(WRITE_DEFAULT_MONTH);
+    expect(WRITE_DEFAULT_MONTH).toBe(MONTH_OPTIONS[1]);
     // Same relationship on a pinned clock, independent of when the module loaded.
     const now = new Date(2026, 0, 4);
     expect(lastCompleteMonthKey(now)).toBe(
