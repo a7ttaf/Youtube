@@ -134,10 +134,12 @@ def test_schedule_enabled_builds_scheduler_and_closes_in_order(tmp_path) -> None
         real_executor_close = app.state.connector_job_executor.close
 
         def _spy_scheduler_close() -> None:
+            """Record scheduler close order, then delegate to the real close."""
             close_order.append("scheduler")
             real_scheduler_close()
 
         def _spy_executor_close() -> None:
+            """Record executor close order, then delegate to the real close."""
             close_order.append("executor")
             real_executor_close()
 
