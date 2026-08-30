@@ -25,7 +25,10 @@ import threading
 from fastapi.testclient import TestClient
 
 from ums_smart_revenue.app import create_app
-from ums_smart_revenue.config.settings import load_app_settings
+from ums_smart_revenue.config.settings import (
+    GOOGLE_CONNECTOR_SERVICE_ACTOR_PLACEHOLDER_ID,
+    load_app_settings,
+)
 from ums_smart_revenue.connectors.runs.scheduler import GroupSyncScheduler
 
 _VALID_ACTOR_UUID = "11111111-2222-3333-4444-555555555555"
@@ -75,6 +78,33 @@ def test_schedule_enabled_without_service_actor_raises(tmp_path) -> None:
             create_app(database_url=_sqlite_url(tmp_path))
         except ValueError as exc:
             assert _ACTOR_ENV in str(exc)
+        else:
+            raise AssertionError("create_app should have raised ValueError")
+    finally:
+        _clear_envs()
+
+
+def test_schedule_enabled_with_placeholder_actor_raises(tmp_path) -> None:
+    """Schedule + executor + the .env.example placeholder UUID refuses to build.
+
+    The placeholder is treated as unconfigured at the boot gate: a scheduler
+    started with it would submit ticks whose principal build fails while
+    _audit_group_sync_failure attributes the failure rows to the published
+    template UUID. The error names the actor env var AND the placeholder so
+    the restart-looping container log is self-diagnosing.
+    """
+    _clear_envs()
+    os.environ[_SCHEDULE_ENV] = "true"
+    os.environ[_EXECUTOR_ENV] = "true"
+    os.environ[_ACTOR_ENV] = GOOGLE_CONNECTOR_SERVICE_ACTOR_PLACEHOLDER_ID
+    load_app_settings.cache_clear()
+    try:
+        try:
+            create_app(database_url=_sqlite_url(tmp_path))
+        except ValueError as exc:
+            message = str(exc)
+            assert _ACTOR_ENV in message
+            assert GOOGLE_CONNECTOR_SERVICE_ACTOR_PLACEHOLDER_ID in message
         else:
             raise AssertionError("create_app should have raised ValueError")
     finally:
