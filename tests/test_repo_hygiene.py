@@ -71,11 +71,13 @@ def _tracked_files() -> list[Path]:
     """Every git-tracked file — the exact set a push would publish.
 
     The guard is meaningful only inside a git worktree with git on PATH; any
-    other environment (source archive, vendored tree) skips explicitly instead
-    of erroring the whole suite on a precondition the guard cannot control.
+    other environment (source archive, vendored tree) fails explicitly because
+    an unavailable scanner cannot prove that tracked content is clean.
     """
+    # FIX: Fail closed instead of calling pytest.skip; required CI's policy gate
+    # forbids skip/xfail and a missing scanner is not proof of clean content.
     if shutil.which("git") is None:
-        pytest.skip("repo hygiene guard requires git on PATH")
+        pytest.fail("repo hygiene guard requires git on PATH")
     probe = subprocess.run(
         ["git", "rev-parse", "--is-inside-work-tree"],
         cwd=REPO_ROOT,
@@ -84,7 +86,7 @@ def _tracked_files() -> list[Path]:
         check=False,
     )
     if probe.returncode != 0:
-        pytest.skip("repo hygiene guard is meaningful only inside a git worktree")
+        pytest.fail("repo hygiene guard is meaningful only inside a git worktree")
     listing = subprocess.run(
         ["git", "ls-files", "-z"],
         cwd=REPO_ROOT,

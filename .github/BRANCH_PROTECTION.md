@@ -1,19 +1,28 @@
 # Required branch checks
 
-After merging the `feat/required-ci` workflows, configure **`main`** branch
-protection (GitHub → Settings → Branches → Branch protection rules) to require
-these status checks before merge:
+Configure the `main` ruleset or branch-protection rule to require these stable
+status checks before merge:
 
-| Check name | Workflow |
-| --- | --- |
-| `Lint and unit tests` | `ci-fast` |
-| `Postgres migrations and authz` | `ci-database` |
-| `Build and Vitest` | `ci-frontend` |
+| Required check | Workflow | Contract |
+| --- | --- | --- |
+| `Lint and unit tests` | `ci-fast` | Locked Python toolchain, lint/type checks, no-skip policy, no-database pytest lane, frontend test-layout guard, and committed-range whitespace hygiene. |
+| `Postgres migrations and authz` | `ci-database` | Alembic head plus the complete database and real-Postgres pytest lane. |
+| `Build and Vitest` | `ci-frontend` | Locked Bun install, production build, and the complete Vitest suite. |
 
-Optional follow-ups (not blocking beta P0):
+All three workflows intentionally run for every pull request targeting `main`
+and every push to `main`; do not add workflow-level `paths` filters. A skipped
+required workflow does not report its context and can strand a pull request.
+Changed-scope optimization is safe only inside a reporting job and only when
+the repository changeset contract fails closed.
 
-- `ci-compose.yml` — `docker compose config` smoke
-- `ci-restore.yml` — nightly backup-restore rehearsal
+Also enable:
 
-Use **Require branches to be up to date before merging** so stale green checks
-cannot merge.
+- Require branches to be up to date before merging.
+- Require pull-request review before merging.
+- Do not allow required checks to be bypassed.
+
+Workflow job names are the required-check API contract. Rename a job only in
+the same change that updates the configured required context.
+
+No repository setting is changed by these files; an administrator must apply
+and verify the rule in GitHub after the workflows exist on the default branch.
