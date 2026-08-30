@@ -94,7 +94,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PATH="/opt/venv/bin:${PATH}" \
     VIRTUAL_ENV=/opt/venv \
-    APP_HOME=/srv/app
+    APP_HOME=/srv/app \
+    APP_UID=${APP_UID}
 
 # Minimal runtime deps. psycopg pulls its client bindings from the Python wheel,
 # so the runtime does not need libpq or the psql client.
@@ -124,18 +125,22 @@ RUN apt-get update \
         tini \
  && apt-get clean \
  && rm -rf /var/lib/apt/lists/* \
- && groupadd --system --gid ${APP_UID} ${APP_USER} \
- && useradd  --system --uid ${APP_UID} --gid ${APP_USER} \
-             --home-dir ${APP_HOME} --shell /sbin/nologin ${APP_USER} \
- && mkdir -p ${APP_HOME} \
- && chown ${APP_USER}:${APP_USER} ${APP_HOME} \
- && mkdir -p ${APP_DATA_HOME}/artifacts ${APP_DATA_HOME}/blobs \
- && chown -R ${APP_USER}:${APP_USER} ${APP_DATA_HOME}
+ && case "${APP_UID}" in ''|*[!0-9]*) echo "APP_UID must be a positive integer" >&2; exit 1 ;; esac \
+ && [ "${APP_UID}" -ge 1 ] \
+ && [ "${APP_UID}" -le 2147483647 ] \
+ && groupadd --system --gid "${APP_UID}" "${APP_USER}" \
+ && useradd  --system --uid "${APP_UID}" --gid "${APP_USER}" \
+             --home-dir "${APP_HOME}" --shell /sbin/nologin "${APP_USER}" \
+ && mkdir -p "${APP_HOME}" \
+ && chown "${APP_USER}:${APP_USER}" "${APP_HOME}" \
+ && mkdir -p "${APP_DATA_HOME}/artifacts" "${APP_DATA_HOME}/blobs" \
+ && chown -R "${APP_USER}:${APP_USER}" "${APP_DATA_HOME}"
 
 # Pull the virtualenv from the builder, then drop the source tree alongside.
 COPY --from=builder --chown=${APP_USER}:${APP_USER} /opt/venv /opt/venv
 COPY --from=builder --chown=${APP_USER}:${APP_USER} /build/backend ${APP_HOME}/backend
 COPY --from=builder --chown=${APP_USER}:${APP_USER} /build/alembic.ini ${APP_HOME}/alembic.ini
+COPY --chown=${APP_USER}:${APP_USER} scripts/compose_storage.py ${APP_HOME}/scripts/compose_storage.py
 
 WORKDIR ${APP_HOME}
 ENV PYTHONPATH=${APP_HOME}/backend
