@@ -303,6 +303,51 @@ describe("CloseView wired to finance-close", () => {
     );
   });
 
+  // Regression (PR #211 review, Devin "Previous month error survives
+  // switching"): the error branch must render only when the error belongs to
+  // the SELECTED month — useAsync clears the previous month's error in its
+  // effect one frame after a switch, and error precedence used to paint that
+  // stale failure under the new month.
+  it("does not show the previous month's error after switching months", async () => {
+    const otherMonth = MONTH_OPTIONS[1];
+    expect(otherMonth).not.toBe(DEFAULT_MONTH);
+    const pending = deferred<Response>();
+    fetchMock().mockImplementation((input: unknown) => {
+      const url = urlOf(input);
+      if (url.endsWith("/readiness")) {
+        return Promise.resolve(jsonResponse(READINESS_BLOCKED));
+      }
+      if (url.includes(`/finance-close/${otherMonth}`)) {
+        return pending.promise;
+      }
+      return Promise.resolve(jsonResponse({ detail: "close lookup exploded" }, 500));
+    });
+    renderCloseView();
+
+    // The first month's read failed — its error tile is honest.
+    await waitFor(() =>
+      expect(screen.getByText("Request failed (500)")).toBeInTheDocument(),
+    );
+
+    // Switch months with the new read pending: the old error must be gone and
+    // the unknown state shown instead.
+    fireEvent.change(screen.getByLabelText("Month"), {
+      target: { value: otherMonth },
+    });
+    expect(screen.queryByText("Request failed (500)")).toBeNull();
+    expect(screen.queryByText("close lookup exploded")).toBeNull();
+    const summary = screen.getByLabelText("Month close summary");
+    expect(within(summary).getByText("Loading month close")).toBeInTheDocument();
+
+    // Same-month errors keep the alert tile exactly as before (the branch
+    // order did not weaken the error path): settle the new read with a 500.
+    pending.resolve(jsonResponse({ detail: "new month exploded" }, 500));
+    await waitFor(() =>
+      expect(screen.getByText("Request failed (500)")).toBeInTheDocument(),
+    );
+    expect(screen.getByText("new month exploded")).toBeInTheDocument();
+  });
+
   it("still replaces the summary with the error tile on a 500 status read", async () => {
     // Only 404 is remapped; every other failure keeps today's role="alert" tile.
     fetchMock().mockImplementation(

@@ -596,30 +596,37 @@ const CloseSummaryTiles = ({
  * Top summary tiles for the close screen: month, status, readiness, and allocation
  * method, with explicit error and initial-loading states mirroring CommandView.
  *
- * Branch order is load-bearing. `error` still wins, so a 403/5xx/network failure
- * keeps its role="alert" tile exactly as before; useMonthClose has already
- * turned the "no close row yet" 404 into (status=null, error=null), which falls
+ * Branch order is load-bearing. An `error` wins ONLY when it belongs to the
+ * selected month (`settledStatusMonth === month`): useAsync clears the error
+ * in its effect one frame after a month switch, so gating keeps a switched-
+ * away month's failure from painting under the new selection (PR #211 review);
+ * same-month 403/5xx/network failures keep their role="alert" tile exactly as
+ * before. A known-verdict month whose read 404'd as "no close row yet" —
+ * useMonthClose has already turned that into (status=null, error=null) — falls
  * through to the tiles and their not-started copy instead of an error banner.
- * `statusKnown=false` (the settled verdict belongs to another month — the frame
- * right after a month switch) renders the loading tile too: a null status is
- * only "no close record" once a read for the SELECTED month settled on it.
+ * Any other state (in-flight first read, or a verdict month that is not the
+ * selection) renders the loading tile: a null status is only "no close record"
+ * once a read for the SELECTED month settled on it.
  */
 const CloseStatusSummary = ({
   month,
   status,
   loading,
   error,
-  statusKnown,
+  settledStatusMonth,
   readiness,
 }: {
   month: string;
   status: FinanceMonthCloseStatus | null;
   loading: boolean;
   error: ApiError | Error | null;
-  statusKnown: boolean;
+  settledStatusMonth: string | null;
   readiness: FinanceCloseReadinessResponse | null;
 }) => {
-  if (error) {
+  // FIX (PR #211 review): render the error only when it belongs to the
+  // SELECTED month; the frame after a month switch still holds the previous
+  // month's error until useAsync's effect clears it.
+  if (error !== null && settledStatusMonth === month) {
     const { title, detail } = describeError(error);
     return (
       <div className="view-summary" aria-label="Month close summary" role="alert">
@@ -636,7 +643,7 @@ const CloseStatusSummary = ({
   // to the selected month — the one-frame gap after a month switch, before the
   // new read starts, used to fall through and paint the previous month's
   // no-record verdict as a false OPEN for the new month.
-  if ((loading && !status) || !statusKnown) {
+  if ((loading && !status) || settledStatusMonth !== month) {
     return (
       <div className="view-summary" aria-label="Month close summary" aria-busy="true">
         <article className="summary-tile">
@@ -798,42 +805,41 @@ const MonthCloseWorkbench = ({
 
 // ============================================================================
 // Purpose: Track WHICH month's read produced the current settled status
-//   verdict, closing the month-switch flash (PR #211 review): useAsync clears
-//   data and flips loading inside its effect — one paint frame AFTER the
-//   selection changes — so for that frame (status=null, loading=false,
-//   error=null) is the PREVIOUS month's verdict, which the summary used to
-//   render as a false OPEN for the newly selected month.
+//   verdict — data or error alike — closing the month-switch flash (PR #211
+//   review): useAsync clears data/error and flips loading inside its effect,
+//   one paint frame AFTER the selection changes, so for that frame the stale
+//   verdict (a null status read as "no record", or a previous month's error)
+//   rendered under the NEWLY selected month.
 // Database/ORM: None (frontend display-state derivation).
 // Standards: The verdict month is cleared synchronously DURING the render
 //   that changes the selection (React's adjust-state-during-render pattern —
 //   guarded to run only while it differs from the selection, so it converges),
 //   putting the unknown verdict in the DOM before the browser paints. The
 //   settle effect re-records the month whenever a read for the current
-//   selection finishes without an error, covering both the no-record (null)
-//   and populated verdicts. Hooks-order safe: same hook calls on every render.
+//   selection finishes, WHATEVER the outcome, so both the data and error
+//   branches can gate on it. Hooks-order safe: same hook calls every render.
 // Blast Radius: Display only — which summary tile / badge renders while a
 //   switched-to month's read is in flight. No write path, no stored value.
 // Connections:
-//   - File: frontend/src/lib/api/useAsync.ts -> the effect-timed data clear
-//     whose one-frame gap this closes.
-//   - File: CloseView (this file) -> feeds statusKnown for the summary tiles
-//     and the lock badge.
+//   - File: frontend/src/lib/api/useAsync.ts -> the effect-timed data/error
+//     clear whose one-frame gap this closes.
+//   - File: CloseView + CloseStatusSummary (this file) -> gate both the
+//     error branch and the not-started/badge branches on the verdict month.
 // ============================================================================
 /** The month whose read produced the current settled verdict; null = unknown. */
 const useSettledStatusMonth = (
   month: string,
   loading: boolean,
-  error: ApiError | Error | null,
 ): string | null => {
   const [settledStatusMonth, setSettledStatusMonth] = useState<string | null>(null);
   if (settledStatusMonth !== null && settledStatusMonth !== month) {
     setSettledStatusMonth(null);
   }
   useEffect(() => {
-    if (!loading && error === null) {
+    if (!loading) {
       setSettledStatusMonth(month);
     }
-  }, [loading, error, month]);
+  }, [loading, month]);
   return settledStatusMonth;
 };
 
@@ -877,10 +883,12 @@ const CloseView = ({
   const isLocked = status?.status?.toUpperCase() === "LOCKED";
 
   // FIX (PR #211 review): a null status only means "no close record" once a
-  // read for the SELECTED month settled on it — see useSettledStatusMonth above
-  // for why the (status=null, error=null) pair alone cannot tell that from the
-  // previous month's verdict in the frame right after a month switch.
-  const settledStatusMonth = useSettledStatusMonth(month, statusLoading, statusError);
+  // read for the SELECTED month settled on it, and an ERROR only renders once
+  // it belongs to the selected month — see useSettledStatusMonth above for why
+  // the (status/error, loading=false) pair alone cannot tell the current
+  // month's verdict from the previous month's in the frame right after a
+  // month switch.
+  const settledStatusMonth = useSettledStatusMonth(month, statusLoading);
   const statusKnown =
     !statusLoading && statusError === null && settledStatusMonth === month;
 
@@ -966,7 +974,7 @@ const CloseView = ({
         status={status}
         loading={statusLoading}
         error={statusError}
-        statusKnown={statusKnown}
+        settledStatusMonth={settledStatusMonth}
         readiness={readiness}
       />
 
