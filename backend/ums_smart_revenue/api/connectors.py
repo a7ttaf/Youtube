@@ -51,7 +51,10 @@ from ums_smart_revenue.auth.policy import (
     has_permission,
 )
 from ums_smart_revenue.auth.scopes import AccessScope
-from ums_smart_revenue.config.settings import load_app_settings
+from ums_smart_revenue.config.settings import (
+    is_configured_service_actor_id,
+    load_app_settings,
+)
 from ums_smart_revenue.connectors.credentials import (
     MAX_CREDENTIAL_PAGE_SIZE,
     ConnectorCredentialConflictError,
@@ -733,7 +736,9 @@ def request_connector_job(
         user=user,
         payload=payload,
         executor=executor,
-        service_actor_configured=settings.google_connector_service_actor_id is not None,
+        service_actor_configured=is_configured_service_actor_id(
+            settings.google_connector_service_actor_id
+        ),
     )
     if preflight_rejection is not None:
         return preflight_rejection

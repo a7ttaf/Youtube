@@ -33,6 +33,18 @@ GOOGLE_CONNECTOR_SERVICE_ACTOR_ID_ENV = "UMS_GOOGLE_CONNECTOR_SERVICE_ACTOR_ID"
 # named placeholder rather than attribute connector audit rows to a UUID
 # published in a public template.
 GOOGLE_CONNECTOR_SERVICE_ACTOR_PLACEHOLDER_ID = "00000000-0000-0000-0000-0000000000bb"
+
+
+def is_configured_service_actor_id(actor_id: str | None) -> bool:
+    """True when the actor id is a real configured value.
+
+    The canonical "treated as configured" test shared by every consumer
+    gate (API pre-flight, scheduler boot wiring): both a missing value and
+    the well-known template placeholder are NOT configured — refusing the
+    placeholder late (worker-time only) turned a synchronous 503 into a
+    202 for a job that can never start.
+    """
+    return actor_id is not None and actor_id != GOOGLE_CONNECTOR_SERVICE_ACTOR_PLACEHOLDER_ID
 CONNECTOR_JOB_EXECUTOR_ENABLED_ENV = "UMS_CONNECTOR_JOB_EXECUTOR_ENABLED"
 CONNECTOR_JOB_MAX_WORKERS_ENV = "UMS_CONNECTOR_JOB_MAX_WORKERS"
 CONNECTOR_JOB_STALE_RUNNING_HOURS_ENV = "UMS_CONNECTOR_JOB_STALE_RUNNING_HOURS"

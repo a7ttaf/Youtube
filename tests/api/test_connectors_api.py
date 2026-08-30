@@ -32,7 +32,10 @@ from ums_smart_revenue.app import create_app
 from ums_smart_revenue.auth.models import RoleAssignment, UserPrincipal
 from ums_smart_revenue.auth.roles import RoleKey
 from ums_smart_revenue.auth.scopes import AccessScope
-from ums_smart_revenue.config.settings import load_app_settings
+from ums_smart_revenue.config.settings import (
+    GOOGLE_CONNECTOR_SERVICE_ACTOR_PLACEHOLDER_ID,
+    load_app_settings,
+)
 from ums_smart_revenue.connectors.credentials import (
     ConnectorCredentialEntry,
     ConnectorCredentialPage,
@@ -783,6 +786,54 @@ def test_request_connector_job_503_service_principal_unavailable(tmp_path):
             "account_id": "content-owner-1",
             "report_month": "2026-03",
             "reason": "Service actor missing",
+        },
+    )
+
+    engine = create_engine(database_url)
+    with Session(engine) as session:
+        audit_log = session.scalars(select(AuditLogORM)).one()
+    engine.dispose()
+    assert response.status_code == 503
+    assert audit_log.details["action"] == "job_rejected"
+    assert audit_log.details["rejection"] == "service_principal_unavailable"
+    # Pre-flight rejection: no reservation, no activate, no cancel.
+    assert fake.submit_calls == []
+    assert fake.activate_calls == []
+    assert fake.cancel_calls == []
+
+
+def test_request_connector_job_503_placeholder_service_actor(tmp_path):
+    """The .env.example placeholder UUID gets the same synchronous 503 as a
+    missing id, instead of a 202 for a job that can never start.
+
+    The pre-flight gate treats the well-known template value as
+    unconfigured: no worker slot reserved, no job_submitted row, the
+    typed service_principal_unavailable rejection. A copied-template
+    deployment must hear "configured wrong" at submit time, not discover
+    it in worker logs after a 202.
+    """
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    _seed_active_credential(database_url)
+    # The template value, not a missing one: pre-flight must refuse it too.
+    os.environ["UMS_GOOGLE_CONNECTOR_SERVICE_ACTOR_ID"] = (
+        GOOGLE_CONNECTOR_SERVICE_ACTOR_PLACEHOLDER_ID
+    )
+    os.environ["UMS_CONNECTOR_JOB_EXECUTOR_ENABLED"] = "true"
+    load_app_settings.cache_clear()
+    app = create_app(database_url=database_url)
+    fake = _FakeExecutor()
+    app.state.connector_job_executor = fake
+    client = TestClient(app)
+
+    response = client.post(
+        "/connectors/jobs",
+        headers=auth_headers("revenue_operations_admin", "connector", "youtube_reporting"),
+        json={
+            "connector_key": "youtube_reporting",
+            "account_id": "content-owner-1",
+            "report_month": "2026-03",
+            "reason": "Template actor must be refused at submit",
         },
     )
 
