@@ -608,6 +608,42 @@ const CloseSummaryTiles = ({
  * selection) renders the loading tile: a null status is only "no close record"
  * once a read for the SELECTED month settled on it.
  */
+/** The CloseStatusSummary render modes, decided by closeSummaryMode. */
+type CloseSummaryMode = "error" | "loading" | "tiles";
+
+// ============================================================================
+// Purpose: Decide the close summary's render mode from the status read's
+//   lifecycle: the error tile ONLY for an error that belongs to the selected
+//   month, the loading tile while the verdict is in flight or belongs to
+//   another month (the month-switch frame before useAsync's effect clears the
+//   stale verdict), and the settled tiles otherwise.
+// Database/ORM: None (frontend, pure derivation).
+// Standards: Single decision point — the component renders, this decides, so
+//   label and precedence can never drift apart. Fail-closed: anything not
+//   provably this month's verdict renders the loading state, never a guessed
+//   status or a stale failure.
+// Blast Radius: Display only (which summary block renders). No write path.
+// Connections:
+//   - File: useSettledStatusMonth (this file) -> supplies the verdict month.
+//   - File: frontend/src/lib/api/useAsync.ts -> the effect-timed clears whose
+//     one-frame gaps both guards close.
+// ============================================================================
+const closeSummaryMode = (
+  error: ApiError | Error | null,
+  settledStatusMonth: string | null,
+  month: string,
+  loading: boolean,
+  status: FinanceMonthCloseStatus | null,
+): CloseSummaryMode => {
+  if (error !== null && settledStatusMonth === month) {
+    return "error";
+  }
+  if ((loading && !status) || settledStatusMonth !== month) {
+    return "loading";
+  }
+  return "tiles";
+};
+
 const CloseStatusSummary = ({
   month,
   status,
@@ -625,8 +661,10 @@ const CloseStatusSummary = ({
 }) => {
   // FIX (PR #211 review): render the error only when it belongs to the
   // SELECTED month; the frame after a month switch still holds the previous
-  // month's error until useAsync's effect clears it.
-  if (error !== null && settledStatusMonth === month) {
+  // month's verdict (error or no-record) until useAsync's effect clears it.
+  // See closeSummaryMode above for the full precedence contract.
+  const mode = closeSummaryMode(error, settledStatusMonth, month, loading, status);
+  if (mode === "error") {
     const { title, detail } = describeError(error);
     return (
       <div className="view-summary" aria-label="Month close summary" role="alert">
@@ -639,11 +677,7 @@ const CloseStatusSummary = ({
     );
   }
 
-  // FIX (PR #211 review): also load while the verdict is not known to belong
-  // to the selected month — the one-frame gap after a month switch, before the
-  // new read starts, used to fall through and paint the previous month's
-  // no-record verdict as a false OPEN for the new month.
-  if ((loading && !status) || settledStatusMonth !== month) {
+  if (mode === "loading") {
     return (
       <div className="view-summary" aria-label="Month close summary" aria-busy="true">
         <article className="summary-tile">
