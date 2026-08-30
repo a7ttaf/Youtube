@@ -1,5 +1,11 @@
 # Channel Registry View — Design Reference
 
+> **Historical / superseded:** This exploration predates the API-backed Registry
+> Phase 2 implementation and the frontend P1 integration. Its mock counts,
+> `Approved` state, control panel, and "Scoped changes" tile are not current
+> product contracts. Use `2026-06-07-registry-phase2-design.md` plus the live
+> API/components as the current source of truth.
+
 **Purpose:** Document the current mock semantics, existing backend assets, undefined concepts, and open questions
 so the Registry page can be specced and built. This is a design exploration document, not a build plan.
 

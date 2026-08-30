@@ -619,7 +619,7 @@ closed unmerged and superseded by the consolidated batch in #156.
   The summary tiles are now wired to the live `GET /audit/summary` aggregate-count
   route (see the audit summary endpoint entry below); the Retention tile stays a
   static policy constant.
-- ⏳ Rolling month window (item P1.2, branch `feat/p1-rolling-months`) — the
+- ✅ Rolling month window (item P1.2, PR #211, merge `41b495393`) — the
   frozen `DEFAULT_MONTH = "2026-03"` / `MONTH_OPTIONS` literals and the AppShell
   topbar month `<select>` now all derive from `frontend/src/lib/months.ts`:
   current calendar month + the 3 before it, from LOCAL date components with an
@@ -636,7 +636,19 @@ closed unmerged and superseded by the consolidated batch in #156.
   (c) `scripts/seed_demo_month.py` and `scripts/smoke_mvp.py` compute their
   default `--month` at run time (local civil date) instead of the frozen
   `"2026-03"`, and `frontend/README.md` documents seeding the current month with
-  both a bash and a PowerShell form. Converts to `✅ PR #N` on merge.
+  both a bash and a PowerShell form.
+- 🛠 Frontend P1 integration replacement — branch
+  `codex/frontend-p1-integration-20260831` consolidates the safe, current-main
+  deltas from draft PRs #212, #214, and #215: P1.1 fixed-copy per-view
+  render containment with payload-private root diagnostics; P1.3 removal of
+  fabricated shell counts, status cues, workflow rail, and inert controls;
+  P1.4 removal of the seven unsupported Command/Registry/Close/Exports panels.
+  It does not replay PR #229 or its relocated `snapshotPanels` fixtures.
+  The integration also fails closed when authorized revenue scopes are missing,
+  enforces selected-month grants for bank and Smart Alerts reads, and withholds
+  lock until status/readiness are trustworthy and unlock until locked status is
+  trustworthy. Official finance values remain server-derived; no migration or
+  backfill is involved.
 
 ## P2 — Advanced features
 
@@ -2031,7 +2043,9 @@ single P-tier above.
   Registry table is wired to `GET /channels` (replacing the `REGISTRY_ROWS`
   mock). All display fields derived client-side (avatar, CMS badge, source
   label, state per Option A, trace key). Extracted to `views/RegistryView.tsx`;
-  16 new Vitest tests. All six dashboard pages off mock data.
+  16 new Vitest tests. The Registry table itself is off `REGISTRY_ROWS` and is
+  API-backed; this did not claim every dashboard surface or every legacy mock
+  constant had been removed.
 - ✅ Soft Dark design system — PR #79, on `feat/design-system-softdark` (stacked
   on Registry Phase 2): `frontend/src/styles.css` token values converted to the
   UMS Revenue Design System Soft Dark theme (dark_dimmed surfaces/ink/status,
@@ -2054,7 +2068,10 @@ single P-tier above.
   that would rewrite a LOCKED month's attribution. The bulk inventory import
   format is no longer definition-blocked either — it shipped as
   `POST /channels/import` in PR #159 (see the entry below). Remaining
-  (definition-blocked): the "Scoped changes" tile.
+  "Scoped changes" is CLOSED as a removed mock concept, not a pending feature:
+  no backend state defines it, so the P1.4 integration does not render the tile.
+  Any future scoped-change workflow requires a separately approved domain and
+  API contract before UI work.
 - ✅ Google source-reported revenue ingestion foundation: `currencies`
   reference table, tenant-scoped `google_revenue_source_rows` with idempotent
   source-row keys (full 64-char SHA-256 hex), storage repository, synthetic-

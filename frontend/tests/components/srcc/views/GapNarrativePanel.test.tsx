@@ -185,6 +185,13 @@ const routeFetch = (opts: { gapExplanation?: () => Response }) => {
       if (url.includes("/net-revenue")) {
         return Promise.resolve(jsonResponse(NET_REVENUE_BODY));
       }
+      if (url.includes("/revenue/scopes")) {
+        return Promise.resolve(
+          jsonResponse({
+            scopes: [{ scope_type: "global", scope_id: null, label: "Global" }],
+          }),
+        );
+      }
       return Promise.resolve(jsonResponse({}, 404));
     },
   );
@@ -293,6 +300,13 @@ describe("GapNarrativePanel in CommandView", () => {
         if (url.includes("/net-revenue")) {
           return Promise.resolve(jsonResponse(NET_REVENUE_BODY));
         }
+        if (url.includes("/revenue/scopes")) {
+          return Promise.resolve(
+            jsonResponse({
+              scopes: [{ scope_type: "global", scope_id: null, label: "Global" }],
+            }),
+          );
+        }
         return Promise.resolve(jsonResponse({}, 404));
       },
     );
@@ -300,6 +314,7 @@ describe("GapNarrativePanel in CommandView", () => {
 
     expect(await screen.findByText("Loading gap narrative…")).toBeInTheDocument();
 
+    await waitFor(() => expect(resolveGap).toBeDefined());
     resolveGap?.(jsonResponse(GAP_EXPLANATION_BODY));
     await waitFor(() =>
       expect(

@@ -29,9 +29,9 @@ import { describeError } from "./CommandView";
 //   configured so the Vite dev proxy injects the trusted-gateway + X-UMS-Tenant
 //   headers, or the configured VITE_API_BASE_URL origin otherwise — because the
 //   JSON-strict useApiClient cannot fetch binary. Loading / error / 403 states
-//   mirror CommandView and TraceView. Static guardrail statuses are omitted
-//   because no exports endpoint reports them; the jobs table is the source for
-//   export state.
+//   mirror CommandView and TraceView. The fabricated Export Guardrails panel
+//   was removed because no endpoint reports its On/Open/Blocked statuses; the
+//   per-job status column remains the authoritative UI signal.
 // Database/ORM: None (frontend) — consumes GET /exports (list), POST /exports
 //   (create, server-side insert + audit), and links to the binary download
 //   routes; downloads are served by the backend, never fetched client-side.

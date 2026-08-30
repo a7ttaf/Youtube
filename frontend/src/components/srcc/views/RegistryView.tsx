@@ -90,10 +90,11 @@ const sourceLabel = (revenue_source_status: string): string =>
   SOURCE_LABELS[revenue_source_status] ?? revenue_source_status;
 
 /**
- * Option A state derivation — purely from existing fields, no new DB column.
+ * Factual state derivation — purely from existing fields, no approval claim.
  * Export block: no revenue source + revenue required (held from export).
  * Evidence due: outside CMS without a verified content-owner link.
- * Approved: everything else (source resolved + CMS status resolved).
+ * Registered: every other row is known only to exist in the registry. The API
+ * exposes no approval status, so the UI must not fabricate "Approved".
  */
 const deriveState = (ch: ChannelRegistryEntry): { text: string; tone: Severity } => {
   if (ch.revenue_required && ch.revenue_source_status === "MISSING_REVENUE_SOURCE") {
@@ -102,7 +103,9 @@ const deriveState = (ch: ChannelRegistryEntry): { text: string; tone: Severity }
   if (ch.cms_status === "OUTSIDE_CMS" && !ch.content_owner_id) {
     return { text: "Evidence due", tone: "amber" };
   }
-  return { text: "Approved", tone: "green" };
+  // FIX: A resolved source/CMS shape is not evidence of approval. "Registered"
+  // is the neutral fact this GET proves without inventing workflow state.
+  return { text: "Registered", tone: "blue" };
 };
 
 /**
@@ -170,22 +173,25 @@ const describeMutationError = (err: unknown): string => {
 
 // ---- Summary tile counts (derived from fetched channels) -------------------
 
+// ============================================================================
+// Purpose: Derive exactly two registry summary counts from the same live rows
+//   the table renders, so the header cannot disagree with the body. Sourceless
+//   finance/change tiles were removed; no finance tile is fabricated here.
+// Database/ORM: None (frontend pure derivation over GET /channels output).
+// Standards: Null data renders neutral placeholders; successful empty data
+//   renders real zeros. Only API-backed channel counts are rendered and
+//   outside-CMS counts use the backend enum.
+// Blast Radius: Registry summary display only; no mutation or finance math.
+//   Outside-CMS count includes ONLY channels with cms_status === "OUTSIDE_CMS".
+// Connections:
+//   - File: frontend/src/lib/api/useChannels.ts -> supplies the channel rows.
+// ============================================================================
 type RegistrySummaryTile = {
   label: string;
   value: string;
   note: string;
 };
 
-// ============================================================================
-// Purpose: Derive the registry summary tiles from the live channel response.
-//   Both tiles count the same fetched rows the table renders, so the header
-//   cannot disagree with the body. No finance tile is fabricated here.
-// Database/ORM: None (frontend read-model derivation).
-// Standards: Loading and error states stay neutral; only API-backed channel
-//            counts are rendered and outside-CMS counts use the backend enum.
-// Blast Radius: Registry header display only; no mutation or finance math.
-//   Outside-CMS count includes ONLY channels with cms_status === "OUTSIDE_CMS".
-// ============================================================================
 const buildSummaryTiles = (
   channels: ChannelRegistryEntry[] | null,
   loading: boolean,
@@ -1136,7 +1142,7 @@ const AccountLinkProposalPanel = ({
   );
 };
 
-/** Registry side panels: the live mapping-change and account-link forms. */
+/** Registry side panels: the live mapping-change and account-link proposal forms. */
 const RegistrySidePanels = ({
   canManageRegistry,
   channels,

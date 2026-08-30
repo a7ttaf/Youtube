@@ -1,6 +1,7 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { DEFAULT_MONTH } from "@/components/srcc/shared";
 import CommandView from "@/components/srcc/views/CommandView";
 import type { NetRevenueResponse, SmartAlertsSummary } from "@/lib/api/types";
 import { TenantProvider } from "@/contexts/TenantContext";
@@ -118,6 +119,28 @@ const routeFetch = (opts: {
           (opts.netRevenue ?? (() => jsonResponse(NET_REVENUE_BODY)))(),
         );
       }
+      if (url.includes("/revenue/scopes")) {
+        return Promise.resolve(
+          jsonResponse({
+            scopes: [{ scope_type: "global", scope_id: null, label: "Global" }],
+          }),
+        );
+      }
+      if (url.includes("/bank-reconciliation")) {
+        return Promise.resolve(jsonResponse({ detail: "not under test" }, 503));
+      }
+      if (url.includes("/rankings")) {
+        return Promise.resolve(
+          jsonResponse({
+            month: DEFAULT_MONTH,
+            metric: "gross",
+            channels: [],
+            companies: [],
+            sectors: [],
+            committed_run: null,
+          }),
+        );
+      }
       return Promise.resolve(jsonResponse({}, 404));
     },
   );
@@ -126,7 +149,18 @@ const routeFetch = (opts: {
 const renderCommandView = (canViewFinance = true) => {
   return render(
     <TenantProvider initialSlug="ums">
-      <CommandView canViewFinance={canViewFinance} />
+      <CommandView
+        canViewFinance={canViewFinance}
+        canViewPayments={canViewFinance}
+        canViewBankReconciliation={canViewFinance}
+        canViewRevenueGlobal={canViewFinance}
+        canViewConfidence={canViewFinance}
+        paymentsViewScopes={{ globalScope: false, financeMonths: [DEFAULT_MONTH] }}
+        bankReconciliationViewScopes={{
+          globalScope: false,
+          financeMonths: [DEFAULT_MONTH],
+        }}
+      />
     </TenantProvider>,
   );
 };
@@ -142,6 +176,28 @@ describe("SmartAlertsPanel in CommandView", () => {
             resolveAlerts = resolve;
           });
         }
+        if (url.includes("/revenue/scopes")) {
+          return Promise.resolve(
+            jsonResponse({
+              scopes: [{ scope_type: "global", scope_id: null, label: "Global" }],
+            }),
+          );
+        }
+        if (url.includes("/bank-reconciliation")) {
+          return Promise.resolve(jsonResponse({ detail: "not under test" }, 503));
+        }
+        if (url.includes("/rankings")) {
+          return Promise.resolve(
+            jsonResponse({
+              month: DEFAULT_MONTH,
+              metric: "gross",
+              channels: [],
+              companies: [],
+              sectors: [],
+              committed_run: null,
+            }),
+          );
+        }
         return Promise.resolve(jsonResponse(NET_REVENUE_BODY));
       },
     );
@@ -150,8 +206,12 @@ describe("SmartAlertsPanel in CommandView", () => {
     expect(
       await screen.findByText("Loading smart alerts…"),
     ).toBeInTheDocument();
+    await waitFor(() => expect(resolveAlerts).toBeDefined());
 
-    resolveAlerts?.(jsonResponse(SMART_ALERTS_BODY));
+    await act(async () => {
+      resolveAlerts?.(jsonResponse(SMART_ALERTS_BODY));
+      await Promise.resolve();
+    });
     await waitFor(() =>
       expect(
         screen.getByText("AdSense payment is not matched for 2026-03."),
@@ -207,7 +267,10 @@ describe("SmartAlertsPanel in CommandView", () => {
 
     // The panel itself shows the no-permission message (header badge + body row).
     expect(screen.getAllByText("No permission").length).toBeGreaterThan(0);
-    expect(screen.getAllByText(/cannot view net revenue/i).length).toBeGreaterThan(0);
+    expect(
+      screen.getByText("Your role cannot view Smart Alerts for this finance month."),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/cannot view net revenue/i)).not.toBeInTheDocument();
     // The panel header still renders (title present), proving the card survives.
     expect(screen.getByText("Smart Alerts / Problem Panel")).toBeInTheDocument();
   });
@@ -224,6 +287,15 @@ describe("SmartAlertsPanel in CommandView", () => {
       expect(screen.getAllByText("UC-DRAMA-01").length).toBeGreaterThan(0),
     );
     // The panel surfaces the typed request-failed copy without crashing the view.
-    expect(screen.getByText("Request failed (500)")).toBeInTheDocument();
+    const panel = screen
+      .getByText("Smart Alerts / Problem Panel")
+      .closest("section");
+    expect(panel).not.toBeNull();
+    expect(within(panel as HTMLElement).getByText("Request failed (500)"))
+      .toBeInTheDocument();
+    expect(
+      screen.getByText("Could not load Smart Alerts for this finance month."),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("boom")).not.toBeInTheDocument();
   });
 });

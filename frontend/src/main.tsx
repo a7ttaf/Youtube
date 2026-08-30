@@ -64,7 +64,27 @@ const AppProviders = () => {
 
 const rootEl = document.getElementById("root");
 if (!rootEl) throw new Error("Root element #root not found in document");
-createRoot(rootEl).render(
+
+// ============================================================================
+// Purpose: Keep React root diagnostics inside fixed public categories. The
+//   nearest ErrorBoundary owns contained-view reporting; root callbacks cover
+//   failures outside that boundary without echoing thrown payloads.
+// Database/ORM: None.
+// Standards: Callback arguments are intentionally ignored. No mutable error
+//   name, message, stack, component stack, or digest reaches browser logs.
+// Blast Radius: Frontend diagnostic privacy only.
+// Connections:
+//   - File: frontend/src/components/srcc/ErrorBoundary.tsx -> contained views.
+// ============================================================================
+const root = createRoot(rootEl, {
+  // FIX: React 19's default caught reporter logs the raw Error; the boundary
+  // already emits its fixed category.
+  onCaughtError: () => undefined,
+  onUncaughtError: () => console.error("[ReactRoot] uncaught_render_failure"),
+  onRecoverableError: () => console.error("[ReactRoot] recoverable_render_failure"),
+});
+
+root.render(
   <StrictMode>
     <AppProviders />
   </StrictMode>,

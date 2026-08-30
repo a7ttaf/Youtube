@@ -29,10 +29,8 @@ import { GroupsView } from "./views/GroupsView";
 import RegistryView from "./views/RegistryView";
 import { importScopeFor } from "@/contexts/UnsettledImportContext";
 import TraceView from "./views/TraceView";
-import {
-  Badge,
-  Dot,
-} from "./shared";
+import { Badge, Dot } from "./shared";
+import ErrorBoundary from "./ErrorBoundary";
 
 /* ------------------------------------------------------------------ shared */
 
@@ -174,7 +172,7 @@ const capabilitiesToPermissions = (
 
 /**
  * Report whether the viewer may create any export variant (global, scoped, or
- * raw), used to enable the header Create Export action.
+ * raw), passed to the real Exports view request form.
  */
 const canCreateAnyExport = (permissions: AccessPermissions) => {
   return (
@@ -565,14 +563,18 @@ const Sidebar = ({
 // Database/ORM: None (frontend route metadata only).
 // Standards: Keep shell chrome free of inert filters whose values do not feed a
 //            request; each view owns its selected month and query lifecycle.
+//            The month list stays on the shared rolling-window source from
+//            PR #211 in the owning view, never in shell chrome.
 // Blast Radius: Presentation-only header; no request or finance calculation.
 // Connections:
 //   - File: frontend/src/config/navigation.ts -> title and subtitle copy.
 //   - File: frontend/src/components/srcc/views/* -> owning month controls and
 //       API requests.
+//   - File: frontend/src/components/srcc/views/ExportsView.tsx -> export action.
 // ============================================================================
 // FIX: Removed the shell-level Month selector because its value never reached
-// any request; the API-backed view selector is now the only visible authority.
+// any request; the API-backed view selector is now the only visible authority,
+// and the real export form remains in ExportsView.
 const Topbar = ({ title, subtitle }: { title: string; subtitle: string }) => {
   return (
     <header className="topbar">
@@ -692,10 +694,9 @@ const ViewRouter = ({
 // RegistryView is the wired Channel Registry screen; it lives in
 // ./views/RegistryView.tsx and reads GET /channels via useChannels. Client-side
 // derivation maps the API fields to avatar initials, CMS badge tone, source
-// label, state (Option A: from existing fields), trace key, and action label.
-// Company/sector columns show primary_company_id and "—" until GET /org-units
-// is added. Summary tiles derive active-channel + outside-CMS counts from the
-// response; unsupported finance aggregates are intentionally not rendered.
+// label, factual state, trace key, and action label. GET /org-units resolves
+// company/sector names. The only summary tiles are live-derived active-channel
+// and outside-CMS counts; no finance or approval placeholder is rendered.
 
 /* ------------------------------------------------------------------ close */
 
@@ -1036,24 +1037,27 @@ const AppShell = ({ initialView = "command" }: { initialView?: ViewKey }) => {
         blockedReason={navBlockedReason}
       />
       <main className="main">
-        <Topbar
-          title={copy.title}
-          subtitle={copy.subtitle}
-        />
-        <ViewRouter
-          view={view}
-          permissions={permissions}
-          canViewFinance={canViewFinance}
-          displayedRole={displayedRole}
-          traceChannelId={traceChannelId}
-          importScope={importScope}
-          importScopeSettled={importScopeSettled}
-          onOpenTrace={(channelId) => {
-            if (navBlockedReason !== null) return;
-            pendingTraceChannelIdRef.current = channelId;
-            navigate("/trace");
-          }}
-        />
+        <Topbar title={copy.title} subtitle={copy.subtitle} />
+        {/* FIX: A render crash may unmount an import flow while its apply POST
+            keeps running. Keep both navigation and boundary retry unavailable
+            until the promise-owned write latch settles, so recovery cannot
+            hide or duplicate an unabortable audited write. */}
+        <ErrorBoundary key={view} recoveryDisabled={navBlockedReason !== null}>
+          <ViewRouter
+            view={view}
+            permissions={permissions}
+            canViewFinance={canViewFinance}
+            displayedRole={displayedRole}
+            traceChannelId={traceChannelId}
+            importScope={importScope}
+            importScopeSettled={importScopeSettled}
+            onOpenTrace={(channelId) => {
+              if (navBlockedReason !== null) return;
+              pendingTraceChannelIdRef.current = channelId;
+              navigate("/trace");
+            }}
+          />
+        </ErrorBoundary>
       </main>
     </div>
     </WriteInFlightProvider>

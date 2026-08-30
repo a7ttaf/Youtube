@@ -154,6 +154,8 @@ describe("ExportsView wired to the exports endpoint", () => {
     expect(
       screen.queryByRole("link", { name: /download/i }),
     ).not.toBeInTheDocument();
+    expect(screen.queryByText("Export Guardrails")).not.toBeInTheDocument();
+    expect(screen.queryByText("Raw appendix restricted")).not.toBeInTheDocument();
   });
 
   it("renders the export request controls and API-backed empty jobs state", async () => {

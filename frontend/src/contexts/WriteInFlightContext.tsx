@@ -2,7 +2,6 @@ import {
   createContext,
   useCallback,
   useContext,
-  useEffect,
   useMemo,
   useState,
   type ReactNode,
@@ -24,9 +23,9 @@ import {
 //   same tick it dispatches its request. An effect would arm one commit LATE,
 //   leaving a window in which the POST is running and the sidebar is still
 //   clickable — the exact hole this latch exists to close, so do not "tidy"
-//   it back into a declarative hook. Effects are used only for UNMOUNT
-//   cleanup, which releases a flow torn down mid-request so the shell can
-//   never be left permanently locked.
+//   it back into a declarative hook. The request's promise owns release even
+//   if an error boundary unmounts the flow: unmount must not make navigation
+//   live while the unabortable write can still commit out of sight.
 //   "No provider" is modelled as a null context rather than a stand-in object
 //   holding a do-nothing setter: absence is a real state worth naming, and
 //   both hooks read it as "make no claim, block nothing", so a component
@@ -100,18 +99,17 @@ export type WriteInFlightControl = {
 //   buttons disable in the same commit; `release()` in the request's
 //   `finally` frees them together. Only `setReason` is pulled out of the
 //   context, never the whole value: that object is re-memoized on every
-//   reason change, so depending on it would give these callbacks — and the
-//   unmount guard — a new identity each time the latch armed. The setter
+//   reason change, so depending on it would give these callbacks a new
+//   identity each time the latch armed. The setter
 //   comes from useState and is identity-stable, so everything derived from it
 //   is too.
 // Blast Radius: Whether a committing import can be navigated away from, and
 //   whether the shell can be left permanently unnavigable. The hook exposes
 //   no abort, so leaving mid-write neither stops nor invalidates a POST that
 //   still commits — the operator would land elsewhere while the registry
-//   changes under them. The opposite failure is the unmount guard's: a flow
-//   torn down with its request pending strands navigation dead forever,
-//   because the component that armed the latch is gone (review #184,
-//   reported independently by greptile, qodo and codex).
+//   changes under them. The async apply handler continues after React unmounts
+//   it and releases in `finally`; clearing from an effect cleanup is unsafe
+//   because a render crash can unmount the flow before that promise settles.
 // Connections:
 //   - File: frontend/src/components/srcc/AppShell.tsx -> the sidebar whose
 //       destinations this latch disables.
@@ -125,10 +123,10 @@ export const useWriteInFlightControl = (): WriteInFlightControl => {
     [setReason],
   );
   const release = useCallback(() => setReason?.(null), [setReason]);
-  // Unmount guard, and the reason `release` must stay identity-stable: a flow
-  // torn down while its request is still pending would otherwise strand the
-  // shell with navigation dead forever. Nothing else can clear the latch,
-  // because the component that armed it is gone.
-  useEffect(() => release, [release]);
+  // FIX: Do not release on component unmount. A view error boundary unmounts
+  // the crashed flow while its non-abortable apply promise keeps running; an
+  // effect cleanup made shell navigation live and hid a still-committing write.
+  // The promise's `finally` retains this stable callback and releases exactly
+  // when the request settles, even though React has removed the component.
   return useMemo(() => ({ arm, release }), [arm, release]);
 };

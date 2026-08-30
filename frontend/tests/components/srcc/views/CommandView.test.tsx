@@ -2,6 +2,7 @@ import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+import { DEFAULT_MONTH, MONTH_OPTIONS } from "@/components/srcc/shared";
 import CommandView from "@/components/srcc/views/CommandView";
 import type {
   MonthBankReconciliationSummary,
@@ -199,7 +200,12 @@ const routeFetch = (
   const routes: ReadonlyArray<{ match: string; respond: () => Response }> = [
     {
       match: "/revenue/scopes",
-      respond: scopes ?? (() => jsonResponse({ scopes: [] })),
+      respond:
+        scopes ??
+        (() =>
+          jsonResponse({
+            scopes: [{ scope_type: "global", scope_id: null, label: "Global" }],
+          })),
     },
     {
       match: "/smart-alerts",
@@ -226,6 +232,8 @@ const renderCommandView = (
   options: {
     canViewPayments?: boolean;
     canViewBankReconciliation?: boolean;
+    paymentsViewScopes?: { globalScope: boolean; financeMonths: string[] };
+    bankReconciliationViewScopes?: { globalScope: boolean; financeMonths: string[] };
   } = {},
 ) => {
   return render(
@@ -234,6 +242,17 @@ const renderCommandView = (
         canViewFinance={canViewFinance}
         canViewPayments={options.canViewPayments ?? canViewFinance}
         canViewBankReconciliation={options.canViewBankReconciliation ?? canViewFinance}
+        canViewRevenueGlobal={canViewFinance}
+        canViewConfidence={canViewFinance}
+        paymentsViewScopes={
+          options.paymentsViewScopes ?? { globalScope: true, financeMonths: [] }
+        }
+        bankReconciliationViewScopes={
+          options.bankReconciliationViewScopes ?? {
+            globalScope: true,
+            financeMonths: [],
+          }
+        }
       />
     </TenantProvider>,
   );
@@ -255,6 +274,9 @@ describe("CommandView wired to net-revenue", () => {
     expect(screen.getAllByText("UC-DRAMA-01").length).toBeGreaterThan(0);
     // Allocation source surfaced from live_compute.
     expect(screen.getByText("Live compute")).toBeInTheDocument();
+    expect(screen.queryByText("Issue Queue")).not.toBeInTheDocument();
+    expect(screen.queryByText("Month Close Controls")).not.toBeInTheDocument();
+    expect(screen.queryByText("Export Readiness")).not.toBeInTheDocument();
   });
 
   it("renders the API-backed command workspace and channel revenue grid", async () => {
@@ -310,14 +332,15 @@ describe("CommandView wired to net-revenue", () => {
     ).toBe(true);
   });
 
-  it("withholds money cells as Restricted when finance is not visible", async () => {
+  it("withholds all revenue reads when finance visibility is absent", async () => {
     const fetchMock = routeFetch(() => jsonResponse(NET_REVENUE_BODY));
     renderCommandView(false);
 
-    await waitFor(() =>
-      expect(screen.getAllByText("UC-DRAMA-01").length).toBeGreaterThan(0),
-    );
-    // No formatted money should leak.
+    await screen.findByText("Revenue access unavailable");
+    // No finance request or formatted money can leak.
+    expect(
+      fetchMock.mock.calls.some((call) => String(call[0]).includes("/net-revenue")),
+    ).toBe(false);
     expect(screen.queryByText("$1,000.00")).not.toBeInTheDocument();
     expect(screen.getAllByText("Restricted").length).toBeGreaterThan(0);
     expect(
@@ -339,6 +362,44 @@ describe("CommandView wired to net-revenue", () => {
       fetchMock.mock.calls.some((call) => String(call[0]).includes("/bank-reconciliation")),
     ).toBe(false);
     expect(screen.getAllByText("Payment and bank permissions required").length).toBeGreaterThan(0);
+  });
+
+  it("honors exact-month payment and bank grants for bank and Smart Alerts reads", async () => {
+    const fetchMock = routeFetch(() => jsonResponse(NET_REVENUE_BODY));
+    renderCommandView(true, {
+      paymentsViewScopes: { globalScope: false, financeMonths: [DEFAULT_MONTH] },
+      bankReconciliationViewScopes: {
+        globalScope: false,
+        financeMonths: [DEFAULT_MONTH],
+      },
+    });
+
+    await waitFor(() => {
+      const urls = fetchMock.mock.calls.map((call) => String(call[0]));
+      expect(urls.some((url) => url.includes("/bank-reconciliation"))).toBe(true);
+      expect(urls.some((url) => url.includes("/smart-alerts"))).toBe(true);
+    });
+  });
+
+  it("withholds bank and Smart Alerts reads when either grant covers another month", async () => {
+    const otherMonth = MONTH_OPTIONS.find((candidate) => candidate !== DEFAULT_MONTH);
+    expect(otherMonth).toBeDefined();
+    const fetchMock = routeFetch(() => jsonResponse(NET_REVENUE_BODY));
+    renderCommandView(true, {
+      paymentsViewScopes: { globalScope: false, financeMonths: [DEFAULT_MONTH] },
+      bankReconciliationViewScopes: {
+        globalScope: false,
+        financeMonths: [otherMonth as string],
+      },
+    });
+
+    await waitFor(() =>
+      expect(screen.getAllByText("$1,000.00").length).toBeGreaterThan(0),
+    );
+    const urls = fetchMock.mock.calls.map((call) => String(call[0]));
+    expect(urls.some((url) => url.includes("/bank-reconciliation"))).toBe(false);
+    expect(urls.some((url) => url.includes("/smart-alerts"))).toBe(false);
+    expect(screen.getByText("Smart Alerts withheld")).toBeInTheDocument();
   });
 
   it("keeps net revenue visible when bank reconciliation 403s", async () => {
@@ -430,13 +491,17 @@ describe("CommandView wired to net-revenue", () => {
         if (url.includes("/bank-reconciliation")) {
           return Promise.resolve(jsonResponse(BANK_RECONCILIATION_SUMMARY));
         }
-        // Resolve scopes + rankings immediately so scopesReady flips and the
-        // gated net-revenue read can fire — the load-under-test is net-revenue's.
-        if (url.includes("/revenue/scopes")) {
-          return Promise.resolve(jsonResponse({ scopes: [] }));
-        }
         if (url.includes("/rankings")) {
           return Promise.resolve(jsonResponse(RANKINGS_EMPTY));
+        }
+        // Resolve scopes immediately so scopesReady flips and the
+        // gated net-revenue read can fire — the load-under-test is net-revenue's.
+        if (url.includes("/revenue/scopes")) {
+          return Promise.resolve(
+            jsonResponse({
+              scopes: [{ scope_type: "global", scope_id: null, label: "Global" }],
+            }),
+          );
         }
         return new Promise<Response>((resolve) => {
           resolveNetRevenue = resolve;
@@ -517,7 +582,7 @@ describe("CommandView dynamic scope selector", () => {
     });
   });
 
-  it("degrades to global-only and still renders when /revenue/scopes 403s", async () => {
+  it("fails closed and sends no finance query when /revenue/scopes 403s", async () => {
     routeFetch(
       () => jsonResponse(NET_REVENUE_BODY),
       undefined,
@@ -526,24 +591,33 @@ describe("CommandView dynamic scope selector", () => {
     );
     renderCommandView(true);
 
-    // The screen still renders the net-revenue content despite the scopes 403.
-    await waitFor(() =>
-      expect(screen.getAllByText("UC-DRAMA-01").length).toBeGreaterThan(0),
-    );
-    // The selector degrades to a guaranteed global-only option (no scoped leak).
+    await screen.findByText("Authorized scopes unavailable");
+    // No invented global option is shown and no revenue/rankings query fires.
     const selector = screen.getByLabelText("Scope");
-    expect(
-      within(selector).getByRole("option", { name: /global/i }),
-    ).toBeInTheDocument();
-    expect(
-      within(selector).queryByRole("option", { name: "Company Alpha" }),
-    ).not.toBeInTheDocument();
-    // The default (global) read sends NO scope_id.
-    const netCalls = (globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls
-      .map((c) => String(c[0]))
-      .filter((u) => u.includes("/net-revenue"));
-    expect(netCalls.length).toBeGreaterThan(0);
-    expect(netCalls.every((u) => !u.includes("scope_id="))).toBe(true);
+    expect(selector).toBeDisabled();
+    const calls = (globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls.map(
+      (c) => String(c[0]),
+    );
+    expect(calls.some((u) => u.includes("/net-revenue"))).toBe(false);
+    expect(calls.some((u) => u.includes("/rankings"))).toBe(false);
+    expect(calls.some((u) => u.includes("/smart-alerts"))).toBe(false);
+  });
+
+  it("fails closed and sends no finance query when /revenue/scopes is empty", async () => {
+    routeFetch(
+      () => jsonResponse(NET_REVENUE_BODY),
+      undefined,
+      () => jsonResponse({ scopes: [] }),
+    );
+    renderCommandView(true);
+
+    await screen.findByText("No authorized scopes returned");
+    const calls = (globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls.map(
+      (c) => String(c[0]),
+    );
+    expect(calls.some((u) => u.includes("/net-revenue"))).toBe(false);
+    expect(calls.some((u) => u.includes("/rankings"))).toBe(false);
+    expect(calls.some((u) => u.includes("/smart-alerts"))).toBe(false);
   });
 
   it("holds the net-revenue + rankings reads until /revenue/scopes resolves", async () => {

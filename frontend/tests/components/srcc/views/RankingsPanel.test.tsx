@@ -131,6 +131,13 @@ const routeFetch = (opts: { rankings?: () => Response } = {}) => {
     if (url.includes("/net-revenue")) {
       return Promise.resolve(jsonResponse(NET_REVENUE_BODY));
     }
+    if (url.includes("/revenue/scopes")) {
+      return Promise.resolve(
+        jsonResponse({
+          scopes: [{ scope_type: "global", scope_id: null, label: "Global" }],
+        }),
+      );
+    }
     return Promise.resolve(jsonResponse({}, 404));
   });
   return fetchMock;
@@ -168,14 +175,10 @@ describe("RankingsPanel in CommandView", () => {
     const fetchMock = routeFetch({});
     renderCommandView({ canViewFinance: false });
 
-    // Wait for the net-revenue read so the render settles.
-    await waitFor(() =>
-      expect(screen.getAllByText("UC-DRAMA-01").length).toBeGreaterThan(0),
-    );
-    // The RankingsRestrictedBand renders for a non-finance viewer (positive
-    // assertion that the Restricted copy/band is shown, not just absent money).
-    expect(screen.getByText("Rankings restricted")).toBeInTheDocument();
-    expect(screen.getAllByText(/Restricted/i).length).toBeGreaterThan(0);
+    await screen.findByText("Revenue access unavailable");
+    // Scope discovery itself is withheld, so the finance-bearing rankings
+    // panel is not mounted at all.
+    expect(screen.queryByText("Rankings")).not.toBeInTheDocument();
     // No rankings request fires for a non-finance viewer (panel shows money).
     const calledUrls = fetchMock.mock.calls.map((c) => String(c[0]));
     expect(calledUrls.some((u) => u.includes("/rankings"))).toBe(false);

@@ -2,6 +2,7 @@ import { render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import CommandView from "@/components/srcc/views/CommandView";
+import { DEFAULT_MONTH } from "@/components/srcc/shared";
 import type {
   ChannelIssuesResponse,
   NetRevenueResponse,
@@ -27,7 +28,7 @@ afterEach(() => {
 });
 
 const NET_REVENUE_BODY: NetRevenueResponse = {
-  month: "2026-03",
+  month: DEFAULT_MONTH,
   status: "CALCULATED",
   channel_count: 1,
   calculated_channel_count: 1,
@@ -42,7 +43,7 @@ const NET_REVENUE_BODY: NetRevenueResponse = {
   unallocated_account_issues: null,
   channels: [
     {
-      month: "2026-03",
+      month: DEFAULT_MONTH,
       youtube_channel_id: "UC-DRAMA-01",
       status: "CALCULATED",
       primary_source_kind: "youtube_cms",
@@ -68,7 +69,7 @@ const NET_REVENUE_BODY: NetRevenueResponse = {
 };
 
 const SMART_ALERTS_CLEAR: SmartAlertsSummary = {
-  month: "2026-03",
+  month: DEFAULT_MONTH,
   status: "CLEAR",
   highest_severity: null,
   alert_count: 0,
@@ -262,17 +263,18 @@ describe("OutsideCmsMonitorPanel in CommandView", () => {
     const fetchMock = routeFetch({});
     renderCommandView({ canViewAnalytics: false, canViewFinance: false });
 
-    // Wait for the net-revenue read so the render settles before asserting.
-    await waitFor(() =>
-      expect(screen.getAllByText("UC-DRAMA-01").length).toBeGreaterThan(0),
-    );
+    // Finance reads are also withheld without capability; wait on the monitor's
+    // own restricted state instead of relying on an unrelated revenue row.
+    expect(
+      await screen.findByText(/analytics access is required/i),
+    ).toBeInTheDocument();
 
     const calledUrls = fetchMock.mock.calls.map((c) => String(c[0]));
     expect(calledUrls.some((u) => u.includes("/channels/outside-cms"))).toBe(false);
     expect(calledUrls.some((u) => u.includes("/channels/issues"))).toBe(false);
 
     // The restricted placeholder copy is shown (NOT a "no issues" masking).
-    expect(screen.getByText(/analytics access is required/i)).toBeInTheDocument();
+    expect(screen.queryByText(/no issues/i)).not.toBeInTheDocument();
   });
 
   it("403 renders a denied state, NOT a 'no issues' message", async () => {
@@ -300,12 +302,9 @@ describe("OutsideCmsMonitorPanel in CommandView", () => {
     });
     renderCommandView({ canViewAnalytics: true });
 
-    // Net-revenue + the issues half still render despite the outside-cms 503.
-    await waitFor(() =>
-      expect(screen.getAllByText("UC-DRAMA-01").length).toBeGreaterThan(0),
-    );
+    // The issues half still renders despite the outside-cms 503.
     expect(
-      screen.getByText("Channel has no company assignment"),
+      await screen.findByText("Channel has no company assignment"),
     ).toBeInTheDocument();
     // The outside-cms half surfaces the typed request-failed copy.
     expect(screen.getByText(/Request failed \(503\)/)).toBeInTheDocument();
@@ -320,8 +319,6 @@ describe("OutsideCmsMonitorPanel in CommandView", () => {
 
     // Outside-cms half renders despite the issues 500.
     expect(await screen.findByText("Outside Channel One")).toBeInTheDocument();
-    // Net-revenue keeps rendering (await: the read is gated on scopesReady).
-    expect((await screen.findAllByText("UC-DRAMA-01")).length).toBeGreaterThan(0);
     // The issues half surfaces the typed request-failed copy.
     expect(screen.getByText(/Request failed \(500\)/)).toBeInTheDocument();
   });

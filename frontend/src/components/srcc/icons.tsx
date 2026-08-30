@@ -80,14 +80,6 @@ export const BrandIcon = () =>
     </>,
   );
 
-export const RefreshIcon = () =>
-  wrap(
-    <>
-      <path d="M20 12a8 8 0 1 1-2.3-5.6" />
-      <path d="M20 4v6h-6" />
-    </>,
-  );
-
 export const LockIcon = () =>
   wrap(
     <>

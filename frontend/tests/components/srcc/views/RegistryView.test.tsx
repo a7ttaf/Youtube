@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import RegistryView, {
@@ -266,14 +266,15 @@ describe("RegistryView wired to GET /channels", () => {
     expect(screen.getByText("Not linked")).toBeInTheDocument();
   });
 
-  it("derives state badges: MISSING_REVENUE_SOURCE+revenue_required→Export block, OUTSIDE_CMS+no content_owner→Evidence due, else→Approved", async () => {
+  it("derives factual state badges without fabricating an approval verdict", async () => {
     fetchMock().mockImplementation(routeChannels());
     renderRegistry();
 
     await waitFor(() =>
       expect(screen.getByText("UMS Drama")).toBeInTheDocument(),
     );
-    expect(screen.getByText("Approved")).toBeInTheDocument();
+    expect(screen.getByText("Registered")).toBeInTheDocument();
+    expect(screen.queryByText("Approved")).not.toBeInTheDocument();
     expect(screen.getByText("Evidence due")).toBeInTheDocument();
     expect(screen.getByText("Export block")).toBeInTheDocument();
   });
@@ -351,6 +352,10 @@ describe("RegistryView wired to GET /channels", () => {
     expect(screen.queryByText(/300\+ target registry/)).not.toBeInTheDocument();
     expect(screen.queryByText(/Allocation requires explicit source mapping/)).not.toBeInTheDocument();
     expect(screen.queryByText("318")).not.toBeInTheDocument();
+    expect(
+      within(screen.getByLabelText("Registry summary")).getAllByRole("article"),
+    ).toHaveLength(2);
+    expect(screen.queryByText("Registry Controls")).not.toBeInTheDocument();
   });
 
   it("fires exactly one /channels and one /org-units fetch per mount", async () => {
@@ -640,7 +645,7 @@ describe("RegistryView Phase 2: Review action + gating", () => {
       expect(screen.getByText("UMS Drama")).toBeInTheDocument(),
     );
 
-    // UC-DRAMA-01 is the Approved row, so its action button is "Review".
+    // UC-DRAMA-01 is the neutral Registered row, so its action is "Review".
     fireEvent.click(screen.getByRole("button", { name: /^review$/i }));
     expect(onOpenTrace).toHaveBeenCalledExactlyOnceWith("UC-DRAMA-01");
   });
