@@ -129,13 +129,41 @@ The Vite dev proxy reads it in Node and injects it server-side.
 ### 2. Seed one demo month
 
 Seeds a fully-populated demo month (3 channels, an account-level deduction, a
-committed allocation snapshot) — idempotent, safe to re-run:
+committed allocation snapshot) — idempotent, safe to re-run.
+
+**Which month to seed.** Every screen's month selector is derived from the clock
+and defaults to the **current calendar month** (local date, not a frozen
+literal). Seed that month, or the dashboard opens on one with no data. The seed
+already defaults to it, so plain `--create-schema` with no `--month` is enough;
+the explicit forms below just make the month visible (and are what you edit to
+seed a different one):
+
+**The Connectors screen is the write-side exception.** Its selector opens on
+the **last complete calendar month**, not the current one: connector pulls
+address a whole calendar month and the backend validates only the month's
+format, so pulling the in-progress month would ingest a partial month as if it
+were final. The current month is still in the dropdown for deliberate use.
+A manually synced payment is not tied to that default at all — it files under
+the month of its **payment date**, matching the automated AdSense mapping, and
+the form shows that derived month next to the date field. Seeding the current
+month therefore leaves the Connectors write default on the previous month;
+that is intended behavior, not drift.
 
 ```bash
-# From the repo root. Default DB is UMS_DATABASE_URL; for a throwaway SQLite:
+# From the repo root (bash). Default DB is UMS_DATABASE_URL; for a throwaway SQLite:
 uv run python scripts/seed_demo_month.py \
   --database-url "sqlite+pysqlite:///./demo.db" \
-  --create-schema --month 2026-03
+  --create-schema --month "$(date +%Y-%m)"
+```
+
+```powershell
+# From the repo root (PowerShell) — same seed; pass --month explicitly when
+# running from a host whose timezone differs from the operator's browser near
+# a month boundary (the seed reads the MACHINE's local date, the dashboard
+# reads the BROWSER's — around a boundary those can disagree):
+uv run python scripts/seed_demo_month.py `
+  --database-url "sqlite+pysqlite:///./demo.db" `
+  --create-schema --month (Get-Date -Format 'yyyy-MM')
 ```
 
 **Lock behavior.** By default the seed asks the production lock service to close
@@ -149,7 +177,13 @@ database, add `--demo-lock-bypass`:
 ```bash
 uv run python scripts/seed_demo_month.py \
   --database-url "sqlite+pysqlite:///./demo.db" \
-  --create-schema --month 2026-03 --demo-lock-bypass
+  --create-schema --month "$(date +%Y-%m)" --demo-lock-bypass
+```
+
+```powershell
+uv run python scripts/seed_demo_month.py `
+  --database-url "sqlite+pysqlite:///./demo.db" `
+  --create-schema --month (Get-Date -Format 'yyyy-MM') --demo-lock-bypass
 ```
 
 That flip writes **no audit event** and bypasses the production readiness gate —
@@ -158,8 +192,10 @@ demonstrates the real readiness refusal: `POST /finance-close/{m}/lock` returns
 **409** with the blockers, which is exactly what the Month Close screen surfaces.
 
 The seed prints the demo principal headers and the committed-allocation summary.
-The default demo month is `2026-03` (the month every screen's selector defaults
-to).
+With no `--month` it targets the current calendar month, computed at run time —
+the same month every screen's selector defaults to. A month that has never been
+closed simply has no close record, and the Month Close screen says so
+(status **OPEN**, "No close record yet") rather than reporting an error.
 
 ### 3. Run the backend
 
@@ -297,8 +333,13 @@ server (in-process FastAPI `TestClient` behind the real trusted-gateway header
 auth), run from the repo root:
 
 ```bash
-uv run python scripts/smoke_mvp.py            # default month 2026-03
-uv run python scripts/smoke_mvp.py --month 2026-03
+uv run python scripts/smoke_mvp.py                        # current calendar month
+uv run python scripts/smoke_mvp.py --month "$(date +%Y-%m)"
+```
+
+```powershell
+uv run python scripts/smoke_mvp.py                        # current calendar month
+uv run python scripts/smoke_mvp.py --month (Get-Date -Format 'yyyy-MM')
 ```
 
 It seeds a throwaway SQLite db, asserts HTTP 200 + the key contract fields for
