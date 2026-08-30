@@ -26,13 +26,27 @@ const CLOSE_RECORD_NOT_FOUND = 404;
  */
 const CLOSE_RECORD_NOT_FOUND_DETAIL = "Finance month close record not found";
 
-/**
- * True ONLY for the finance-close status GET's documented missing-record 404.
- * The tenant resolver (stale/deleted slug after session bootstrap) and the
- * router can also answer 404 before this route runs; remapping those as "no
- * close record" made the Close screen report a valid OPEN month for a request
- * that never reached the finance-close repository (PR #211 review).
- */
+// ============================================================================
+// Purpose: The one predicate that decides whether a 404 from the close status
+//   GET means "this month has no close row yet" — the machine-readable
+//   discrimination between the finance-close endpoint's documented
+//   missing-record response and every other 404 the SPA can receive.
+// Database/ORM: None (frontend) — matches the detail string raised by
+//   backend get_finance_month_close (finance_close.py).
+// Standards: Fail-closed by string contract: status AND parsed body detail must
+//   both match exactly; anything else (tenant 404s, routing 404s, malformed
+//   bodies) falls through and stays a typed error. The exact string is pinned
+//   by tests on both sides of the remap.
+// Blast Radius: Finance-close display semantics — deciding between the honest
+//   not-started state and an error tile. No write path; the backend stays the
+//   authority on the close row.
+// Connections:
+//   - File: backend/ums_smart_revenue/api/finance_close.py -> raises the 404
+//     with detail "Finance month close record not found" (single definition).
+//   - File: frontend/tests/lib/api/useMonthClose.test.tsx -> pins both the
+//     remapped close-record detail and the tenant-404 error path.
+// ============================================================================
+/** True ONLY for the finance-close status GET's documented missing-record 404. */
 const isMissingCloseRecord = (error: ApiError): boolean => {
   return (
     error.status === CLOSE_RECORD_NOT_FOUND &&

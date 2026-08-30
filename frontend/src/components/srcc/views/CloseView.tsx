@@ -1,4 +1,4 @@
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import { ApiError } from "@/lib/api/client";
 import type {
@@ -369,13 +369,25 @@ const closeStatusNote = (status: FinanceMonthCloseStatus | null): string => {
   return status.status === "LOCKED" ? "Exports allowed" : "Open for edits";
 };
 
-/**
- * The Lock Controls badge value: the close status with the absent-row OPEN
- * fallback — but ONLY once the status read has SETTLED without an error. A
- * still-loading or failed read is UNKNOWN, not open: the badge then renders an
- * em dash so it never asserts OPEN for a month whose state the panel does not
- * actually have (PR #211 review).
- */
+// ============================================================================
+// Purpose: The Lock Controls badge value: the close status with the absent-row
+//   OPEN fallback — but ONLY once the status read has SETTLED without an error
+//   AND the verdict belongs to the selected month. A still-loading, failed, or
+//   switched-away read is UNKNOWN, not open: the badge then renders an em dash
+//   so it never asserts OPEN for a month whose state the panel does not
+//   actually have.
+// Database/ORM: None (frontend, pure derivation over the status read state).
+// Standards: Single source for the badge's label; the tone comes from the same
+//   value via statusTone so label and tone can never disagree. Fail-closed:
+//   unknown renders "—", never a guessed status.
+// Blast Radius: Display only (one badge); no write path, no stored value.
+// Connections:
+//   - File: CloseStatusSummary (this file) -> renders the same verdict via
+//     closeStatusValue for the summary tiles, sharing the fallback semantics.
+//   - File: frontend/src/lib/api/useMonthClose.ts -> the settled (data=null,
+//     error=null) no-record verdict this falls back to.
+// ============================================================================
+/** The Lock Controls badge label, or undefined when the status is unknown. */
 const lockStatusBadgeValue = (
   status: FinanceMonthCloseStatus | null,
   statusKnown: boolean,
@@ -588,18 +600,23 @@ const CloseSummaryTiles = ({
  * keeps its role="alert" tile exactly as before; useMonthClose has already
  * turned the "no close row yet" 404 into (status=null, error=null), which falls
  * through to the tiles and their not-started copy instead of an error banner.
+ * `statusKnown=false` (the settled verdict belongs to another month — the frame
+ * right after a month switch) renders the loading tile too: a null status is
+ * only "no close record" once a read for the SELECTED month settled on it.
  */
 const CloseStatusSummary = ({
   month,
   status,
   loading,
   error,
+  statusKnown,
   readiness,
 }: {
   month: string;
   status: FinanceMonthCloseStatus | null;
   loading: boolean;
   error: ApiError | Error | null;
+  statusKnown: boolean;
   readiness: FinanceCloseReadinessResponse | null;
 }) => {
   if (error) {
@@ -615,7 +632,11 @@ const CloseStatusSummary = ({
     );
   }
 
-  if (loading && !status) {
+  // FIX (PR #211 review): also load while the verdict is not known to belong
+  // to the selected month — the one-frame gap after a month switch, before the
+  // new read starts, used to fall through and paint the previous month's
+  // no-record verdict as a false OPEN for the new month.
+  if ((loading && !status) || !statusKnown) {
     return (
       <div className="view-summary" aria-label="Month close summary" aria-busy="true">
         <article className="summary-tile">
@@ -815,6 +836,47 @@ const CloseView = ({
   const isLocked = status?.status?.toUpperCase() === "LOCKED";
 
   // ==========================================================================
+  // Purpose: The month whose read produced the CURRENT settled status verdict.
+  //   FIX (PR #211 review): on a month switch, useAsync clears data and flips
+  //   loading inside its effect — which runs AFTER paint — so exactly one
+  //   painted frame had (status=null, loading=false, error=null): the summary
+  //   read the PREVIOUS month's "no close record" verdict as the new month's
+  //   and flashed a false OPEN. This state is cleared synchronously DURING the
+  //   render that changes the selection (React's adjust-state-during-render
+  //   pattern), so the unknown verdict reaches the DOM before the browser
+  //   paints, and both the summary and the lock badge treat the month as
+  //   unknown until the read for the newly selected month settles.
+  // Database/ORM: None (frontend display-state derivation).
+  // Standards: The render-phase adjustment is a plain setState guarded to run
+  //   only while the recorded verdict month differs from the selection, so it
+  //   converges (null is stable) and violates no rules-of-hooks constraint.
+  //   The settle effect re-records the verdict month whenever a read for the
+  //   current selection finishes without an error, covering both the
+  //   no-record (null) and populated verdicts.
+  // Blast Radius: Display only — which summary tile / badge renders during the
+  //   read of a switched-to month. No write path, no stored value.
+  // Connections:
+  //   - File: frontend/src/lib/api/useAsync.ts -> the effect-timed data clear
+  //     whose one-frame gap this closes.
+  //   - File: CloseStatusSummary + LockControlsPanel (this file) -> the two
+  //     statusKnown consumers.
+  // ==========================================================================
+  const [settledStatusMonth, setSettledStatusMonth] = useState<string | null>(null);
+  if (settledStatusMonth !== null && settledStatusMonth !== month) {
+    setSettledStatusMonth(null);
+  }
+  useEffect(() => {
+    if (!statusLoading && statusError === null) {
+      setSettledStatusMonth(month);
+    }
+  }, [statusLoading, statusError, month]);
+  // True only when a read for the SELECTED month has settled without an error —
+  // the (status=null, error=null) pair alone cannot tell "no record for this
+  // month" from "the previous month's verdict, one frame before the new read".
+  const statusKnown =
+    !statusLoading && statusError === null && settledStatusMonth === month;
+
+  // ==========================================================================
   // Purpose: POST a lock/unlock action using the trimmed, audited reason already
   //   captured in component state (no native prompt/confirm — the arm/confirm UI
   //   gates the call). On success it clears the reason + armed latch and refetches
@@ -896,6 +958,7 @@ const CloseView = ({
         status={status}
         loading={statusLoading}
         error={statusError}
+        statusKnown={statusKnown}
         readiness={readiness}
       />
 
@@ -919,7 +982,7 @@ const CloseView = ({
         <aside className="view-stack">
           <LockControlsPanel
             status={status}
-            statusKnown={!statusLoading && statusError === null}
+            statusKnown={statusKnown}
             month={month}
             canCloseMonth={canCloseMonth}
             canUnlockMonth={canUnlockMonth}

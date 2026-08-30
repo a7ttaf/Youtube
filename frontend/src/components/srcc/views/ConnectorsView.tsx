@@ -943,11 +943,24 @@ const AdsenseSyncForm = ({
   const [amount, setAmount] = useState<string>("");
   const [currency, setCurrency] = useState<string>("USD");
   const [reason, setReason] = useState<string>("");
-  // FIX (PR #211 review): the month the LAST successful sync filed under,
-  // captured at submit time. SyncSuccess must not read the live paymentDate
-  // derivation — editing or clearing the date field after a submit relabeled
-  // the completed payment. Cleared when a new request starts, alongside
-  // actions.data.
+  // ==========================================================================
+  // Purpose: The month the LAST successful payment sync filed under, captured
+  //   in the submit closure at POST time. FIX (PR #211 review): SyncSuccess
+  //   must not read the live paymentDate derivation — editing or clearing the
+  //   date field after a submit relabeled the completed payment.
+  // Database/ORM: None (frontend form state over an already-posted value).
+  // Standards: Cleared when a new request starts, mirroring actions.data being
+  //   cleared while a sync is in flight, so the banner and its month always
+  //   belong to the same completed request; the banner renders only when both
+  //   are present (SyncSuccessBanner), so a data-without-month edge renders
+  //   nothing rather than a guessed month.
+  // Blast Radius: Display only (the success banner's label); no write path —
+  //   the posted month itself comes from filingMonth in the request body.
+  // Connections:
+  //   - File: SyncSuccessBanner / SyncSuccess (this file) -> render it.
+  //   - File: frontend/tests/.../ConnectorsView.test.tsx -> pins that editing
+  //     the date after submit does not relabel the banner.
+  // ==========================================================================
   const [filedSuccessMonth, setFiledSuccessMonth] = useState<string | null>(null);
 
   // FIX (PR #211 review): the month this payment row files under comes from
@@ -1720,13 +1733,27 @@ export const ConnectorsView = ({
     () => payments.reload(),
     [payments],
   );
-  // FIX (PR #211 review): a synced payment files under the month of its
-  // payment date, which can differ from the selected filter month. When that
-  // month IS one of the rolling options, switch the selector so the refreshed
-  // list shows the row just written; when it is OLDER than the window the
-  // selector offers, switching would render a value with no matching option
-  // (the same blank-selector defect this PR fixes elsewhere), so the filter
-  // stays and the success banner names the month the rows landed under.
+  // ==========================================================================
+  // Purpose: Post-sync visibility for a filed payment. FIX (PR #211 review): a
+  //   synced payment files under the month of its payment date, which can
+  //   differ from the selected filter month.
+  // Database/ORM: None (frontend filter state; the row itself was already
+  //   posted by AdsenseSyncForm).
+  // Standards: When the filed month IS one of the rolling options, switch the
+  //   selector to it — the month change refetches the list, so the just-written
+  //   row appears. When it is OLDER than the window the selector offers,
+  //   switching would render a value with no matching option (the same
+  //   blank-selector defect this PR fixes elsewhere), so the filter stays and
+  //   the success banner names the month instead. Fail-closed: never sets a
+  //   month the selector cannot display.
+  // Blast Radius: The payments list filter + one selection; display only. The
+  //   connector-run report_month path is untouched.
+  // Connections:
+  //   - File: AdsenseSyncForm (this file) -> calls onSynced(filingMonth) from
+  //     the submit closure, so the month here is the POSTED one.
+  //   - File: frontend/src/components/srcc/shared.tsx -> MONTH_OPTIONS, the
+  //     offered window membership is checked against.
+  // ==========================================================================
   const handleSynced = useCallback(
     (filedMonth: string) => {
       if (MONTH_OPTIONS.includes(filedMonth) && month !== filedMonth) {

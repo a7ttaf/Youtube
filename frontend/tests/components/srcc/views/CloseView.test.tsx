@@ -1,7 +1,7 @@
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { DEFAULT_MONTH } from "@/components/srcc/shared";
+import { DEFAULT_MONTH, MONTH_OPTIONS } from "@/components/srcc/shared";
 import CloseView from "@/components/srcc/views/CloseView";
 import type {
   FinanceCloseReadinessResponse,
@@ -208,8 +208,7 @@ describe("CloseView wired to finance-close", () => {
     );
   });
 
-  it("renders the honest not-started state when the month has no close row (404)", async () => {
-    // The rolling default opens on the CURRENT calendar month, which has no
+  it("renders the honest not-started state when the month has no close row (404)", async () => {    // The rolling default opens on the CURRENT calendar month, which has no
     // finance_month_close row until a finance write creates one — so its status
     // GET 404s by construction. That must read as "not started", never as
     // "Request failed (404)" over the whole summary.
@@ -245,6 +244,63 @@ describe("CloseView wired to finance-close", () => {
         "2 pending manual overrides require approval before locking 2026-03.",
       ),
     ).toBeInTheDocument();
+  });
+
+  // Regression (PR #211 review, qodo "Month switch flashes false OPEN"): the
+  // previous month's no-record verdict must not render as the switched-to
+  // month's status. useAsync clears data/flips loading in its effect — one
+  // paint frame after the selection changes — so the derivation now tracks
+  // which month the settled verdict belongs to and treats a mismatch as
+  // unknown. RTL's act() flushes that effect, so the observable contract here
+  // is the pending-read window: while the new month's read has not settled,
+  // neither the summary nor the lock badge may show a verdict.
+  it("shows no status verdict for a switched-to month until its read settles", async () => {
+    const otherMonth = MONTH_OPTIONS[1];
+    expect(otherMonth).not.toBe(DEFAULT_MONTH);
+    const pending = deferred<Response>();
+    fetchMock().mockImplementation((input: unknown) => {
+      const url = urlOf(input);
+      if (url.endsWith("/readiness")) {
+        return Promise.resolve(jsonResponse(READINESS_BLOCKED));
+      }
+      if (url.includes(`/finance-close/${otherMonth}`)) {
+        return pending.promise;
+      }
+      return Promise.resolve(
+        jsonResponse({ detail: "Finance month close record not found" }, 404),
+      );
+    });
+    renderCloseView();
+
+    // The first month settled as not-started — its verdict is honest.
+    await waitFor(() =>
+      expect(screen.getByText("No close record yet")).toBeInTheDocument(),
+    );
+    const summary = screen.getByLabelText("Month close summary");
+    expect(within(summary).getByText("OPEN")).toBeInTheDocument();
+
+    // Switch to the other month: its read is still pending, so no verdict may
+    // render anywhere — not the summary tiles, not the lock badge.
+    fireEvent.change(screen.getByLabelText("Month"), {
+      target: { value: otherMonth },
+    });
+    const summaryAfter = screen.getByLabelText("Month close summary");
+    expect(within(summaryAfter).queryByText("OPEN")).toBeNull();
+    expect(within(summaryAfter).getByText("Loading month close")).toBeInTheDocument();
+    const lockPanel = screen.getByText("Lock Controls").closest("section");
+    expect(lockPanel).not.toBeNull();
+    expect(within(lockPanel as HTMLElement).queryByText("OPEN")).toBeNull();
+
+    // Once the switched-to month's read settles as no-record, the verdict is
+    // honest again.
+    pending.resolve(
+      jsonResponse({ detail: "Finance month close record not found" }, 404),
+    );
+    await waitFor(() =>
+      expect(
+        within(screen.getByLabelText("Month close summary")).getByText("OPEN"),
+      ).toBeInTheDocument(),
+    );
   });
 
   it("still replaces the summary with the error tile on a 500 status read", async () => {
