@@ -1,6 +1,7 @@
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+import { DEFAULT_MONTH, MONTH_OPTIONS } from "@/components/srcc/shared";
 import CloseView from "@/components/srcc/views/CloseView";
 import type {
   FinanceCloseReadinessResponse,
@@ -9,6 +10,10 @@ import type {
 import { TenantProvider } from "@/contexts/TenantContext";
 
 const ORIGINAL_FETCH = globalThis.fetch;
+
+// The armed confirm button names the month the view is on, which is the rolling
+// DEFAULT_MONTH — derive the matcher from it instead of a literal that ages out.
+const CONFIRM_LOCK_LABEL = new RegExp(`^confirm lock ${DEFAULT_MONTH}$`, "i");
 
 beforeEach(() => {
   vi.stubGlobal("fetch", vi.fn());
@@ -203,6 +208,176 @@ describe("CloseView wired to finance-close", () => {
     );
   });
 
+  it("renders the honest not-started state when the month has no close row (404)", async () => {    // The rolling default opens on the CURRENT calendar month, which has no
+    // finance_month_close row until a finance write creates one — so its status
+    // GET 404s by construction. That must read as "not started", never as
+    // "Request failed (404)" over the whole summary.
+    fetchMock().mockImplementation(
+      routeFetch({
+        status: () =>
+          jsonResponse({ detail: "Finance month close record not found" }, 404),
+        readiness: () => jsonResponse(READINESS_BLOCKED),
+      }),
+    );
+    renderCloseView();
+
+    await waitFor(() =>
+      expect(screen.getByText("No close record yet")).toBeInTheDocument(),
+    );
+    const summary = screen.getByLabelText("Month close summary");
+    expect(within(summary).getByText("OPEN")).toBeInTheDocument();
+    // The Month tile falls back to the month the view is on, not an em dash.
+    expect(within(summary).getByText(DEFAULT_MONTH)).toBeInTheDocument();
+    // Both status displays agree on the absent-row fallback: the Lock Controls
+    // badge says OPEN too, not "—" — one screen, one status (PR #211 review).
+    const lockPanel = screen.getByText("Lock Controls").closest("section");
+    expect(lockPanel).not.toBeNull();
+    expect(within(lockPanel as HTMLElement).getByText("OPEN")).toBeInTheDocument();
+    // No error tile anywhere, and nothing claiming the request failed.
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(screen.queryByText(/request failed/i)).toBeNull();
+    // The readiness panel keeps rendering from its own 200 response.
+    expect(within(summary).getByText("Blocked")).toBeInTheDocument();
+    expect(within(summary).getByText("2 blockers")).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "2 pending manual overrides require approval before locking 2026-03.",
+      ),
+    ).toBeInTheDocument();
+  });
+
+  // Regression (PR #211 review, qodo "Month switch flashes false OPEN"): the
+  // previous month's no-record verdict must not render as the switched-to
+  // month's status. useAsync clears data/flips loading in its effect — one
+  // paint frame after the selection changes — so the derivation now tracks
+  // which month the settled verdict belongs to and treats a mismatch as
+  // unknown. RTL's act() flushes that effect, so the observable contract here
+  // is the pending-read window: while the new month's read has not settled,
+  // neither the summary nor the lock badge may show a verdict.
+  it("shows no status verdict for a switched-to month until its read settles", async () => {
+    const otherMonth = MONTH_OPTIONS[1];
+    expect(otherMonth).not.toBe(DEFAULT_MONTH);
+    const pending = deferred<Response>();
+    fetchMock().mockImplementation((input: unknown) => {
+      const url = urlOf(input);
+      if (url.endsWith("/readiness")) {
+        return Promise.resolve(jsonResponse(READINESS_BLOCKED));
+      }
+      if (url.includes(`/finance-close/${otherMonth}`)) {
+        return pending.promise;
+      }
+      return Promise.resolve(
+        jsonResponse({ detail: "Finance month close record not found" }, 404),
+      );
+    });
+    renderCloseView();
+
+    // The first month settled as not-started — its verdict is honest.
+    await waitFor(() =>
+      expect(screen.getByText("No close record yet")).toBeInTheDocument(),
+    );
+    const summary = screen.getByLabelText("Month close summary");
+    expect(within(summary).getByText("OPEN")).toBeInTheDocument();
+
+    // Switch to the other month: its read is still pending, so no verdict may
+    // render anywhere — not the summary tiles, not the lock badge.
+    fireEvent.change(screen.getByLabelText("Month"), {
+      target: { value: otherMonth },
+    });
+    const summaryAfter = screen.getByLabelText("Month close summary");
+    expect(within(summaryAfter).queryByText("OPEN")).toBeNull();
+    expect(within(summaryAfter).getByText("Loading month close")).toBeInTheDocument();
+    const lockPanel = screen.getByText("Lock Controls").closest("section");
+    expect(lockPanel).not.toBeNull();
+    expect(within(lockPanel as HTMLElement).queryByText("OPEN")).toBeNull();
+
+    // Once the switched-to month's read settles as no-record, the verdict is
+    // honest again.
+    pending.resolve(
+      jsonResponse({ detail: "Finance month close record not found" }, 404),
+    );
+    await waitFor(() =>
+      expect(
+        within(screen.getByLabelText("Month close summary")).getByText("OPEN"),
+      ).toBeInTheDocument(),
+    );
+  });
+
+  // Regression (PR #211 review, Devin "Previous month error survives
+  // switching"): the error branch must render only when the error belongs to
+  // the SELECTED month — useAsync clears the previous month's error in its
+  // effect one frame after a switch, and error precedence used to paint that
+  // stale failure under the new month.
+  it("does not show the previous month's error after switching months", async () => {
+    const otherMonth = MONTH_OPTIONS[1];
+    expect(otherMonth).not.toBe(DEFAULT_MONTH);
+    const pending = deferred<Response>();
+    fetchMock().mockImplementation((input: unknown) => {
+      const url = urlOf(input);
+      if (url.endsWith("/readiness")) {
+        return Promise.resolve(jsonResponse(READINESS_BLOCKED));
+      }
+      if (url.includes(`/finance-close/${otherMonth}`)) {
+        return pending.promise;
+      }
+      return Promise.resolve(jsonResponse({ detail: "close lookup exploded" }, 500));
+    });
+    renderCloseView();
+
+    // The first month's read failed — its error tile is honest.
+    await waitFor(() =>
+      expect(screen.getByText("Request failed (500)")).toBeInTheDocument(),
+    );
+
+    // Switch months with the new read pending: the old error must be gone and
+    // the unknown state shown instead.
+    fireEvent.change(screen.getByLabelText("Month"), {
+      target: { value: otherMonth },
+    });
+    expect(screen.queryByText("Request failed (500)")).toBeNull();
+    expect(screen.queryByText("close lookup exploded")).toBeNull();
+    const summary = screen.getByLabelText("Month close summary");
+    expect(within(summary).getByText("Loading month close")).toBeInTheDocument();
+
+    // Same-month errors keep the alert tile exactly as before (the branch
+    // order did not weaken the error path): settle the new read with a 500.
+    pending.resolve(jsonResponse({ detail: "new month exploded" }, 500));
+    await waitFor(() =>
+      expect(screen.getByText("Request failed (500)")).toBeInTheDocument(),
+    );
+    expect(screen.getByText("new month exploded")).toBeInTheDocument();
+  });
+
+  it("still replaces the summary with the error tile on a 500 status read", async () => {
+    // Only 404 is remapped; every other failure keeps today's role="alert" tile.
+    fetchMock().mockImplementation(
+      routeFetch({
+        status: () => jsonResponse({ detail: "close lookup exploded" }, 500),
+        readiness: () => jsonResponse(READINESS_READY),
+      }),
+    );
+    renderCloseView();
+
+    await waitFor(() =>
+      expect(screen.getByText("Request failed (500)")).toBeInTheDocument(),
+    );
+    const summary = screen.getByLabelText("Month close summary");
+    expect(summary).toHaveAttribute("role", "alert");
+    expect(within(summary).getByText("close lookup exploded")).toBeInTheDocument();
+    expect(screen.queryByText("No close record yet")).toBeNull();
+    // A failed status read is UNKNOWN, not open: the Lock Controls badge shows
+    // an em dash instead of asserting OPEN for a month whose state it does not
+    // have (PR #211 review). (The detail grid's actor cells also render em
+    // dashes for a null row, so assert the absence of OPEN plus the presence of
+    // at least the badge's dash.)
+    const lockPanel = screen.getByText("Lock Controls").closest("section");
+    expect(lockPanel).not.toBeNull();
+    expect(within(lockPanel as HTMLElement).queryByText("OPEN")).toBeNull();
+    expect(
+      within(lockPanel as HTMLElement).getAllByText("—").length,
+    ).toBeGreaterThan(0);
+  });
+
   it("disables Lock for a viewer without close permission", async () => {
     fetchMock().mockImplementation(
       routeFetch({
@@ -242,7 +417,7 @@ describe("CloseView wired to finance-close", () => {
     // First click arms the action (the button switches to a confirm label).
     fireEvent.click(lockButton);
     const confirmButton = await screen.findByRole("button", {
-      name: /^confirm lock 2026-03$/i,
+      name: CONFIRM_LOCK_LABEL,
     });
     // Second click executes the POST.
     fireEvent.click(confirmButton);
@@ -307,7 +482,7 @@ describe("CloseView wired to finance-close", () => {
     // First click arms the action (the button switches to a confirm label).
     fireEvent.click(lockButton);
     const confirmButton = await screen.findByRole("button", {
-      name: /^confirm lock 2026-03$/i,
+      name: CONFIRM_LOCK_LABEL,
     });
 
     // Double-click the armed confirm before busy=true re-renders: both clicks run
@@ -360,7 +535,7 @@ describe("CloseView wired to finance-close", () => {
     // Arm, then confirm the lock so the conflicting POST fires.
     fireEvent.click(lockButton);
     fireEvent.click(
-      await screen.findByRole("button", { name: /^confirm lock 2026-03$/i }),
+      await screen.findByRole("button", { name: CONFIRM_LOCK_LABEL }),
     );
 
     await waitFor(() =>
