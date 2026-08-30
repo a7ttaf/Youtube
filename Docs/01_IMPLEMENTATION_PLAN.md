@@ -1257,8 +1257,10 @@ and the reconciled-net content (Phase 4 allocation/tax) feeding report bodies.
   and no non-dev path to serve the browser app. Two viable beta shapes are
   documented there; real revenue can be ingested without any Google/GCP
   dependency via the first-class `MANUAL_UPLOAD` import path.
-  **Freshness (2026-08-28):** P0 execution + living Docs/21 status track **P0 split PRs**
-  on main (replaces blocked #210). Docs/20–21/23/24/25 ship together on branch
+  **Freshness (2026-08-30):** P0 execution + living Docs/21 status track current successor
+  PRs **#221–#225 (P0-a…P0-e)** on main. PR #210 is historical: it merged into the
+  non-main `docs/deployment-readiness-audit` branch and is not the mainline source of
+  truth. Docs/20–21/23/24/25 ship together on branch
   docs/program-plans-consolidated (supersedes closed drafts #209/#218/#219). Do not
   schedule unchecked P0 items from the Docs/21 snapshot alone.
 - ⏳ Google credential token monitoring — remaining: credentials repo (PRs #33, #34) +

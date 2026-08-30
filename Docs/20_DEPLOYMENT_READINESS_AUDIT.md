@@ -8,13 +8,16 @@ localhost only**, operator-run, with **real** YouTube CMS revenue data.
 refute it. Those passes reversed or downgraded findings in every round; the
 corrections are recorded rather than quietly dropped.
 
-> ⚠️ **Freshness banner (2026-08-28).** P0 **implementation** is tracked on **restacked
-> P0 split PRs (P0-a…P0-e)** onto `main` — **not** on blocked PR #210. This document is
-> the **pre-execution snapshot** at `main` = `d8418cea2`. Do **not** schedule unchecked
-> open items from this text alone. For scheduling work, use Docs/21 as maintained on
-> `main` after each P0 split merges (see [`25_PROGRAM_DEPENDENCY_GRAPH.md`](25_PROGRAM_DEPENDENCY_GRAPH.md)).
+> ⚠️ **Freshness banner (2026-08-30).** P0 **implementation** is tracked by current
+> successor PRs **#221–#225 (P0-a…P0-e)**. PR #210 is historical: it merged on
+> 2026-08-29 into the non-main `docs/deployment-readiness-audit` branch and is not
+> the source of truth on `main`. At this check, #221 is open/BLOCKED against
+> `main` = `41b4953`, while #222–#225 are open/BEHIND from `d8418cea2`. This document
+> remains the **pre-execution snapshot** at `main` = `d8418cea2`. Do **not** schedule
+> unchecked open items from this text alone. For scheduling work, use Docs/21 as
+> maintained on `main` after each P0 split merges (see [`25_PROGRAM_DEPENDENCY_GRAPH.md`](25_PROGRAM_DEPENDENCY_GRAPH.md)).
 >
-> **Consolidation:** this file ships with Docs/21/23/24 in branch
+> **Consolidation:** this file ships with Docs/21/23/24/25 in branch
 > `docs/program-plans-consolidated` (supersedes closed drafts #209 / #218 / #219).
 
 - **Round 1 — deployment surface:** auth, secrets, data lifecycle, bootstrap, config.
@@ -38,7 +41,7 @@ corrections are recorded rather than quietly dropped.
 
 **The plan built from this audit is [`21_BETA_IMPLEMENTATION_PLAN.md`](21_BETA_IMPLEMENTATION_PLAN.md).**
 
-### Related plans (program triad)
+### Related plans (program bundle)
 
 | Doc | Where | Role |
 | --- | --- | --- |
@@ -49,8 +52,8 @@ corrections are recorded rather than quietly dropped.
 | [`23_ADMIN_ACCESS_AND_CONFIG_PLAN.md`](23_ADMIN_ACCESS_AND_CONFIG_PLAN.md) | this PR | Admin / access / config UI (Docs/21 is silent here) |
 | [`24_US_WITHHOLDING_AND_US_REVENUE_PLAN.md`](24_US_WITHHOLDING_AND_US_REVENUE_PLAN.md) | this PR | US revenue slice + withholding estimate (fills P3 rate gap) |
 
-**Residual proxy note:** after P0-e adds `/org-units` and `/users`, `/security` is
-still missing from `TENANT_SCOPED_ROUTES` — required by Docs/23 A2.
+**Residual proxy note:** P0-e/#225 adds `/org-units` and `/users`; `/security` remains
+missing from `TENANT_SCOPED_ROUTES` and is owned by Docs/23 A2.
 
 ---
 
@@ -196,8 +199,11 @@ and connector raw-file blobs default to `cwd/_local_blob_store`
 `redis-data` volumes — **neither path is mounted**. Both are wiped by any rebuild,
 `--force-recreate`, or `down`.
 
-**Fix:** set `UMS_EXPORT_ARTIFACT_DIR` and `UMS_LOCAL_STORE_ROOT` to paths inside a
-new named volume, and mount it on `app` (and `migrate`, if it ever writes there).
+**Fix:** set `UMS_EXPORT_ARTIFACT_DIR` and `UMS_LOCAL_STORE_ROOT` to durable host
+bind paths (for example, `./data/artifacts` and `./data/blobs`) and mount them on
+`app` (and `migrate`, if it ever writes there). An externally managed Compose
+volume (`external: true`) is acceptable only when provisioned outside this stack
+and verified to survive `docker compose down -v`; an ordinary named volume is not.
 
 ### B5 — There is no browser app in any non-dev path
 `frontend/` has no Dockerfile; compose has no frontend service; the backend mounts
@@ -374,8 +380,8 @@ Vite dev server injects the fixed operator identity. **Revenue enters by manual
 import, not by connector** — so Google is never called and the currency questions
 (D1/D2) do not arise: the operator supplies the figures directly.
 
-Required before real data: **B3** (backups), **B4** (artifact volume — note the
-permanent-503 consequence), and the **logging fix** (one `basicConfig` call, so that
+Required before real data: **B3** (backups), **B4** (durable artifact/blob storage —
+note the permanent-503 consequence), and the **logging fix** (one `basicConfig` call, so that
 INFO-level connector progress is recorded and what already prints can be placed in
 time). B1/B2 are *accepted risks* documented in the runbook rather than fixed,
 justified solely by the localhost binding.

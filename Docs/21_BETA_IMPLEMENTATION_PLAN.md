@@ -7,27 +7,29 @@ revenue entering by **manual import**.
 **Method:** every item below was costed against the actual code — file, line, what
 breaks, what it unblocks — not estimated from the finding text.
 
-> ⚠️ **Freshness banner (2026-08-28, post-audit).** P0 **implementation** is **not** on
-> merge-ready #210 (blocked, wrong base). Track execution on **restacked P0 split PRs**
-> (P0-a…P0-e — see [`25_PROGRAM_DEPENDENCY_GRAPH.md`](25_PROGRAM_DEPENDENCY_GRAPH.md)).
-> This copy is the **costing snapshot** at `main` = `d8418cea2`. Do not schedule open
-> items from the hour tables alone until P0 split PRs land on `main`.
+> ⚠️ **Freshness banner (2026-08-30, post-audit).** P0 **implementation** is tracked by
+> current successor PRs **#221–#225 (P0-a…P0-e)**. PR #210 is historical: it merged on
+> 2026-08-29 into the non-main `docs/deployment-readiness-audit` branch and is not the
+> source of truth on `main`. At this check, #221 is open/BLOCKED against `main` =
+> `41b4953`, while #222–#225 are open/BEHIND from `d8418cea2`. This copy remains the
+> **costing snapshot** at `main` = `d8418cea2`. Do not schedule open items from the
+> hour tables alone until the successor PRs land on `main`.
 >
 > **Consolidation:** ships with Docs/20/23/24/25 in `docs/program-plans-consolidated`
 > (supersedes closed drafts #209 / #218 / #219).
 
-### Related plans (program triad)
+### Related plans (program bundle)
 
 | Doc | Where | Role |
 | --- | --- | --- |
 | [`20_DEPLOYMENT_READINESS_AUDIT.md`](20_DEPLOYMENT_READINESS_AUDIT.md) | this PR | Historical audit snapshot |
-| P0 split PRs (P0-a…P0-e) | `main` (TBD numbers) | **Living** P0 implementation — replaces blocked #210 |
+| P0 split PRs (P0-a…P0-e; #221–#225) | `main` | **Living** P0 implementation; supersedes historical #210 |
 | [`23_ADMIN_ACCESS_AND_CONFIG_PLAN.md`](23_ADMIN_ACCESS_AND_CONFIG_PLAN.md) | this PR | Admin / access / config UI extension |
 | [`24_US_WITHHOLDING_AND_US_REVENUE_PLAN.md`](24_US_WITHHOLDING_AND_US_REVENUE_PLAN.md) | this PR | US revenue + withholding estimate |
 | [`25_PROGRAM_DEPENDENCY_GRAPH.md`](25_PROGRAM_DEPENDENCY_GRAPH.md) | this PR | Explicit execution DAG |
 
-**Residual after P0-e:** `/security` still missing from Vite `TENANT_SCOPED_ROUTES` until
-P0-e merges (Docs/23 A2).
+**Residual after P0-e/#225:** `/security` remains missing from Vite
+`TENANT_SCOPED_ROUTES`; Docs/23 A2 owns that proxy addition.
 
 ---
 
@@ -80,7 +82,7 @@ item is easier to judge once you can actually operate the UI.
 | # | Change | File | Time |
 | --- | --- | --- | --- |
 | W0.1 | Create repo-root `.env`; set `VITE_DEV_GATEWAY_ROLE=beta_operator` and `UMS_TRUSTED_GATEWAY_TOKEN` | `.env` (new, repo root) | 15 min |
-| W0.2 | Add `"/org-units"`, `"/users"`, and `"/security"` to `TENANT_SCOPED_ROUTES` | `frontend/vite.config.ts:13-32` | 5 min |
+| W0.2 | Add `"/org-units"` and `"/users"` to `TENANT_SCOPED_ROUTES`; A2 adds `"/security"` | `frontend/vite.config.ts:13-32` (P0-e; A2 follow-up) | 5 min (P0-e) |
 | W0.3 | Restart the dev server, click through every view, write down what is still dead | — | 30 min |
 
 **W0.1 is the single highest-leverage change in this document.** The shipped default
@@ -102,7 +104,7 @@ the product through its second-most-restricted role.
 - [ ] `.env` at repo root with `VITE_DEV_GATEWAY_ROLE=beta_operator` and gateway token
 - [ ] Manual import (`POST /revenue/facts`, `connector_key=manual-upload`) succeeds (201)
 - [ ] Finance views render real data (not 403) under `beta_operator`
-- [ ] `/org-units`, `/users`, `/security` proxied in dev (no 404 on Registry / Admin matrix)
+- [ ] P0-e proxies `/org-units` and `/users`; A2 proxies `/security` (no 404 on Registry / Admin matrix)
 
 > ⚠️ **The file is the repo-root `.env`, not `frontend/.env`.** `envDir` is pinned to
 > the repo root (`vite.config.ts:41-51,93,151`) and the comment at `:38` records that
@@ -144,17 +146,19 @@ Export artifacts and connector blobs live on ephemeral container paths
 (`reports/artifact_storage.py:13`, `orchestrator.py:3125`, `Dockerfile:109`). A
 container replacement discards them, and a requested export then **503s permanently**.
 
-Fix by mounting a **host bind mount** (e.g. `./data/artifacts:/var/lib/ums/artifacts`) —
-**not** a Compose-managed named volume. `docker compose down -v` destroys
-`postgres-data` and `redis-data`; any co-located named app volume is destroyed with them.
-Restore would leave export records pointing at missing blobs.
+Fix by mounting a **durable host bind mount** (e.g.
+`./data/artifacts:/var/lib/ums/artifacts`) — **not** a Compose-managed named volume.
+An externally managed Compose volume is acceptable only when provisioned outside this
+stack and excluded from `docker compose down -v` cleanup. `down -v` destroys
+`postgres-data` and `redis-data`; any ordinary co-located named app volume is destroyed
+with them. Restore would leave export records pointing at missing blobs.
 
 > 💡 There is an undocumented workaround for the 503 in the meantime: `request_export`
 > has no dedup on scope+month (`reports/exports.py:383-433`), so the operator can
 > simply request the export again. Note this in the runbook.
 
 **Acceptance criteria (P0.2):**
-- [ ] Artifact path is a host bind mount outside Compose named volumes
+- [ ] Artifact path is a durable host bind mount (preferred), or an external Compose volume outside `down -v` cleanup
 - [ ] `docker compose down` (without `-v`) preserves artifacts across container recreate
 - [ ] Document that `down -v` wipes DB **and** must not be used when artifacts must survive
 
@@ -344,13 +348,15 @@ pipeline is internally consistent and the numbers are real. Do P2.2 when conveni
 **If no:** that is the EGP program — 3–6 weeks, ~2,154 `*_usd` identifiers, and a
 USD-only design that is *test-locked* by
 `tests/finance/test_finance_no_fx_dependency.py:40-53`. It should be its own milestone
-after the beta proves the rest works. **EGP path adopted in separate program doc.**
+after the beta proves the rest works. **EGP path is scoped in Docs/24 as a separate
+program; this snapshot does not close the operator decision.**
 
 > ⚠️ **Do not let anyone "shortcut" this through `currency_exchange_rates`.** It looks
-> like a 2-hour win and will be rejected by an existing guard test, four documents, and
-> one closed decision. The sanctioned route to EGP is Google's own server-side
-> conversion (`currency=EGP`), never a UMS-derived rate. Your own words are the reason
-> it was closed: *"i dont need to make it USD × 47.5, i need pure number."*
+> like a 2-hour win and is rejected by an existing guard test and the surrounding
+> finance contracts. The operator decision recorded in `Docs/16:70-71` remains open in
+> this snapshot. If EGP is approved, the sanctioned route is Google's own server-side
+> conversion (`currency=EGP`), never a UMS-derived rate. The quoted operator preference
+> remains context, not a closed decision: *"i dont need to make it USD × 47.5, i need pure number."*
 
 ---
 

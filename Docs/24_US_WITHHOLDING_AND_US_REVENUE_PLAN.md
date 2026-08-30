@@ -7,21 +7,21 @@ calculation"* and *"the project can see how much revinue from us per channel rig
 
 This document records the verified facts first (tax rules and what the codebase actually
 ingests today), then the program that adds per-channel US revenue and the withholding
-calculation as display/evidence surfaces. Gap-patched 2026-08-28 (triad review).
+calculation as display/evidence surfaces. Gap-patched 2026-08-30 (triad/status review).
 
-### Related plans (program triad)
+### Related plans (program bundle)
 
 | Doc / where | Role |
 | --- | --- |
 | [`20_DEPLOYMENT_READINESS_AUDIT.md`](20_DEPLOYMENT_READINESS_AUDIT.md) / [`21_BETA_IMPLEMENTATION_PLAN.md`](21_BETA_IMPLEMENTATION_PLAN.md) | Parent beta audit; P3 parked recon TAX (living status on P0 split PRs) |
 | [`25_PROGRAM_DEPENDENCY_GRAPH.md`](25_PROGRAM_DEPENDENCY_GRAPH.md) | Execution DAG |
-| P0 split PRs (P0-a…P0-e) | `main` (TBD) | Living P0 — replaces blocked #210 |
+| P0 split PRs (P0-a…P0-e; #221–#225) on `main` | Living P0 implementation; supersedes historical #210 |
 | [`23_ADMIN_ACCESS_AND_CONFIG_PLAN.md`](23_ADMIN_ACCESS_AND_CONFIG_PLAN.md) | Sibling admin program (independent) |
 
 > ⚠️ **D-U1 is blocking.** No estimate surfaces until the operator confirms the live
 > AdSense tax-info rate and records it in effective-dated config. **No default rate.**
 >
-> **Consolidation:** Docs/20/21/23/24 ship together in `docs/program-plans-consolidated`
+> **Consolidation:** Docs/20/21/23/24/25 ship together in `docs/program-plans-consolidated`
 > (supersedes closed drafts #209 / #218 / #219).
 
 ---
@@ -79,7 +79,7 @@ net finance math.
 | F2 | The YouTube Reporting (CSV) lane whitelists `content_owner_estimated_revenue_a1`, whose **daily rows already include `country_code`**. The adapter **deliberately drops** country (and video/day) when folding rows into monthly channel totals, to keep one source_row_key per channel-month. Raw CSV evidence is persisted before parsing. | `connectors/google/report_type_whitelist.py`; `connectors/runs/orchestrator.py` `_accumulate_csv_row` ("Lower-level official dimensions (video_id, country_code, etc.) are deliberately NOT forwarded") |
 | F3 | The AdSense payments lane is `accounts.payments.list` only — unpaid/scheduled **payment totals, no transaction line items**. **No withholding amount is ingested anywhere in UMS.** The Management API v2 does not expose the transactions detail; the withheld line lives in the AdSense UI report. | `connectors/google/adsense_payments_client.py`; `finance/adsense_payments.py` |
 | F4 | The YouTube Analytics API **does** support the needed shape: content-owner "user activity by country" report = `dimensions=country` + revenue metrics (`estimatedRevenue`) + exactly one `filters=channel==UC…`. Same per-channel loop as the 54-channel workbook (contentOwner queries still don't support `dimensions=channel`). | developers.google.com/youtube/analytics/content_owner_reports |
-| F5 | `source_row_key` hashes report_type/period/**dimensions**/currency — country-dimensioned rows get distinct keys and **cannot collide with or double-count** the existing channel-month totals. This is also why the EGP program sequencing matters (currency is in the hash). | `connectors/google_source_parsers/source_row_keys.py` |
+| F5 | `source_row_key` hashes report_type/period/**dimensions**/currency, so country-dimensioned rows get distinct keys and cannot collide at upsert. That key distinction alone does **not** prevent double projection: canonical selection still groups by channel/source and could choose a country row. The U2 non-projecting guard is what keeps country evidence out of channel-month totals. This is also why EGP sequencing matters (currency is in the hash). | `connectors/google_source_parsers/source_row_keys.py`; `finance/google_source_normalizer.py` |
 | F6 | **Existing recon already models a US-tax hop at 0.30.** `DEFAULT_US_WITHHOLDING_RATE = 0.30` in `finance/reconciliation_workflow.py` feeds a `us_view_share × gross × rate` component into net math. Today it is **dormant** (`NullUsViewShareProvider` → tax ≈ 0). Docs/21 P3 already says do not arm recon-derived TAX until the rate is known. | `finance/reconciliation_workflow.py`; Docs/21 P3; Docs/15 refine-later “withholding-rate calibration” |
 
 **Direct answers to the operator's questions:**
@@ -124,10 +124,10 @@ decomposes the number we already trust, no drift). No writes, no UMS changes.
 
 ### U2 — Ingest the US slice (10–16h) — **blocked until normalization fence**
 
-Country-dimensional rows must **never** enter [`GoogleSourceNormalizer._source_row_buckets`](backend/ums_smart_revenue/finance/google_source_normalizer.py)
+Country-dimensional rows must **never** enter [`GoogleSourceNormalizer._source_row_buckets`](../backend/ums_smart_revenue/finance/google_source_normalizer.py)
 (which groups only by `(channel_id, source_system)`). Distinct `source_row_key` hashes
 prevent upsert collisions but **do not** prevent a country row from winning
-[`select_canonical_row`](backend/ums_smart_revenue/finance/google_source_normalizer.py)
+[`select_canonical_row`](../backend/ums_smart_revenue/finance/google_source_normalizer.py)
 and replacing the worldwide channel gross fact.
 
 **Required design:** a **non-projecting evidence lane** — separate `source_system` value
@@ -190,7 +190,8 @@ a monthly manual glance at the AdSense payments report.
   `UMS_US_WITHHOLDING_RATE` unset → no estimate surfaces. It is **not** a silent rename of
   the recon constant (0.30).
 - **T-U3** Country-dimensioned rows never feed the monthly-totals lane (no double count);
-  enforced by distinct source_row_key dimensions (F5) and a guard test in U2.
+  enforced by the U2 non-projecting guard. Distinct source_row_key dimensions (F5)
+  prevent upsert collisions only; they are not a projection guard.
 - **T-U4** No FX anywhere in this program (standing rule); US revenue is displayed in the
   source currency of the row, full stop.
 - **T-U5** U2 respects EGP-program sequencing (currency is inside source_row_key).

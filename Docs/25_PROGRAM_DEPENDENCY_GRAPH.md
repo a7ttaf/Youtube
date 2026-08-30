@@ -1,15 +1,16 @@
 # 25 — Program Dependency Graph
 
-*Written 2026-08-28. Supersedes implicit ordering scattered across Docs/20–24.
-P0 **implementation** is tracked on restacked split PRs from former #210 — **not**
-on blocked PR #210 itself until those land on `main`.*
+*Written 2026-08-30. Supersedes implicit ordering scattered across Docs/20–24.
+P0 **implementation** is tracked by current successor PRs **#221–#225 (P0-a…P0-e)**.
+PR #210 is historical: it merged on 2026-08-29 into the non-main
+`docs/deployment-readiness-audit` branch, not into `main`.*
 
 ---
 
 ## DAG (execution order)
 
 ```text
-[#220 docs amend]  ← you are here (stay draft until 9 review threads resolved)
+[#220 docs amend]  ← you are here (draft pending final owner review after this cleanup)
         │
         ▼
 [P0-a compose/storage] ──► host bind mount for artifacts; PG18; Redis; grace; log rotate
@@ -24,9 +25,9 @@ on blocked PR #210 itself until those land on `main`.*
 [P0-d logging/ops] ──► structured logging; /readyz honesty; credential redaction
         │
         ▼
-[P0-e dev gateway/docs] ──► Vite proxy (/users, /org-units, /security); .env.example; runbook
+[P0-e dev gateway/docs] ──► Vite proxy (/users, /org-units); .env.example; runbook
         │
-        ├──► [ci-fast + ci-database + ci-frontend] required on main
+        ├──► [ci-fast + ci-database + ci-frontend] proposed required gates (see status note)
         │
         ▼
 [P1 band restack: #211–#217] ──► rolling months, de-mock, error boundary, alias cleanup
@@ -58,13 +59,20 @@ on blocked PR #210 itself until those land on `main`.*
 
 ---
 
+> **CI status (2026-08-30):** `ci-fast`, `ci-database`, and `ci-frontend` are proposed
+> by open PR #226; they are **not active required contexts** on current `main`.
+> Branch protection currently requires only `DeepSource: Docker`, `DeepSource: JavaScript`,
+> `DeepSource: Python`, `DeepSource: SQL`, `DeepSource: Secrets`, and `DeepSource: Shell`.
+> Treat the three `ci-*` names as future gates until #226 lands and branch protection is
+> updated.
+
 ## Hard gates (do not skip)
 
 | Gate | Blocks |
 | --- | --- |
-| All 9 #220 review threads resolved | Undraft #220 |
+| All 9 #220 review threads resolved | Satisfied; retain draft until final owner review and current checks |
 | P0-a…P0-e merged to `main` | A1, beta runbook, living Docs/21 status |
-| `ci-fast` + `ci-database` + `ci-frontend` required | Claiming review-ready on any code PR |
+| Proposed `ci-fast` + `ci-database` + `ci-frontend` gates in #226 | Future review-readiness gate; not active on current `main` |
 | Normalization fence merged | U2 country ingest |
 | D-U1 AdSense rate confirmed + config row written | U3 estimate surfaces |
 | A6 read-isolation matrix green | Any sub-company / competitor account |
@@ -77,9 +85,14 @@ on blocked PR #210 itself until those land on `main`.*
 | Former | Successor |
 | --- | --- |
 | #209, #218, #219 (closed) | **#220** (consolidated docs) |
-| #210 (blocked, wrong base) | **P0-a … P0-e** (restacked onto `main`) |
+| #210 (historical; merged 2026-08-29 into non-main `docs/deployment-readiness-audit`) | **#221–#225** (current P0-a … P0-e successors on `main`) |
 | Living schedule | Docs/21 status table on `main` after each P0 split merges |
 
-See also: [`21_BETA_IMPLEMENTATION_PLAN.md`](21_BETA_IMPLEMENTATION_PLAN.md),
+As of 2026-08-30, #221 is open/BLOCKED against `main` = `41b4953`; #222–#225 are
+open/BEHIND from `d8418cea2`. Treat those live PR states, not this static graph, as
+the source for merge ordering.
+
+See also: [`20_DEPLOYMENT_READINESS_AUDIT.md`](20_DEPLOYMENT_READINESS_AUDIT.md),
+[`21_BETA_IMPLEMENTATION_PLAN.md`](21_BETA_IMPLEMENTATION_PLAN.md),
 [`23_ADMIN_ACCESS_AND_CONFIG_PLAN.md`](23_ADMIN_ACCESS_AND_CONFIG_PLAN.md),
 [`24_US_WITHHOLDING_AND_US_REVENUE_PLAN.md`](24_US_WITHHOLDING_AND_US_REVENUE_PLAN.md).

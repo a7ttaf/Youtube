@@ -1,8 +1,8 @@
 # 23 — Admin, Access & Configuration Plan
 
 *Written 2026-08-27, scoped against the merged integration tree (main `d8418cea2` + the
-#211–#217 draft band + the #209/#210 P0 stack). Every "exists today" claim below was
-verified against code, not recalled. Gap-patched 2026-08-28 (triad review).*
+#211–#217 historical draft band + the former #209/#210 P0 stack). Every "exists today" claim below was
+verified against code, not recalled. Gap-patched 2026-08-30 (triad/status review).*
 
 The operator's question that produced this plan: **"From where do I add the other users?
 From where the permissions? From where can I make full config?"**
@@ -12,22 +12,24 @@ missing is the user interface.** Nothing in the current beta plan (Docs/21) buil
 This document is the honest inventory of what works today, the plan for the missing
 surface, and the tripwires that keep it safe.
 
-### Prerequisites & related plans
+### Prerequisites & related plans (program bundle)
 
 | Doc / where | Role |
 | --- | --- |
 | [`20_DEPLOYMENT_READINESS_AUDIT.md`](20_DEPLOYMENT_READINESS_AUDIT.md) / [`21_BETA_IMPLEMENTATION_PLAN.md`](21_BETA_IMPLEMENTATION_PLAN.md) | Parent beta audit/plan (snapshot; living status on P0 split PRs) |
 | [`25_PROGRAM_DEPENDENCY_GRAPH.md`](25_PROGRAM_DEPENDENCY_GRAPH.md) | Execution DAG |
-| P0 split PRs (P0-a…P0-e) | `main` (TBD) | **Hard prerequisite** for A1/A5 (bootstrap, seed migration, `/users` proxy) |
+| P0 split PRs (P0-a…P0-e; #221–#225) on `main` | **Hard prerequisite** for A1/A5 (bootstrap, seed migration, `/users` proxy) |
 | [`24_US_WITHHOLDING_AND_US_REVENUE_PLAN.md`](24_US_WITHHOLDING_AND_US_REVENUE_PLAN.md) | Sibling finance program (no overlap) |
 
 > ⚠️ **Hard dependency on P0 split PRs.** `scripts/bootstrap_operator.py`, Alembic migration
 > `20260825_0001` (roles/permissions seed), and Vite proxy `/users` (plus `/org-units`)
-> land on **P0-c / P0-e** — **not on bare `main`**. Do not start A1 or A5 until P0-c
-> merges (or cherry-picks). After P0-e, A2 still needs `/security` added to
-> `TENANT_SCOPED_ROUTES`. Blocked PR #210 is **not** living source of truth.
+> land on **P0-c/#223 / P0-e/#225** — **not on bare `main`**. Do not start A1 or A5
+> until P0-c merges (or cherry-picks). After P0-e/#225, A2 still owns adding
+> `/security` to `TENANT_SCOPED_ROUTES`. PR #210 is historical: it merged on 2026-08-29
+> into the non-main `docs/deployment-readiness-audit` branch and is not living source
+> of truth on `main`; current successors are #221–#225.
 >
-> **Consolidation:** Docs/20/21/23/24 ship together in `docs/program-plans-consolidated`
+> **Consolidation:** Docs/20/21/23/24/25 ship together in `docs/program-plans-consolidated`
 > (supersedes closed drafts #209 / #218 / #219).
 
 ---
@@ -171,7 +173,7 @@ Admin view in `ViewRouter`/nav + hooks. Do not start until **P0-c** merges.
   session already carries (`GET /session/me`) — kills the "why is this button dead"
   confusion at the root.
 - **Proxy residual:** on bare `main`, `/users` and `/security` are both missing from
-  `TENANT_SCOPED_ROUTES`. P0-e adds `/users` (and `/org-units`); **A2 still must add
+  `TENANT_SCOPED_ROUTES`. P0-e/#225 adds `/users` (and `/org-units`); **A2 owns adding
   `/security`**, or the matrix 404s in dev. Decide whether `audit.view` is the right
   gate for catalog reads or whether they should move under `users.manage`
   (decision D-A2).
