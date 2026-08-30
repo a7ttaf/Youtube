@@ -48,6 +48,7 @@ import argparse
 import sys
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import date
 from decimal import Decimal
 from functools import lru_cache
 from pathlib import Path
@@ -60,7 +61,6 @@ _BACKEND_PATH = str(_PROJECT_ROOT / "backend")
 # Deterministic UUIDs derived from a fixed namespace so re-running the seed
 # (and seeding multiple months) yields stable, collision-free identity rows.
 _DEMO_NAMESPACE = UUID("00000000-0000-0000-0000-0000deadbeef")
-_DEFAULT_MONTH = "2026-03"
 _COMMIT_IDEMPOTENCY_PREFIX = "demo-seed-commit"
 _COMMIT_REASON = "demo month seed close"
 
@@ -72,6 +72,44 @@ _DEMO_COMMITTER_EMAIL = "demo-seed@ums.local"
 
 # FIX: Keep project imports lazy so direct script execution can adjust sys.path
 # before importing the backend package (mirrors scripts/run_deduction_ingestion.py).
+
+
+# ============================================================================
+# Purpose: Resolve the seed's DEFAULT --month at RUN TIME instead of freezing a
+#   literal. The dashboard's month selector now derives from the clock and opens
+#   on the CURRENT calendar month, so the old frozen "2026-03" default seeded a
+#   month no screen ever lands on and left the demo dashboard looking empty.
+# Database/ORM: None — this produces a CLI default string, not a stored value.
+# Standards: LOCAL civil date (``date.today()``), matching the dashboard's own
+#   local-date derivation in frontend/src/lib/months.ts, so the operator and
+#   the UI agree on "this month" WHEN BOTH RUN ON MACHINES IN THE SAME TIME
+#   ZONE. FIX (PR #211 review): that agreement is NOT guaranteed across hosts
+#   — around a month boundary, a seed run from a UTC container while the
+#   operator's browser sits in a different zone can resolve a DIFFERENT
+#   current month and re-create the empty-dashboard mismatch; the runbook
+#   says to pass ``--month`` explicitly in that situation. A UTC-based
+#   derivation instead would disagree with the browser for part of every day
+#   at any non-zero offset. Zero-padded "YYYY-MM", the shape the backend's
+#   month validator accepts. ``--month`` still overrides it, so this
+#   constrains nothing an operator can seed.
+# Blast Radius: The demo seed's default target month only. No finance math, no
+#   production data path, no schema change.
+# Connections:
+#   - File: frontend/src/lib/months.ts -> currentMonthKey, the UI derivation
+#     this mirrors.
+#   - File: scripts/smoke_mvp.py -> _default_month, the same runtime default.
+#   - File: frontend/README.md -> the seed runbook that computes this month.
+# ============================================================================
+def _default_month(today: date | None = None) -> str:
+    """Return the CURRENT calendar month as ``YYYY-MM`` from the local date.
+
+    ``today`` is injectable so a caller can pin the date; it defaults to THIS
+    machine's local civil date. The dashboard selector uses the BROWSER's local
+    date, so the two agree only when the seed and the browser share a timezone
+    — near a month boundary on different-timezone hosts, pass ``--month``.
+    """
+    current = today if today is not None else date.today()
+    return f"{current.year:04d}-{current.month:02d}"
 
 
 @dataclass(frozen=True)
@@ -1041,8 +1079,11 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     )
     parser.add_argument(
         "--month",
-        default=_DEFAULT_MONTH,
-        help=f"Finance month YYYY-MM (default {_DEFAULT_MONTH}).",
+        default=_default_month(),
+        help=(
+            "Finance month YYYY-MM (default: the CURRENT calendar month, which is"
+            " the month the dashboard's selector opens on)."
+        ),
     )
     parser.add_argument(
         "--tenant",
