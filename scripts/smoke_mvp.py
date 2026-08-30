@@ -68,8 +68,14 @@ _FIRST_DEMO_CHANNEL = "demo-channel-alpha"
 # Database/ORM: None — a CLI default string; the month itself is seeded into a
 #   throwaway SQLite db by scripts/seed_demo_month.py.
 # Standards: LOCAL civil date (``date.today()``), matching the dashboard's own
-#   local-date derivation in frontend/src/lib/months.ts, so the smoke and the UI
-#   agree on "this month". Zero-padded "YYYY-MM". ``--month`` still overrides.
+#   local-date derivation in frontend/src/lib/months.ts, so the smoke and the
+#   UI agree on "this month" WHEN BOTH RUN ON MACHINES IN THE SAME TIME ZONE.
+#   FIX (PR #211 review): that agreement is NOT guaranteed across hosts —
+#   around a month boundary, a smoke run from a UTC container while the
+#   operator's browser sits in a different zone can resolve a DIFFERENT
+#   current month and probe a month the dashboard never opens on; pass
+#   ``--month`` explicitly in that situation. Zero-padded "YYYY-MM".
+#   ``--month`` still overrides it.
 # Blast Radius: The smoke harness's default target month only. No production
 #   data path, no finance math.
 # Connections:

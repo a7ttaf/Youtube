@@ -81,10 +81,16 @@ _DEMO_COMMITTER_EMAIL = "demo-seed@ums.local"
 #   month no screen ever lands on and left the demo dashboard looking empty.
 # Database/ORM: None — this produces a CLI default string, not a stored value.
 # Standards: LOCAL civil date (``date.today()``), matching the dashboard's own
-#   local-date derivation in frontend/src/lib/months.ts, so the operator and the
-#   UI agree on "this month"; a UTC-based derivation would disagree for part of
-#   every day at any non-zero offset. Zero-padded "YYYY-MM", the shape the
-#   backend's month validator accepts. ``--month`` still overrides it, so this
+#   local-date derivation in frontend/src/lib/months.ts, so the operator and
+#   the UI agree on "this month" WHEN BOTH RUN ON MACHINES IN THE SAME TIME
+#   ZONE. FIX (PR #211 review): that agreement is NOT guaranteed across hosts
+#   — around a month boundary, a seed run from a UTC container while the
+#   operator's browser sits in a different zone can resolve a DIFFERENT
+#   current month and re-create the empty-dashboard mismatch; the runbook
+#   says to pass ``--month`` explicitly in that situation. A UTC-based
+#   derivation instead would disagree with the browser for part of every day
+#   at any non-zero offset. Zero-padded "YYYY-MM", the shape the backend's
+#   month validator accepts. ``--month`` still overrides it, so this
 #   constrains nothing an operator can seed.
 # Blast Radius: The demo seed's default target month only. No finance math, no
 #   production data path, no schema change.
@@ -97,8 +103,10 @@ _DEMO_COMMITTER_EMAIL = "demo-seed@ums.local"
 def _default_month(today: date | None = None) -> str:
     """Return the CURRENT calendar month as ``YYYY-MM`` from the local date.
 
-    ``today`` is injectable so a caller can pin the date; it defaults to the
-    machine's local civil date, the same basis the dashboard selector uses.
+    ``today`` is injectable so a caller can pin the date; it defaults to THIS
+    machine's local civil date. The dashboard selector uses the BROWSER's local
+    date, so the two agree only when the seed and the browser share a timezone
+    — near a month boundary on different-timezone hosts, pass ``--month``.
     """
     current = today if today is not None else date.today()
     return f"{current.year:04d}-{current.month:02d}"

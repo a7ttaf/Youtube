@@ -157,7 +157,10 @@ uv run python scripts/seed_demo_month.py \
 ```
 
 ```powershell
-# From the repo root (PowerShell) — same seed, same locally-computed month:
+# From the repo root (PowerShell) — same seed; pass --month explicitly when
+# running from a host whose timezone differs from the operator's browser near
+# a month boundary (the seed reads the MACHINE's local date, the dashboard
+# reads the BROWSER's — around a boundary those can disagree):
 uv run python scripts/seed_demo_month.py `
   --database-url "sqlite+pysqlite:///./demo.db" `
   --create-schema --month (Get-Date -Format 'yyyy-MM')
