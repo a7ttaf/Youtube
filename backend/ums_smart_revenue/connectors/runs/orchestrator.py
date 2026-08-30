@@ -2796,8 +2796,26 @@ def _normalize_csv_fieldnames(
 
 
 # ============================================================================
+# Purpose: Identify which normalized aliases from one CSV schema group are
+#          present in a validated header set.
+# Database/ORM: None.
+# Standards: Preserve alias declaration order while collapsing equivalent
+#            spellings, so callers can reject ambiguous schemas deterministically.
+# Blast Radius: YouTube Reporting CSV header validation only.
+#               No graph projection impact detected.
+# Connections:
+#   - Function: _validate_csv_headers -> enforces one alias per schema group.
+#   - Constants: _CSV_DATE_COLUMNS, _CSV_CHANNEL_COLUMNS, and metric aliases.
+# ============================================================================
+def _matching_csv_aliases(headers: set[str], aliases: Sequence[str]) -> tuple[str, ...]:
+    """Return distinct normalized aliases from ``aliases`` that appear in ``headers``."""
+    normalized_aliases = dict.fromkeys(alias.strip().lower() for alias in aliases)
+    return tuple(alias for alias in normalized_aliases if alias in headers)
+
+
+# ============================================================================
 # Purpose: Validate that a downloaded CSV has the columns required to build
-#          parser rows and exactly one supported revenue metric.
+#          parser rows and exactly one alias for every supplied schema group.
 # Database/ORM: None.
 # Standards: Empty/headerless/missing-column/conflicting-alias payloads become
 #            typed upstream response errors instead of parser KeyError, silent
@@ -2816,29 +2834,32 @@ def _validate_csv_headers(
     for group_name, aliases in (
         ("date", _CSV_DATE_COLUMNS),
         ("channel", _CSV_CHANNEL_COLUMNS),
+        ("revenue", _CSV_REVENUE_COLUMNS),
     ):
-        if not any(alias.lower() in headers for alias in aliases):
+        matching_aliases = _matching_csv_aliases(headers, aliases)
+        if not matching_aliases:
             raise _parser_payload_error(
                 report_id=report_id,
                 reason=f"csv missing {group_name} column",
             )
-    revenue_headers = {
-        alias.lower() for alias in _CSV_REVENUE_COLUMNS if alias.lower() in headers
-    }
-    if not revenue_headers:
-        raise _parser_payload_error(
-            report_id=report_id,
-            reason="csv missing revenue column",
-        )
-    if len(revenue_headers) > 1:
+        if len(matching_aliases) > 1:
+            raise _parser_payload_error(
+                report_id=report_id,
+                reason=(
+                    f"csv conflicting {group_name} columns "
+                    f"(expected exactly one of: {', '.join(aliases)})"
+                ),
+            )
+    currency_aliases = _matching_csv_aliases(headers, _CSV_CURRENCY_COLUMNS)
+    if len(currency_aliases) > 1:
         raise _parser_payload_error(
             report_id=report_id,
             reason=(
-                "csv conflicting revenue columns "
-                "(expected exactly one of: estimated_partner_revenue, estimatedRevenue)"
+                "csv conflicting currency columns "
+                "(expected exactly one of: currency_code, currencyCode)"
             ),
         )
-    if any(alias.lower() in headers for alias in _CSV_CURRENCY_COLUMNS):
+    if currency_aliases:
         return None
     default_currency = _CSV_DEFAULT_CURRENCY_BY_REPORT_TYPE.get(report_type)
     if default_currency is not None:
@@ -2964,6 +2985,15 @@ def _accumulate_csv_row(
         raise _parser_payload_error(
             report_id=report_id,
             reason=f"csv row revenue {amount!r} not finite",
+        )
+    # FIX: Reject negative revenue at the CSV boundary so malformed amounts
+    # fail before parser payload construction or dry-run row counting. The
+    # source-row repository enforces the same non-negative finance contract
+    # for live writes, but dry-run must not report a negative row as valid.
+    if amount_decimal < 0:
+        raise _parser_payload_error(
+            report_id=report_id,
+            reason=f"csv row revenue {amount!r} must be non-negative",
         )
 
     currency = _first_present(csv_row, *_CSV_CURRENCY_COLUMNS)

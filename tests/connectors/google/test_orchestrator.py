@@ -471,9 +471,9 @@ def test_csv_adapter_rejects_ad_revenue_as_a_revenue_column() -> None:
 # Purpose: Prove malformed CSV headers fail closed while supported aliases and
 #          whitespace-normalized rows preserve the downstream finance shape.
 # Database/ORM: None -- these are pure adapter boundary tests.
-# Standards: Reject duplicate/conflicting revenue columns before DictReader can
-#            silently select a value; retain exact parser payload assertions for
-#            canonical and legacy supported headers.
+# Standards: Reject duplicate/conflicting aliases before DictReader can silently
+#            select a value; retain exact parser payload assertions for canonical
+#            and legacy supported headers.
 # Blast Radius: Finance -- protects revenue-column selection and parser export
 #               shape before source-row normalization.
 # Connections:
@@ -505,6 +505,45 @@ def test_csv_adapter_rejects_conflicting_revenue_alias_headers() -> None:
                 b"2026-05-01,UC_orch_alpha,1.10,99.00,USD\n"
             ),
             report_id="r-conflicting-revenue-headers",
+            report_type="content_owner_estimated_revenue_a1",
+            month="2026-05",
+        )
+
+
+@pytest.mark.parametrize(
+    ("raw_bytes", "error_message"),
+    [
+        (
+            (
+                b"date,day,channel_id,estimated_partner_revenue,currencyCode\n"
+                b"2026-05-01,2026-05-01,UC_orch_alpha,1.10,USD\n"
+            ),
+            "conflicting date columns",
+        ),
+        (
+            (
+                b"date,channel,channel_id,estimated_partner_revenue,currencyCode\n"
+                b"2026-05-01,UC_orch_alpha,UC_orch_alpha,1.10,USD\n"
+            ),
+            "conflicting channel columns",
+        ),
+        (
+            (
+                b"date,channel_id,estimated_partner_revenue,currency_code,currencyCode\n"
+                b"2026-05-01,UC_orch_alpha,1.10,USD,USD\n"
+            ),
+            "conflicting currency columns",
+        ),
+    ],
+)
+def test_csv_adapter_rejects_conflicting_non_revenue_alias_headers(
+    raw_bytes: bytes, error_message: str
+) -> None:
+    """Even equal alias values are ambiguous schema evidence and must fail."""
+    with pytest.raises(GoogleApiResponseError, match=error_message):
+        _csv_to_parser_payload(
+            raw_bytes=raw_bytes,
+            report_id="r-conflicting-non-revenue-headers",
             report_type="content_owner_estimated_revenue_a1",
             month="2026-05",
         )
@@ -550,6 +589,59 @@ def test_csv_adapter_normalizes_whitespace_before_row_lookup() -> None:
             },
         }
     ]
+
+
+@pytest.mark.parametrize(
+    ("raw_bytes", "error_message"),
+    [
+        (
+            (
+                b"date,channel_id,estimated_partner_revenue,currencyCode\n"
+                b"2026-04-30,UC_orch_alpha,1.10,USD\n"
+            ),
+            "outside requested report_month",
+        ),
+        (
+            (
+                b"date,channel_id,estimated_partner_revenue,currencyCode\n"
+                b"2026-05-01,,1.10,USD\n"
+            ),
+            "missing channel/channel_id",
+        ),
+        (
+            (
+                b"date,channel_id,estimated_partner_revenue,currencyCode\n"
+                b"2026-05-01,UC_orch_alpha,1.10, \n"
+            ),
+            "blank currency",
+        ),
+    ],
+)
+def test_csv_adapter_rejects_wrong_month_channel_or_currency(
+    raw_bytes: bytes, error_message: str
+) -> None:
+    """Rows outside the requested month or missing identity/currency fail closed."""
+    with pytest.raises(GoogleApiResponseError, match=error_message):
+        _csv_to_parser_payload(
+            raw_bytes=raw_bytes,
+            report_id="r-invalid-row-boundary",
+            report_type="content_owner_estimated_revenue_a1",
+            month="2026-05",
+        )
+
+
+def test_csv_adapter_rejects_negative_revenue_before_totals() -> None:
+    """Negative revenue must not reach parser payload totals."""
+    with pytest.raises(GoogleApiResponseError, match="must be non-negative"):
+        _csv_to_parser_payload(
+            raw_bytes=(
+                b"date,channel_id,estimated_partner_revenue,currencyCode\n"
+                b"2026-05-01,UC_orch_alpha,-1.10,USD\n"
+            ),
+            report_id="r-negative-revenue",
+            report_type="content_owner_estimated_revenue_a1",
+            month="2026-05",
+        )
 
 
 def test_csv_adapter_preserves_camel_case_revenue_payload_shape() -> None:
@@ -2714,6 +2806,96 @@ def test_dry_run_writes_nothing_returns_outcome_with_run_none(
     assert (
         session.query(ConnectorRunRawFileORM)
         .filter(ConnectorRunRawFileORM.tenant_id == TENANT_ID)
+        .count()
+        == 0
+    )
+    assert (
+        session.query(GoogleRevenueSourceRowORM)
+        .filter(GoogleRevenueSourceRowORM.tenant_id == TENANT_ID)
+        .count()
+        == 0
+    )
+
+
+# ============================================================================
+# Purpose: Prove dry-run rejects a negative CSV amount before reporting a
+#          successful report or a would-upsert finance row count.
+# Database/ORM: SQLite session is inspected after the dry-run SAVEPOINT rolls
+#               back; no connector, raw-file, or source-row write is allowed.
+# Standards: Exercise the real runner and parser boundary with mocked Google
+#            transport/blob dependencies; assert typed failure and zero rows.
+# Blast Radius: Finance dry-run validation and operator-facing report counts.
+# Connections:
+#   - Function: orchestrator._accumulate_csv_row -> rejects negative revenue.
+#   - Function: orchestrator._run_dry_run -> counts the produced failure.
+# ============================================================================
+def test_dry_run_rejects_negative_revenue_before_counting_rows(
+    session: Session, _stub_secret_resolver
+) -> None:
+    """A negative revenue CSV must produce a failed, zero-row dry-run outcome."""
+    _make_credential_row(
+        session,
+        tenant_id=TENANT_ID,
+        connector_key=CONNECTOR_KEY,
+        account_id=ACCOUNT_ID,
+    )
+    negative_csv = (
+        b"date,channel,content_owner,estimatedRevenue,currencyCode\n"
+        b"2026-05-01,UC_dry_negative,cms-orch-1,-1.230000,USD\n"
+    )
+
+    with (
+        patch(
+            "ums_smart_revenue.connectors.runs.orchestrator.YouTubeReportingClient"
+        ) as yt_client_cls,
+        patch("ums_smart_revenue.connectors.runs.orchestrator.LocalFileStoreBackend") as local_cls,
+        patch("ums_smart_revenue.connectors.runs.orchestrator.refresh_credentials") as refresh,
+        patch("ums_smart_revenue.connectors.runs.orchestrator.GoogleHttpClient") as http_cls,
+    ):
+        http_cls.return_value.close.return_value = None
+        refresh.return_value = None
+
+        client = yt_client_cls.return_value
+        client.list_supported_jobs.return_value = [
+            {"id": "job-negative", "reportTypeId": CONNECTOR_KEY}
+        ]
+        client.list_reports_for_month.return_value = [
+            {"id": "r-negative", "downloadUrl": "https://yt/r-negative"}
+        ]
+        client.fetch_report.return_value = negative_csv
+
+        backend = local_cls.return_value
+        backend.upload.side_effect = AssertionError("blob upload must not be called in dry-run")
+        backend.get_bytes.side_effect = AssertionError(
+            "blob get_bytes must not be called in dry-run"
+        )
+
+        outcome = run_one(
+            session,
+            tenant_id=TENANT_ID,
+            connector_key=CONNECTOR_KEY,
+            account_id=ACCOUNT_ID,
+            report_month="2026-05",
+            dry_run=True,
+        )
+
+    assert outcome.run is None
+    assert outcome.counts["reports_attempted"] == 1
+    assert outcome.counts["reports_succeeded"] == 0
+    assert outcome.counts["reports_failed"] == 1
+    assert outcome.counts["rows_upserted_total"] == 0
+    assert outcome.per_report_failures == [
+        (CONNECTOR_KEY, "GoogleApiResponseError"),
+    ]
+    assert (
+        session.query(ConnectorRunORM)
+        .filter(ConnectorRunORM.tenant_id == TENANT_ID)
+        .count()
+        == 0
+    )
+    assert (
+        session.query(RawReportFileORM)
+        .filter(RawReportFileORM.tenant_id == TENANT_ID)
         .count()
         == 0
     )
