@@ -21,7 +21,13 @@
 #         teardown warning they already believe they understand.
 #     Artifact/blob storage uses a **host bind mount** (`UMS_APP_DATA_HOST`,
 #     default `./data/ums`) — it is NOT in this named-volume list and survives
-#     `down -v`, but the operator must back it up separately (Docs/22).
+#     `down -v`, but the operator must back it up separately, with the
+#     writers stopped (only app/app-dev mount it):
+#       docker compose stop app
+#       tar -czf ums-app-data-$(date +%F).tgz ./data/ums
+#     tar ships with Windows 10+, Git Bash and Linux; adjust the path if
+#     UMS_APP_DATA_HOST is set. No dedicated backup/restore runbook exists
+#     yet — this header is the procedure.
 #     There is no prompt and no undo.
 #     Plain `docker compose down` is the non-destructive teardown and is what
 #     you want ~always; containers are recreated from the image on the next
@@ -29,10 +35,20 @@
 #     you deliberately want empty volumes (postgres-data AND app-data), and
 #     only after a verified *database* backup AND a rehearsed restore for
 #     postgres-data. Artifact blobs on the host bind mount need a separate
-#     backup — see Docs/22.
+#     backup — the copy command in the header above.
 #     Note that `pg_dump` alone does not capture the `app_tenant` /
 #     `app_platform` roles the RLS policies depend on, so a roles-only dump
-#     has to exist too — see P0.1 in Docs/21_BETA_IMPLEMENTATION_PLAN.md.
+#     has to exist too, taken while postgres is up (run from Git Bash or
+#     PowerShell — but see the encoding note):
+#       docker compose exec postgres sh -c 'pg_dumpall --roles-only -U "$POSTGRES_USER"' > ums-roles.sql
+#     The quoting is deliberate: $POSTGRES_USER expands inside the
+#     container, the same variable the healthcheck below reads. In
+#     PowerShell 5.1 use `docker compose exec -T postgres sh -c '...' |
+#     Out-File -Encoding utf8 ums-roles.sql` instead of `>` — the shell
+#     redirect writes UTF-16 with a BOM, which psql cannot replay. On a
+#     fresh cluster replay ums-roles.sql BEFORE the pg_dump: the dump's
+#     GRANT/policy statements name those roles. ums-roles.sql contains the
+#     superuser password hash — guard it like .env.
 #
 # `app` is the FastAPI service running with --reload disabled by default.
 # For interactive dev with hot reload, use the `dev` override profile:
@@ -46,8 +62,8 @@
 #     complete one for this file and copying it is not enough to boot the
 #     stack. It predates the database variables below, so
 #     `docker compose --env-file .env.example config` exits 1 on
-#     "UMS_DB_USER" being required. Completing the template is P0.3 in
-#     Docs/21_BETA_IMPLEMENTATION_PLAN.md and has not landed yet.
+#     "UMS_DB_USER" being required. Completing the template has not landed
+#     yet; until it does, the authoritative variable list is the one below.
 #
 # Until it does, this file is the authoritative list. Five variables have no
 # default and compose refuses to render without them:
@@ -201,8 +217,8 @@ x-app-env: &app-env
   #     herring pointing away from the actual cause.
   #
   #     UMS_LOG_LEVEL is the process log verbosity: DEBUG, INFO (default),
-  #     WARNING, ERROR or CRITICAL, case-insensitive. It was added to
-  #     settings.py by P0.6 but had no way into this stack — no service here
+  #     WARNING, ERROR or CRITICAL, case-insensitive. It long had no way
+  #     into this stack — no service here
   #     declares `env_file:`, and this block did not list it, so an operator
   #     could set it in `.env` and see nothing change. It reaches the
   #     APPLICATION loggers only; third-party libraries stay at WARNING
@@ -313,10 +329,7 @@ services:
       # meant Postgres never initialised, so there is no old cluster to move.
       # Every revision of this file that shipped the legacy mount shipped a
       # Postgres 18 image, and the 18 entrypoint exits before initdb whenever
-      # the legacy path is a mount, empty or not. The operator-facing version —
-      # what each entrypoint error variant means and the exact commands per
-      # case — is the "Operator note: existing volumes and fresh stacks"
-      # subsection of B0 in Docs/20_DEPLOYMENT_READINESS_AUDIT.md.
+      # the legacy path is a mount, empty or not.
       - postgres-data:/var/lib/postgresql
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
@@ -504,7 +517,8 @@ volumes:
   # Export artifacts + connector blobs use a HOST bind mount (see app / app-dev
   # services: UMS_APP_DATA_HOST, default ./data/ums). NOT a named volume — plain
   # `docker compose down -v` destroys postgres-data and redis-data; a co-located
-  # named app volume would be destroyed with them. See Docs/21 P0.2 and Docs/22.
+  # named app volume would be destroyed with them. Back it up with the copy
+  # command in the header above; no dedicated runbook exists yet.
 
 networks:
   ums-net:
