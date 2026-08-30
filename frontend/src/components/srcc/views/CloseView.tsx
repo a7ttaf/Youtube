@@ -370,12 +370,25 @@ const closeStatusNote = (status: FinanceMonthCloseStatus | null): string => {
 };
 
 /**
+ * The Lock Controls badge value: the close status with the absent-row OPEN
+ * fallback — but ONLY once the status read has SETTLED without an error. A
+ * still-loading or failed read is UNKNOWN, not open: the badge then renders an
+ * em dash so it never asserts OPEN for a month whose state the panel does not
+ * actually have (PR #211 review).
+ */
+const lockStatusBadgeValue = (
+  status: FinanceMonthCloseStatus | null,
+  statusKnown: boolean,
+): string | undefined => (statusKnown ? closeStatusValue(status) : undefined);
+
+/**
  * Lock Controls panel: status badge, lock/unlock actor + timestamp grid, the
  * audited reason input, and the two-step arm/confirm lock & unlock buttons. The
  * parent owns all state; this component is presentational and calls back on intent.
  */
 const LockControlsPanel = ({
   status,
+  statusKnown,
   month,
   canCloseMonth,
   canUnlockMonth,
@@ -388,6 +401,7 @@ const LockControlsPanel = ({
   onCancel,
 }: {
   status: FinanceMonthCloseStatus | null;
+  statusKnown: boolean;
   month: string;
   canCloseMonth: boolean;
   canUnlockMonth: boolean;
@@ -400,6 +414,7 @@ const LockControlsPanel = ({
   onCancel: () => void;
 }) => {
   const reasonEmpty = reason.trim().length === 0;
+  const badgeStatus = lockStatusBadgeValue(status, statusKnown);
 
   return (
     <section className="panel">
@@ -409,11 +424,12 @@ const LockControlsPanel = ({
           <span>The backend rejects a lock until blockers are cleared</span>
         </div>
         {/* FIX (PR #211 review): the same absent-row fallback as the summary
-            tiles — a mapped 404 (no close row yet) must read OPEN here too,
-            never "—", or the two status indicators on one screen disagree. */}
-        <Badge tone={statusTone(closeStatusValue(status))}>
-          {closeStatusValue(status)}
-        </Badge>
+            tiles — a mapped 404 (no close row yet) reads OPEN here too, never
+            "—", or the two status indicators on one screen disagree. But the
+            fallback applies ONLY to a SETTLED, error-free read: while the
+            status request is loading or has failed, the month's state is
+            unknown and the badge says so instead of asserting OPEN. */}
+        <Badge tone={statusTone(badgeStatus)}>{badgeStatus ?? "—"}</Badge>
       </div>
       <LockDetailGrid status={status} />
       <div className="control-row" style={{ marginTop: 8 }}>
@@ -903,6 +919,7 @@ const CloseView = ({
         <aside className="view-stack">
           <LockControlsPanel
             status={status}
+            statusKnown={!statusLoading && statusError === null}
             month={month}
             canCloseMonth={canCloseMonth}
             canUnlockMonth={canUnlockMonth}

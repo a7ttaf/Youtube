@@ -264,6 +264,17 @@ describe("CloseView wired to finance-close", () => {
     expect(summary).toHaveAttribute("role", "alert");
     expect(within(summary).getByText("close lookup exploded")).toBeInTheDocument();
     expect(screen.queryByText("No close record yet")).toBeNull();
+    // A failed status read is UNKNOWN, not open: the Lock Controls badge shows
+    // an em dash instead of asserting OPEN for a month whose state it does not
+    // have (PR #211 review). (The detail grid's actor cells also render em
+    // dashes for a null row, so assert the absence of OPEN plus the presence of
+    // at least the badge's dash.)
+    const lockPanel = screen.getByText("Lock Controls").closest("section");
+    expect(lockPanel).not.toBeNull();
+    expect(within(lockPanel as HTMLElement).queryByText("OPEN")).toBeNull();
+    expect(
+      within(lockPanel as HTMLElement).getAllByText("—").length,
+    ).toBeGreaterThan(0);
   });
 
   it("disables Lock for a viewer without close permission", async () => {
