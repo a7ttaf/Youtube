@@ -545,7 +545,8 @@ export type NumberExplanation = {
 //   (not guessed); nullable fields serialize as null. An export is requested
 //   (POST), tracked through its lifecycle (QUEUED -> COMPLETED | FAILED |
 //   CANCELLED), and its artifact is downloaded through useApiClient's shared
-//   Blob path (with tenant/auth headers) and a temporary object URL. The
+//   Blob path (with the shared tenant header; trusted-gateway identity remains
+//   a deployment concern) and a temporary object URL. The
 //   download routes generate-on-demand: a QUEUED job builds + persists + streams
 //   its bytes on first request, so QUEUED and COMPLETED jobs are both
 //   downloadable (QUEUED triggers generation; COMPLETED serves the cached

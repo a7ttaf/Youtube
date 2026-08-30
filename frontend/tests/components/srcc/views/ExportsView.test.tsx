@@ -93,6 +93,28 @@ const POPULATED_LIST: ExportListResponse = {
   pagination: { limit: 50, offset: 0, returned: 1, has_more: false },
 };
 
+const QUEUED_LIST: ExportListResponse = {
+  items: [QUEUED_FINANCE_JOB],
+  pagination: { limit: 50, offset: 0, returned: 1, has_more: false },
+};
+
+const COMPLETED_QUEUED_JOB: ExportJob = {
+  ...QUEUED_FINANCE_JOB,
+  status: "COMPLETED",
+  file_url: "file-store://export/22222222/ums-finance-2026-08-global.xlsx",
+  artifact_filename: "ums-finance-2026-08-global.xlsx",
+  artifact_content_type:
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  artifact_byte_size: 4096,
+  artifact_checksum_sha256: "b".repeat(64),
+  completed_at: "2026-08-31T01:43:00+00:00",
+};
+
+const COMPLETED_QUEUED_LIST: ExportListResponse = {
+  items: [COMPLETED_QUEUED_JOB],
+  pagination: { limit: 50, offset: 0, returned: 1, has_more: false },
+};
+
 const jsonResponse = (body: unknown, status = 200) => {
   return new Response(JSON.stringify(body), {
     status,
@@ -100,10 +122,16 @@ const jsonResponse = (body: unknown, status = 200) => {
   });
 };
 
-const blobResponse = (body = "export bytes") => {
+const blobResponse = (
+  body = "export bytes",
+  headers: HeadersInit = {},
+) => {
   return new Response(body, {
     status: 200,
-    headers: { "Content-Type": "application/octet-stream" },
+    headers: {
+      "Content-Type": "application/octet-stream",
+      ...headers,
+    },
   });
 };
 
@@ -162,7 +190,7 @@ describe("ExportsView wired to the exports endpoint", () => {
     ).not.toBeInTheDocument();
   });
 
-  it("renders a populated list with a COMPLETED job and an authenticated download action", async () => {
+  it("renders a populated list with a COMPLETED job and a download action", async () => {
     fetchMock().mockResolvedValue(jsonResponse(POPULATED_LIST));
     renderExportsView();
 
@@ -203,11 +231,13 @@ describe("ExportsView wired to the exports endpoint", () => {
     expect(revokeObjectURL).toHaveBeenCalledWith("blob:export-relative");
   });
 
-  it("fetches direct-origin downloads with shared-client headers and revokes the object URL", async () => {
+  it("normalizes direct-origin download URLs while retaining the tenant header", async () => {
     const createObjectURL = vi.fn(() => "blob:export-direct");
     const revokeObjectURL = vi.fn();
     vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => undefined);
     vi.stubGlobal("URL", { ...URL, createObjectURL, revokeObjectURL });
+    // This exercises URL normalization only; it does not claim that a browser
+    // direct-origin request supplies trusted-gateway identity or CORS support.
     vi.stubEnv("VITE_API_BASE_URL", "https://api.example.com/");
     fetchMock().mockImplementation((input: unknown) =>
       urlOf(input).includes("finance-workbook.xlsx")
@@ -228,6 +258,87 @@ describe("ExportsView wired to the exports endpoint", () => {
     const headers = new Headers((binaryCall?.[1] as RequestInit).headers);
     expect(headers.get("X-UMS-Tenant")).toBe("ums");
     expect(revokeObjectURL).toHaveBeenCalledWith("blob:export-direct");
+  });
+
+  it("prefers the safe quoted Content-Disposition filename for a queued artifact", async () => {
+    const createObjectURL = vi.fn(() => "blob:export-header");
+    const revokeObjectURL = vi.fn();
+    let clickedFilename: string | undefined;
+    vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(function (
+      this: HTMLAnchorElement,
+    ) {
+      clickedFilename = this.download;
+    });
+    vi.stubGlobal("URL", { ...URL, createObjectURL, revokeObjectURL });
+    fetchMock().mockImplementation((input: unknown) =>
+      urlOf(input).includes("finance-workbook.xlsx")
+        ? Promise.resolve(
+            blobResponse("export bytes", {
+              "Content-Disposition":
+                'attachment; filename="ums-finance-2026-08-global.xlsx"',
+            }),
+          )
+        : Promise.resolve(jsonResponse(QUEUED_LIST)),
+    );
+    renderExportsView();
+
+    fireEvent.click(await screen.findByRole("button", { name: /generate xlsx/i }));
+    await waitFor(() =>
+      expect(clickedFilename).toBe("ums-finance-2026-08-global.xlsx"),
+    );
+    expect(revokeObjectURL).toHaveBeenCalledWith("blob:export-header");
+  });
+
+  it("falls back to artifact_filename when Content-Disposition is absent", async () => {
+    const createObjectURL = vi.fn(() => "blob:export-metadata");
+    const revokeObjectURL = vi.fn();
+    let clickedFilename: string | undefined;
+    vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(function (
+      this: HTMLAnchorElement,
+    ) {
+      clickedFilename = this.download;
+    });
+    vi.stubGlobal("URL", { ...URL, createObjectURL, revokeObjectURL });
+    fetchMock().mockImplementation((input: unknown) =>
+      urlOf(input).includes("finance-workbook.xlsx")
+        ? Promise.resolve(blobResponse())
+        : Promise.resolve(jsonResponse(POPULATED_LIST)),
+    );
+    renderExportsView();
+
+    fireEvent.click(await screen.findByRole("button", { name: /download xlsx/i }));
+    await waitFor(() => expect(clickedFilename).toBe("ums-finance.xlsx"));
+    expect(revokeObjectURL).toHaveBeenCalledWith("blob:export-metadata");
+  });
+
+  it("rejects a malformed Content-Disposition filename before using the generic fallback", async () => {
+    const createObjectURL = vi.fn(() => "blob:export-fallback");
+    const revokeObjectURL = vi.fn();
+    let clickedFilename: string | undefined;
+    vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(function (
+      this: HTMLAnchorElement,
+    ) {
+      clickedFilename = this.download;
+    });
+    vi.stubGlobal("URL", { ...URL, createObjectURL, revokeObjectURL });
+    fetchMock().mockImplementation((input: unknown) =>
+      urlOf(input).includes("finance-workbook.xlsx")
+        ? Promise.resolve(
+            blobResponse("export bytes", {
+              // The backend contract is quoted; this path-shaped unquoted
+              // value must never become an anchor filename.
+              "Content-Disposition": "attachment; filename=../../unsafe.xlsx",
+            }),
+          )
+        : Promise.resolve(jsonResponse(QUEUED_LIST)),
+    );
+    renderExportsView();
+
+    fireEvent.click(await screen.findByRole("button", { name: /generate xlsx/i }));
+    await waitFor(() =>
+      expect(clickedFilename).toBe("export-22222222-2222-2222-2222-222222222222.xlsx"),
+    );
+    expect(revokeObjectURL).toHaveBeenCalledWith("blob:export-fallback");
   });
 
   it("renders no mock Export Guardrails panel", async () => {
@@ -390,6 +501,148 @@ describe("ExportsView wired to the exports endpoint", () => {
     expect(
       await screen.findByRole("button", { name: /generate xlsx/i }),
     ).toBeEnabled();
+  });
+
+  it("reloads exactly once after a successful queued binary completion", async () => {
+    const createObjectURL = vi.fn(() => "blob:export-reload");
+    const revokeObjectURL = vi.fn();
+    let listCallCount = 0;
+    vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => undefined);
+    vi.stubGlobal("URL", { ...URL, createObjectURL, revokeObjectURL });
+    fetchMock().mockImplementation((input: unknown) => {
+      const url = urlOf(input);
+      if (url.includes("finance-workbook.xlsx")) {
+        return Promise.resolve(
+          blobResponse("export bytes", {
+            "Content-Disposition":
+              'attachment; filename="ums-finance-2026-08-global.xlsx"',
+          }),
+        );
+      }
+      listCallCount += 1;
+      return Promise.resolve(
+        jsonResponse(
+          listCallCount === 1 ? QUEUED_LIST : COMPLETED_QUEUED_LIST,
+        ),
+      );
+    });
+    renderExportsView();
+
+    fireEvent.click(await screen.findByRole("button", { name: /generate xlsx/i }));
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: /download xlsx/i }),
+      ).toBeInTheDocument(),
+    );
+    expect(listCallCount).toBe(2);
+    expect(createObjectURL).toHaveBeenCalledTimes(1);
+    expect(revokeObjectURL).toHaveBeenCalledWith("blob:export-reload");
+  });
+
+  it("maps a 403 download failure to permission copy without reloading", async () => {
+    const createObjectURL = vi.fn(() => "blob:export-forbidden");
+    let listCallCount = 0;
+    vi.stubGlobal("URL", { ...URL, createObjectURL });
+    fetchMock().mockImplementation((input: unknown) => {
+      if (urlOf(input).includes("finance-workbook.xlsx")) {
+        return Promise.resolve(
+          jsonResponse({ detail: "Missing permission: exports.finance" }, 403),
+        );
+      }
+      listCallCount += 1;
+      return Promise.resolve(jsonResponse(POPULATED_LIST));
+    });
+    renderExportsView();
+
+    fireEvent.click(await screen.findByRole("button", { name: /download xlsx/i }));
+    await waitFor(() =>
+      expect(
+        screen.getByText("Your role cannot download this export."),
+      ).toBeInTheDocument(),
+    );
+    expect(screen.queryByText(/net revenue/i)).not.toBeInTheDocument();
+    expect(screen.getByRole("alert")).toBeInTheDocument();
+    expect(listCallCount).toBe(1);
+    expect(createObjectURL).not.toHaveBeenCalled();
+  });
+
+  it("surfaces a non-403 download failure without reloading", async () => {
+    const createObjectURL = vi.fn(() => "blob:export-unavailable");
+    let listCallCount = 0;
+    vi.stubGlobal("URL", { ...URL, createObjectURL });
+    fetchMock().mockImplementation((input: unknown) => {
+      if (urlOf(input).includes("finance-workbook.xlsx")) {
+        return Promise.resolve(
+          jsonResponse({ detail: "Artifact is not available" }, 503),
+        );
+      }
+      listCallCount += 1;
+      return Promise.resolve(jsonResponse(POPULATED_LIST));
+    });
+    renderExportsView();
+
+    fireEvent.click(await screen.findByRole("button", { name: /download xlsx/i }));
+    await waitFor(() =>
+      expect(screen.getByText("Artifact is not available")).toBeInTheDocument(),
+    );
+    expect(screen.getByRole("alert")).toBeInTheDocument();
+    expect(listCallCount).toBe(1);
+    expect(createObjectURL).not.toHaveBeenCalled();
+  });
+
+  it("deduplicates same-tick download clicks while the binary request is pending", async () => {
+    const createObjectURL = vi.fn(() => "blob:export-concurrent");
+    const revokeObjectURL = vi.fn();
+    let resolveBlob: (response: Response) => void = () => undefined;
+    const pendingBlob = new Promise<Response>((resolve) => {
+      resolveBlob = resolve;
+    });
+    vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => undefined);
+    vi.stubGlobal("URL", { ...URL, createObjectURL, revokeObjectURL });
+    fetchMock().mockImplementation((input: unknown) =>
+      urlOf(input).includes("finance-workbook.xlsx")
+        ? pendingBlob
+        : Promise.resolve(jsonResponse(POPULATED_LIST)),
+    );
+    renderExportsView();
+
+    const button = await screen.findByRole("button", { name: /download xlsx/i });
+    fireEvent.click(button);
+    fireEvent.click(button);
+    expect(
+      fetchMock().mock.calls.filter(([input]) =>
+        urlOf(input).includes("finance-workbook.xlsx"),
+      ),
+    ).toHaveLength(1);
+
+    resolveBlob(blobResponse());
+    await waitFor(() => expect(createObjectURL).toHaveBeenCalledTimes(1));
+    expect(revokeObjectURL).toHaveBeenCalledWith("blob:export-concurrent");
+  });
+
+  it("revokes the object URL and skips reload when the browser save throws", async () => {
+    const createObjectURL = vi.fn(() => "blob:export-click-error");
+    const revokeObjectURL = vi.fn();
+    let listCallCount = 0;
+    vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => {
+      throw new Error("Browser refused the download");
+    });
+    vi.stubGlobal("URL", { ...URL, createObjectURL, revokeObjectURL });
+    fetchMock().mockImplementation((input: unknown) => {
+      if (urlOf(input).includes("finance-workbook.xlsx")) {
+        return Promise.resolve(blobResponse());
+      }
+      listCallCount += 1;
+      return Promise.resolve(jsonResponse(POPULATED_LIST));
+    });
+    renderExportsView();
+
+    fireEvent.click(await screen.findByRole("button", { name: /download xlsx/i }));
+    await waitFor(() =>
+      expect(screen.getByText("Browser refused the download")).toBeInTheDocument(),
+    );
+    expect(revokeObjectURL).toHaveBeenCalledWith("blob:export-click-error");
+    expect(listCallCount).toBe(1);
   });
 
   it("does not expose a download action for CANCELLED or FAILED jobs", async () => {

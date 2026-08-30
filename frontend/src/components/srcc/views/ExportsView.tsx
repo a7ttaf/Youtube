@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 
 import { ApiError, useApiClient } from "@/lib/api/client";
 import type {
@@ -24,10 +24,11 @@ import { describeError } from "./CommandView";
 //   fills a request form (report type + scope + month + currency + reason),
 //   "Generate" POSTs to /exports (creating a QUEUED job + audit event), and the
 //   jobs table reloads from GET /exports. Each QUEUED or COMPLETED job exposes a
-//   download action that uses the shared API client's Blob path, so tenant/auth
-//   headers are present even when VITE_API_BASE_URL points at a separate origin;
-//   the temporary object URL is revoked after the browser save. Loading / error /
-//   403 states mirror CommandView and TraceView. The mock Export Guardrails side panel was
+//   download action through the shared API client's Blob path; the client adds
+//   the resolved tenant header, while trusted-gateway identity and cross-origin
+//   CORS/auth remain deployment concerns (VITE_API_BASE_URL is URL-normalization
+//   coverage only). The temporary object URL is revoked after the browser save.
+//   Loading / error / 403 states mirror CommandView and TraceView. The mock Export Guardrails side panel was
 //   DELETED in P1.4: its three rows carried fabricated On/Open/Blocked statuses
 //   that no endpoint reports, and the exports API exposes no guardrail state to
 //   derive them from — the per-job status column is the honest signal.
@@ -38,7 +39,8 @@ import { describeError } from "./CommandView";
 //   (EXPORT_REVENUE/ANALYTICS_REPORT + VIEW_* @scope, plus VIEW_FINALIZED_PAYMENTS
 //   @finance_month for finance exports) is authoritative; a 403 surfaces as
 //   no-permission copy. The browser never holds the gateway secret; downloads
-//   ride the same client header path as every other call.
+//   use the shared tenant-header path, but this screen does not claim that a
+//   direct API origin supplies trusted-gateway identity or supported CORS.
 // Blast Radius: Export create (write path) + artifact download — both via the
 //   backend's own guarded, audited routes only. No source-of-truth finance
 //   number is computed or mutated client-side.
@@ -214,10 +216,11 @@ const effectiveReportType = (
 //   action verb (Download vs Generate) is derived from job status by the caller;
 //   this returns the route and the format suffix only.
 // Standards: The path is resolved through the SAME base-URL logic the JSON
-//   client uses (resolveUrl inside useApiClient), so when VITE_API_BASE_URL
-//   points at a separate API origin, direct-origin downloads receive the same
-//   tenant/auth headers as JSON requests. The Blob path is separate from the
-//   JSON parser because these routes return binary content.
+//   client uses (resolveUrl inside useApiClient). A configured API origin is
+//   URL-normalization coverage only: getBlob supplies the tenant header, while
+//   trusted-gateway identity and cross-origin CORS/auth remain deployment
+//   concerns. The Blob path is separate from the JSON parser because these
+//   routes return binary content.
 // ============================================================================
 /**
  * Returns the API-relative binary download route and artifact format for a job,
@@ -252,6 +255,69 @@ const saveBlobAsFile = (blob: Blob, filename: string): void => {
     anchor.remove();
     URL.revokeObjectURL(objectUrl);
   }
+};
+
+// ============================================================================
+// Purpose: Select a safe local artifact filename from the backend header,
+//   persisted artifact metadata, or a deterministic format fallback.
+// Database/ORM: None (frontend) — reads only the Blob response headers and the
+//   typed ExportJob metadata returned by the backend.
+// Standards: Parse only the quoted filename contract; reject control/path
+//   characters and normalize Windows-invalid filename characters before a value
+//   reaches an anchor download attribute. Never use a response value as a path.
+// Blast Radius: Export artifact presentation only — no finance value,
+//   authorization decision, or backend state is calculated client-side.
+// Connections:
+//   - File: frontend/src/lib/api/client.ts -> getBlob returns the raw Headers.
+//   - File: backend/ums_smart_revenue/api/exports.py -> download routes emit
+//     Content-Disposition and persist artifact_filename for queued jobs.
+// ============================================================================
+const safeDownloadFilename = (
+  value: string | null | undefined,
+): string | null => {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  if (
+    !trimmed ||
+    trimmed === "." ||
+    trimmed === ".." ||
+    /[\u0000-\u001f\u007f]/.test(trimmed) ||
+    /[\\/]/.test(trimmed)
+  ) {
+    return null;
+  }
+  const sanitized = trimmed
+    .replace(/[<>:"|?*]/g, "_")
+    .replace(/[. ]+$/g, "");
+  return sanitized && sanitized !== "." && sanitized !== ".."
+    ? sanitized
+    : null;
+};
+
+/** Read the quoted Content-Disposition filename used by the export routes. */
+const filenameFromContentDisposition = (headers: Headers): string | null => {
+  const contentDisposition = headers.get("Content-Disposition");
+  if (!contentDisposition) return null;
+  const match = contentDisposition.match(
+    /(?:^|;)\s*filename\s*=\s*"([^"]*)"\s*(?:;|$)/i,
+  );
+  return safeDownloadFilename(match?.[1]);
+};
+
+/** Prefer the response filename, then persisted metadata, then a safe fallback. */
+const downloadFilenameFor = (
+  headers: Headers,
+  job: ExportJob,
+  format: string,
+): string => {
+  const responseFilename = filenameFromContentDisposition(headers);
+  const artifactFilename = safeDownloadFilename(job.artifact_filename);
+  const safeId = job.id.replace(/[^A-Za-z0-9_-]/g, "_");
+  return (
+    responseFilename ??
+    artifactFilename ??
+    `export-${safeId}.${format.toLowerCase()}`
+  );
 };
 
 // ============================================================================
@@ -584,39 +650,45 @@ const ExportJobsTableHead = () => {
 };
 
 /**
- * The download cell for a job: an authenticated Blob action (Generate for
+ * The download cell for a job: a tenant-scoped Blob action (Generate for
  * QUEUED, Download for COMPLETED) when the type has a route, otherwise a
- * failure reason or not-ready note.
+ * failure reason or not-ready note. A successful binary completion reloads
+ * the list so queued jobs reflect the backend's persisted artifact metadata.
  */
 const ExportDownloadCell = ({
   job,
   canViewRevenue,
+  onDownloadSuccess,
 }: {
   job: ExportJob;
   canViewRevenue: boolean;
+  onDownloadSuccess: () => void;
 }) => {
   const client = useApiClient();
   const [busy, setBusy] = useState(false);
   const [errorDetail, setErrorDetail] = useState<string | null>(null);
+  const inFlightRef = useRef(false);
   const download = downloadFor(job, canViewRevenue);
   if (isDownloadable(job) && download) {
     /** Fetch and save one export artifact while preventing concurrent clicks. */
     const handleDownload = async (): Promise<void> => {
-      if (busy) return;
+      // State updates are asynchronous; the ref closes the same-tick window
+      // where two click handlers could otherwise both observe busy === false.
+      if (inFlightRef.current) return;
+      inFlightRef.current = true;
       setBusy(true);
       setErrorDetail(null);
       try {
-        const { blob } = await client.getBlob(download.path);
-        saveBlobAsFile(
-          blob,
-          job.artifact_filename ?? `export-${job.id}.${download.format.toLowerCase()}`,
-        );
+        const { blob, headers } = await client.getBlob(download.path);
+        saveBlobAsFile(blob, downloadFilenameFor(headers, job, download.format));
+        onDownloadSuccess();
       } catch (caught) {
         const error = caught instanceof Error ? caught : new Error("Download failed");
         setErrorDetail(
           describeError(error, "Your role cannot download this export.").detail,
         );
       } finally {
+        inFlightRef.current = false;
         setBusy(false);
       }
     };
@@ -653,9 +725,11 @@ const ExportDownloadCell = ({
 const ExportJobRow = ({
   job,
   canViewRevenue,
+  onDownloadSuccess,
 }: {
   job: ExportJob;
   canViewRevenue: boolean;
+  onDownloadSuccess: () => void;
 }) => {
   return (
     <tr>
@@ -668,7 +742,11 @@ const ExportJobRow = ({
       <td>{formatTimestamp(job.created_at)}</td>
       <td>{formatTimestamp(job.completed_at)}</td>
       <td>
-        <ExportDownloadCell job={job} canViewRevenue={canViewRevenue} />
+        <ExportDownloadCell
+          job={job}
+          canViewRevenue={canViewRevenue}
+          onDownloadSuccess={onDownloadSuccess}
+        />
       </td>
     </tr>
   );
@@ -680,11 +758,13 @@ const ExportJobsTableBody = ({
   loading,
   error,
   canViewRevenue,
+  onDownloadSuccess,
 }: {
   jobs: ExportJob[];
   loading: boolean;
   error: ApiError | Error | null;
   canViewRevenue: boolean;
+  onDownloadSuccess: () => void;
 }) => {
   if (error) {
     const { title, detail } = describeError(
@@ -731,6 +811,7 @@ const ExportJobsTableBody = ({
               key={job.id}
               job={job}
               canViewRevenue={canViewRevenue}
+              onDownloadSuccess={onDownloadSuccess}
             />
           ))}
         </tbody>
@@ -746,12 +827,14 @@ const ExportJobsTable = ({
   error,
   onRefresh,
   canViewRevenue,
+  onDownloadSuccess,
 }: {
   jobs: ExportJob[];
   loading: boolean;
   error: ApiError | Error | null;
   onRefresh: () => void;
   canViewRevenue: boolean;
+  onDownloadSuccess: () => void;
 }) => {
   return (
     <>
@@ -775,6 +858,7 @@ const ExportJobsTable = ({
         loading={loading}
         error={error}
         canViewRevenue={canViewRevenue}
+        onDownloadSuccess={onDownloadSuccess}
       />
     </>
   );
@@ -915,6 +999,7 @@ const ExportsView = ({
           error={error}
           onRefresh={reload}
           canViewRevenue={canViewRevenue}
+          onDownloadSuccess={reload}
         />
       </section>
     </section>
