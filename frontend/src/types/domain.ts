@@ -1,5 +1,4 @@
 export type Severity = "green" | "amber" | "red" | "blue" | "violet";
-export type WorkflowTone = Severity | "primary";
 export type ViewKey =
   | "command"
   | "registry"

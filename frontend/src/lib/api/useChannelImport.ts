@@ -176,8 +176,8 @@ const isChannelId = (value: unknown): boolean => {
  * and leaves the SPA unable to reach Preview (review #184, codex P2).
  * Measured, not assumed:
  *
- *   python: "﻿Alpha".strip() -> unchanged
- *   node:   "﻿Alpha".trim()  -> "Alpha"
+ *   python: "\ufeffAlpha".strip() -> unchanged
+ *   node:   "\ufeffAlpha".trim()  -> "Alpha"
  *
  * The other direction is harmless: U+001C-U+001F are Python-space and not
  * JS-space, but the parser has already stripped them from the ends, so no

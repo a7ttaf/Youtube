@@ -3,7 +3,8 @@
 # required: true means fail if tool is missing (default: false = skip gracefully)
 #
 # UMS configuration: Python + shell + yaml + actions + markdown lanes are
-# enabled, plus the JS test and typecheck lanes now that frontend/ exists. Go /
+# enabled, plus the JS lint, test, and typecheck lanes now that frontend/ has a
+# checked-in toolchain. Go /
 # Rust / IaC / container lanes stay disabled because the v1.0 stack is FastAPI /
 # SQLAlchemy / Alembic on Python 3.14 with a React frontend. Re-enable a lane by
 # flipping its `enabled` field to `true`. See ci/UMS_INTEGRATION.md.
@@ -22,7 +23,7 @@ checks:
     timeout_sec: 60
 
   lint-js:
-    enabled: false  # UMS: no eslint config or lint script in frontend/ yet
+    enabled: true   # UMS: frontend/eslint.config.mjs + package lint script
     severity: blocker
     required: false
     tool: eslint
@@ -102,7 +103,7 @@ checks:
     tool: shfmt
 
   format-js:
-    enabled: false  # UMS: no prettier config or format:check script in frontend/ yet
+    enabled: false  # UMS: no formatter or format:check script in frontend/
     severity: blocker
     required: false
     tool: prettier

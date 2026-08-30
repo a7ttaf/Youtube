@@ -2,6 +2,7 @@ import js from "@eslint/js";
 import globals from "globals";
 import tseslint from "typescript-eslint";
 
+// Keep this flat config explicitly ESM so analyzers load the same module as ESLint.
 export default tseslint.config(
   js.configs.recommended,
   ...tseslint.configs.recommended,

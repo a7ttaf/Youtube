@@ -9,14 +9,12 @@ import type {
 } from "@/lib/api/types";
 import { useExportActions } from "@/lib/api/useExportActions";
 import { useExports } from "@/lib/api/useExports";
-import { EXPORTS_GUARDRAILS } from "@/fixtures/snapshotPanels";
 import type { Severity } from "@/types/domain";
 import {
   Badge,
   DEFAULT_MONTH,
   Dot,
   formatTimestamp,
-  ItemRow,
   MONTH_OPTIONS,
 } from "../shared";
 import { describeError } from "./CommandView";
@@ -31,8 +29,9 @@ import { describeError } from "./CommandView";
 //   configured so the Vite dev proxy injects the trusted-gateway + X-UMS-Tenant
 //   headers, or the configured VITE_API_BASE_URL origin otherwise — because the
 //   JSON-strict useApiClient cannot fetch binary. Loading / error / 403 states
-//   mirror CommandView and TraceView. The Export Guardrails side panel stays as
-//   static role context (it is descriptive, not API data).
+//   mirror CommandView and TraceView. Static guardrail statuses are omitted
+//   because no exports endpoint reports them; the jobs table is the source for
+//   export state.
 // Database/ORM: None (frontend) — consumes GET /exports (list), POST /exports
 //   (create, server-side insert + audit), and links to the binary download
 //   routes; downloads are served by the backend, never fetched client-side.
@@ -340,41 +339,6 @@ const ExportCenterHeader = () => {
       </div>
       <Badge tone="violet">Audited export</Badge>
     </div>
-  );
-};
-
-/** Header for the export guardrails side panel (title, description, policy badge). */
-const GuardrailsHeader = () => {
-  return (
-    <div className="panel-header">
-      <div className="panel-title">
-        <strong>Export Guardrails</strong>
-        <span>Every package records scope, filters, checksum, and actor</span>
-      </div>
-      <Badge tone="amber">Policy</Badge>
-    </div>
-  );
-};
-
-/** Static side panel listing the export guardrails (descriptive role context). */
-const ExportGuardrailsPanel = () => {
-  return (
-    <aside className="view-stack">
-      <section className="panel">
-        <GuardrailsHeader />
-        <div className="issue-list" role="list">
-          {EXPORTS_GUARDRAILS.map((g) => (
-            <ItemRow
-              key={g.title}
-              tone={g.tone}
-              title={g.title}
-              sub={g.sub}
-              trailing={<Badge tone={g.badge.tone}>{g.badge.text}</Badge>}
-            />
-          ))}
-        </div>
-      </section>
-    </aside>
   );
 };
 
@@ -863,46 +827,42 @@ const ExportsView = ({
 
   return (
     <section className="view-page" aria-labelledby="exportsTitle">
-      <div className="view-grid wide-side">
-        <section className="panel">
-          <ExportCenterHeader />
+      <section className="panel">
+        <ExportCenterHeader />
 
-          <RequestExportForm
-            exportType={effectiveExportType}
-            onExportType={setExportType}
-            reportTypeOptions={reportTypeOptions}
-            hasCreatableType={hasCreatableType}
-            scopeType={scopeType}
-            onScopeType={setScopeType}
-            scopeId={scopeId}
-            onScopeId={setScopeId}
-            requiresScopeId={requiresScopeId}
-            month={month}
-            onMonth={setMonth}
-            currency={currency}
-            onCurrency={setCurrency}
-            reason={reason}
-            onReason={setReason}
-            canCreateExport={canCreateExport}
-            canSubmit={canSubmit}
-            submitting={actions.loading}
-            onGenerate={onGenerate}
-          />
+        <RequestExportForm
+          exportType={effectiveExportType}
+          onExportType={setExportType}
+          reportTypeOptions={reportTypeOptions}
+          hasCreatableType={hasCreatableType}
+          scopeType={scopeType}
+          onScopeType={setScopeType}
+          scopeId={scopeId}
+          onScopeId={setScopeId}
+          requiresScopeId={requiresScopeId}
+          month={month}
+          onMonth={setMonth}
+          currency={currency}
+          onCurrency={setCurrency}
+          reason={reason}
+          onReason={setReason}
+          canCreateExport={canCreateExport}
+          canSubmit={canSubmit}
+          submitting={actions.loading}
+          onGenerate={onGenerate}
+        />
 
-          {actions.error ? <RequestError error={actions.error} /> : null}
-          {actions.data ? <RequestSuccess job={actions.data} /> : null}
+        {actions.error ? <RequestError error={actions.error} /> : null}
+        {actions.data ? <RequestSuccess job={actions.data} /> : null}
 
-          <ExportJobsTable
-            jobs={jobs}
-            loading={loading}
-            error={error}
-            onRefresh={reload}
-            canViewRevenue={canViewRevenue}
-          />
-        </section>
-
-        <ExportGuardrailsPanel />
-      </div>
+        <ExportJobsTable
+          jobs={jobs}
+          loading={loading}
+          error={error}
+          onRefresh={reload}
+          canViewRevenue={canViewRevenue}
+        />
+      </section>
     </section>
   );
 };

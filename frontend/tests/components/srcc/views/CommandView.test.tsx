@@ -257,6 +257,18 @@ describe("CommandView wired to net-revenue", () => {
     expect(screen.getByText("Live compute")).toBeInTheDocument();
   });
 
+  it("does not mount the deleted snapshot issue, close, or export panels", async () => {
+    routeFetch(() => jsonResponse(NET_REVENUE_BODY));
+    renderCommandView(true);
+
+    await screen.findByText("Live compute");
+    expect(screen.queryByText("Issue Queue")).not.toBeInTheDocument();
+    expect(screen.queryByText("Month Close Controls")).not.toBeInTheDocument();
+    expect(screen.queryByText("Export Readiness")).not.toBeInTheDocument();
+    expect(screen.queryByText("$4.82M")).not.toBeInTheDocument();
+    expect(screen.queryByText("A Official")).not.toBeInTheDocument();
+  });
+
   it("renders payment reconciliation cards from the backend month summary", async () => {
     routeFetch(() => jsonResponse(NET_REVENUE_BODY));
     renderCommandView(true);
@@ -542,9 +554,14 @@ describe("CommandView dynamic scope selector", () => {
         if (url.includes("/bank-reconciliation")) {
           return Promise.resolve(jsonResponse(BANK_RECONCILIATION_SUMMARY));
         }
-        // Any other read (net-revenue / rankings / smart-alerts) is recorded if
-        // it fires; net-revenue and rankings should NOT fire until the scopes
-        // promise resolves.
+        if (url.includes("/rankings")) {
+          return Promise.resolve(jsonResponse(RANKINGS_EMPTY));
+        }
+        if (url.includes("/smart-alerts")) {
+          return Promise.resolve(jsonResponse(SMART_ALERTS_CLEAR));
+        }
+        // Any other read (net-revenue) is recorded if it fires; net-revenue and
+        // rankings should NOT fire until the scopes promise resolves.
         return Promise.resolve(jsonResponse(NET_REVENUE_BODY));
       },
     );

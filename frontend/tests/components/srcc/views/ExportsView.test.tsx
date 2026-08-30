@@ -155,6 +155,16 @@ describe("ExportsView wired to the exports endpoint", () => {
     ).not.toBeInTheDocument();
   });
 
+  it("does not render the deleted static export guardrail panel", async () => {
+    fetchMock().mockResolvedValue(jsonResponse(EMPTY_LIST));
+    renderExportsView();
+
+    await screen.findByText(/No export jobs yet/i);
+    expect(screen.queryByText("Export Guardrails")).not.toBeInTheDocument();
+    expect(screen.queryByText("Confidence notes required")).not.toBeInTheDocument();
+    expect(screen.queryByText("Raw appendix restricted")).not.toBeInTheDocument();
+  });
+
   it("renders a populated list with a COMPLETED job and a download link to the proxied binary path", async () => {
     fetchMock().mockResolvedValue(jsonResponse(POPULATED_LIST));
     renderExportsView();

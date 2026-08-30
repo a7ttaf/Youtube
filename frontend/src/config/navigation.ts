@@ -1,13 +1,25 @@
-import type { ViewKey, WorkflowTone } from "@/types/domain";
+import type { ViewKey } from "@/types/domain";
 
+// ============================================================================
+// Purpose: Keep route labels and surface grouping presentation-only and keyed
+//          to the typed ViewKey union; navigation never carries finance counts.
+// Database/ORM: None; authoritative values are loaded by each routed view.
+// Standards: One canonical key list feeds route validation, sidebar buttons,
+//            and page copy without static status, currency, or KPI fixtures.
+// Blast Radius: Client navigation and labels only; no API or finance state.
+// Connections:
+//   - File: frontend/src/router/AppRouter.tsx -> validates route segments.
+//   - File: frontend/src/components/srcc/AppShell.tsx -> renders navigation.
+//   - File: frontend/src/components/srcc/views/* -> owns API-backed values.
+// ============================================================================
 export const VIEW_COPY: Record<ViewKey, { title: string; subtitle: string }> = {
   command: {
     title: "Revenue Command Center",
-    subtitle: "March 2026 close, UMS holding scope, USD reporting currency",
+    subtitle: "Net revenue, payment reconciliation, and open issues for the selected month",
   },
   registry: {
     title: "Channel Registry",
-    subtitle: "Ownership, CMS status, company scope, and SQL lineage controls",
+    subtitle: "Channel ownership, CMS status, company scope, and roster import",
   },
   groups: {
     title: "CMS Groups",
@@ -15,19 +27,19 @@ export const VIEW_COPY: Record<ViewKey, { title: string; subtitle: string }> = {
   },
   close: {
     title: "Month Close Workbench",
-    subtitle: "Payment reconciliation, allocation review, overrides, and lock controls",
+    subtitle: "Close readiness, lock and unlock controls, and the audited reason trail",
   },
   trace: {
     title: "SQL Trace Explorer",
-    subtitle: "Issue lineage filtered by SQL-backed application permissions",
+    subtitle: "Per-channel number explanation, filtered by your read permissions",
   },
   exports: {
     title: "Export Center",
-    subtitle: "Permission-controlled finance, executive, brand, and audit packages",
+    subtitle: "Permission-gated export requests and the artifacts they generate",
   },
   connectors: {
     title: "Connector Operations",
-    subtitle: "YouTube, Analytics, AdSense, raw files, and restricted job controls",
+    subtitle: "Credentials, run history, and permission-gated job controls",
   },
   audit: {
     title: "Audit Log",
@@ -36,50 +48,35 @@ export const VIEW_COPY: Record<ViewKey, { title: string; subtitle: string }> = {
   },
 };
 
-export const NAV_GROUPS: Array<{
+export const NAV_GROUPS: ReadonlyArray<{
   label: string;
-  items: Array<{ key: ViewKey; label: string; count: string; icon: string }>;
+  items: ReadonlyArray<{ key: ViewKey; label: string; icon: string }>;
 }> = [
   {
     label: "Workspace",
     items: [
-      { key: "command", label: "Command Center", count: "Live", icon: "command" },
-      { key: "registry", label: "Channel Registry", count: "318", icon: "registry" },
-      { key: "groups", label: "CMS Groups", count: "CMS", icon: "groups" },
-      { key: "close", label: "Month Close", count: "5", icon: "close" },
-      { key: "trace", label: "Trace Explorer", count: "SQL", icon: "trace" },
+      { key: "command", label: "Command Center", icon: "command" },
+      { key: "registry", label: "Channel Registry", icon: "registry" },
+      { key: "groups", label: "CMS Groups", icon: "groups" },
+      { key: "close", label: "Month Close", icon: "close" },
+      { key: "trace", label: "Trace Explorer", icon: "trace" },
     ],
   },
   {
     label: "Operations",
     items: [
-      { key: "exports", label: "Exports", count: "12", icon: "exports" },
-      { key: "connectors", label: "Connectors", count: "2", icon: "connectors" },
-      { key: "audit", label: "Audit Log", count: "AA", icon: "audit" },
+      { key: "exports", label: "Exports", icon: "exports" },
+      { key: "connectors", label: "Connectors", icon: "connectors" },
+      { key: "audit", label: "Audit Log", icon: "audit" },
     ],
   },
 ];
 
-export const WORKFLOW_STEPS: Array<{ state: string; tone: WorkflowTone; label: string }> = [
-  { state: "is-done", tone: "green", label: "Reports" },
-  { state: "is-done", tone: "green", label: "Normalize" },
-  { state: "is-done", tone: "green", label: "Payments" },
-  { state: "is-current", tone: "primary", label: "Allocate" },
-  { state: "", tone: "amber", label: "Lock" },
-  { state: "", tone: "amber", label: "Export" },
-];
+export const VIEW_KEYS: ReadonlyArray<ViewKey> = NAV_GROUPS.flatMap((group) =>
+  group.items.map((item) => item.key),
+);
 
-export const VIEW_KEYS: ViewKey[] = [
-  "command",
-  "registry",
-  "groups",
-  "close",
-  "trace",
-  "exports",
-  "connectors",
-  "audit",
-];
-
-export function isViewKey(value: string): value is ViewKey {
+/** Return true only for a view key declared in the canonical navigation map. */
+export const isViewKey = (value: string): value is ViewKey => {
   return (VIEW_KEYS as string[]).includes(value);
-}
+};

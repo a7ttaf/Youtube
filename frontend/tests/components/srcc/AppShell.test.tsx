@@ -1,15 +1,17 @@
 // frontend/src/components/srcc/__tests__/AppShell.test.tsx
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { ReactNode } from "react";
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { StrictMode } from "react";
-import { MemoryRouter } from "react-router-dom";
+import { createMemoryRouter, RouterProvider } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import AppShell, { isImportScopeSettled } from "@/components/srcc/AppShell";
+import { DEFAULT_MONTH, MONTH_OPTIONS } from "@/components/srcc/shared";
 import { SessionProvider } from "@/contexts/SessionContext";
 import { TenantProvider } from "@/contexts/TenantContext";
 import type { SessionMe } from "@/lib/api/types";
+import { monthKeyLabel } from "@/lib/months";
 import { withDisplayDigest } from "../../helpers/displayDigestFixtures";
 
 const ORIGINAL_FETCH = globalThis.fetch;
@@ -90,6 +92,72 @@ const NET_REVENUE_BODY = {
   audit_events: [],
 };
 
+const traceChannel = (youtube_channel_id: string) => ({
+  month: "2026-03",
+  youtube_channel_id,
+  status: "CALCULATED",
+  primary_source_kind: "youtube_cms",
+  baseline_gross_revenue_usd: "0",
+  baseline_net_revenue_usd: "0",
+  approved_manual_override_total_usd: "0",
+  adjusted_gross_revenue_usd: "0",
+  net_revenue_usd: "0",
+  deduction_amount_usd: "0",
+  channel_direct_deduction_amount_usd: "0",
+  account_allocated_deduction_amount_usd: "0",
+  deduction_percentage: "0",
+  confidence: "A",
+  approved_manual_override_count: 0,
+  pending_manual_override_count: 0,
+  issues: [],
+});
+
+const TRACE_REVENUE_BODY = {
+  ...NET_REVENUE_BODY,
+  channel_count: 2,
+  calculated_channel_count: 2,
+  channels: [
+    traceChannel("UC-FIRST-LIVE"),
+    traceChannel("UC-SECOND-LIVE"),
+  ],
+};
+
+const TRACE_REGISTRY_CHANNELS = [
+  {
+    youtube_channel_id: "UC-FIRST-LIVE",
+    channel_name: "First Live Channel",
+    primary_company_id: "company-1",
+    cms_status: "INSIDE_CMS",
+    content_owner_id: "OWNERaaa",
+    revenue_required: false,
+    revenue_source_status: "PERFORMANCE_ONLY",
+    active: true,
+  },
+  {
+    youtube_channel_id: "UC-SECOND-LIVE",
+    channel_name: "Second Live Channel",
+    primary_company_id: "company-1",
+    cms_status: "INSIDE_CMS",
+    content_owner_id: "OWNERaaa",
+    revenue_required: false,
+    revenue_source_status: "PERFORMANCE_ONLY",
+    active: true,
+  },
+];
+
+const EMPTY_RANKINGS_BODY = {
+  month: "2026-03",
+  scope_type: "global",
+  scope_id: null,
+  metric: "gross",
+  limit: 10,
+  allocation_source: "live_compute",
+  committed_run: null,
+  companies: [],
+  sectors: [],
+  channels: [],
+};
+
 const urlOf = (input: unknown): string => {
   if (typeof input === "string") return input;
   if (input instanceof URL) return input.toString();
@@ -129,6 +197,38 @@ const tenantFetchCalls = () => {
   const mock = globalThis.fetch as unknown as ReturnType<typeof vi.fn>;
   return mock.mock.calls.filter(([input]) => isTenantCall(input));
 };
+
+/** Render a shell tree inside a data router so blocker behavior matches production. */
+const renderDataRouter = (
+  tree: ReactNode,
+  initialEntries: string[] = ["/command"],
+) => {
+  const queryClient = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  });
+  const router = createMemoryRouter(
+    [{ path: "*", element: tree }],
+    { initialEntries },
+  );
+  const rendered = render(
+    <QueryClientProvider client={queryClient}>
+      <RouterProvider router={router} />
+    </QueryClientProvider>,
+  );
+  return {
+    ...rendered,
+    router,
+    unmount: () => {
+      rendered.unmount();
+      router.dispose();
+    },
+  };
+};
+
+const renderShellTree = (
+  tree: ReactNode,
+  initialEntries: string[] = ["/command"],
+) => renderDataRouter(tree, initialEntries);
 
 describe("import scope settling", () => {
   // The rule that decides whether an import may be ADMITTED at all. Its effect
@@ -441,33 +541,15 @@ const routeFetchWithSession = (sessionResponder: () => Response) => {
   };
 };
 
-const renderShell = () => {
-  const queryClient = new QueryClient({
-    defaultOptions: { queries: { retry: false } },
-  });
-  return render(
-    <QueryClientProvider client={queryClient}>
-      <MemoryRouter initialEntries={["/command"]}>
-        <SessionProvider>
-          <TenantProvider initialSlug="ums">
-            <AppShell initialView="command" />
-          </TenantProvider>
-        </SessionProvider>
-      </MemoryRouter>
-    </QueryClientProvider>,
+const renderShell = (initialEntries: string[] = ["/command"]) =>
+  renderDataRouter(
+    <SessionProvider>
+      <TenantProvider initialSlug="ums">
+        <AppShell initialView="command" />
+      </TenantProvider>
+    </SessionProvider>,
+    initialEntries,
   );
-};
-
-const renderShellTree = (tree: ReactNode) => {
-  const queryClient = new QueryClient({
-    defaultOptions: { queries: { retry: false } },
-  });
-  return render(
-    <QueryClientProvider client={queryClient}>
-      <MemoryRouter initialEntries={["/command"]}>{tree}</MemoryRouter>
-    </QueryClientProvider>,
-  );
-};
 
 describe("AppShell production session hydration", () => {
   afterEach(() => {
@@ -494,6 +576,29 @@ describe("AppShell production session hydration", () => {
     const roleControl = screen.getByLabelText(/current role/i);
     expect(roleControl.tagName).toBe("OUTPUT");
     expect(screen.queryByTestId("role-preview-hint")).not.toBeInTheDocument();
+  });
+
+  it("reads /session/me exactly once when StrictMode replays the shell mount", async () => {
+    vi.stubEnv("DEV", false);
+    vi.stubEnv("VITE_ENABLE_ROLE_PREVIEW", "");
+    const fetchMock = globalThis.fetch as ReturnType<typeof vi.fn>;
+    fetchMock.mockImplementation(
+      routeFetchWithSession(() => jsonResponse(sessionBody({ canViewRevenue: true }))),
+    );
+
+    renderDataRouter(
+      <StrictMode>
+        <SessionProvider>
+          <TenantProvider>
+            <AppShell initialView="command" />
+          </TenantProvider>
+        </SessionProvider>
+      </StrictMode>,
+    );
+
+    expect(await screen.findByText(/money visible/i)).toBeInTheDocument();
+    const sessionCalls = fetchMock.mock.calls.filter(([input]) => isSessionCall(input));
+    expect(sessionCalls).toHaveLength(1);
   });
 
   it("PRODUCTION: withheld canViewRevenue gates finance cells to the Restricted sentinel", async () => {
@@ -714,6 +819,84 @@ describe("AppShell production session hydration", () => {
   });
 });
 
+// ------------------------------------------------------------- month chrome
+
+describe("AppShell topbar month filter", () => {
+  it("MONTH CHROME: options and the default derive from the rolling window", async () => {
+    (globalThis.fetch as ReturnType<typeof vi.fn>).mockImplementation(
+      routeFetchWithSession(() => jsonResponse(sessionBody({ canViewRevenue: true }))),
+    );
+    renderShell();
+
+    // The wired CommandView carries its own aria-label="Month" selector, so
+    // scope to the topbar's "Report filters" control row before querying.
+    const reportFilters = await screen.findByLabelText("Report filters");
+    const monthSelect = within(reportFilters).getByLabelText("Month") as HTMLSelectElement;
+    const renderedLabels = within(monthSelect)
+      .getAllByRole("option")
+      .map((option) => option.textContent);
+    // Same source as every wired view's selector — no second hardcoded list.
+    expect(renderedLabels).toEqual(MONTH_OPTIONS.map(monthKeyLabel));
+    expect(monthSelect.value).toBe(monthKeyLabel(DEFAULT_MONTH));
+  });
+});
+
+describe("AppShell fixture-free chrome", () => {
+  it("does not render removed snapshot finance values or static nav counters", async () => {
+    (globalThis.fetch as ReturnType<typeof vi.fn>).mockImplementation(
+      routeFetchWithSession(() => jsonResponse(sessionBody({ canViewRevenue: true }))),
+    );
+    renderShell();
+
+    const sidebar = await screen.findByRole("complementary", { name: "Primary navigation" });
+    await screen.findByText(/money visible/i);
+    expect(within(sidebar).queryByText("318")).not.toBeInTheDocument();
+    expect(screen.queryByText("A Official")).not.toBeInTheDocument();
+    expect(screen.queryByText("$31.4K")).not.toBeInTheDocument();
+    expect(screen.queryByText(/March 2026 close, UMS holding scope, USD reporting currency/i)).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /create export/i })).not.toBeInTheDocument();
+  });
+
+  it("clears a Registry Review trace seed across route transitions", async () => {
+    const routed = routeFetchWithSession(() =>
+      jsonResponse(sessionBody({ canViewRevenue: true, canManageRegistry: true })),
+    );
+    (globalThis.fetch as ReturnType<typeof vi.fn>).mockImplementation((input: unknown) => {
+      const path = requestPathOf(input);
+      if (path === "/channels") return Promise.resolve(jsonResponse(TRACE_REGISTRY_CHANNELS));
+      if (path.endsWith("/net-revenue")) {
+        return Promise.resolve(jsonResponse(TRACE_REVENUE_BODY));
+      }
+      if (path.endsWith("/rankings")) return Promise.resolve(jsonResponse(EMPTY_RANKINGS_BODY));
+      if (path === "/org-units") return Promise.resolve(jsonResponse([]));
+      return routed(input);
+    });
+    const rendered = renderShell();
+
+    await screen.findByRole("complementary", { name: "Primary navigation" });
+    fireEvent.click(navButton("Channel Registry"));
+    const secondRow = await waitFor(() => {
+      const row = screen.getByText("Second Live Channel").closest("tr");
+      if (!row) throw new Error("registry row not rendered");
+      return row;
+    });
+    fireEvent.click(within(secondRow).getByRole("button", { name: "Review" }));
+
+    const channel = (await screen.findByLabelText("Channel")) as HTMLSelectElement;
+    await waitFor(() => expect(channel.value).toBe("UC-SECOND-LIVE"));
+
+    await act(async () => {
+      await rendered.router.navigate("/command");
+    });
+    await waitFor(() => expect(screen.queryByLabelText("Channel")).not.toBeInTheDocument());
+    await act(async () => {
+      await rendered.router.navigate("/trace");
+    });
+    const reenteredChannel = (await screen.findByLabelText("Channel")) as HTMLSelectElement;
+    await waitFor(() => expect(reenteredChannel.value).toBe("UC-FIRST-LIVE"));
+  });
+});
+
 // ---------------------------------------------------------------- groups nav
 
 describe("AppShell groups navigation", () => {
@@ -848,6 +1031,19 @@ const IMPORT_SHELL_ROUTES: FetchRouteMap = new Map([
   ["/channels", () => jsonResponse(IMPORT_CHANNELS)],
   ["/org-units", () => jsonResponse([])],
   ["/connectors/content-owners", () => jsonResponse({ items: [{ account_id: "OWNERaaa" }] })],
+  [
+    "/audit/events",
+    () =>
+      jsonResponse({
+        items: [],
+        pagination: { limit: 50, has_more: false, next_cursor: null },
+        audit_event: {},
+      }),
+  ],
+  [
+    "/audit/summary",
+    () => jsonResponse({ total_events: 0, sensitive_events: 0, recent_count: 0, window_hours: 24 }),
+  ],
 ]);
 
 describe("AppShell navigation latch during an un-abortable write", () => {
@@ -939,6 +1135,50 @@ describe("AppShell navigation latch during an un-abortable write", () => {
       expect(screen.getByRole("group", { name: "Import applied" })).toBeInTheDocument(),
     );
     expect(navButton("CMS Groups")).toBeEnabled();
+  });
+
+  it("NAV LATCH: blocks browser Back and Forward while an import apply is in flight", async () => {
+    const applyGate = deferredImportResponse();
+    let firstCall = true;
+    const rendered = await openImportPreview(() => {
+      if (firstCall) {
+        firstCall = false;
+        return jsonResponse(IMPORT_PLAN);
+      }
+      return applyGate.pending;
+    });
+
+    // Add and then leave a same-view history entry so both directions have a
+    // concrete target without unmounting the import preview.
+    await act(async () => {
+      await rendered.router.navigate("/registry?history-probe=1");
+      await rendered.router.navigate(-1);
+    });
+    expect(rendered.router.state.location.pathname).toBe("/registry");
+
+    fireEvent.click(screen.getByRole("button", { name: /^apply$/iu }));
+    await waitFor(() => expect(navButton("CMS Groups")).toBeDisabled());
+
+    // A blocked Back leaves the route and the preview mounted at the current
+    // entry; the reset is intentional, not an accepted transition.
+    await act(async () => {
+      await rendered.router.navigate(-1);
+    });
+    expect(rendered.router.state.location.pathname).toBe("/registry");
+    expect(screen.getByRole("group", { name: "Import preview" })).toBeInTheDocument();
+
+    // Forward is independently blocked as well; this catches guards that only
+    // cover sidebar/programmatic PUSH navigation.
+    await act(async () => {
+      await rendered.router.navigate(1);
+    });
+    expect(rendered.router.state.location.pathname).toBe("/registry");
+    expect(screen.getByRole("group", { name: "Import preview" })).toBeInTheDocument();
+
+    applyGate.release(jsonResponse({ ...IMPORT_PLAN, dry_run: false }));
+    await waitFor(() =>
+      expect(screen.getByRole("group", { name: "Import applied" })).toBeInTheDocument(),
+    );
   });
 
   it("NAV LATCH: leaves navigation free during the read-only dry run", async () => {

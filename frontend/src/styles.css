@@ -277,12 +277,6 @@ button:focus-visible, select:focus-visible, input:focus-visible {
   border-color: color-mix(in oklch, var(--primary) 38%, var(--line));
   color: var(--ink);
 }
-.nav-count {
-  font-size: 11px;
-  color: var(--faint);
-  transition: color 160ms var(--ease-out-quart);
-}
-.nav-item:hover .nav-count { color: var(--muted); }
 
 .role-card {
   margin-top: auto;
@@ -369,27 +363,6 @@ button:focus-visible, select:focus-visible, input:focus-visible {
   letter-spacing: 0;
 }
 .page-title p { margin: 3px 0 0; color: var(--muted); font-size: 12px; }
-
-.operational-cues { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 5px; }
-.cue {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  min-height: 24px;
-  padding: 3px 8px;
-  border-radius: 999px;
-  border: 1px solid var(--line);
-  background: color-mix(in oklch, var(--panel) 86%, var(--panel-soft));
-  color: var(--muted);
-  font-size: 11px;
-  font-weight: 650;
-  white-space: nowrap;
-}
-.cue strong { color: var(--ink); font-weight: 760; }
-.cue.green  { background: color-mix(in oklch, var(--green-soft) 72%, var(--panel)); border-color: color-mix(in oklch, var(--green) 22%, var(--line)); }
-.cue.amber  { background: color-mix(in oklch, var(--amber-soft) 74%, var(--panel)); border-color: color-mix(in oklch, var(--amber) 24%, var(--line)); }
-.cue.red    { background: color-mix(in oklch, var(--red-soft) 72%, var(--panel)); border-color: color-mix(in oklch, var(--red) 23%, var(--line)); }
-.cue.violet { background: color-mix(in oklch, var(--violet-soft) 74%, var(--panel)); border-color: color-mix(in oklch, var(--violet) 22%, var(--line)); }
 
 .control-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
 .control {
@@ -854,19 +827,8 @@ tbody tr:hover .avatar { border-color: color-mix(in oklch, var(--primary) 30%, v
 }
 
 /* =========================================================================
- * Workflow rail (footer)
+ * Step indicator (ActionStepper)
  * =======================================================================*/
-.workflow {
-  border-top: 1px solid var(--line);
-  background: color-mix(in oklch, var(--panel) 86%, var(--panel-soft));
-  padding: 11px 22px;
-  display: grid;
-  grid-template-columns: auto 1fr auto;
-  align-items: center;
-  gap: 14px;
-}
-.workflow-label { font-size: 12px; font-weight: 760; display: grid; gap: 2px; }
-.workflow-label span { color: var(--muted); font-size: 11px; font-weight: 560; }
 .steps {
   display: grid;
   grid-template-columns: repeat(6, minmax(100px, 1fr));
@@ -1071,7 +1033,6 @@ tbody tr:hover .avatar { border-color: color-mix(in oklch, var(--primary) 30%, v
   .brand div:not(.brand-mark),
   .nav-title,
   .nav-item span:not(.icon),
-  .nav-count,
   .role-card label,
   .role-meta { display: none; }
   .brand { justify-content: center; }

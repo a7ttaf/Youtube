@@ -5,9 +5,16 @@ import {
   type DisplayDigestPlanFields,
 } from "@/lib/displayDigestCore";
 
+type SchedulerWithYield = {
+  yield: () => Promise<void>;
+};
+
 const yieldToMainThread = async (): Promise<void> => {
-  if (typeof scheduler !== "undefined" && "yield" in scheduler) {
-    await (scheduler as Scheduler & { yield: () => Promise<void> }).yield();
+  const schedulerApi = (
+    globalThis as typeof globalThis & { scheduler?: SchedulerWithYield }
+  ).scheduler;
+  if (schedulerApi && typeof schedulerApi.yield === "function") {
+    await schedulerApi.yield();
     return;
   }
   await new Promise<void>((resolve) => {

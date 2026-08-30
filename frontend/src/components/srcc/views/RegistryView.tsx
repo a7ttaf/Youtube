@@ -7,11 +7,10 @@ import { useChannels } from "@/lib/api/useChannels";
 import { useProposeAccountLinkAction } from "@/lib/api/useChannelAccountLinks";
 import { useOrgUnits } from "@/lib/api/useOrgUnits";
 import type { Severity } from "@/types/domain";
-import { REGISTRY_CONTROLS, REGISTRY_SUMMARY } from "@/fixtures/snapshotPanels";
+import { currentMonthKey } from "@/lib/months";
 import {
   Badge,
   Dot,
-  ItemRow,
   RESTRICTED_FINANCE_VALUE,
   SummaryTile,
 } from "../shared";
@@ -58,7 +57,8 @@ import { useUnsettledImport } from "@/contexts/UnsettledImportContext";
 // ---- Client-side derivation helpers ----------------------------------------
 
 /** Compute up to 2-char initials from a channel display name. */
-const avatarFromName = (name: string): string =>  name
+const avatarFromName = (name: string): string =>
+  name
     .split(/\s+/)
     .filter(Boolean)
     .slice(0, 2)
@@ -170,34 +170,48 @@ const describeMutationError = (err: unknown): string => {
 
 // ---- Summary tile counts (derived from fetched channels) -------------------
 
+type RegistrySummaryTile = {
+  label: string;
+  value: string;
+  note: string;
+};
+
 // ============================================================================
-// Purpose: Derive display values for all four summary tiles from the live
-//   channel response. Returns neutral values (loading: "…", error: "—") when
-//   channels is null so mock numbers are never shown during load or on error.
-//   Finance tiles (Unmapped revenue, Scoped changes) have no live source —
-//   they show "—" after a successful fetch rather than static mock numbers.
+// Purpose: Derive the registry summary tiles from the live channel response.
+//   Both tiles count the same fetched rows the table renders, so the header
+//   cannot disagree with the body. No finance tile is fabricated here.
+// Database/ORM: None (frontend read-model derivation).
+// Standards: Loading and error states stay neutral; only API-backed channel
+//            counts are rendered and outside-CMS counts use the backend enum.
+// Blast Radius: Registry header display only; no mutation or finance math.
 //   Outside-CMS count includes ONLY channels with cms_status === "OUTSIDE_CMS".
 // ============================================================================
 const buildSummaryTiles = (
   channels: ChannelRegistryEntry[] | null,
   loading: boolean,
-  baseStatic: typeof REGISTRY_SUMMARY,
-): typeof REGISTRY_SUMMARY => {
-  const neutral = loading ? "…" : "—";
+): RegistrySummaryTile[] => {
   if (!channels) {
-    return baseStatic.map((tile) => ({ ...tile, value: neutral, note: "" }));
+    const neutral = loading ? "…" : "—";
+    return [
+      { label: "Active channels", value: neutral, note: "" },
+      { label: "Outside CMS", value: neutral, note: "" },
+    ];
   }
-  const activeCount = channels.length;
   const outsideCmsCount = channels.filter(
     (ch) => ch.cms_status === "OUTSIDE_CMS",
   ).length;
-  return baseStatic.map((tile) => {
-    // FIX: always clear note — mock subtitle copy contradicts live-derived values.
-    if (tile.label === "Active channels") return { ...tile, value: String(activeCount), note: "" };
-    if (tile.label === "Outside CMS") return { ...tile, value: String(outsideCmsCount), note: "" };
-    // Finance tiles (Unmapped revenue, Scoped changes): no live source yet.
-    return { ...tile, value: "—", note: "" };
-  });
+  return [
+    {
+      label: "Active channels",
+      value: String(channels.length),
+      note: "Channels returned by the registry read",
+    },
+    {
+      label: "Outside CMS",
+      value: String(outsideCmsCount),
+      note: "Channels whose CMS status is OUTSIDE_CMS",
+    },
+  ];
 };
 
 type ChannelAsyncState = ReturnType<typeof useChannels>;
@@ -570,6 +584,14 @@ export const warnedIdsForAcknowledgement = (
   return captured.length > 0 ? captured : livePendingIds;
 };
 
+/**
+ * Warning callout rendered while an import response never arrived
+ * (importUnsettled): the rows below may predate the import, so reload before
+ * judging and never re-import blindly. canViewAudit switches only the guidance
+ * copy and the acknowledge button's label — acknowledgement itself is NOT
+ * permission-gated; a viewer without audit access acknowledges on trust that
+ * someone with access confirmed the outcome.
+ */
 const UnsettledImportNotice = ({
   canViewAudit,
   onReload,
@@ -908,12 +930,6 @@ const MappingChangeRequestPanel = ({
   );
 };
 
-/** Current month as YYYY-MM for the proposal default (operator can change it). */
-const currentMonth = (): string => {
-  const now = new Date();
-  return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
-};
-
 /** May the operator act on the proposal form at all (permission held, no submit in flight)? */
 const canActOnProposal = (canManageRegistry: boolean, busy: boolean): boolean =>
   canManageRegistry && !busy;
@@ -981,7 +997,9 @@ const AccountLinkProposalPanel = ({
 }) => {
   const [adsenseAccountId, setAdsenseAccountId] = useState("");
   const [contentOwnerId, setContentOwnerId] = useState("");
-  const [effectiveMonthStart, setEffectiveMonthStart] = useState(currentMonth);
+  // Current month as YYYY-MM for the proposal default (operator can change it);
+  // the shared months.ts derivation, not a second local copy of the arithmetic.
+  const [effectiveMonthStart, setEffectiveMonthStart] = useState(currentMonthKey);
   const [reason, setReason] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -997,7 +1015,7 @@ const AccountLinkProposalPanel = ({
     if (context) {
       setAdsenseAccountId("");
       setContentOwnerId("");
-      setEffectiveMonthStart(currentMonth());
+      setEffectiveMonthStart(currentMonthKey());
       setReason("");
       setConfirmation(null);
       setError(null);
@@ -1027,7 +1045,7 @@ const AccountLinkProposalPanel = ({
       setBusy(false);
       setAdsenseAccountId("");
       setContentOwnerId("");
-      setEffectiveMonthStart(currentMonth());
+      setEffectiveMonthStart(currentMonthKey());
       setReason("");
       setConfirmation(
         "Link proposed (UNVERIFIED) — verification is a separate admin step.",
@@ -1118,32 +1136,7 @@ const AccountLinkProposalPanel = ({
   );
 };
 
-/** The registry-controls panel listing the expected production behaviors. */
-const RegistryControlsPanel = () => {
-  return (
-    <section className="panel">
-      <div className="panel-header">
-        <div className="panel-title">
-          <strong>Registry Controls</strong>
-          <span>Active safeguards for registry operations</span>
-        </div>
-      </div>
-      <div className="issue-list" role="list">
-        {REGISTRY_CONTROLS.map((c) => (
-          <ItemRow
-            key={c.title}
-            tone={c.tone}
-            title={c.title}
-            sub={c.sub}
-            trailing={<Badge tone={c.badge.tone}>{c.badge.text}</Badge>}
-          />
-        ))}
-      </div>
-    </section>
-  );
-};
-
-/** Registry side panels: the live mapping-change form, the account-link proposal form, and registry controls. */
+/** Registry side panels: the live mapping-change and account-link forms. */
 const RegistrySidePanels = ({
   canManageRegistry,
   channels,
@@ -1173,7 +1166,6 @@ const RegistrySidePanels = ({
         context={assignContext}
         onProposed={onMutated}
       />
-      <RegistryControlsPanel />
     </aside>
   );
 };
@@ -1250,11 +1242,7 @@ const RegistryView = ({
     [orgUnitState.data],
   );
 
-  const summaryTiles = buildSummaryTiles(
-    channelState.data,
-    channelState.loading,
-    REGISTRY_SUMMARY,
-  );
+  const summaryTiles = buildSummaryTiles(channelState.data, channelState.loading);
 
   const onMap = useCallback(
     (ch: ChannelRegistryEntry) =>

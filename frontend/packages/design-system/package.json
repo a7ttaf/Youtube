@@ -6,5 +6,8 @@
   "main": "./src/index.tsx",
   "exports": {
     ".": "./src/index.tsx"
+  },
+  "peerDependencies": {
+    "react": ">=18"
   }
 }

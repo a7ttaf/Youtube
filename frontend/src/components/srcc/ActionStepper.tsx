@@ -57,9 +57,8 @@ export type ActionStepperProps = {
 
 /**
  * Tone for a step's leading Dot: green once passed, the default (primary)
- * dot for the active step, amber while still upcoming — the same
- * done/current/pending coloring AppShell's WorkflowRail already uses for its
- * own step Dots (see workflowDotTone in shared.tsx).
+ * dot for the active step, amber while still upcoming — the same visual
+ * language used by the shared status primitives.
  */
 const stepDotTone = (index: number, activeIndex: number): Severity | undefined => {
   if (index < activeIndex) {

@@ -6,13 +6,26 @@ type MoneyCellProps = {
   className?: string;
 };
 
-export function MoneyCell({ value, currency = "USD", className }: MoneyCellProps) {
+// ============================================================================
+// Purpose: Render a finance value without deriving or mutating its meaning.
+// Database/ORM: None; the value is supplied by an API-backed view model.
+// Standards: Keep presentation-only formatting at the design-system boundary.
+// Blast Radius: None detected; this component does not calculate finance.
+// Connections:
+//   - File: frontend/src/styles.css -> shared money-cell presentation tokens.
+// ============================================================================
+/** Render an API-provided money value with its display currency metadata. */
+export const MoneyCell = ({
+  value,
+  currency = "USD",
+  className,
+}: MoneyCellProps) => {
   return (
     <span className={className} data-currency={currency} data-testid="money-cell">
       {value}
     </span>
   );
-}
+};
 
 type ConfidenceBadgeProps = {
   label: string;
@@ -21,22 +34,35 @@ type ConfidenceBadgeProps = {
 };
 
 const TONE_CLASS: Record<Severity, string> = {
-  green: "badge-tone-green",
-  amber: "badge-tone-amber",
-  red: "badge-tone-red",
-  blue: "badge-tone-blue",
-  violet: "badge-tone-violet",
+  green: "green",
+  amber: "amber",
+  red: "red",
+  blue: "blue",
+  violet: "violet",
 };
 
-export function ConfidenceBadge({ label, tone, className }: ConfidenceBadgeProps) {
+// ============================================================================
+// Purpose: Render a confidence/severity label using the shared badge contract.
+// Database/ORM: None; the tone is supplied by the typed domain model.
+// Standards: Preserve the base `badge` class so global design tokens apply.
+// Blast Radius: None detected; this component is presentation-only.
+// Connections:
+//   - File: frontend/src/styles.css -> `.badge` plus the typed tone classes.
+// ============================================================================
+/** Render a typed confidence label with the shared badge treatment. */
+export const ConfidenceBadge = ({
+  label,
+  tone,
+  className,
+}: ConfidenceBadgeProps) => {
   return (
     <span
-      className={[TONE_CLASS[tone], className].filter(Boolean).join(" ")}
+      className={["badge", TONE_CLASS[tone], className].filter(Boolean).join(" ")}
       data-testid="confidence-badge"
     >
       {label}
     </span>
   );
-}
+};
 
 export type { MoneyCellProps, ConfidenceBadgeProps };
