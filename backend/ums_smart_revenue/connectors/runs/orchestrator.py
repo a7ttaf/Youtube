@@ -1954,6 +1954,8 @@ def _delete_stale_source_rows(
 
 @dataclass(frozen=True)
 class _RawReportDescriptor:
+    """Identify the connector scope and month owning one raw report."""
+
     connector_key: str
     source_system: str
     report_type: str
@@ -1962,6 +1964,8 @@ class _RawReportDescriptor:
 
 @dataclass(frozen=True)
 class _RawReportStorageContext:
+    """Carry blob-storage settings and the triggering actor for raw evidence."""
+
     backend: BlobStorageBackend
     scheme: str
     bucket: str
@@ -1970,12 +1974,16 @@ class _RawReportStorageContext:
 
 @dataclass(frozen=True)
 class _RawReportAuditContext:
+    """Carry the audit sink and principal used for raw-report lifecycle events."""
+
     sink: AuditSink
     actor: UserPrincipal
 
 
 @dataclass(frozen=True)
 class _RawReportLinkContext:
+    """Carry transaction state needed to link raw evidence to a connector run."""
+
     session: Session
     tenant_id: UUID
     run_entry: ConnectorRunEntry
@@ -2695,8 +2703,9 @@ def _csv_reports_to_parser_payload(
 # Purpose: Decode one Google CSV report, validate its header, and fold each
 #          row into monthly parser totals.
 # Database/ORM: None.
-# Standards: UTF-8 and CSV-shape failures are typed as GoogleApiResponseError
-#            so live runs persist downloaded evidence before marking failure.
+# Standards: UTF-8 and CSV-shape failures are typed as GoogleApiResponseError;
+#            normalized fieldnames keep header and row contracts identical so
+#            live runs persist evidence before marking malformed input failed.
 # Blast Radius: Parser payload construction for YouTube Reporting revenue rows.
 #               No graph projection impact detected.
 # Connections:
@@ -2723,8 +2732,15 @@ def _accumulate_csv_report_bytes(
     except UnicodeDecodeError as exc:
         raise _parser_payload_error(report_id=report_id, reason="csv is not valid utf-8") from exc
     reader = csv.DictReader(io.StringIO(text))
+    normalized_fieldnames = _normalize_csv_fieldnames(
+        reader.fieldnames, report_id=report_id
+    )
+    # DictReader uses its fieldnames as the row-dictionary keys. Replace the
+    # raw names with the validated normalized names so header validation and
+    # row lookup apply the same whitespace/case contract.
+    reader.fieldnames = list(normalized_fieldnames)
     default_currency = _validate_csv_headers(
-        reader.fieldnames, report_id=report_id, report_type=report_type
+        normalized_fieldnames, report_id=report_id, report_type=report_type
     )
     for csv_row in reader:
         _accumulate_csv_row(
@@ -2738,38 +2754,90 @@ def _accumulate_csv_report_bytes(
 
 
 # ============================================================================
-# Purpose: Validate that a downloaded CSV has the columns required to build
-#          parser rows.
+# Purpose: Normalize downloaded CSV fieldnames before DictReader exposes row
+#          dictionaries, rejecting malformed or duplicate normalized headers.
 # Database/ORM: None.
-# Standards: Empty/headerless/missing-column payloads become typed upstream
-#            response errors instead of parser KeyError/None drift.
+# Standards: Header names are trimmed/lower-cased once; blank and duplicate
+#            normalized names become typed upstream response errors instead of
+#            allowing DictReader's last-value-wins behavior.
 # Blast Radius: YouTube Reporting CSV acceptance only. No graph projection
 #               impact detected.
 # Connections:
-#   - Function: _accumulate_csv_report_bytes -> calls this before row parsing.
+#   - Function: _accumulate_csv_report_bytes -> installs normalized names.
+#   - Function: _validate_csv_headers -> checks required normalized aliases.
 # ============================================================================
-def _validate_csv_headers(
-    fieldnames: Sequence[str] | None, *, report_id: str, report_type: str
-) -> str | None:
-    """Confirm the CSV header set contains the metric column expected for ``report_type``."""
+def _normalize_csv_fieldnames(
+    fieldnames: Sequence[str] | None, *, report_id: str
+) -> tuple[str, ...]:
+    """Return unique normalized CSV headers or raise a typed shape error."""
     if not fieldnames:
         raise _parser_payload_error(
             report_id=report_id,
             reason="csv missing header row",
         )
-    headers = {
-        field.strip().lower() for field in fieldnames if isinstance(field, str) and field.strip()
-    }
+
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for index, raw_field in enumerate(fieldnames):
+        if not isinstance(raw_field, str) or not raw_field.strip():
+            raise _parser_payload_error(
+                report_id=report_id,
+                reason=f"csv invalid header column at index {index}",
+            )
+        normalized_field = raw_field.strip().lower()
+        if normalized_field in seen:
+            raise _parser_payload_error(
+                report_id=report_id,
+                reason=f"csv duplicate header column {normalized_field!r}",
+            )
+        seen.add(normalized_field)
+        normalized.append(normalized_field)
+    return tuple(normalized)
+
+
+# ============================================================================
+# Purpose: Validate that a downloaded CSV has the columns required to build
+#          parser rows and exactly one supported revenue metric.
+# Database/ORM: None.
+# Standards: Empty/headerless/missing-column/conflicting-alias payloads become
+#            typed upstream response errors instead of parser KeyError, silent
+#            last-value-wins behavior, or ambiguous finance totals.
+# Blast Radius: YouTube Reporting CSV acceptance only. No graph projection
+#               impact detected.
+# Connections:
+#   - Function: _accumulate_csv_report_bytes -> calls this before row parsing.
+#   - Function: _normalize_csv_fieldnames -> establishes the header contract.
+# ============================================================================
+def _validate_csv_headers(
+    fieldnames: Sequence[str] | None, *, report_id: str, report_type: str
+) -> str | None:
+    """Confirm the CSV header set contains the metric column expected for ``report_type``."""
+    headers = set(_normalize_csv_fieldnames(fieldnames, report_id=report_id))
     for group_name, aliases in (
         ("date", _CSV_DATE_COLUMNS),
         ("channel", _CSV_CHANNEL_COLUMNS),
-        ("revenue", _CSV_REVENUE_COLUMNS),
     ):
         if not any(alias.lower() in headers for alias in aliases):
             raise _parser_payload_error(
                 report_id=report_id,
                 reason=f"csv missing {group_name} column",
             )
+    revenue_headers = {
+        alias.lower() for alias in _CSV_REVENUE_COLUMNS if alias.lower() in headers
+    }
+    if not revenue_headers:
+        raise _parser_payload_error(
+            report_id=report_id,
+            reason="csv missing revenue column",
+        )
+    if len(revenue_headers) > 1:
+        raise _parser_payload_error(
+            report_id=report_id,
+            reason=(
+                "csv conflicting revenue columns "
+                "(expected exactly one of: estimated_partner_revenue, estimatedRevenue)"
+            ),
+        )
     if any(alias.lower() in headers for alias in _CSV_CURRENCY_COLUMNS):
         return None
     default_currency = _CSV_DEFAULT_CURRENCY_BY_REPORT_TYPE.get(report_type)
@@ -2978,13 +3046,25 @@ def _month_bounds(*, report_month: str, report_id: str) -> tuple[date_cls, date_
     return month_start, month_end
 
 
+# ============================================================================
+# Purpose: Resolve one non-blank CSV value through normalized, case-insensitive
+#          row keys shared by date, identity, revenue, and currency parsing.
+# Database/ORM: None.
+# Standards: Trim header keys and values consistently; return None for absent
+#            or blank values so callers apply typed fail-closed validation.
+# Blast Radius: YouTube Reporting CSV row parsing and finance amount selection.
+#               No graph projection impact detected.
+# Connections:
+#   - Function: _accumulate_csv_row -> selects each required/optional field.
+#   - Function: _row_has_any_column -> checks whether currency was supplied.
+# ============================================================================
 def _first_present(row: dict[str, str | None], *keys: str) -> str | None:
     """Return the first non-blank string value among the given column keys.
 
-    csv.DictReader keys preserve the header's case, so this helper checks
-    each candidate case-insensitively against the row's actual keys.
+    csv.DictReader keys preserve the header's case and whitespace, so this
+    helper checks each candidate after normalizing the row's actual keys.
     """
-    lower_map = {k.lower(): k for k in row if isinstance(k, str)}
+    lower_map = {k.strip().lower(): k for k in row if isinstance(k, str)}
     for key in keys:
         actual = lower_map.get(key.lower())
         if actual is None:
@@ -2995,9 +3075,21 @@ def _first_present(row: dict[str, str | None], *keys: str) -> str | None:
     return None
 
 
+# ============================================================================
+# Purpose: Detect whether a CSV row includes any candidate column after the
+#          same whitespace/case normalization used for value lookup.
+# Database/ORM: None.
+# Standards: Keep blank-value detection aligned with header normalization and
+#            preserve the caller's typed fail-closed handling.
+# Blast Radius: YouTube Reporting CSV currency validation only.
+#               No graph projection impact detected.
+# Connections:
+#   - Function: _accumulate_csv_row -> distinguishes absent from blank currency.
+#   - Function: _first_present -> shares normalized row-key semantics.
+# ============================================================================
 def _row_has_any_column(row: dict[str, str | None], *keys: str) -> bool:
     """True iff the CSV row carries any of the supplied column names (case-insensitive)."""
-    lower_keys = {k.lower() for k in row if isinstance(k, str)}
+    lower_keys = {k.strip().lower() for k in row if isinstance(k, str)}
     return any(key.lower() in lower_keys for key in keys)
 
 

@@ -110,23 +110,27 @@ _SERVICE_ACTOR_ID = "ddddeeee-ffff-0000-1111-222222222222"
 def _next_produced_report(
     produced_iter: Iterator[ProducedReport],
 ) -> ProducedReport:
+    """Return the first produced report, failing when the iterator is empty."""
     for produced in produced_iter:
         return produced
     raise AssertionError("expected one aggregated YouTube report")
 
 
 def _assert_produced_reports_exhausted(produced_iter: Iterator[ProducedReport]) -> None:
+    """Assert that the produced-report iterator has no additional reports."""
     for extra_report in produced_iter:
         raise AssertionError(f"expected produced reports to be exhausted, got {extra_report!r}")
 
 
 def _close_produced_reports(produced_iter: Iterator[ProducedReport]) -> None:
+    """Close a produced-report iterator when it exposes a close method."""
     close = getattr(produced_iter, "close", None)
     if callable(close):
         close()
 
 
 def _runner_credentials() -> Credentials:
+    """Return deterministic credentials for tests that do not call Google."""
     return Credentials(token="test-token")
 
 
@@ -457,6 +461,116 @@ def test_csv_adapter_rejects_ad_revenue_as_a_revenue_column() -> None:
             },
             "metrics": {
                 "estimatedRevenue": "1.10",
+                "currencyCode": "USD",
+            },
+        }
+    ]
+
+
+# ============================================================================
+# Purpose: Prove malformed CSV headers fail closed while supported aliases and
+#          whitespace-normalized rows preserve the downstream finance shape.
+# Database/ORM: None -- these are pure adapter boundary tests.
+# Standards: Reject duplicate/conflicting revenue columns before DictReader can
+#            silently select a value; retain exact parser payload assertions for
+#            canonical and legacy supported headers.
+# Blast Radius: Finance -- protects revenue-column selection and parser export
+#               shape before source-row normalization.
+# Connections:
+#   - Function: orchestrator._normalize_csv_fieldnames -> duplicate contract.
+#   - Function: orchestrator._validate_csv_headers -> revenue alias contract.
+#   - File: backend/ums_smart_revenue/connectors/google_source_parsers/youtube_reporting.py
+#     -> consumes the asserted ``estimatedRevenue`` payload metric.
+# ============================================================================
+def test_csv_adapter_rejects_duplicate_normalized_revenue_headers() -> None:
+    """Headers that differ only by case/whitespace must not be last-value-wins."""
+    with pytest.raises(GoogleApiResponseError, match="duplicate header"):
+        _csv_to_parser_payload(
+            raw_bytes=(
+                b"date,channel_id,estimatedRevenue, estimatedRevenue ,currencyCode\n"
+                b"2026-05-01,UC_orch_alpha,1.10,99.00,USD\n"
+            ),
+            report_id="r-duplicate-revenue-header",
+            report_type="content_owner_estimated_revenue_a1",
+            month="2026-05",
+        )
+
+
+def test_csv_adapter_rejects_conflicting_revenue_alias_headers() -> None:
+    """Distinct supported revenue aliases must not silently choose one amount."""
+    with pytest.raises(GoogleApiResponseError, match="conflicting revenue columns"):
+        _csv_to_parser_payload(
+            raw_bytes=(
+                b"date,channel_id,estimated_partner_revenue,estimatedRevenue,currencyCode\n"
+                b"2026-05-01,UC_orch_alpha,1.10,99.00,USD\n"
+            ),
+            report_id="r-conflicting-revenue-headers",
+            report_type="content_owner_estimated_revenue_a1",
+            month="2026-05",
+        )
+
+
+def test_csv_adapter_rejects_malformed_revenue_decimal() -> None:
+    """A non-decimal revenue cell must fail before any finance row is emitted."""
+    with pytest.raises(GoogleApiResponseError, match="not a valid decimal"):
+        _csv_to_parser_payload(
+            raw_bytes=(
+                b"date,channel_id,estimated_partner_revenue,currencyCode\n"
+                b"2026-05-01,UC_orch_alpha,not-a-number,USD\n"
+            ),
+            report_id="r-malformed-revenue",
+            report_type="content_owner_estimated_revenue_a1",
+            month="2026-05",
+        )
+
+
+def test_csv_adapter_normalizes_whitespace_before_row_lookup() -> None:
+    """Whitespace around headers and values must preserve the canonical row shape."""
+    payload = _csv_to_parser_payload(
+        raw_bytes=(
+            b" date , channel_id , content_owner , estimated_partner_revenue , currencyCode \n"
+            b" 2026-05-01 , UC_orch_alpha , cms-orch-1 , 1.10 , USD \n"
+        ),
+        report_id="r-whitespace-normalized",
+        report_type="content_owner_estimated_revenue_a1",
+        month="2026-05",
+    )
+
+    assert payload["rows"] == [
+        {
+            "line_index": 0,
+            "date_range": {"start": "2026-05-01", "end": "2026-05-31"},
+            "dimensions": {
+                "channel": "UC_orch_alpha",
+                "content_owner": "cms-orch-1",
+            },
+            "metrics": {
+                "estimatedRevenue": "1.10",
+                "currencyCode": "USD",
+            },
+        }
+    ]
+
+
+def test_csv_adapter_preserves_camel_case_revenue_payload_shape() -> None:
+    """The existing ``estimatedRevenue`` alias remains a valid finance input."""
+    payload = _csv_to_parser_payload(
+        raw_bytes=_csv_for_one_row(),
+        report_id="r-existing-estimated-revenue",
+        report_type="content_owner_estimated_revenue_a1",
+        month="2026-05",
+    )
+
+    assert payload["rows"] == [
+        {
+            "line_index": 0,
+            "date_range": {"start": "2026-05-01", "end": "2026-05-31"},
+            "dimensions": {
+                "channel": "UC_orch_alpha",
+                "content_owner": "cms-orch-1",
+            },
+            "metrics": {
+                "estimatedRevenue": "12.345600",
                 "currencyCode": "USD",
             },
         }
@@ -861,8 +975,8 @@ def test_run_one_reuses_raw_file_inserted_by_racing_worker(
     calls = {"n": 0}
 
     def racing_find(db_session, *, tenant_id, source, report_type, report_month, checksum):
-        """Race the duplicate-row lookup with a sibling insert
-        to exercise the IntegrityError fallback."""
+        """Race the duplicate-row lookup with a sibling insert to
+        exercise the IntegrityError fallback."""
         calls["n"] += 1
         if calls["n"] == 1:
             db_session.add(
@@ -2000,8 +2114,8 @@ def test_bucket_b_parser_error_on_second_report_marks_raw_file_failed_and_status
     call_state = {"n": 0}
 
     class FlakyParser:
-        """Parser that fails the first call and succeeds on retry;
-        exercises parser retry semantics."""
+        """Parser that fails the first call and succeeds on retry; exercises
+        parser retry semantics."""
 
         @staticmethod
         def parse(payload, *, tenant_id):
