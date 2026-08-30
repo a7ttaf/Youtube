@@ -650,33 +650,37 @@ const Sidebar = ({
 /* ------------------------------------------------------------------ topbar */
 
 // ============================================================================
-// Purpose: Page header — the active view's title and subtitle, plus the report
-//   filter row. What it NO LONGER renders is the point of this component: an
+// Purpose: Page header — the active view's title and subtitle. What it NO
+//   LONGER renders is the point of this component: an
 //   "Operational status" cue strip (Source "A Official", Bank gap "$31.4K",
 //   Export blockers "2", Trace "SQL scoped") whose four values were literals,
-//   and four controls that were wired to nothing — a Scope select, a Currency
-//   select, a Refresh button and a Create Export button, none of which had an
-//   onChange or onClick. A control that does not act, and a status that is not
+//   and controls that were wired to nothing — Scope, Currency, Month, Refresh,
+//   and Create Export. A control that does not act, and a status that is not
 //   read from anywhere, both misreport the system; the fix for each is deletion,
-//   not a fabricated backend call.
+//   not a fabricated backend call. The real month and scope selectors remain
+//   inside their data-owning views, where their state drives the corresponding
+//   authorized reads.
+// FIX: Removed the shell-level Month selector; its value never reached the
+//   CommandView request and could display a month different from the data.
 // Database/ORM: None (frontend) — renders props only.
 // Standards: The app is SINGLE-CURRENCY by decision, so the chrome carries no
 //   currency control at all: not wired, not disabled, ABSENT. Re-adding one
 //   would need the currency program (rate source, per-month FX, source-row
 //   keying) that decision is waiting on, and a picker offering USD/EGP/AED with
-//   nothing behind it is the exact failure this removes. The one remaining
-//   control is the Month select, deliberately left as-is (hardcoded options, no
-//   handler) because wiring the shell's month is a separate item; it is the only
-//   survivor here, not an endorsement.
-// Blast Radius: Presentation only. Removing the Create Export button removes NO
-//   capability: the export request flow lives in ExportsView, still gated by
-//   canCreateAnyExport, and this button never reached it.
+//   nothing behind it is the exact failure this removes. The shell also owns no
+//   month or scope state, so it cannot render a selector that looks authoritative
+//   while leaving the view request unchanged.
+// Blast Radius: Presentation only. Removing these chrome controls removes NO
+//   capability: real view-owned controls and the export request flow remain
+//   permission-gated by their owning views.
 // Connections:
 //   - File: frontend/src/components/srcc/views/ExportsView.tsx -> the real,
 //     permission-gated export request surface (with its own wired month +
 //     currency fields, which this deletion does not touch).
+//   - File: frontend/src/components/srcc/views/CommandView.tsx -> the real,
+//     controlled month/scope selectors and authorized net-revenue reads.
 // ============================================================================
-/** Page header: the routed view's title/subtitle plus the report filter row. */
+/** Page header: the routed view's title and subtitle only. */
 const Topbar = ({ title, subtitle }: { title: string; subtitle: string }) => {
   return (
     <header className="topbar">
@@ -685,13 +689,6 @@ const Topbar = ({ title, subtitle }: { title: string; subtitle: string }) => {
           <h1>{title}</h1>
         </div>
         <p>{subtitle}</p>
-      </div>
-      <div className="control-row" role="group" aria-label="Report filters">
-        <select className="control" aria-label="Month" defaultValue="Mar 2026">
-          <option>Mar 2026</option>
-          <option>Feb 2026</option>
-          <option>Jan 2026</option>
-        </select>
       </div>
     </header>
   );

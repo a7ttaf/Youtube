@@ -4,6 +4,7 @@ import { StrictMode } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import AppShell, { isImportScopeSettled } from "@/components/srcc/AppShell";
+import { DEFAULT_MONTH, MONTH_OPTIONS } from "@/components/srcc/shared";
 import { SessionProvider } from "@/contexts/SessionContext";
 import { TenantProvider } from "@/contexts/TenantContext";
 import type { SessionMe } from "@/lib/api/types";
@@ -698,8 +699,8 @@ describe("AppShell production session hydration", () => {
 // The shell chrome used to be driven by lib/mock/data: NAV_GROUPS carried
 // invented badge counts, VIEW_COPY named a month/scope/currency the shell reads
 // from nowhere, and WORKFLOW_STEPS drove a close-progress rail frozen at
-// "Allocate". Four controls (Scope select, Currency select, Refresh reports,
-// Create Export) had no handler at all. These tests pin the removals, because
+// "Allocate". Five controls (Scope select, Currency select, Month, Refresh
+// reports, Create Export) had no handler at all. These tests pin the removals, because
 // nothing else fails when fabricated chrome comes back: it renders fine, it
 // just lies.
 
@@ -757,22 +758,17 @@ describe("AppShell de-mocked chrome", () => {
 
   it("CHROME: no currency selector remains — single-currency by decision", async () => {
     await renderChrome();
-    const filters = screen.getByRole("group", { name: "Report filters" });
-    expect(within(filters).queryByLabelText(/currency/iu)).not.toBeInTheDocument();
-    // The deleted control offered exactly these three codes with no onChange.
-    const filterOptions = comboboxOptionLabels(filters);
-    expect(filterOptions).not.toContain("USD");
-    expect(filterOptions).not.toContain("EGP");
-    expect(filterOptions).not.toContain("AED");
+    expect(screen.queryByRole("group", { name: "Report filters" })).not.toBeInTheDocument();
     // Nothing anywhere in the mounted shell offers a non-USD code either.
     // ExportsView owns the one REAL currency field (wired, USD-only, sent with
     // the export request) and is not mounted on the Command view rendered here.
     const shellOptions = comboboxOptionLabels(document.body);
+    expect(shellOptions).not.toContain("USD");
     expect(shellOptions).not.toContain("EGP");
     expect(shellOptions).not.toContain("AED");
   });
 
-  it("CHROME: the four handler-less header controls are gone, Month survives", async () => {
+  it("CHROME: inert header controls are gone and real filters stay view-owned", async () => {
     await renderChrome();
     expect(
       screen.queryByRole("button", { name: /create export/iu }),
@@ -780,11 +776,31 @@ describe("AppShell de-mocked chrome", () => {
     expect(
       screen.queryByRole("button", { name: "Refresh reports" }),
     ).not.toBeInTheDocument();
-    const filters = screen.getByRole("group", { name: "Report filters" });
-    expect(within(filters).queryByLabelText("Scope")).not.toBeInTheDocument();
-    // Month is the deliberate survivor: still unwired, but wiring the shell's
-    // month is a separate item, so this PR leaves it exactly as it found it.
-    expect(within(filters).getByLabelText("Month")).toBeInTheDocument();
+    // The shell cannot own a selector whose value does not drive a request.
+    // Both controls remain in CommandView, alongside the state and authorized
+    // reads they control.
+    expect(screen.queryByRole("group", { name: "Report filters" })).not.toBeInTheDocument();
+    const filters = await screen.findByRole("region", { name: "Net revenue filters" });
+    const monthSelect = within(filters).getByLabelText("Month") as HTMLSelectElement;
+    const scopeSelect = within(filters).getByLabelText("Scope") as HTMLSelectElement;
+    expect(scopeSelect).toBeInTheDocument();
+    expect(Array.from(monthSelect.options).map((option) => option.value)).toEqual(MONTH_OPTIONS);
+    expect(monthSelect.value).toBe(DEFAULT_MONTH);
+
+    const nextMonth = MONTH_OPTIONS[1];
+    if (!nextMonth) {
+      throw new Error("rolling month window must expose a second month for this test");
+    }
+    fireEvent.change(monthSelect, { target: { value: nextMonth } });
+    await waitFor(() => expect(monthSelect.value).toBe(nextMonth));
+    const fetchMock = globalThis.fetch as ReturnType<typeof vi.fn>;
+    await waitFor(() =>
+      expect(
+        fetchMock.mock.calls.some(([input]) =>
+          urlOf(input).includes(`/revenue/months/${encodeURIComponent(nextMonth)}/net-revenue`),
+        ),
+      ).toBe(true),
+    );
   });
 
   it("CHROME: the fabricated status cues and month-close rail are gone", async () => {
