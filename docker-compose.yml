@@ -9,7 +9,7 @@
 #
 # ⚠️  `docker compose down -v` is NOT an ordinary teardown — do not reach for it
 #     out of habit. The `-v` flag DELETES EVERY named volume declared at the
-#     bottom of this file. All three of them, not a selection:
+#     bottom of this file. Both of them, not a selection:
 #       * `postgres-data` — every revenue fact, every audit row, every tenant
 #         and role grant.
 #       * `redis-data` — the Redis append-only file. Losing this one costs
@@ -35,13 +35,20 @@
 #     `/ums-app-data-*.tgz` ignore exists as a backstop for anyone who
 #     redirects it inside anyway.
 #     tar ships with Windows 10+, Git Bash and Linux; adjust the path if
-#     UMS_APP_DATA_HOST is set. No dedicated backup/restore runbook exists
-#     yet — this header is the procedure.
+#     UMS_APP_DATA_HOST is set. Scope: this covers the DEFAULT
+#     UMS_BLOB_BACKEND=file-store layout. When UMS_BLOB_BACKEND=gcs,
+#     connector blobs live in UMS_GCS_BUCKET, NOT in the bind — the tar
+#     then protects local export artifacts only, and the bucket needs
+#     its own backup in that mode. No dedicated backup/restore runbook
+#     exists yet — this header is the procedure.
 #     There is no prompt and no undo.
 #     Plain `docker compose down` is the non-destructive teardown and is what
 #     you want ~always; containers are recreated from the image on the next
 #     `up` and the data volumes are reattached untouched. Only use `-v` when
-#     you deliberately want empty volumes (postgres-data AND app-data), and
+#     you deliberately want empty volumes (postgres-data and redis-data —
+#     the artifact/blob bind directory is NOT emptied by `-v`, so a full
+#     reset additionally requires deleting ${UMS_APP_DATA_HOST:-./data/ums}
+#     by hand), and
 #     only after a verified *database* backup AND a rehearsed restore for
 #     postgres-data. Artifact blobs on the host bind mount need a separate
 #     backup — the copy command in the header above.
@@ -160,16 +167,23 @@ x-app-env: &app-env
   # typed ConnectorServicePrincipalUnavailableError (a job_failed_before_start
   # audit row, never a mis-attributed one).
   #
-  # Consequence for the operator: setting the schedule flags with the
-  # placeholder still in `.env` boots fine but every connector job refuses —
-  # check `docker compose logs app` for the ValueError naming the
-  # placeholder. Setting a REAL provisioned actor
+  # Consequence for the operator, in both directions:
+  # * Scheduling ENABLED + placeholder in `.env`: create_app fails at boot
+  #   (app.py raises for the template UUID exactly as for an unset one).
+  #   Under `restart: unless-stopped` the `app` container restart-loops
+  #   before serving anything; `docker compose logs app` shows the
+  #   ValueError naming the placeholder. Recovery: provision a real actor
+  #   (or remove the placeholder line / disable scheduling) in `.env`,
+  #   then `docker compose up -d app`.
+  # * Scheduling DISABLED, executor enabled + placeholder: the API boots
+  #   and serves normally; only live connector submissions refuse —
+  #   synchronously at the route pre-flight with the 503
+  #   `service_principal_unavailable` rejection, never a 202 for a job
+  #   that cannot start.
+  # Setting a REAL provisioned actor
   # (Docs/19_GOOGLE_CREDENTIAL_SETUP_SMOKE.md "Live-run gate") is what turns
-  # scheduled mode on. Boot-time gating is unchanged: enabling
-  # UMS_GROUP_SYNC_SCHEDULE_ENABLED without the executor, or with no actor
-  # value at all, still fails create_app and restart-loops under
-  # `restart: unless-stopped` — same failure mode as a malformed value in any
-  # pass-through below.
+  # scheduled mode on. Enabling UMS_GROUP_SYNC_SCHEDULE_ENABLED without the
+  # executor still fails create_app the same way.
   #
   # Operator-facing copies of the placeholder contract live in README.md
   # ("Environment variables") and Docs/19_GOOGLE_CREDENTIAL_SETUP_SMOKE.md.
@@ -385,6 +399,14 @@ services:
   # directories to the app uid, then PROVES writability by writing and
   # removing a probe file AS uid 10001 (setpriv; the image also has the
   # `app` user for `runuser -u app --` if setpriv ever disappears). The
+  # three roots are also chmod'd 750: this is a HOST bind, not a
+  # container-only filesystem, and under the default 022 umask a 0755
+  # root lets any other local account traverse into raw connector
+  # evidence and finance exports. 750 keeps the owning uid full-access,
+  # blocks traversal for everyone else; files the app creates inside
+  # still follow its umask, but no other local user can reach them
+  # through the directory path.
+  # The
   # probe — deliberately NOT `chown`'s exit status — is the exit gate:
   # Docker Desktop's emulated bind filesystems can make chown fail (EPERM)
   # or silently no-op while the directory is still writable by everyone, so
@@ -413,6 +435,7 @@ services:
         mkdir -p /var/lib/ums/artifacts /var/lib/ums/blobs
         chown 10001:10001 /var/lib/ums /var/lib/ums/artifacts /var/lib/ums/blobs \
           || echo "app-data-init: chown unavailable on this bind filesystem (common on Docker Desktop shares); gating on the uid-10001 write probe below instead"
+        chmod 750 /var/lib/ums /var/lib/ums/artifacts /var/lib/ums/blobs
         setpriv --reuid=10001 --regid=10001 --clear-groups sh -c \
           'touch /var/lib/ums/artifacts/.rw-probe && rm -f /var/lib/ums/artifacts/.rw-probe && touch /var/lib/ums/blobs/.rw-probe && rm -f /var/lib/ums/blobs/.rw-probe'
     volumes:
@@ -471,6 +494,14 @@ services:
 
   # Optional dev variant with source bind-mount + reload. Activate with:
   #   docker compose --profile dev up app-dev
+  # ⚠️ Use the TARGETED form above, not `docker compose --profile dev up -d`:
+  #    an untargeted profile `up` also starts every UNPROFILED service, so
+  #    `app` and `app-dev` run side by side. With the executor and schedule
+  #    flags enabled that is TWO schedulers against one database —
+  #    ConnectorJobExecutor deduplication is in-process and cannot see
+  #    across containers, so every tick would be submitted twice. If both
+  #    are already running, `docker compose stop app` before relying on
+  #    app-dev.
   app-dev:
     profiles: ["dev"]
     build:
