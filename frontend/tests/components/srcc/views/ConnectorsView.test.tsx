@@ -1151,12 +1151,13 @@ describe("ConnectorsView wired to the connector + AdSense endpoints", () => {
         screen.getByText(/upserted into the finance source under aug 2026/i),
       ).toBeInTheDocument();
 
-      // Regression (PR #211 review, Devin): the filter's auto-switch must NOT
-      // retarget the connector pull. The pull's report month stays on the
-      // operator's deliberate choice (July), is DISPLAYED next to the reason
-      // field, and the next Run pull still submits it — never the in-progress
-      // month a current-month payment would otherwise drag it onto.
-      expect(screen.getByText(/pull reports the whole month jul 2026/i)).toBeInTheDocument();
+      // Regression (PR #211 review, Devin + codex): the filter's auto-switch
+      // must NOT retarget the connector pull, and the pull's submitted month
+      // must be exactly what its OWN visible control displays — not the
+      // payments selector, which now shows the filed month (2026-08).
+      const pullMonthSelect =
+        screen.getByLabelText<HTMLSelectElement>("Pull month");
+      expect(pullMonthSelect.value).toBe("2026-07");
       await waitFor(() =>
         expect(screen.getByText("youtube_reporting")).toBeInTheDocument(),
       );
@@ -1177,6 +1178,29 @@ describe("ConnectorsView wired to the connector + AdSense endpoints", () => {
         String((jobCall?.[1] as RequestInit | undefined)?.body ?? "{}"),
       );
       expect(pullBody.report_month).toBe("2026-07");
+
+      // Changing the pull control is the one deliberate way to retarget a
+      // pull — and it submits exactly the displayed value.
+      fireEvent.change(screen.getByLabelText<HTMLSelectElement>("Pull month"), {
+        target: { value: "2026-06" },
+      });
+      fireEvent.click(screen.getByRole("button", { name: /run pull/i }));
+      await waitFor(() =>
+        expect(
+          fetchMock().mock.calls.filter(
+            ([input, init]) =>
+              urlOf(input) === "/connectors/jobs" && methodOf(init) === "POST",
+          ).length,
+        ).toBeGreaterThan(1),
+      );
+      const pullCalls = fetchMock().mock.calls.filter(
+        ([input, init]) =>
+          urlOf(input) === "/connectors/jobs" && methodOf(init) === "POST",
+      );
+      const retargetedBody = JSON.parse(
+        String((pullCalls.at(-1)?.[1] as RequestInit | undefined)?.body ?? "{}"),
+      );
+      expect(retargetedBody.report_month).toBe("2026-06");
 
       // The banner names the SUBMITTED month, not the live date field: editing
       // the payment date after a successful sync must not relabel the completed

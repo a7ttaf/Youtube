@@ -645,12 +645,14 @@ const AdsensePaymentsSection = ({
 /**
  * The inline, always-visible "Sync reason" field that every per-row Run pull
  * uses; the reason is recorded on the audit event. It also carries the dry-run
- * toggle (validate-only, no facts written) that the pull request honors, and
- * states the REPORT MONTH the pull will file under — that month is the
- * operator's deliberate selector choice and a payment sync cannot move it
- * (PR #211 review), so it is displayed here rather than left as hidden state.
- * When the viewer cannot run connectors both controls are disabled and the
- * field shows the connector-operations hint.
+ * toggle (validate-only, no facts written), the pull request honors, and the
+ * PULL MONTH control — the one and only value submitted as the connector run's
+ * report_month. That control is deliberately separate from the AdSense
+ * payments selector: a payment sync moves the payments filter for visibility
+ * but can never retarget a whole-month pull, and the pull's visible value is
+ * always exactly what the next Run pull submits (PR #211 review). When the
+ * viewer cannot run connectors the controls are disabled and the field shows
+ * the connector-operations hint.
  */
 const SyncReasonField = ({
   canRunConnectors,
@@ -659,6 +661,7 @@ const SyncReasonField = ({
   dryRun,
   onDryRun,
   reportMonth,
+  onReportMonth,
 }: {
   canRunConnectors: boolean;
   reason: string;
@@ -666,6 +669,7 @@ const SyncReasonField = ({
   dryRun: boolean;
   onDryRun: (value: boolean) => void;
   reportMonth: string;
+  onReportMonth: (value: string) => void;
 }) => {
   return (
     <div className="field-row" style={{ margin: 13 }}>
@@ -677,6 +681,23 @@ const SyncReasonField = ({
         placeholder="Why this sync is being requested"
         onChange={(e) => onReason(e.target.value)}
       />
+      <label htmlFor="connectorPullMonth" className="item-sub">
+        {" Pull month (becomes report_month)"}
+      </label>
+      <select
+        id="connectorPullMonth"
+        className="control"
+        aria-label="Pull month"
+        value={reportMonth}
+        disabled={!canRunConnectors}
+        onChange={(e) => onReportMonth(e.target.value)}
+      >
+        {MONTH_OPTIONS.map((m) => (
+          <option key={m} value={m}>
+            {m}
+          </option>
+        ))}
+      </select>
       <label htmlFor="connectorDryRun" className="item-sub">
         <input
           id="connectorDryRun"
@@ -688,7 +709,9 @@ const SyncReasonField = ({
         {" Dry run (validate only, no facts written)"}
       </label>
       <span className="item-sub" role="status">
-        {`Pull reports the whole month ${monthKeyLabel(reportMonth)} — the selector changes it; a payment sync does not.`}
+        {
+          "Pulls report a WHOLE calendar month — the payments selector above does not change this control."
+        }
       </span>
       {canRunConnectors ? null : (
         <span className="item-sub" role="note">
@@ -724,6 +747,7 @@ const DataSourcesPanel = ({
   month,
   onMonth,
   reportMonth,
+  onReportMonth,
   payments,
   paymentsLoading,
   paymentsError,
@@ -748,6 +772,7 @@ const DataSourcesPanel = ({
   month: string;
   onMonth: (value: string) => void;
   reportMonth: string;
+  onReportMonth: (value: string) => void;
   payments: AdsensePayment[];
   paymentsLoading: boolean;
   paymentsError: ApiError | Error | null;
@@ -785,6 +810,7 @@ const DataSourcesPanel = ({
         dryRun={dryRun}
         onDryRun={onDryRun}
         reportMonth={reportMonth}
+        onReportMonth={onReportMonth}
       />
 
       <ConnectorCredentialsTable
@@ -1681,14 +1707,15 @@ export const ConnectorsView = ({
   // current month included, so this fixes the default, not the operator's
   // choice.
   const [month, setMonth] = useState<string>(WRITE_DEFAULT_MONTH);
-  // FIX (PR #211 review, Devin): the payments-list FILTER is deliberately
-  // separate from the connector-run REPORT MONTH. A successful payment sync
-  // switches the filter so the new row is visible, but that auto-switch must
-  // never retarget the next connector pull — a current-month payment would
-  // otherwise silently move report_month onto the in-progress month and ingest
-  // a partial month as final, the exact hazard the write default prevents.
-  // Only an explicit selector change (handleMonthChange) moves both together;
-  // the SyncReasonField always displays the pull's report month.
+  // FIX (PR #211 review): the payments-list FILTER is deliberately separate
+  // from the connector-run REPORT MONTH. A successful payment sync switches
+  // the filter so the new row is visible, but that auto-switch must never
+  // retarget the next connector pull — a current-month payment would
+  // otherwise silently move report_month onto the in-progress month and
+  // ingest a partial month as final, the exact hazard the write default
+  // prevents. The AdSense selector drives ONLY this filter; the pull month
+  // has its own visible control in SyncReasonField bound to `month`, so each
+  // control's displayed value is exactly what it submits or queries.
   const [filterMonth, setFilterMonth] = useState<string>(WRITE_DEFAULT_MONTH);
   const [reason, setReason] = useState<string>("");
   const [dryRun, setDryRun] = useState<boolean>(false);
@@ -1754,23 +1781,27 @@ export const ConnectorsView = ({
     [payments],
   );
   // ==========================================================================
-  // Purpose: An explicit selector change is the OPERATOR's deliberate month
-  //   choice: it retargets both the payments filter AND the connector-run
-  //   report_month together, so the visible selector and the pull target can
-  //   never silently disagree.
+  // Purpose: The AdSense payments selector is now PURELY the list filter. FIX
+  //   (PR #211 review, codex deDWi): while it also implied the connector
+  //   pull's report_month, a payment sync that moved the filter left the
+  //   displayed month and the submitted report_month silently divergent — and
+  //   re-selecting the displayed value emits no change event, so an operator
+  //   could pull "the month on screen" and write the previous month's report.
+  //   The pull month now has its OWN visible control (SyncReasonField's
+  //   "Pull month" select); the displayed value and the submitted value are
+  //   the same state by construction.
   // Database/ORM: None (frontend filter/pull-target state).
-  // Standards: The only path besides the initial default that sets the pull
-  //   month; a payment sync (handleSynced) deliberately does NOT come through
-  //   here. Fail-closed pairing: both states always move together here.
-  // Blast Radius: The connector run's report_month (a whole-month finance
-  //   write) and the list filter. No stored value set client-side.
+  // Standards: One control, one concern, one state: the AdSense selector
+  //   drives ONLY the payments query; the pull select drives ONLY
+  //   report_month. No cross-moving, no hidden defaults after a sync.
+  // Blast Radius: Which month the payments list filters and which month a
+  //   connector run reports — both now exactly what their controls display.
   // Connections:
-  //   - File: AdsensePaymentsSection (this file) -> the selector the operator
-  //     uses.
+  //   - File: AdsensePaymentsSection (this file) -> the filter selector.
+  //   - File: SyncReasonField (this file) -> the pull-month control.
   //   - File: onRequestSync (this file) -> submits report_month = month.
   // ==========================================================================
   const handleMonthChange = useCallback((value: string) => {
-    setMonth(value);
     setFilterMonth(value);
   }, []);
 
@@ -1877,6 +1908,7 @@ export const ConnectorsView = ({
           month={filterMonth}
           onMonth={handleMonthChange}
           reportMonth={month}
+          onReportMonth={setMonth}
           payments={paymentRows}
           paymentsLoading={payments.loading}
           paymentsError={payments.error}
