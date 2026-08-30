@@ -33,9 +33,12 @@ import { GroupsView } from "./views/GroupsView";
 import RegistryView from "./views/RegistryView";
 import { importScopeFor } from "@/contexts/UnsettledImportContext";
 import TraceView from "./views/TraceView";
+import { monthKeyLabel } from "@/lib/months";
 import {
   Badge,
+  DEFAULT_MONTH,
   Dot,
+  MONTH_OPTIONS,
   RESTRICTED_FINANCE_VALUE,
   workflowDotTone,
 } from "./shared";
@@ -616,10 +619,10 @@ const Topbar = ({
         <OperationalCues canViewFinance={canViewFinance} />
       </div>
       <div className="control-row" aria-label="Report filters">
-        <select className="control" aria-label="Month" defaultValue="Mar 2026">
-          <option>Mar 2026</option>
-          <option>Feb 2026</option>
-          <option>Jan 2026</option>
+        <select className="control" aria-label="Month" defaultValue={monthKeyLabel(DEFAULT_MONTH)}>
+          {MONTH_OPTIONS.map((monthValue) => (
+            <option key={monthValue}>{monthKeyLabel(monthValue)}</option>
+          ))}
         </select>
         <select className="control" aria-label="Scope" defaultValue="UMS Holding">
           <option>UMS Holding</option>
