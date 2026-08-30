@@ -18,8 +18,11 @@ wired dashboard screens consume, plus the production session-hydration path
 5. Cleans up the throwaway database.
 
 Run: ``python scripts/smoke_mvp.py`` — it defaults to the CURRENT calendar month
-(the month the dashboard's selector opens on); pass ``--month YYYY-MM`` to probe
-a different one.
+(the month the dashboard's READ selectors open on). The Connectors screen is
+the write-side exception: its payment filter opens on the PREVIOUS month by
+design, so the smoke probes that month separately and asserts it is honestly
+EMPTY (the seed only populates the current month). Pass ``--month YYYY-MM`` to
+probe a different one.
 
 This is a verification harness, NOT a product feature: it imports + drives the
 existing seed and app and never reimplements finance math or auth.
@@ -91,6 +94,20 @@ def _default_month(today: date | None = None) -> str:
     """
     current = today if today is not None else date.today()
     return f"{current.year:04d}-{current.month:02d}"
+
+
+def _connector_write_default_month(today: date | None = None) -> str:
+    """Return the month ConnectorsView opens on: the LAST COMPLETE month.
+
+    Mirrors the frontend's ``lastCompleteMonthKey`` snapshot basis (the month
+    before the current one, with January rolling back to the previous
+    December). The smoke probes this month separately: its payment list must be
+    honestly empty because the seed only populates the current month.
+    """
+    current = today if today is not None else date.today()
+    if current.month == 1:
+        return f"{current.year - 1:04d}-12"
+    return f"{current.year:04d}-{current.month - 1:02d}"
 
 
 def _ensure_backend_path() -> None:
@@ -231,6 +248,24 @@ def _validate_paginated_items(body: Any) -> str:
     )
 
 
+def _validate_adsense_payments_empty_month(body: Any) -> str:
+    """Assert the unseeded connector write-default month is an honest EMPTY page.
+
+    The seed populates only the current month, so the previous month the
+    Connectors screen opens on must return a valid envelope with ZERO rows —
+    rows there would mean cross-month leakage into an untouched finance month.
+    """
+    if not isinstance(body, Mapping):
+        return "response is not a JSON object"
+    base = _validate_paginated_items(body)
+    if base:
+        return base
+    items = body.get("items")
+    if not isinstance(items, list) or items:
+        return "expected no payment rows for the unseeded connector write-default month"
+    return ""
+
+
 def _validate_adsense_payments(body: Any) -> str:
     """Assert the AdSense payment list returns items + pagination + audit event."""
     if not isinstance(body, Mapping):
@@ -359,6 +394,16 @@ def _build_checks(month: str) -> list[_Check]:
             "GET",
             f"/adsense/payments?month={month}",
             _validate_adsense_payments,
+        ),
+        # The Connectors screen opens its payment filter on the LAST COMPLETE
+        # month, not the seeded current month — probe that default explicitly
+        # and assert it is honestly EMPTY (no cross-month leakage).
+        _Check(
+            "Connectors",
+            "adsense payments (write-default month)",
+            "GET",
+            f"/adsense/payments?month={_connector_write_default_month()}",
+            _validate_adsense_payments_empty_month,
         ),
         # Write-path smoke: unlock → create export job → re-lock attempt (409 expected).
         # The demo month uses single-source channels so lock_month() always hits the
