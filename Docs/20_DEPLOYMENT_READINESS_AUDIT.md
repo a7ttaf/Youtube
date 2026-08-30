@@ -8,13 +8,14 @@ localhost only**, operator-run, with **real** YouTube CMS revenue data.
 refute it. Those passes reversed or downgraded findings in every round; the
 corrections are recorded rather than quietly dropped.
 
-> ⚠️ **Freshness banner (2026-08-28).** P0 **implementation** is tracked on **restacked
-> P0 split PRs (P0-a…P0-e)** onto `main` — **not** on blocked PR #210. This document is
+> ⚠️ **Freshness banner (2026-08-31).** PR #210 was merged only into the closed PR #209
+> branch; neither its head nor merge commit reached `main`. P0 **implementation** is
+> tracked on open, non-draft split PRs #221–#225 (P0-a…P0-e). This document is
 > the **pre-execution snapshot** at `main` = `d8418cea2`. Do **not** schedule unchecked
 > open items from this text alone. For scheduling work, use Docs/21 as maintained on
 > `main` after each P0 split merges (see [`25_PROGRAM_DEPENDENCY_GRAPH.md`](25_PROGRAM_DEPENDENCY_GRAPH.md)).
 >
-> **Consolidation:** this file ships with Docs/21/23/24 in branch
+> **Consolidation:** this file ships with Docs/21/23/24/25 in PR #220 / branch
 > `docs/program-plans-consolidated` (supersedes closed drafts #209 / #218 / #219).
 
 - **Round 1 — deployment surface:** auth, secrets, data lifecycle, bootstrap, config.
@@ -42,15 +43,15 @@ corrections are recorded rather than quietly dropped.
 
 | Doc | Where | Role |
 | --- | --- | --- |
-| Docs/21 (living status) | P0 split PRs on `main` | P0 execution + current schedule |
-| Docs/22 backup rehearsal | P0-b split PR | Backup/restore runbook |
+| Docs/21 (living status) | PR #220 until successor merges | Costing snapshot; not implementation status |
+| Docs/22 backup rehearsal | P0-b / PR #222 | Backup/restore runbook; PR still open |
 | [`25_PROGRAM_DEPENDENCY_GRAPH.md`](25_PROGRAM_DEPENDENCY_GRAPH.md) | this PR | Execution DAG |
 | [`21_BETA_IMPLEMENTATION_PLAN.md`](21_BETA_IMPLEMENTATION_PLAN.md) | this PR (snapshot) | Original costed beta plan at `d8418cea2` |
 | [`23_ADMIN_ACCESS_AND_CONFIG_PLAN.md`](23_ADMIN_ACCESS_AND_CONFIG_PLAN.md) | this PR | Admin / access / config UI (Docs/21 is silent here) |
 | [`24_US_WITHHOLDING_AND_US_REVENUE_PLAN.md`](24_US_WITHHOLDING_AND_US_REVENUE_PLAN.md) | this PR | US revenue slice + withholding estimate (fills P3 rate gap) |
 
-**Residual proxy note:** after P0-e adds `/org-units` and `/users`, `/security` is
-still missing from `TENANT_SCOPED_ROUTES` — required by Docs/23 A2.
+**Residual proxy note:** PR #225 / P0-e adds `/org-units` and `/users`, but does **not**
+add `/security`. That route remains owned by Docs/23 A2; do not report it as #225 work.
 
 ---
 
@@ -196,8 +197,24 @@ and connector raw-file blobs default to `cwd/_local_blob_store`
 `redis-data` volumes — **neither path is mounted**. Both are wiped by any rebuild,
 `--force-recreate`, or `down`.
 
-**Fix:** set `UMS_EXPORT_ARTIFACT_DIR` and `UMS_LOCAL_STORE_ROOT` to paths inside a
-new named volume, and mount it on `app` (and `migrate`, if it ever writes there).
+**Fix (container contract):** set the *inside-container* variables exactly to
+`UMS_EXPORT_ARTIFACT_DIR=/var/lib/ums/artifacts` and
+`UMS_LOCAL_STORE_ROOT=/var/lib/ums/blobs`. Bind host source
+`./data/ums:/var/lib/ums` on both `app` and `app-dev`; add the same mount to
+`migrate` only if that service writes artifacts or blobs. `./data/ums` is the
+host-side source path, not an environment-variable value inside the container.
+An externally managed Compose volume may replace the host source only when it is
+mounted at the same `/var/lib/ums` target and verified to survive
+`docker compose down -v`; never use relative paths for the container variables.
+
+**Permission/persistence smoke before real data:** as the runtime user, verify
+both configured directories are readable and writable in `app` and the `app-dev`
+profile. Write one sentinel under each target, recreate with `docker compose down`
+(without `-v`) followed by `docker compose up` (and
+`docker compose --profile dev up app-dev` for the dev service), and verify both
+sentinels remain; clean them up after the check. Repeat for `migrate` only if its
+service receives the storage mount. Ignore `/data/ums/` in repo-root `.gitignore`
+before the first real write so private finance evidence cannot be staged.
 
 ### B5 — There is no browser app in any non-dev path
 `frontend/` has no Dockerfile; compose has no frontend service; the backend mounts
@@ -278,7 +295,12 @@ reconciliation source priority (`finance/reconciliation.py:13`), explanation lab
 (`api/channels.py:666-680`).
 
 **Limitation:** `/revenue/facts` is **one fact per request** — there is no bulk
-revenue CSV endpoint. A beta must script the loop.
+revenue CSV endpoint. A beta must use a resumable/idempotent loop and compare the
+expected revenue-required channel set with the persisted month facts after the final
+request; one successful 201 is not a complete-import proof. The request carries
+`*_usd` amounts and no source-currency field, so the runbook must also require evidence
+that every submitted value is already USD. Supplying EGP to a USD-labelled field would
+be accepted and would corrupt official totals; this path performs no FX conversion.
 
 ---
 
@@ -371,8 +393,10 @@ These were checked and found correct — no action needed:
 ### Path A — Single-operator beta, manual import (recommended first step)
 The only user is the operator, on this PC, at `127.0.0.1`. No gateway is built; the
 Vite dev server injects the fixed operator identity. **Revenue enters by manual
-import, not by connector** — so Google is never called and the currency questions
-(D1/D2) do not arise: the operator supplies the figures directly.
+import, not by connector**, so Google is never called. Currency correctness still
+matters: the endpoint accepts USD-labelled values without a source-currency field.
+The operator must prove the source figures are already USD; entering EGP as USD is
+forbidden and no local conversion is permitted.
 
 Required before real data: **B3** (backups), **B4** (artifact volume — note the
 permanent-503 consequence), and the **logging fix** (one `basicConfig` call, so that
@@ -440,10 +464,12 @@ question they answer. Severities are the **post-refutation** ones.
   (`deduction_ingestion.py:604,611`) and printed by the CLI
   (`scripts/run_deduction_ingestion.py:196,204`). It is invisible in the API and UI
   only — still worth surfacing, but for a narrower reason than first stated.
-- **MEDIUM — the currency selector is inert, and offers currencies the pipeline
+- **MEDIUM — the current currency selector is inert, and offers currencies the pipeline
   rejects.** `AppShell.tsx:629-633` renders USD/EGP/AED with an uncontrolled
   `defaultValue` and no `onChange`, in a pipeline that skips non-USD source rows and
-  non-USD deductions and hard-fails non-USD exports.
+  non-USD deductions and hard-fails non-USD exports. Hide/remove this misleading
+  implementation for the USD-only beta, but preserve `DESIGN.md`'s durable contract for
+  a real backend-backed month/currency/scope filter when multi-currency support exists.
 - **MEDIUM — split-brain confidence:** `finance/reconciliation.py:139-141` halves a
   single-source channel's preview score to 0.5 while `explanations.py:498` reports
   the stored `1.0` (HIGH) for the same channel-month. Both ship.

@@ -7,27 +7,35 @@ revenue entering by **manual import**.
 **Method:** every item below was costed against the actual code — file, line, what
 breaks, what it unblocks — not estimated from the finding text.
 
-> ⚠️ **Freshness banner (2026-08-28, post-audit).** P0 **implementation** is **not** on
-> merge-ready #210 (blocked, wrong base). Track execution on **restacked P0 split PRs**
-> (P0-a…P0-e — see [`25_PROGRAM_DEPENDENCY_GRAPH.md`](25_PROGRAM_DEPENDENCY_GRAPH.md)).
+> ⚠️ **Freshness banner (2026-08-31, post-audit).** PR #210 was merged only into the
+> closed PR #209 branch; neither its head nor merge commit reached `main`. Track P0
+> execution on open, non-draft split PRs #221–#225 (P0-a…P0-e — see
+> [`25_PROGRAM_DEPENDENCY_GRAPH.md`](25_PROGRAM_DEPENDENCY_GRAPH.md)).
 > This copy is the **costing snapshot** at `main` = `d8418cea2`. Do not schedule open
 > items from the hour tables alone until P0 split PRs land on `main`.
 >
 > **Consolidation:** ships with Docs/20/23/24/25 in `docs/program-plans-consolidated`
 > (supersedes closed drafts #209 / #218 / #219).
 
-### Related plans (program triad)
+### Related plans and live implementation state
 
-| Doc | Where | Role |
+| Work | Live state at 2026-08-31 | Role |
 | --- | --- | --- |
-| [`20_DEPLOYMENT_READINESS_AUDIT.md`](20_DEPLOYMENT_READINESS_AUDIT.md) | this PR | Historical audit snapshot |
-| P0 split PRs (P0-a…P0-e) | `main` (TBD numbers) | **Living** P0 implementation — replaces blocked #210 |
-| [`23_ADMIN_ACCESS_AND_CONFIG_PLAN.md`](23_ADMIN_ACCESS_AND_CONFIG_PLAN.md) | this PR | Admin / access / config UI extension |
-| [`24_US_WITHHOLDING_AND_US_REVENUE_PLAN.md`](24_US_WITHHOLDING_AND_US_REVENUE_PLAN.md) | this PR | US revenue + withholding estimate |
-| [`25_PROGRAM_DEPENDENCY_GRAPH.md`](25_PROGRAM_DEPENDENCY_GRAPH.md) | this PR | Explicit execution DAG |
+| [`20_DEPLOYMENT_READINESS_AUDIT.md`](20_DEPLOYMENT_READINESS_AUDIT.md) | PR #220, open/non-draft | Historical audit snapshot; no runtime implementation |
+| P0-a / #221 | open, non-draft; not merged | Compose/artifact storage |
+| P0-b / #222 | open, non-draft; not merged | Backup/restore |
+| P0-c / #223 | open, non-draft; not merged | Bootstrap/authz seed |
+| P0-d / #224 | open, non-draft; not merged | Logging/ops |
+| P0-e / #225 | open, non-draft; not merged | Dev gateway docs + `/org-units` and `/users` proxy |
+| P1.2 / #211 | **merged to `main` as `41b4953`** | Rolling months |
+| P1 / #212–#216 | open drafts | Remaining P1 work; not implemented on `main` |
+| EGP Phase 1 / #217 | open draft | Currency-spine foundation; not selector behavior |
+| [`23_ADMIN_ACCESS_AND_CONFIG_PLAN.md`](23_ADMIN_ACCESS_AND_CONFIG_PLAN.md) | plan in PR #220 | Admin / access / config extension |
+| [`24_US_WITHHOLDING_AND_US_REVENUE_PLAN.md`](24_US_WITHHOLDING_AND_US_REVENUE_PLAN.md) | plan in PR #220 | US revenue + withholding estimate |
+| [`25_PROGRAM_DEPENDENCY_GRAPH.md`](25_PROGRAM_DEPENDENCY_GRAPH.md) | plan in PR #220 | Explicit execution DAG |
 
-**Residual after P0-e:** `/security` still missing from Vite `TENANT_SCOPED_ROUTES` until
-P0-e merges (Docs/23 A2).
+**Residual after P0-e:** PR #225 does **not** add `/security` to Vite
+`TENANT_SCOPED_ROUTES`; Docs/23 A2 owns that separate matrix dependency.
 
 ---
 
@@ -38,7 +46,7 @@ P0-e merges (Docs/23 A2).
 That was the distance between `main` @ `d8418cea2` and a beta you can put real money
 data into. Not another phase, not a rewrite. The application is genuinely built; what
 was missing is the layer that lets one person *run* it and not lose data. **P0
-implementation is restacked onto `main` as P0-a…P0-e split PRs** — treat the tables
+implementation targets `main` through still-open P0-a…P0-e split PRs** — treat the tables
 below as the original costing, not the live backlog.
 
 Three things are worth saying plainly before the table:
@@ -51,8 +59,9 @@ Three things are worth saying plainly before the table:
    costs a minute and changes the entire impression of the product.
 3. **EGP was deferred in this snapshot.** The section
    [The one decision only you can make](#the-one-decision-only-you-can-make) records the
-   open question as of `d8418cea2`. EGP program sequencing is tracked separately once
-   P0 split PRs are on `main` — do not re-decide from this frozen text alone.
+   open question as of `d8418cea2`. The operator decision remains at
+   `Docs/16_OPEN_DECISIONS.md:70-71`; Docs/24 records sequencing constraints only.
+   Do not re-decide from this frozen text alone.
 
 ---
 
@@ -60,7 +69,7 @@ Three things are worth saying plainly before the table:
 
 | | Band | What it buys | Hours |
 | --- | --- | --- | --- |
-| **W0** | [Unblock yourself](#w0--unblock-yourself-1-hour) | You can finally *see* the product | **~1** |
+| **W0** | [Unblock yourself](#w0--unblock-yourself-split-around-p0-c-and-p0-e) | You can finally *see* the product | **~1** |
 | **P0** | [Don't lose the data](#p0--dont-lose-the-data) | Real money data is safe to enter | **9–12** |
 | **P0** | [Be able to operate it](#p0--be-able-to-operate-it) | First run works; failures leave a trace | **11–20** |
 | **P1** | [Stop looking like a mockup](#p1--stop-looking-like-a-mockup) | It reads as a product | **10–12** |
@@ -72,37 +81,49 @@ Three things are worth saying plainly before the table:
 
 ---
 
-## W0 — Unblock yourself (1 hour)
+## W0 — Unblock yourself (split around P0-c and P0-e)
 
-Do this before anything else, including reading the rest of this plan. Every other
-item is easier to judge once you can actually operate the UI.
+The original one-hour sequence was not executable: `beta_operator` is unknown on the
+reviewed tree until P0-c, and assigning a role globally cannot scope only one bundled
+permission to `manual-upload`. Split the UI re-walk from the later import bootstrap.
 
 | # | Change | File | Time |
 | --- | --- | --- | --- |
-| W0.1 | Create repo-root `.env`; set `VITE_DEV_GATEWAY_ROLE=beta_operator` and `UMS_TRUSTED_GATEWAY_TOKEN` | `.env` (new, repo root) | 15 min |
-| W0.2 | Add `"/org-units"`, `"/users"`, and `"/security"` to `TENANT_SCOPED_ROUTES` | `frontend/vite.config.ts:13-32` | 5 min |
-| W0.3 | Restart the dev server, click through every view, write down what is still dead | — | 30 min |
+| W0.1a | Before P0-c, create repo-root `.env`; set the gateway token and use existing `finance_admin` for the finance re-walk. In accepted-risk header mode, use existing `revenue_operations_admin` only for the manual-import request, then switch back | `.env` (new, repo root) | 15 min |
+| W0.1b | After P0-c **and A5 database-authz cutover**, bootstrap the real DB user, assign `finance_admin` globally, and add a separate direct `connectors.run_jobs` grant scoped to connector `manual-upload` | bootstrap/authz workflow | P0-c + A5 |
+| W0.2 | Let PR #225 add `/org-units` + `/users`; add `/security` separately in Docs/23 A2 | `frontend/vite.config.ts` | P0-e + A2 |
+| W0.3 | Install the bootstrap UUID/email in `VITE_DEV_GATEWAY_USER_ID`/`VITE_DEV_GATEWAY_USER_EMAIL`, restart, click through every view, and record what is still dead | `.env` + runbook | 30 min |
 
-**W0.1 is the single highest-leverage change in this document.** The shipped default
+**W0.1a is the immediate visibility change.** The shipped default
 role is `assistant_analyst` (`vite.config.ts:69`), which `auth/seed.py` grants exactly
 two permissions — `VIEW_ANALYTICS` and `VIEW_CONFIDENCE` — out of **26**. Every write
 action and most reads are denied before they reach any logic. You have been demoing
 the product through its second-most-restricted role.
 
-> **Beta operator role (P0-c):** `finance_admin` alone **cannot** manual-import — `POST
+> **Least-privilege beta operator (P0-c):** `finance_admin` alone **cannot** manual-import — `POST
 > /revenue/facts` requires `connectors.run_jobs` (`api/revenue.py:1028`) and
-> `FINANCE_ADMIN` does not hold it (`auth/seed.py`). The prescribed beta identity is
-> **`beta_operator`**: finance read/write surface **plus** `connectors.run_jobs` scoped
-> to `manual-upload` only (least privilege — no connector scheduler, no Google lanes).
-> Bootstrap: `bootstrap_operator.py --role beta_operator`. Use `corporate_admin` only
-> for user-creation sessions (`users.manage`); use `finance_admin` only when demoing
-> finance UI without import.
+> `FINANCE_ADMIN` does not hold it (`auth/seed.py`). Do **not** solve that with a global
+> `beta_operator` role that bundles the connector permission: every permission from a
+> role assignment receives the same scope, so that shape widens job execution beyond
+> `manual-upload`. Bootstrap one DB principal with a global `finance_admin` assignment
+> plus a separate direct `connectors.run_jobs` grant at connector scope
+> `manual-upload`, after A5 enables database-backed authz. Until then, the localhost-only
+> accepted-risk header path must use existing roles: `revenue_operations_admin` for the
+> import request and `finance_admin` for finance UI. Use `corporate_admin` only for
+> user-creation sessions.
 
 **Acceptance criteria (W0):**
-- [ ] `.env` at repo root with `VITE_DEV_GATEWAY_ROLE=beta_operator` and gateway token
+- [ ] Before P0-c, `.env` uses an existing role; unknown `beta_operator` is never sent
+- [ ] After P0-c + A5, the DB principal has global finance authority plus only the scoped
+  `manual-upload` connector grant; other connector job requests remain denied
+- [ ] Bootstrap emits the created user UUID; gateway UUID/email match that row and a
+  subsequent write audit records the non-null actor
 - [ ] Manual import (`POST /revenue/facts`, `connector_key=manual-upload`) succeeds (201)
-- [ ] Finance views render real data (not 403) under `beta_operator`
-- [ ] `/org-units`, `/users`, `/security` proxied in dev (no 404 on Registry / Admin matrix)
+- [ ] Import rejects any source not independently proven already USD; no EGP value is
+  submitted to a `*_usd` field and no local FX is performed
+- [ ] Resumable/idempotent loop finishes with expected revenue-required channels exactly
+  matching persisted month facts; a single 201 is not accepted as batch proof
+- [ ] `/org-units` and `/users` proxy through #225; `/security` proxies only after A2
 
 > ⚠️ **The file is the repo-root `.env`, not `frontend/.env`.** `envDir` is pinned to
 > the repo root (`vite.config.ts:41-51,93,151`) and the comment at `:38` records that
@@ -144,19 +165,37 @@ Export artifacts and connector blobs live on ephemeral container paths
 (`reports/artifact_storage.py:13`, `orchestrator.py:3125`, `Dockerfile:109`). A
 container replacement discards them, and a requested export then **503s permanently**.
 
-Fix by mounting a **host bind mount** (e.g. `./data/artifacts:/var/lib/ums/artifacts`) —
-**not** a Compose-managed named volume. `docker compose down -v` destroys
-`postgres-data` and `redis-data`; any co-located named app volume is destroyed with them.
-Restore would leave export records pointing at missing blobs.
+Use one explicit host-to-container contract:
+
+- Container env: `UMS_EXPORT_ARTIFACT_DIR=/var/lib/ums/artifacts` and
+  `UMS_LOCAL_STORE_ROOT=/var/lib/ums/blobs`.
+- Compose mount: host source `./data/ums:/var/lib/ums` on both `app` and `app-dev`;
+  mount `migrate` only if it writes artifacts or blobs.
+- `./data/ums` is the host source. Never put that relative path in either environment
+  variable inside a container; both values are absolute container targets.
+
+An externally managed Compose volume is acceptable only if mounted at `/var/lib/ums`
+and verified to survive `docker compose down -v`. Ordinary named app volumes can be
+destroyed alongside `postgres-data` and `redis-data`, leaving export records pointing
+at missing blobs. Ignore `/data/ums/` in repo-root `.gitignore` **before** the first real
+write so `git add .` cannot stage private exports or raw evidence.
+
+**Permission/persistence smoke:** as the runtime user in `app` and `app-dev`, verify
+both targets are readable/writable, write one sentinel under each, recreate with
+`docker compose down` (without `-v`) plus `docker compose up` (and the dev-profile
+equivalent), verify both survive, then remove them.
 
 > 💡 There is an undocumented workaround for the 503 in the meantime: `request_export`
 > has no dedup on scope+month (`reports/exports.py:383-433`), so the operator can
 > simply request the export again. Note this in the runbook.
 
 **Acceptance criteria (P0.2):**
-- [ ] Artifact path is a host bind mount outside Compose named volumes
+- [ ] `app` and `app-dev` mount `./data/ums:/var/lib/ums`; env targets are the two
+  absolute container paths above; `migrate` is mounted only if it writes
+- [ ] `/data/ums/` is excluded by repo-root `.gitignore` before first write
 - [ ] `docker compose down` (without `-v`) preserves artifacts across container recreate
 - [ ] Document that `down -v` wipes DB **and** must not be used when artifacts must survive
+- [ ] Runtime-user permission/persistence smokes pass for both targets
 
 ### P0.3 — Compose env vars + `.env.example` — **1–2h**
 
@@ -220,7 +259,9 @@ and it is an FK prerequisite for assigning any role.
 ### P0.8 — Bootstrap script (`bootstrap_operator.py`) — **4–8h** ⚠️
 
 Creates the first operator user, and — with `--org-skeleton` — one `SECTOR` plus one
-`COMPANY` beneath it.
+`COMPANY` beneath it. It must print/export the created user UUID and the runbook must
+install that UUID and matching email in the dev gateway env; the fixed fallback UUID
+is not proof of identity and otherwise produces null/misattributed audit actors.
 
 > ⚠️ **This is the rabbit hole of the whole plan.** It looks like "insert one row." On
 > Postgres, `SET LOCAL ROLE app_tenant` + `tenant_id = app_current_tenant_id()` will
@@ -241,14 +282,20 @@ until each channel has `primary_company_id` set.
 > `MANAGE_ORG_MAPPING` gating + audit events + cycle validation + tests + a frontend
 > that does not exist = 8–16h that buys one operator nothing.
 >
-> **Mandatory follow-up:** assigning channels to companies is one
+> **Mandatory truthful follow-up:** assigning channels to companies is one
 > `PATCH /channels/{id}/mapping` per channel (`api/channels.py:1425`) — no bulk path.
-> **P0.9 acceptance requires the scripted mapping loop**, not just the two-row skeleton.
+> The two-row placeholder skeleton is valid only if every imported channel truly belongs
+> to that company. For a multi-company roster, ingest/seed the real hierarchy first or
+> leave mappings visibly unresolved; never clear issues by assigning unrelated channels
+> to a fake common company. Then run a resumable mapping loop and verify the result.
 
 **Acceptance criteria (P0.8 + P0.9):**
 - [ ] Bootstrap creates operator + optional org skeleton (sector + company)
-- [ ] Scripted loop maps every imported channel to a company (`PATCH …/mapping`)
-- [ ] Registry shows zero `MISSING_COMPANY` for mapped channels after loop completes
+- [ ] Bootstrap emits the operator UUID and the gateway env uses that UUID/email
+- [ ] Real company/sector hierarchy exists for the roster, or the beta remains global
+  with unresolved mappings explicitly visible
+- [ ] Resumable loop maps only channels with evidence-backed ownership (`PATCH …/mapping`)
+- [ ] Registry shows zero `MISSING_COMPANY` only for truthfully mapped channels
 - [ ] `POST /channels` succeeds for new channels once parent company exists
 
 ---
@@ -266,8 +313,8 @@ Roughly **90% of this work is deletion.**
 | # | Item | Where | Time |
 | --- | --- | --- | --- |
 | P1.1 | Error boundary — land **first**, so later mistakes degrade to a card, not a white page | new | 2–3h |
-| P1.2 | Rolling month window replacing 4 hardcoded months | — | 1.5–2h |
-| P1.3 | De-mock the chrome: `NAV_GROUPS`, `VIEW_COPY`, `WORKFLOW_STEPS` + remove 4 dead buttons + delete the inert currency selector | `AppShell.tsx` | 3–4h |
+| P1.2 | **DONE on `main` — PR #211 / `41b4953`**: rolling month window replacing 4 hardcoded months; live date rollover still requires reload | — | delivered; provider/timer follow-up open |
+| P1.3 | De-mock the chrome: `NAV_GROUPS`, `VIEW_COPY`, `WORKFLOW_STEPS` + remove 4 dead buttons + temporarily hide/remove the inert currency-selector implementation | `AppShell.tsx` | 3–4h |
 | P1.4 | De-mock `CLOSE_STEPS`, `EXPORT_READINESS`, `ISSUES`, `REGISTRY_SUMMARY`, `REGISTRY_CONTROLS`, `RECON_NOTES`, `EXPORTS_GUARDRAILS` | `CommandView`, `RegistryView`, `CloseView`, `ExportsView` | ~3h |
 
 **The migration is further along than it looks.** `ConnectorsView`, `GroupsView`,
@@ -276,10 +323,14 @@ Roughly **90% of this work is deletion.**
 concentrated in the chrome and the summary tiles — which is exactly the part a visitor
 sees first, and why the impression is so much worse than the reality.
 
-**Delete the currency selector** (`AppShell.tsx:629-633`) rather than wiring it. It
+**Hide or remove the current inert currency selector** (`AppShell.tsx:629-633`) rather
+than wiring fake behavior. It
 offers USD/EGP/AED with no `onChange`, in a pipeline that rejects non-USD everywhere.
 It is three lines, no test touches it, and it is the most actively misleading control
-in the app — it advertises a capability that is 3–6 weeks away.
+in the app — it advertises a capability that is 3–6 weeks away. This is a temporary
+USD-beta decision, **not** deletion of the durable `DESIGN.md` contract: the top bar
+still requires a month/currency/scope filter once a backend-backed multi-currency path
+exists. PR #217 is a currency-spine foundation, not proof that selector behavior exists.
 
 **Skip react-router.** State-based view switching is fine for one operator. Optional:
 `sessionStorage` view persistence, 1–1.5h.
@@ -322,8 +373,11 @@ first beta run *is* the first rehearsal, and should be treated as one.
 
 Must cover: first-run order (seed → bootstrap → import), the reboot recovery path
 (nothing restarts itself), the restore drill, **B1/B2 written down as accepted risks**
-justified by the localhost binding, the per-channel mapping loop, the export-503
-re-request workaround, and a note that a connector-only month cannot be locked at all.
+justified by the localhost binding, proof that manual-import values are already USD, a
+resumable/idempotent import loop plus expected-vs-persisted channel comparison, the
+truthful per-channel mapping loop, bootstrap-UUID gateway wiring and audit attribution,
+the export-503 re-request workaround, and a note that a connector-only month cannot be
+locked at all.
 
 ---
 
@@ -344,13 +398,16 @@ pipeline is internally consistent and the numbers are real. Do P2.2 when conveni
 **If no:** that is the EGP program — 3–6 weeks, ~2,154 `*_usd` identifiers, and a
 USD-only design that is *test-locked* by
 `tests/finance/test_finance_no_fx_dependency.py:40-53`. It should be its own milestone
-after the beta proves the rest works. **EGP path adopted in separate program doc.**
+after the beta proves the rest works. The operator decision remains open at
+`Docs/16_OPEN_DECISIONS.md:70-71`; Docs/24 records the U2/EGP sequencing constraint
+only and is not the EGP implementation plan.
 
 > ⚠️ **Do not let anyone "shortcut" this through `currency_exchange_rates`.** It looks
-> like a 2-hour win and will be rejected by an existing guard test, four documents, and
-> one closed decision. The sanctioned route to EGP is Google's own server-side
-> conversion (`currency=EGP`), never a UMS-derived rate. Your own words are the reason
-> it was closed: *"i dont need to make it USD × 47.5, i need pure number."*
+> like a 2-hour win and is rejected by an existing guard test and the surrounding
+> finance contracts. The operator decision remains open. If EGP is approved, the
+> sanctioned route is Google's own server-side conversion (`currency=EGP`), never a
+> UMS-derived rate. The quoted operator preference remains context, not a closed
+> decision: *"i dont need to make it USD × 47.5, i need pure number."*
 
 ---
 
@@ -391,7 +448,9 @@ Recorded so they are not re-proposed:
   Keep recon dormant until a separate ruling.
 - **`POST /org-units`** — 8–16h; two seeded rows do the job.
 - **react-router** — unnecessary for one operator.
-- **Wiring the currency selector** — that is the EGP program wearing a dropdown.
+- **Wiring the current inert currency selector before backend support** — that is the EGP
+  program wearing a dropdown. Temporarily hiding it does not rescind `DESIGN.md`'s
+  durable currency-filter contract.
 
 ---
 

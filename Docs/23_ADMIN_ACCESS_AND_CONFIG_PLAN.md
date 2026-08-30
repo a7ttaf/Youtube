@@ -1,38 +1,53 @@
 # 23 — Admin, Access & Configuration Plan
 
-*Written 2026-08-27, scoped against the merged integration tree (main `d8418cea2` + the
-#211–#217 draft band + the #209/#210 P0 stack). Every "exists today" claim below was
-verified against code, not recalled. Gap-patched 2026-08-28 (triad review).*
+*Written 2026-08-27 and status-reconciled 2026-08-31. PR #211 is merged to `main` as
+`41b4953`; #212–#216 remain open P1 drafts and #217 is a separate open EGP draft.
+PR #210 was merged only into the closed #209 planning branch and never reached `main`;
+#221–#225 are the open main-targeted P0 successors. Every "exists today" claim below
+was verified against code, not recalled.*
+
+**Status: PLAN.** PR #228 is an open persistence/repository scaffold and PR #229 is an
+open, conflicting frontend foundation. Neither completes an A-band in this document.
 
 The operator's question that produced this plan: **"From where do I add the other users?
 From where the permissions? From where can I make full config?"**
 
-The short answer: **the backend for all of it already exists and is audited — what is
-missing is the user interface.** Nothing in the current beta plan (Docs/21) builds one.
-This document is the honest inventory of what works today, the plan for the missing
-surface, and the tripwires that keep it safe.
+The short answer: **core user/role CRUD, assignment, grant, and catalog APIs exist and
+are audited; the complete program does not.** A1 needs scoped reads and session
+capabilities, A4 needs a status endpoint, A6 needs policy/isolation enforcement, and A7
+needs enrollment plus an OIDC gateway. This document is the honest inventory of what
+works today, the plan for the missing backend and UI surfaces, and the tripwires that
+keep them safe.
 
 ### Prerequisites & related plans
 
-| Doc / where | Role |
+| Work | Live state / role |
 | --- | --- |
-| [`20_DEPLOYMENT_READINESS_AUDIT.md`](20_DEPLOYMENT_READINESS_AUDIT.md) / [`21_BETA_IMPLEMENTATION_PLAN.md`](21_BETA_IMPLEMENTATION_PLAN.md) | Parent beta audit/plan (snapshot; living status on P0 split PRs) |
-| [`25_PROGRAM_DEPENDENCY_GRAPH.md`](25_PROGRAM_DEPENDENCY_GRAPH.md) | Execution DAG |
-| P0 split PRs (P0-a…P0-e) | `main` (TBD) | **Hard prerequisite** for A1/A5 (bootstrap, seed migration, `/users` proxy) |
-| [`24_US_WITHHOLDING_AND_US_REVENUE_PLAN.md`](24_US_WITHHOLDING_AND_US_REVENUE_PLAN.md) | Sibling finance program (no overlap) |
+| [`20_DEPLOYMENT_READINESS_AUDIT.md`](20_DEPLOYMENT_READINESS_AUDIT.md) / [`21_BETA_IMPLEMENTATION_PLAN.md`](21_BETA_IMPLEMENTATION_PLAN.md) | PR #220 audit/costing snapshots; no runtime implementation |
+| [`25_PROGRAM_DEPENDENCY_GRAPH.md`](25_PROGRAM_DEPENDENCY_GRAPH.md) | Exact execution and PR-status DAG |
+| #223 / P0-c | Open, non-draft; bootstrap/seed prerequisite for A1 and A5 |
+| #225 / P0-e | Open, non-draft; `/users` + `/org-units` proxy prerequisite for A1; **not** `/security` |
+| #228 | Open scaffold; must be restacked after #223 before its persistence can feed A6/A7 |
+| #229 | Open/conflicting frontend scaffold; must be rewritten/restacked after P1 before A1/A2 UI work consumes it |
+| [`24_US_WITHHOLDING_AND_US_REVENUE_PLAN.md`](24_US_WITHHOLDING_AND_US_REVENUE_PLAN.md) | Sibling finance program; #228 shares only a persistence prerequisite |
+
+**#228 migration gate:** its `20260828_0001` and #223's `20260825_0001` both currently
+revise `20260805_0001`, producing sibling Alembic heads if merged as authored. #228 must
+be restacked after #223 and revise #223's head before it can be treated as a prerequisite.
 
 > ⚠️ **Hard dependency on P0 split PRs.** `scripts/bootstrap_operator.py`, Alembic migration
 > `20260825_0001` (roles/permissions seed), and Vite proxy `/users` (plus `/org-units`)
 > land on **P0-c / P0-e** — **not on bare `main`**. Do not start A1 or A5 until P0-c
 > merges (or cherry-picks). After P0-e, A2 still needs `/security` added to
-> `TENANT_SCOPED_ROUTES`. Blocked PR #210 is **not** living source of truth.
+> `TENANT_SCOPED_ROUTES`; #225 does not own that route. PR #210 is GitHub-merged only
+> into the closed non-main #209 branch; none of it is delivered on `main`.
 >
-> **Consolidation:** Docs/20/21/23/24 ship together in `docs/program-plans-consolidated`
+> **Consolidation:** Docs/20/21/23/24/25 ship together in `docs/program-plans-consolidated`
 > (supersedes closed drafts #209 / #218 / #219).
 
 ---
 
-## 1 — What exists TODAY (no UI, fully functional)
+## 1 — Existing backend inventory (no UI; insufficient for A1–A7)
 
 ### Users
 
@@ -117,9 +132,10 @@ Audit). **None of them is an Admin view.** Consequences the operator already hit
 
 ## 3 — The program
 
-All bands are frontend-dominant (the APIs exist), independently draft-PR-able from
-main, and none blocks the beta data path. Hours assume the established view patterns
-(useAsync hooks, permission-gated panels, honest empty states).
+The bands mix frontend, API, authorization, persistence, migration, and gateway work.
+They are independently reviewable only after their named prerequisites are on `main`;
+none blocks the single-operator beta data path. Hours assume the established view
+patterns (useAsync hooks, permission-gated panels, honest empty states).
 
 ### A1 — Admin view MVP: Users & Roles — **10–15h** ⭐ the operator's actual ask
 
@@ -131,7 +147,10 @@ main, and none blocks the beta data path. Hours assume the established view patt
    (scoped to the actor's subtree post-A6; global for HQ until then); **or**
 2. Remove `finance_admin` from the assignment drawer until that endpoint exists.
 
-A ninth view, nav-gated to principals holding `users.manage` (decision D-A1):
+A ninth view, nav-gated when the session reports
+`can_manage_users || can_assign_roles` (decision D-A1). Creation/lifecycle controls
+remain hidden unless `can_manage_users`; role-only principals receive an
+assignment-only surface:
 
 - User list (`GET /users` or scoped read): email, display name, status, service-account badge.
 - Create user: email + display name + human/service toggle (`POST /users`).
@@ -154,8 +173,9 @@ session-capability booleans. The six user write endpoints already exist. New wir
 Admin view in `ViewRouter`/nav + hooks. Do not start until **P0-c** merges.
 
 **Acceptance criteria (A1):**
-- [ ] Admin nav hidden unless session reports `can_manage_users`
-- [ ] `finance_admin` can open assignment drawer **only if** scoped user list returns 200
+- [ ] Admin nav hidden unless session reports `can_manage_users || can_assign_roles`
+- [ ] `finance_admin` with `can_assign_roles` + scoped read can open the assignment drawer
+  but cannot see create/activate/deactivate controls
 - [ ] Create/assign/revoke flows require audit reason; blank reason → 422 surfaced in UI
 - [ ] No client-side permission widening beyond session capabilities
 
@@ -201,9 +221,12 @@ is where the operator confirms the flip actually took effect in a deployment.
 The operator story for `UMS_AUTHZ_SOURCE=database`: bootstrap the first
 corporate_admin (CLI) → verify via `GET /users/{id}/access` → flip the env → the
 gateway now supplies identity only. Cross-references Docs/21 P2 — this band documents,
-it does not re-scope.
+it does not re-scope. PR #228 does not implement this cutover; A5 remains planned work.
 
-**Suggested order: A1 → A2 → (beta ships) → A6 → A7 + A5 → A3 → A4.** A1+A2 are worth
+**Suggested order:** #223 → **A5 immediately if the beta adopts database authz**;
+integrate #212/#214/#215, rewrite/restack #229, then
+**A1 → A2 → (beta ships) → restacked #228 prerequisite → A6 → A7 → A3 → A4.**
+A1+A2 are worth
 doing right after the P1 band merges — they are the same "stop looking like a mockup"
 story applied to administration. A6 (delegated administration, §4b) comes before A3
 because the scoped-grants UI should be built on the delegation model's ceiling, not
@@ -286,6 +309,10 @@ program. What the code enforces today was verified line by line
 2. **Scope containment.** A delegated admin may act only on users and assignments
    inside their own scope subtree; users they create are born inside it; revocations
    are limited to assignments they could have made.
+   Account `status` is global even when a user has assignments in several subtrees.
+   Therefore delegated activate/deactivate must re-check **all** effective assignments
+   and grants in the same transaction and reject if any authority lies outside the
+   actor's subtree; global admins retain the unrestricted lifecycle path.
 3. **The no-amplification invariant** — the operator's "no one can take higher layer":
    an actor may assign a (role, scope) pair or grant a (permission, scope) pair **only
    if its effective permission set at that scope is a subset of the actor's own
@@ -333,6 +360,8 @@ A6 is what makes it safe to hand pieces of it to sub-company people.
 - [ ] Mutation tests RED when home-scope guard removed
 - [ ] Competitor read-isolation matrix green across all views/exports
 - [ ] No-amplification invariant proven for role assign, grant, revoke, self-modification
+- [ ] Delegated lifecycle change refuses a multi-scope user with any authority outside
+  the actor subtree; removing that transaction-time guard turns a test RED
 
 ## 4c — A7: Google-only sign-in with an operator-owned domain allowlist
 
@@ -350,6 +379,14 @@ internal UMS UUID** — Google `sub` and email are **not** valid principal IDs.
 adapter resolves Google OIDC claims → UMS UUID **before** trusted headers reach FastAPI
 (`dependencies.py` UUID validation). Unknown allowlisted identity → clean 403; no
 auto-provisioning.
+
+**Enrollment is explicit and audited.** A7 must add an operator-only link operation
+(CLI or internal API) that consumes a Google-verified subject + normalized email, binds
+it to one existing active UMS user with the exact same normalized email, requires an
+audit reason, enforces unique `(provider, provider_subject)` and one intended mapping,
+and commits mapping + audit atomically. A missing, mismatched, duplicate, disabled, or
+unverified identity fails closed. A denied first login may provide claims to the
+operator workflow, but it may not auto-provision or silently bind by email.
 
 Google SSO is that gateway made real — an OIDC front (Google sign-in) standing where
 the dev proxy stands today, injecting the same headers. Zero change to UMS's internal
@@ -381,6 +418,8 @@ and the runbook.
 
 **Acceptance criteria (A7):**
 - [ ] `external_identities` migration + repository; Google `sub` maps to UMS UUID
+- [ ] Audited enrollment/link operation exists; mismatch/duplicate/disabled/unverified
+  inputs fail closed and no unknown login can self-bind
 - [ ] Gateway never forwards raw Google subject as `X-User-ID`
 - [ ] Allowlisted unknown email → 403; known mapped user → session with DB authz (post-A5)
 
@@ -398,7 +437,7 @@ gate). None of the three is optional for that step, and the beta needs none of t
 
 | # | Decision | Recommendation |
 | --- | --- | --- |
-| D-A1 | Which roles see the Admin nav | Principals holding `users.manage` (super_owner, corporate_admin); finance_admin sees assignment drawer **only** with `users.read_scoped` (or hide until that gate exists) |
+| D-A1 | Which roles see the Admin nav | Show when either `can_manage_users` or `can_assign_roles` is true; finance_admin gets assignment-only UI with `users.read_scoped`, never lifecycle controls |
 | D-A2 | Gate for the catalog reads (`/security/*`) | Move to `users.manage` alongside the matrix UI; `audit.view` was a placeholder |
 | D-A3 | A4 status endpoint scope | Read-only allowlist, `platform.manage_settings` gate |
 | D-A4 | When A1 lands | Immediately after the P1 band merges, before beta polish |

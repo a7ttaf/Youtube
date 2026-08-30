@@ -1257,10 +1257,13 @@ and the reconciled-net content (Phase 4 allocation/tax) feeding report bodies.
   and no non-dev path to serve the browser app. Two viable beta shapes are
   documented there; real revenue can be ingested without any Google/GCP
   dependency via the first-class `MANUAL_UPLOAD` import path.
-  **Freshness (2026-08-28):** P0 execution + living Docs/21 status track **P0 split PRs**
-  on main (replaces blocked #210). Docs/20–21/23/24/25 ship together on branch
-  docs/program-plans-consolidated (supersedes closed drafts #209/#218/#219). Do not
-  schedule unchecked P0 items from the Docs/21 snapshot alone.
+  **Freshness (2026-08-31):** PR #210 was merged only into the now-closed PR #209
+  branch; neither its head nor its merge commit reached `main`. Living P0 execution is
+  therefore the still-open, non-draft split fleet: #221 (P0-a), #222 (P0-b), #223
+  (P0-c), #224 (P0-d), and #225 (P0-e). Docs/20–21/23/24/25 ship together in PR #220
+  (supersedes closed drafts #209/#218/#219). Do not mark a P0 band implemented until
+  its successor PR is merged to `main`, and do not schedule unchecked items from the
+  Docs/21 costing snapshot alone.
 - ⏳ Google credential token monitoring — remaining: credentials repo (PRs #33, #34) +
   four `api_connector_credentials` refresh-telemetry columns (last-attempt,
   token-expiry, last-status, last-error-class) stamped at the
