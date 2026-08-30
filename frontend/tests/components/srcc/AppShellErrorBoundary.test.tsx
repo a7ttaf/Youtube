@@ -197,9 +197,9 @@ describe("AppShell view error boundary", () => {
   });
 
   it("clears the caught error when the operator navigates to another view", async () => {
-    // The boundary is keyed by the active view, so a switch REMOUNTS it. Held
-    // without the key, a single crash would pin the fallback over every view
-    // the operator visited afterwards.
+    // The boundary instance is retained across view changes; resetKey clears
+    // its stale error through getDerivedStateFromProps before the next view
+    // renders, so one crash cannot pin the fallback over later views.
     renderShell();
     await screen.findByRole("complementary", { name: "Primary navigation" });
 
