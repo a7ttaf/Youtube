@@ -796,6 +796,47 @@ const MonthCloseWorkbench = ({
   );
 };
 
+// ============================================================================
+// Purpose: Track WHICH month's read produced the current settled status
+//   verdict, closing the month-switch flash (PR #211 review): useAsync clears
+//   data and flips loading inside its effect — one paint frame AFTER the
+//   selection changes — so for that frame (status=null, loading=false,
+//   error=null) is the PREVIOUS month's verdict, which the summary used to
+//   render as a false OPEN for the newly selected month.
+// Database/ORM: None (frontend display-state derivation).
+// Standards: The verdict month is cleared synchronously DURING the render
+//   that changes the selection (React's adjust-state-during-render pattern —
+//   guarded to run only while it differs from the selection, so it converges),
+//   putting the unknown verdict in the DOM before the browser paints. The
+//   settle effect re-records the month whenever a read for the current
+//   selection finishes without an error, covering both the no-record (null)
+//   and populated verdicts. Hooks-order safe: same hook calls on every render.
+// Blast Radius: Display only — which summary tile / badge renders while a
+//   switched-to month's read is in flight. No write path, no stored value.
+// Connections:
+//   - File: frontend/src/lib/api/useAsync.ts -> the effect-timed data clear
+//     whose one-frame gap this closes.
+//   - File: CloseView (this file) -> feeds statusKnown for the summary tiles
+//     and the lock badge.
+// ============================================================================
+/** The month whose read produced the current settled verdict; null = unknown. */
+const useSettledStatusMonth = (
+  month: string,
+  loading: boolean,
+  error: ApiError | Error | null,
+): string | null => {
+  const [settledStatusMonth, setSettledStatusMonth] = useState<string | null>(null);
+  if (settledStatusMonth !== null && settledStatusMonth !== month) {
+    setSettledStatusMonth(null);
+  }
+  useEffect(() => {
+    if (!loading && error === null) {
+      setSettledStatusMonth(month);
+    }
+  }, [loading, error, month]);
+  return settledStatusMonth;
+};
+
 /**
  * The real-data Month-Close screen: status summary, readiness checklist, and the
  * inline reason + arm/confirm lock/unlock workflow wired to the finance-close API.
@@ -835,44 +876,11 @@ const CloseView = ({
 
   const isLocked = status?.status?.toUpperCase() === "LOCKED";
 
-  // ==========================================================================
-  // Purpose: The month whose read produced the CURRENT settled status verdict.
-  //   FIX (PR #211 review): on a month switch, useAsync clears data and flips
-  //   loading inside its effect — which runs AFTER paint — so exactly one
-  //   painted frame had (status=null, loading=false, error=null): the summary
-  //   read the PREVIOUS month's "no close record" verdict as the new month's
-  //   and flashed a false OPEN. This state is cleared synchronously DURING the
-  //   render that changes the selection (React's adjust-state-during-render
-  //   pattern), so the unknown verdict reaches the DOM before the browser
-  //   paints, and both the summary and the lock badge treat the month as
-  //   unknown until the read for the newly selected month settles.
-  // Database/ORM: None (frontend display-state derivation).
-  // Standards: The render-phase adjustment is a plain setState guarded to run
-  //   only while the recorded verdict month differs from the selection, so it
-  //   converges (null is stable) and violates no rules-of-hooks constraint.
-  //   The settle effect re-records the verdict month whenever a read for the
-  //   current selection finishes without an error, covering both the
-  //   no-record (null) and populated verdicts.
-  // Blast Radius: Display only — which summary tile / badge renders during the
-  //   read of a switched-to month. No write path, no stored value.
-  // Connections:
-  //   - File: frontend/src/lib/api/useAsync.ts -> the effect-timed data clear
-  //     whose one-frame gap this closes.
-  //   - File: CloseStatusSummary + LockControlsPanel (this file) -> the two
-  //     statusKnown consumers.
-  // ==========================================================================
-  const [settledStatusMonth, setSettledStatusMonth] = useState<string | null>(null);
-  if (settledStatusMonth !== null && settledStatusMonth !== month) {
-    setSettledStatusMonth(null);
-  }
-  useEffect(() => {
-    if (!statusLoading && statusError === null) {
-      setSettledStatusMonth(month);
-    }
-  }, [statusLoading, statusError, month]);
-  // True only when a read for the SELECTED month has settled without an error —
-  // the (status=null, error=null) pair alone cannot tell "no record for this
-  // month" from "the previous month's verdict, one frame before the new read".
+  // FIX (PR #211 review): a null status only means "no close record" once a
+  // read for the SELECTED month settled on it — see useSettledStatusMonth above
+  // for why the (status=null, error=null) pair alone cannot tell that from the
+  // previous month's verdict in the frame right after a month switch.
+  const settledStatusMonth = useSettledStatusMonth(month, statusLoading, statusError);
   const statusKnown =
     !statusLoading && statusError === null && settledStatusMonth === month;
 
