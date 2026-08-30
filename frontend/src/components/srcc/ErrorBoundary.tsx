@@ -40,6 +40,12 @@ export type ErrorBoundaryReport = Readonly<{
   correlationId: string;
 }>;
 
+/** Injectable browser entropy surface used by the correlation-id generator. */
+export type CorrelationEntropySource = Readonly<{
+  randomUUID?: () => string;
+  getRandomValues?: (array: Uint32Array) => Uint32Array;
+}>;
+
 type ErrorBoundaryProps = {
   children: ReactNode;
   /** Changes clear a stale fallback without remounting the guarded subtree. */
@@ -66,30 +72,96 @@ const FALLBACK_MESSAGE =
   "server state. A write may already have committed, so confirm its outcome " +
   "before retrying any action.";
 
+const CORRELATION_UUID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const CORRELATION_SENTINEL = 0xa5a5a5a5;
 let correlationSequence = 0;
+
+// ============================================================================
+// Purpose: Read fresh per-event browser entropy and retain a safe final
+//   fallback for restricted or hostile execution contexts.
+// Database/ORM: None.
+// Standards: Never use raw error data or a timestamp/counter pair as the
+//   primary identity; every source failure is contained without throwing.
+// Blast Radius: Correlation uniqueness and telemetry support only.
+// Connections:
+//   - File: frontend/src/components/srcc/ErrorBoundary.tsx -> correlationIdOf.
+//   - File: frontend/tests/components/srcc/ErrorBoundary.test.tsx -> injected
+//     deterministic values and hostile-source regression coverage.
+// ============================================================================
+const browserEntropySource = (): CorrelationEntropySource | undefined => {
+  try {
+    return globalThis.crypto as unknown as CorrelationEntropySource;
+  } catch {
+    return undefined;
+  }
+};
+
+const randomValuesPartOf = (
+  source: CorrelationEntropySource | undefined,
+): string | null => {
+  try {
+    if (typeof source?.getRandomValues !== "function") return null;
+    const words = new Uint32Array([
+      CORRELATION_SENTINEL,
+      CORRELATION_SENTINEL,
+      CORRELATION_SENTINEL,
+      CORRELATION_SENTINEL,
+    ]);
+    source.getRandomValues(words);
+    if (words.every((word) => word === CORRELATION_SENTINEL)) return null;
+    return Array.from(words, (word) => word.toString(16).padStart(8, "0")).join(
+      "",
+    );
+  } catch {
+    return null;
+  }
+};
+
+const lastResortEntropyPart = (): string => {
+  try {
+    const random = Math.random();
+    if (Number.isFinite(random)) {
+      return Math.trunc(random * 2 ** 32).toString(36);
+    }
+  } catch {
+    // The final reference still must not throw when browser primitives are
+    // unavailable or hostile.
+  }
+  return "noentropy";
+};
 
 // ============================================================================
 // Purpose: Generate a non-sensitive reference for one caught render failure.
 // Database/ORM: None.
-// Standards: Prefer the browser UUID source and use a local monotonic fallback
-//   when it is unavailable; the value contains no user, tenant, or error data.
+// Standards: Prefer UUID, then fresh crypto.getRandomValues entropy, then a
+//   nonthrowing last resort; callers can inject the source for deterministic
+//   tests and the value contains no user, tenant, or error data.
 // Blast Radius: Telemetry correlation and operator support only.
 // Connections:
 //   - File: frontend/src/components/srcc/ErrorBoundary.tsx -> report payload
 //     and the fallback reference text.
+//   - File: frontend/src/main.tsx -> sanitized handlers for root-level errors.
 // ============================================================================
-const correlationIdOf = (): string => {
+export const correlationIdOf = (
+  source: CorrelationEntropySource | undefined = browserEntropySource(),
+): string => {
   try {
-    if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
-      return crypto.randomUUID();
+    const uuid = source?.randomUUID?.();
+    if (typeof uuid === "string" && CORRELATION_UUID_PATTERN.test(uuid)) {
+      return uuid;
     }
   } catch {
-    // Fall through to the deterministic local reference when UUID generation is
-    // unavailable in a restricted browser context.
+    // Fall through to fresh random values when UUID generation is unavailable.
+  }
+
+  const randomValuesPart = randomValuesPartOf(source);
+  if (randomValuesPart !== null) {
+    return `view-error-${randomValuesPart}`;
   }
 
   correlationSequence += 1;
-  return `view-error-${Date.now().toString(36)}-${correlationSequence.toString(36)}`;
+  return `view-error-${lastResortEntropyPart()}-${correlationSequence.toString(36)}`;
 };
 
 // ============================================================================
@@ -103,7 +175,7 @@ const correlationIdOf = (): string => {
 //   - File: frontend/tests/components/srcc/ErrorBoundary.test.tsx -> malformed
 //     name/getter regression coverage.
 // ============================================================================
-const errorCategoryOf = (error: unknown): ErrorBoundaryCategory => {
+export const errorCategoryOf = (error: unknown): ErrorBoundaryCategory => {
   try {
     if (!(error instanceof Error)) return "Error";
     const candidate = error.name;
@@ -116,6 +188,27 @@ const errorCategoryOf = (error: unknown): ErrorBoundaryCategory => {
     return "Error";
   }
 };
+
+// ============================================================================
+// Purpose: Build the only error payload allowed to cross a render-error
+//   reporting boundary, shared by the view boundary and React root handlers.
+// Database/ORM: None.
+// Standards: Normalize the thrown value and generate a fresh opaque reference;
+//   raw Error, message, name, and component-stack fields are never retained.
+// Blast Radius: Client-side telemetry shape and operator correlation only.
+// Connections:
+//   - File: frontend/src/main.tsx -> root-level React error callbacks.
+//   - File: frontend/tests/components/srcc/ErrorBoundary.test.tsx -> category,
+//     malformed getter, and deterministic entropy coverage.
+// ============================================================================
+export const safeErrorReportOf = (
+  error: unknown,
+  source?: CorrelationEntropySource,
+): ErrorBoundaryReport =>
+  Object.freeze({
+    category: errorCategoryOf(error),
+    correlationId: correlationIdOf(source),
+  });
 
 /** Return the stable reset identity used to clear a prior view failure. */
 const resetKeyOf = ({ resetKey }: ErrorBoundaryProps): string =>
@@ -186,10 +279,7 @@ class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundaryState> {
    * and are not needed to reconcile or correlate the failure.
    */
   componentDidCatch(error: unknown, _info: ErrorInfo): void {
-    const report = Object.freeze({
-      category: errorCategoryOf(error),
-      correlationId: correlationIdOf(),
-    });
+    const report = safeErrorReportOf(error);
     this.setState({
       errorCategory: report.category,
       correlationId: report.correlationId,
