@@ -611,6 +611,21 @@ const CloseSummaryTiles = ({
 /** The CloseStatusSummary render modes, decided by closeSummaryMode. */
 type CloseSummaryMode = "error" | "loading" | "tiles";
 
+/** True when the error belongs to the selected month — the only error we render. */
+const errorBelongsToMonth = (
+  error: ApiError | Error | null,
+  settledStatusMonth: string | null,
+  month: string,
+): boolean => error !== null && settledStatusMonth === month;
+
+/** True while the verdict is in flight or belongs to another month. */
+const verdictUnknown = (
+  loading: boolean,
+  status: FinanceMonthCloseStatus | null,
+  settledStatusMonth: string | null,
+  month: string,
+): boolean => (loading && !status) || settledStatusMonth !== month;
+
 // ============================================================================
 // Purpose: Decide the close summary's render mode from the status read's
 //   lifecycle: the error tile ONLY for an error that belongs to the selected
@@ -635,10 +650,10 @@ const closeSummaryMode = (
   loading: boolean,
   status: FinanceMonthCloseStatus | null,
 ): CloseSummaryMode => {
-  if (error !== null && settledStatusMonth === month) {
+  if (errorBelongsToMonth(error, settledStatusMonth, month)) {
     return "error";
   }
-  if ((loading && !status) || settledStatusMonth !== month) {
+  if (verdictUnknown(loading, status, settledStatusMonth, month)) {
     return "loading";
   }
   return "tiles";
