@@ -61,22 +61,29 @@ FROM python:${PYTHON_VERSION}-slim@${PYTHON_BASE_DIGEST} AS runtime
 ARG APP_USER=app
 ARG APP_UID=10001
 
-# Mount point for the durable `app-data` volume (docker-compose.yml). Export
-# artifacts and connector blobs live under here instead of in the container's
-# writable layer, which a rebuild or `docker compose down` discards. Keep this
-# path in sync with UMS_EXPORT_ARTIFACT_DIR / UMS_LOCAL_STORE_ROOT in
-# docker-compose.yml's x-app-storage-env anchor.
+# Mount point for the durable application-data mount (docker-compose.yml).
+# Export artifacts and connector blobs live under here instead of in the
+# container's writable layer, which a rebuild or `docker compose down`
+# discards. Keep this path in sync with UMS_EXPORT_ARTIFACT_DIR /
+# UMS_LOCAL_STORE_ROOT in docker-compose.yml's x-app-storage-env anchor.
 #
 # The directory and its two subdirectories are created and chowned in the
-# runtime RUN below, and that is load-bearing rather than tidiness: Docker
-# seeds an empty named volume from whatever the image has at the mount point,
-# ownership included. If the path were absent from the image, Docker would
-# create the mount point root-owned and uid ${APP_UID} could not write into it
-# — every export would then fail with
+# runtime RUN below. That stays load-bearing for every mount-free use of the
+# image (a plain `docker run` writes into the writable layer as uid
+# ${APP_UID} and needs the directories to exist and be owned) and for any
+# future named-volume mount (Docker seeds an empty named volume from the
+# image content at the mount point, ownership included). It deliberately
+# does NOT cover the compose HOST BIND mount: a bind mount overlays the
+# image entirely, so image-time ownership never reaches the host directory —
+# on a fresh Linux checkout the daemon even creates the missing bind source
+# root-owned. docker-compose.yml therefore runs the one-shot `app-data-init`
+# service (same image, root, same bind path) to provision the host side and
+# prove uid ${APP_UID} writability with a probe file before `app` starts.
+# Without either mechanism every export would fail with
 # ExportArtifactStorageError("artifact storage unavailable"), surfacing as a
-# permanent 503 on download, because FileSystemExportArtifactStore.save() only
-# mkdir()s the leaf directories and has no fallback when the parent is not
-# writable (backend/ums_smart_revenue/reports/artifact_storage.py).
+# permanent 503 on download, because FileSystemExportArtifactStore.save()
+# only mkdir()s the leaf directories and has no fallback when the parent is
+# not writable (backend/ums_smart_revenue/reports/artifact_storage.py).
 #
 # No `VOLUME` instruction on purpose: VOLUME would make every plain
 # `docker run` of this image spawn an anonymous volume that nothing ever

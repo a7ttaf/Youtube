@@ -228,7 +228,7 @@ x-app-env: &app-env
   PYTHONUNBUFFERED: "1"
 
 # ---------------------------------------------------------------------------
-# Durable application storage (P0.2). Both of the paths below default, in code,
+# Durable application storage. Both of the paths below default, in code,
 # to locations that live inside the container's writable layer and are thrown
 # away by any `up --force-recreate`, image rebuild, or `docker compose down`:
 #
@@ -243,24 +243,26 @@ x-app-env: &app-env
 # bytes do not, so the next download raises ExportArtifactStorageError
 # ("artifact missing from storage") and that export id 503s forever. A missing
 # connector blob destroys the raw evidence behind already-ingested revenue
-# rows. Pointing both at one named volume fixes it with no Python change.
+# rows. Pointing both at one durable mount fixes it with no Python change.
 #
-# One volume, two subdirectories: the two stores never share a filename
-# space, and backing both up means backing up one mount. This anchor is
-# merged ONLY into the services that actually mount `app-data`, so a storage
-# path can never be configured without its volume behind it. `migrate`
-# deliberately gets neither — alembic writes no artifacts or blobs.
+# One mount, two subdirectories: the two stores never share a filename
+# space, and backing both up means backing up one directory tree. This
+# anchor is merged ONLY into the services that actually mount the data
+# mount, so a storage path can never be configured without its mount
+# behind it. `migrate` deliberately gets neither — alembic writes no
+# artifacts or blobs.
 #
-# /var/lib/ums, /var/lib/ums/artifacts and /var/lib/ums/blobs are pre-created
-# in the Dockerfile and chowned to the non-root app user. That is
-# load-bearing, not tidiness: Docker seeds a fresh named volume from the image
-# content at the mount point, ownership included. If the directory were absent
-# from the image the volume would come up root-owned, uid 10001 could not
-# write into it, and every export would fail with "artifact storage
-# unavailable". Keep these paths and the Dockerfile's APP_DATA_HOME in sync.
+# The mount is a HOST BIND (UMS_APP_DATA_HOST, default ./data/ums ->
+# /var/lib/ums), chosen over a named volume because `down -v` would destroy
+# a named one alongside postgres-data. A bind mount does NOT inherit
+# image-time ownership — the Dockerfile's pre-created, chowned /var/lib/ums
+# is overlaid by whatever the host directory holds — so the one-shot
+# `app-data-init` service provisions the host side (subdirs + uid 10001
+# ownership + a write probe) before `app`/`app-dev` start. Keep these paths
+# and the Dockerfile's APP_DATA_HOME in sync.
 # ---------------------------------------------------------------------------
-# Paths are pinned under the durable ``app-data`` mount at ``/var/lib/ums``.
-# Do NOT interpolate host overrides here: Compose only mounts ``app-data`` at
+# Paths are pinned under the durable bind mount at ``/var/lib/ums``. Do NOT
+# interpolate host overrides here: Compose only mounts UMS_APP_DATA_HOST at
 # ``/var/lib/ums``, so an operator-set path like ``/srv/app/artifacts`` would
 # write into the container writable layer and vanish on recreate.
 x-app-storage-env: &app-storage-env
@@ -357,6 +359,53 @@ services:
     logging: *default-logging
     networks: [ums-net]
 
+  # One-shot host-side provisioning for the bind mount the app services use.
+  # On a fresh Linux checkout the Docker daemon creates the missing
+  # ./data/ums bind source ROOT-OWNED, and a bind mount OVERLAYS the
+  # image-time ownership — unlike a named volume, the image's chown never
+  # seeds a bind source — so uid 10001 could not create artifacts/ or
+  # blobs/, and every export would fail with ExportArtifactStorageError
+  # ("artifact storage unavailable") while blob uploads fail with EACCES.
+  #
+  # This service creates the two subdirectories and hands the three
+  # directories to the app uid, then PROVES writability by writing and
+  # removing a probe file AS uid 10001 (setpriv; the image also has the
+  # `app` user for `runuser -u app --` if setpriv ever disappears). The
+  # probe — deliberately NOT `chown`'s exit status — is the exit gate:
+  # Docker Desktop's emulated bind filesystems can make chown fail (EPERM)
+  # or silently no-op while the directory is still writable by everyone, so
+  # gating on chown would either brick the stack on the stated beta target
+  # (a Windows box) or pass while nothing changed. chown is non-recursive
+  # on purpose: the app creates everything nested as the owning uid, so
+  # only the three mount roots need fixing, and a recursive walk would
+  # grow with the blob store and delay every `up`.
+  #
+  # If the probe fails the service exits non-zero: `docker compose up`
+  # reports app-data-init failed and `docker compose logs app-data-init`
+  # names the unwritable directory — loud and early, instead of a silent
+  # permanent 503 on every export. It mounts the same UMS_APP_DATA_HOST
+  # path as app/app-dev so an operator override is provisioned identically.
+  app-data-init:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ums-smart-revenue:dev
+    restart: "no"
+    user: "0:0"
+    command:
+      - sh
+      - -c
+      - |
+        mkdir -p /var/lib/ums/artifacts /var/lib/ums/blobs
+        chown 10001:10001 /var/lib/ums /var/lib/ums/artifacts /var/lib/ums/blobs \
+          || echo "app-data-init: chown unavailable on this bind filesystem (common on Docker Desktop shares); gating on the uid-10001 write probe below instead"
+        setpriv --reuid=10001 --regid=10001 --clear-groups sh -c \
+          'touch /var/lib/ums/artifacts/.rw-probe && rm -f /var/lib/ums/artifacts/.rw-probe && touch /var/lib/ums/blobs/.rw-probe && rm -f /var/lib/ums/blobs/.rw-probe'
+    volumes:
+      - ${UMS_APP_DATA_HOST:-./data/ums}:/var/lib/ums
+    logging: *default-logging
+    networks: [ums-net]
+
   app:
     build:
       context: .
@@ -369,6 +418,8 @@ services:
       redis:
         condition: service_healthy
       migrate:
+        condition: service_completed_successfully
+      app-data-init:
         condition: service_completed_successfully
     environment:
       <<: [*app-env, *app-storage-env]
@@ -418,6 +469,8 @@ services:
       redis:
         condition: service_healthy
       migrate:
+        condition: service_completed_successfully
+      app-data-init:
         condition: service_completed_successfully
     environment:
       <<: [*app-env, *app-storage-env]
