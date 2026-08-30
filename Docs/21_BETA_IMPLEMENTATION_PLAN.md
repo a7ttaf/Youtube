@@ -53,8 +53,9 @@ Three things are worth saying plainly before the table:
    costs a minute and changes the entire impression of the product.
 3. **EGP was deferred in this snapshot.** The section
    [The one decision only you can make](#the-one-decision-only-you-can-make) records the
-   open question as of `d8418cea2`. EGP program sequencing is tracked separately once
-   P0 split PRs are on `main` — do not re-decide from this frozen text alone.
+   open question as of `d8418cea2`. The operator decision remains at
+   `Docs/16_OPEN_DECISIONS.md:70-71`; Docs/24 records sequencing constraints only.
+   Do not re-decide from this frozen text alone.
 
 ---
 
@@ -146,21 +147,37 @@ Export artifacts and connector blobs live on ephemeral container paths
 (`reports/artifact_storage.py:13`, `orchestrator.py:3125`, `Dockerfile:109`). A
 container replacement discards them, and a requested export then **503s permanently**.
 
-Fix by mounting a **durable host bind mount** (e.g.
-`./data/artifacts:/var/lib/ums/artifacts`) — **not** a Compose-managed named volume.
-An externally managed Compose volume is acceptable only when provisioned outside this
-stack and excluded from `docker compose down -v` cleanup. `down -v` destroys
-`postgres-data` and `redis-data`; any ordinary co-located named app volume is destroyed
-with them. Restore would leave export records pointing at missing blobs.
+Fix with one explicit host-to-container contract:
+
+- Container environment: `UMS_EXPORT_ARTIFACT_DIR=/var/lib/ums/artifacts` and
+  `UMS_LOCAL_STORE_ROOT=/var/lib/ums/blobs`.
+- Compose mount: host source `./data/ums:/var/lib/ums` on both `app` and `app-dev`;
+  mount `migrate` only if it writes artifacts or blobs.
+- `./data/ums` is the host-side source path. Never put that relative host path in
+  either environment variable inside a container; both values must remain absolute
+  container targets. An externally managed Compose volume is an alternative only if
+  it is mounted at `/var/lib/ums` and survives `docker compose down -v` cleanup.
+
+`down -v` destroys `postgres-data` and `redis-data`; any ordinary co-located named
+app volume is destroyed with them. Restore would leave export records pointing at
+missing blobs.
+
+**Permission/persistence smoke:** run as the runtime user in `app` and the
+`app-dev` profile, verify read/write access to both configured directories, write
+sentinels under `/var/lib/ums/artifacts` and `/var/lib/ums/blobs`, recreate with
+`docker compose down` (without `-v`) plus `docker compose up` (and
+`docker compose --profile dev up app-dev` for the dev service), and verify both
+sentinels remain. Remove the sentinels after the check.
 
 > 💡 There is an undocumented workaround for the 503 in the meantime: `request_export`
 > has no dedup on scope+month (`reports/exports.py:383-433`), so the operator can
 > simply request the export again. Note this in the runbook.
 
 **Acceptance criteria (P0.2):**
-- [ ] Artifact path is a durable host bind mount (preferred), or an external Compose volume outside `down -v` cleanup
+- [ ] `app` and `app-dev` use `./data/ums:/var/lib/ums`, with the two absolute container env targets above; `migrate` is mounted only if it writes
 - [ ] `docker compose down` (without `-v`) preserves artifacts across container recreate
 - [ ] Document that `down -v` wipes DB **and** must not be used when artifacts must survive
+- [ ] Permission and persistence smokes pass for both targets under the runtime user
 
 ### P0.3 — Compose env vars + `.env.example` — **1–2h**
 
@@ -348,8 +365,9 @@ pipeline is internally consistent and the numbers are real. Do P2.2 when conveni
 **If no:** that is the EGP program — 3–6 weeks, ~2,154 `*_usd` identifiers, and a
 USD-only design that is *test-locked* by
 `tests/finance/test_finance_no_fx_dependency.py:40-53`. It should be its own milestone
-after the beta proves the rest works. **EGP path is scoped in Docs/24 as a separate
-program; this snapshot does not close the operator decision.**
+after the beta proves the rest works. The operator decision remains open at
+`Docs/16_OPEN_DECISIONS.md:70-71`; Docs/24 records the U2/EGP sequencing constraint
+only and is not the EGP implementation plan.
 
 > ⚠️ **Do not let anyone "shortcut" this through `currency_exchange_rates`.** It looks
 > like a 2-hour win and is rejected by an existing guard test and the surrounding

@@ -124,26 +124,27 @@ decomposes the number we already trust, no drift). No writes, no UMS changes.
 
 ### U2 — Ingest the US slice (10–16h) — **blocked until normalization fence**
 
-Country-dimensional rows must **never** enter [`GoogleSourceNormalizer._source_row_buckets`](../backend/ums_smart_revenue/finance/google_source_normalizer.py)
-(which groups only by `(channel_id, source_system)`). Distinct `source_row_key` hashes
-prevent upsert collisions but **do not** prevent a country row from winning
-[`select_canonical_row`](../backend/ums_smart_revenue/finance/google_source_normalizer.py)
-and replacing the worldwide channel gross fact.
+The PR227 contract keeps country evidence on the existing allowlisted
+`source_system="youtube_analytics"`; do not invent a second source-system value.
+The parser owns the dimension shape by emitting `raw_payload.dimensions` with a
+`country` key (alongside `channel`). Before `_source_row_buckets` groups rows, the
+normalizer detects that exact parser-owned shape, appends
+`SkippedSourceRow(..., SkipReason.NON_PROJECTING_EVIDENCE)` to `result.skipped`, and
+does not add the row to any canonical bucket. The existing `youtube_analytics` rows
+without a country key (including worldwide rows) remain in the normal bucket.
 
-**Required design:** a **non-projecting evidence lane** — separate `source_system` value
-(e.g. `youtube_analytics_country_evidence`) or dedicated evidence table that
-**explicitly excludes** rows from canonical normalization. Parser + normalizer guard tests
-required before ingest lands.
-
-Extend the Analytics lane with a second, additive report shape per channel-month:
-country-dimensioned revenue rows stored in the evidence lane only (at minimum the US row).
-New rows carry `dimensions={channel, country}` in evidence storage. The existing
-channel-month canonical lane is untouched.
+Country-dimensional rows remain persisted in the source-row evidence table; the
+explicit `NON_PROJECTING_EVIDENCE` skip reaches the normal `ROWS_SKIPPED` audit
+summary. No new source-system allowlist, migration, or key namespace is required.
+Any future evidence discriminator would need its full migration, parser/source
+allowlist, source-row-key, and audit-contract changes before it could be proposed.
+The existing channel-month canonical lane is untouched.
 
 **Acceptance criteria (U2):**
-- [ ] Country rows persist in evidence lane with distinct keys (F5)
-- [ ] `GoogleSourceNormalizer` never selects country-dimensional rows for canonical facts
-- [ ] Mutation test: removing the exclusion guard turns a country-canonical test RED
+- [ ] Parser emits country rows with `source_system="youtube_analytics"` and parser-owned `raw_payload.dimensions.country`
+- [ ] Country rows persist as evidence with distinct keys (F5), then are skipped with `NON_PROJECTING_EVIDENCE`
+- [ ] `ROWS_SKIPPED` audit telemetry includes the explicit non-projecting reason
+- [ ] `GoogleSourceNormalizer` never selects country-dimensional rows for canonical facts; removing the pre-bucket guard turns the guard test RED
 - [ ] Full PG suite green; RLS-scoped reads
 
 **Sequencing tripwire:** if the EGP flip (currency change, which re-keys source rows) is

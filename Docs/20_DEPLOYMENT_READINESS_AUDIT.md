@@ -199,11 +199,23 @@ and connector raw-file blobs default to `cwd/_local_blob_store`
 `redis-data` volumes — **neither path is mounted**. Both are wiped by any rebuild,
 `--force-recreate`, or `down`.
 
-**Fix:** set `UMS_EXPORT_ARTIFACT_DIR` and `UMS_LOCAL_STORE_ROOT` to durable host
-bind paths (for example, `./data/artifacts` and `./data/blobs`) and mount them on
-`app` (and `migrate`, if it ever writes there). An externally managed Compose
-volume (`external: true`) is acceptable only when provisioned outside this stack
-and verified to survive `docker compose down -v`; an ordinary named volume is not.
+**Fix (container contract):** set the *inside-container* variables exactly to
+`UMS_EXPORT_ARTIFACT_DIR=/var/lib/ums/artifacts` and
+`UMS_LOCAL_STORE_ROOT=/var/lib/ums/blobs`. Bind the host source
+`./data/ums:/var/lib/ums` on both `app` and `app-dev`; add the same mount to
+`migrate` only if that service writes artifacts or blobs. `./data/ums` is the
+host-side source path, not an environment-variable value inside the container.
+An externally managed Compose volume may replace the host source only when it is
+mounted at the same `/var/lib/ums` target and verified to survive
+`docker compose down -v`; never use relative paths for the container variables.
+
+**Permission/persistence smoke before real data:** as the runtime user, verify
+both configured directories are readable and writable in `app` and the `app-dev`
+profile. Write one sentinel under each target, recreate with `docker compose down`
+(without `-v`) followed by `docker compose up` (and
+`docker compose --profile dev up app-dev` for the dev service), and verify both
+sentinels remain; clean them up after the check. Repeat for `migrate` only if its
+service receives the storage mount.
 
 ### B5 — There is no browser app in any non-dev path
 `frontend/` has no Dockerfile; compose has no frontend service; the backend mounts

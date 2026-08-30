@@ -13,7 +13,7 @@ PR #210 is historical: it merged on 2026-08-29 into the non-main
 [#220 docs amend]  ← you are here (draft pending final owner review after this cleanup)
         │
         ▼
-[P0-a compose/storage] ──► host bind mount for artifacts; PG18; Redis; grace; log rotate
+[P0-a compose/storage] ──► `./data/ums:/var/lib/ums` on app/app-dev; absolute artifact/blob env targets; PG18; Redis; grace; log rotate; storage smokes
         │
         ▼
 [P0-b backup/restore] ──► roles dump + data dump + artifact backup + rehearsal (Docs/22)
