@@ -22,9 +22,13 @@
 #     Artifact/blob storage uses a **host bind mount** (`UMS_APP_DATA_HOST`,
 #     default `./data/ums`) — it is NOT in this named-volume list and survives
 #     `down -v`, but the operator must back it up separately, with the
-#     writers stopped (only app/app-dev mount it):
-#       docker compose stop app
+#     writers stopped (only app/app-dev mount it — stop BOTH; connector
+#     blobs are written with Path.write_bytes, so tarring under a live
+#     writer can capture a half-written raw-evidence file):
+#       docker compose stop app app-dev
 #       tar -czf ums-app-data-$(date +%F).tgz ./data/ums
+#     (stopping a service that is not running is a no-op, so the same
+#     command is safe when the dev profile is inactive)
 #     tar ships with Windows 10+, Git Bash and Linux; adjust the path if
 #     UMS_APP_DATA_HOST is set. No dedicated backup/restore runbook exists
 #     yet — this header is the procedure.
