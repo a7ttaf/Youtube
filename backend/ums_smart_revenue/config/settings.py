@@ -45,6 +45,8 @@ def is_configured_service_actor_id(actor_id: str | None) -> bool:
     202 for a job that can never start.
     """
     return actor_id is not None and actor_id != GOOGLE_CONNECTOR_SERVICE_ACTOR_PLACEHOLDER_ID
+
+
 CONNECTOR_JOB_EXECUTOR_ENABLED_ENV = "UMS_CONNECTOR_JOB_EXECUTOR_ENABLED"
 CONNECTOR_JOB_MAX_WORKERS_ENV = "UMS_CONNECTOR_JOB_MAX_WORKERS"
 CONNECTOR_JOB_STALE_RUNNING_HOURS_ENV = "UMS_CONNECTOR_JOB_STALE_RUNNING_HOURS"
