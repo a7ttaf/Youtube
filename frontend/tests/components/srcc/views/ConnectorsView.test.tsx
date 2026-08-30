@@ -1024,6 +1024,15 @@ describe("ConnectorsView wired to the connector + AdSense endpoints", () => {
     await waitFor(() =>
       expect(screen.getByText("Payments synced")).toBeInTheDocument(),
     );
+    // The filed month (2026-03) is OLDER than the rolling window the selector
+    // offers, so the filter stays put — switching would render a value with no
+    // matching option — and the success banner names where the rows landed.
+    const monthSelectAfter =
+      screen.getByLabelText<HTMLSelectElement>("AdSense month");
+    expect(monthSelectAfter.value).toBe(WRITE_DEFAULT_MONTH);
+    expect(
+      screen.getByText(/upserted into the finance source under mar 2026/i),
+    ).toBeInTheDocument();
     // The list refetched and now shows the synced row.
     await waitFor(() =>
       expect(screen.getByText("AdSense payment March 2026")).toBeInTheDocument(),
@@ -1109,6 +1118,8 @@ describe("ConnectorsView wired to the connector + AdSense endpoints", () => {
       await waitFor(() =>
         expect(screen.getByText("Payments synced")).toBeInTheDocument(),
       );
+      // Filed under the payment date's month (August), not the July default,
+      // and the selector FOLLOWS the filed month so the synced row is visible.
       const syncCall = fetchMock().mock.calls.find(
         ([input, init]) =>
           urlOf(input) === "/adsense/sync-payments" && methodOf(init) === "POST",
@@ -1117,8 +1128,15 @@ describe("ConnectorsView wired to the connector + AdSense endpoints", () => {
       const body = JSON.parse(
         String((syncCall?.[1] as RequestInit | undefined)?.body ?? "{}"),
       );
-      // Filed under the payment date's month (August), not the July default.
       expect(body.payments[0].month).toBe("2026-08");
+      // The filed month IS one of the offered options here, so the selector
+      // switches to it and the refreshed list shows the new row.
+      const monthSelectAfter =
+        screen.getByLabelText<HTMLSelectElement>("AdSense month");
+      await waitFor(() => expect(monthSelectAfter.value).toBe("2026-08"));
+      expect(
+        screen.getByText(/upserted into the finance source under aug 2026/i),
+      ).toBeInTheDocument();
     } finally {
       vi.useRealTimers();
       vi.resetModules();

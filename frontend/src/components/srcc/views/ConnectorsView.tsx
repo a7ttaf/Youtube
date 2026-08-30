@@ -835,13 +835,19 @@ const SyncError = ({ error }: { error: ApiError | Error }) => {
 };
 
 /** Banner confirming how many AdSense payments were upserted into finance. */
-const SyncSuccess = ({ count }: { count: number }) => {
+/**
+ * Success banner for a payment sync. Names the month the rows were filed under
+ * (derived from the payment date): when that month is outside the selector's
+ * rolling window the rows cannot be shown by switching the filter, so the
+ * banner is the only on-screen record of where they landed.
+ */
+const SyncSuccess = ({ count, filedMonth }: { count: number; filedMonth: string }) => {
   return (
     <div className="permission-band" role="status">
       <Dot tone="green" />
       <span>
         <strong>Payments synced</strong>
-        <span>{`${count} payment${count === 1 ? "" : "s"} upserted into the finance source`}</span>
+        <span>{`${count} payment${count === 1 ? "" : "s"} upserted into the finance source under ${monthKeyLabel(filedMonth)}`}</span>
       </span>
       <Badge tone="green">Synced</Badge>
     </div>
@@ -908,7 +914,7 @@ const AdsenseSyncForm = ({
 }: {
   canRunConnectors: boolean;
   actions: ReturnType<typeof useAdsenseSyncActions>;
-  onSynced: () => void;
+  onSynced: (filedMonth: string) => void;
 }) => {
   const [accountId, setAccountId] = useState<string>("");
   const [paymentName, setPaymentName] = useState<string>("");
@@ -966,7 +972,7 @@ const AdsenseSyncForm = ({
       .then((synced) => {
         if (synced !== null) {
           setReason("");
-          onSynced();
+          onSynced(filingMonth);
         }
       })
       .catch(() => {
@@ -1042,7 +1048,9 @@ const AdsenseSyncForm = ({
       </div>
 
       {actions.error ? <SyncError error={actions.error} /> : null}
-      {actions.data ? <SyncSuccess count={actions.data.synced_count} /> : null}
+      {actions.data ? (
+        <SyncSuccess count={actions.data.synced_count} filedMonth={filingMonth} />
+      ) : null}
 
       {canRunConnectors ? null : (
         <span className="item-sub" role="note">
@@ -1558,7 +1566,7 @@ const ConnectorSidebar = ({
   canRunConnectors: boolean;
   canViewConnectorHealth: boolean;
   syncActions: ReturnType<typeof useAdsenseSyncActions>;
-  onSynced: () => void;
+  onSynced: (filedMonth: string) => void;
   reloadToken: number;
 }) => {
   return (
@@ -1680,9 +1688,22 @@ export const ConnectorsView = ({
     () => payments.reload(),
     [payments],
   );
+  // FIX (PR #211 review): a synced payment files under the month of its
+  // payment date, which can differ from the selected filter month. When that
+  // month IS one of the rolling options, switch the selector so the refreshed
+  // list shows the row just written; when it is OLDER than the window the
+  // selector offers, switching would render a value with no matching option
+  // (the same blank-selector defect this PR fixes elsewhere), so the filter
+  // stays and the success banner names the month the rows landed under.
   const handleSynced = useCallback(
-    () => payments.reload(),
-    [payments],
+    (filedMonth: string) => {
+      if (MONTH_OPTIONS.includes(filedMonth) && month !== filedMonth) {
+        setMonth(filedMonth); // the month change itself refetches the list
+        return;
+      }
+      payments.reload();
+    },
+    [month, payments],
   );
 
   // ==========================================================================

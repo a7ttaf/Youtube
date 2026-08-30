@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { DEFAULT_MONTH, MONTH_OPTIONS, WRITE_DEFAULT_MONTH } from "@/components/srcc/shared";
 import {
@@ -176,10 +176,30 @@ describe("shared month window exports", () => {
     }
   });
 
-  it("makes DEFAULT_MONTH the first option and the CURRENT month", () => {
-    expect(DEFAULT_MONTH).toBe(MONTH_OPTIONS[0]);
-    // Not a frozen literal: the published window is the one the clock implies.
-    expect(MONTH_OPTIONS).toEqual(rollingMonthWindow(MONTH_WINDOW_SIZE, new Date()));
+  it("derives the published window from the clock at module load (pinned, not re-read)", async () => {
+    // FIX (PR #211 review): comparing MONTH_OPTIONS to a FRESH new Date() made
+    // this test nondeterministic across a month boundary — the module-load
+    // snapshot and the assertion clock are two independent reads, and a test
+    // run straddling a boundary failed spuriously. Pin the system time, reset
+    // the module registry, and re-import the shared module so both sides of
+    // the assertion read ONE clock.
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date(2026, 2, 15, 12, 0, 0));
+      vi.resetModules();
+      const shared = await import("@/components/srcc/shared");
+      const months = await import("@/lib/months");
+      // Not a frozen literal: the published window is the one the clock
+      // implies at module load.
+      expect(shared.MONTH_OPTIONS).toEqual(
+        months.rollingMonthWindow(months.MONTH_WINDOW_SIZE, new Date(2026, 2, 15, 12, 0, 0)),
+      );
+      expect(shared.DEFAULT_MONTH).toBe("2026-03");
+      expect(shared.WRITE_DEFAULT_MONTH).toBe("2026-02");
+    } finally {
+      vi.useRealTimers();
+      vi.resetModules();
+    }
   });
 
   it("derives WRITE_DEFAULT_MONTH from the frozen window, never a second clock read", () => {

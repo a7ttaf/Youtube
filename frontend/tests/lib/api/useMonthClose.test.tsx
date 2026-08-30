@@ -123,6 +123,27 @@ describe("useMonthClose", () => {
     expect(result.current.data).toBeNull();
     expect(result.current.error).toMatchObject({ name: "ApiError", status: 500 });
   });
+
+  // Regression (PR #211 review, codex + Devin): the tenant resolver and the
+  // router can also answer 404 BEFORE the finance-close route runs (stale or
+  // deleted tenant after session bootstrap). Those must stay ERRORS — remapping
+  // every 404 made the Close screen report a valid OPEN month for a request
+  // that never reached the finance-close repository. Only the documented
+  // missing-record detail is an absence.
+  it("keeps a tenant 404 as a typed error — only the close-record detail is remapped", async () => {
+    fetchMock().mockResolvedValue(
+      jsonResponse({ detail: "Unknown tenant" }, 404),
+    );
+    const { result } = renderHook(() => useMonthClose({ month: "2026-03" }), {
+      wrapper,
+    });
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    expect(result.current.data).toBeNull();
+    expect(result.current.error).toMatchObject({ name: "ApiError", status: 404 });
+    expect(
+      (result.current.error as { body?: { detail?: string } }).body?.detail,
+    ).toBe("Unknown tenant");
+  });
 });
 
 describe("useMonthCloseReadiness", () => {

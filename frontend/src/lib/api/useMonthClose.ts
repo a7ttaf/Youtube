@@ -19,6 +19,29 @@ export type MonthCloseQuery = {
  */
 const CLOSE_RECORD_NOT_FOUND = 404;
 
+/**
+ * The exact detail string get_finance_month_close raises with that 404 — the
+ * machine-readable contract that distinguishes "no close row" from every other
+ * 404 the SPA can receive.
+ */
+const CLOSE_RECORD_NOT_FOUND_DETAIL = "Finance month close record not found";
+
+/**
+ * True ONLY for the finance-close status GET's documented missing-record 404.
+ * The tenant resolver (stale/deleted slug after session bootstrap) and the
+ * router can also answer 404 before this route runs; remapping those as "no
+ * close record" made the Close screen report a valid OPEN month for a request
+ * that never reached the finance-close repository (PR #211 review).
+ */
+const isMissingCloseRecord = (error: ApiError): boolean => {
+  return (
+    error.status === CLOSE_RECORD_NOT_FOUND &&
+    typeof error.body === "object" &&
+    error.body !== null &&
+    (error.body as { detail?: unknown }).detail === CLOSE_RECORD_NOT_FOUND_DETAIL
+  );
+};
+
 // ============================================================================
 // Purpose: Typed fetch hook for a finance month's close STATUS (OPEN/LOCKED +
 //   lock/unlock actor/timestamps). Builds GET /finance-close/{month} on the
@@ -27,16 +50,18 @@ const CLOSE_RECORD_NOT_FOUND = 404;
 // Database/ORM: None (frontend) — reads the backend finance-close GET endpoint.
 // Standards: month is path-encoded; the request closure is memoized so useAsync
 //   does not refetch on every render. Timestamps stay ISO strings.
-//   404 IS NOT AN ERROR HERE. get_finance_month_close raises 404 whenever the
-//   month has no close row, and close rows only ever appear once a finance
+//   ONLY the documented missing-record 404 IS NOT AN ERROR. get_finance_month_close
+//   raises that 404 with detail "Finance month close record not found" whenever
+//   the month has no close row, and close rows only ever appear once a finance
 //   write touches the month — so the rolling CURRENT-month default the views
 //   open on is exactly such a month. Surfacing that as an error made the Close
 //   screen replace its whole summary with "Request failed (404)" on its own
-//   default month. This hook resolves that ONE status to `null` data with a
+//   default month. This hook resolves that ONE response to `null` data with a
 //   null error, so the settled (data=null, error=null) pair means "no close
 //   record yet" and the view renders its honest not-started state. EVERY other
-//   status (403, 5xx, network) still rejects and still reaches `error`
-//   untouched, and the sibling readiness read is not remapped at all.
+//   response — 403, 5xx, network, AND any 404 whose detail is not the close
+//   contract (tenant 404s, routing 404s) — still rejects and still reaches
+//   `error` untouched, and the sibling readiness read is not remapped at all.
 // Blast Radius: None detected (read-only finance close display). It never
 //   invents a close status: the caller still sees no record, and lock/unlock
 //   remain gated by the backend.
@@ -60,7 +85,7 @@ export const useMonthClose = (
       client
         .get<FinanceMonthCloseStatus>(`/finance-close/${encodeURIComponent(month)}`)
         .catch((caught: unknown) => {
-          if (caught instanceof ApiError && caught.status === CLOSE_RECORD_NOT_FOUND) {
+          if (caught instanceof ApiError && isMissingCloseRecord(caught)) {
             return null;
           }
           throw caught;
