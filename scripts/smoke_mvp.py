@@ -17,7 +17,12 @@ wired dashboard screens consume, plus the production session-hydration path
 4. Prints a per-endpoint PASS/FAIL table and exits non-zero on any failure.
 5. Cleans up the throwaway database.
 
-Run: ``python scripts/smoke_mvp.py``  (optionally ``--month 2026-03``).
+Run: ``python scripts/smoke_mvp.py`` — it defaults to the CURRENT calendar month
+(the month the dashboard's READ selectors open on). The Connectors screen is
+the write-side exception: its payment filter opens on the PREVIOUS month by
+design, so the smoke probes that month separately and asserts it is honestly
+EMPTY (the seed only populates the current month). Pass ``--month YYYY-MM`` to
+probe a different one.
 
 This is a verification harness, NOT a product feature: it imports + drives the
 existing seed and app and never reimplements finance math or auth.
@@ -31,13 +36,13 @@ import sys
 import tempfile
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
+from datetime import date
 from pathlib import Path
 from typing import Any
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[1]
 _BACKEND_PATH = str(_PROJECT_ROOT / "backend")
 
-_DEFAULT_MONTH = "2026-03"
 # A throwaway, never-shared token: the smoke run sets it in its OWN process env
 # and sends the same value in the demo headers, so the real trusted-gateway
 # check (compare_digest) is exercised without weakening anything.
@@ -55,6 +60,54 @@ _DEMO_USER_EMAIL = "demo-seed@ums.local"
 # is the smoke harness exercising the full read surface, not an auth change.
 _DEMO_ROLE = "super_owner"
 _FIRST_DEMO_CHANNEL = "demo-channel-alpha"
+
+
+# ============================================================================
+# Purpose: Resolve the smoke run's DEFAULT --month at RUN TIME instead of
+#   freezing a literal. The dashboard's selector now derives from the clock and
+#   opens on the CURRENT calendar month, so a frozen "2026-03" default probed a
+#   month the UI never lands on — the smoke passed while the screens an operator
+#   actually opens went unexercised.
+# Database/ORM: None — a CLI default string; the month itself is seeded into a
+#   throwaway SQLite db by scripts/seed_demo_month.py.
+# Standards: LOCAL civil date (``date.today()``), matching the dashboard's own
+#   local-date derivation in frontend/src/lib/months.ts, so the smoke and the
+#   UI agree on "this month" WHEN BOTH RUN ON MACHINES IN THE SAME TIME ZONE.
+#   FIX (PR #211 review): that agreement is NOT guaranteed across hosts —
+#   around a month boundary, a smoke run from a UTC container while the
+#   operator's browser sits in a different zone can resolve a DIFFERENT
+#   current month and probe a month the dashboard never opens on; pass
+#   ``--month`` explicitly in that situation. Zero-padded "YYYY-MM".
+#   ``--month`` still overrides it.
+# Blast Radius: The smoke harness's default target month only. No production
+#   data path, no finance math.
+# Connections:
+#   - File: scripts/seed_demo_month.py -> _default_month, the same derivation
+#     (this harness shells the seed with whatever month it resolves).
+#   - File: frontend/src/lib/months.ts -> currentMonthKey, the UI derivation.
+# ============================================================================
+def _default_month(today: date | None = None) -> str:
+    """Return the CURRENT calendar month as ``YYYY-MM`` from the local date.
+
+    ``today`` is injectable so a caller can pin the date; it defaults to the
+    machine's local civil date, the same basis the dashboard selector uses.
+    """
+    current = today if today is not None else date.today()
+    return f"{current.year:04d}-{current.month:02d}"
+
+
+def _connector_write_default_month(today: date | None = None) -> str:
+    """Return the month ConnectorsView opens on: the LAST COMPLETE month.
+
+    Mirrors the frontend's ``lastCompleteMonthKey`` snapshot basis (the month
+    before the current one, with January rolling back to the previous
+    December). The smoke probes this month separately: its payment list must be
+    honestly empty because the seed only populates the current month.
+    """
+    current = today if today is not None else date.today()
+    if current.month == 1:
+        return f"{current.year - 1:04d}-12"
+    return f"{current.year:04d}-{current.month - 1:02d}"
 
 
 def _ensure_backend_path() -> None:
@@ -195,6 +248,24 @@ def _validate_paginated_items(body: Any) -> str:
     )
 
 
+def _validate_adsense_payments_empty_month(body: Any) -> str:
+    """Assert the unseeded connector write-default month is an honest EMPTY page.
+
+    The seed populates only the current month, so the previous month the
+    Connectors screen opens on must return a valid envelope with ZERO rows —
+    rows there would mean cross-month leakage into an untouched finance month.
+    """
+    if not isinstance(body, Mapping):
+        return "response is not a JSON object"
+    base = _validate_paginated_items(body)
+    if base:
+        return base
+    items = body.get("items")
+    if not isinstance(items, list) or items:
+        return "expected no payment rows for the unseeded connector write-default month"
+    return ""
+
+
 def _validate_adsense_payments(body: Any) -> str:
     """Assert the AdSense payment list returns items + pagination + audit event."""
     if not isinstance(body, Mapping):
@@ -212,6 +283,22 @@ def _validate_export_created(body: Any) -> str:
     return _require(isinstance(body.get("id"), str), "missing id on export job")
 
 
+def _validate_session_capabilities(capabilities: Any) -> str:
+    """Assert the capabilities object carries the camelCase gate booleans."""
+    # Early isinstance return narrows the type for the checker (DeepSource
+    # TYP-050 union-attr): ``body.get("capabilities")`` is Any | None, so the
+    # .get calls below must sit behind a Mapping guard the typechecker sees.
+    if not isinstance(capabilities, Mapping):
+        return "capabilities object missing"
+    return _require(
+        isinstance(capabilities.get("canViewRevenue"), bool),
+        "capabilities.canViewRevenue must be a camelCase bool",
+    ) or _require(
+        isinstance(capabilities.get("canRunConnectorJobs"), bool),
+        "capabilities.canRunConnectorJobs must be a camelCase bool",
+    )
+
+
 def _validate_session_me(body: Any) -> str:
     """Assert GET /session/me carries the principal identity + capabilities.
 
@@ -224,18 +311,15 @@ def _validate_session_me(body: Any) -> str:
     if not isinstance(body, Mapping):
         return "response is not a JSON object"
     capabilities = body.get("capabilities")
+    # FIX: read the fields once and bool()-narrow the truthiness operand so the
+    # _require condition is a bool for the typechecker (DeepSource TYP-050);
+    # a bare ``and body.get(...)`` expression types as bool|Any|None.
+    user_id = body.get("user_id")
+    email = body.get("email")
     return (
-        _require(isinstance(body.get("user_id"), str) and body.get("user_id"), "missing user_id")
-        or _require(isinstance(body.get("email"), str) and body.get("email"), "missing email")
-        or _require(isinstance(capabilities, Mapping), "capabilities object missing")
-        or _require(
-            isinstance(capabilities.get("canViewRevenue"), bool),
-            "capabilities.canViewRevenue must be a camelCase bool",
-        )
-        or _require(
-            isinstance(capabilities.get("canRunConnectorJobs"), bool),
-            "capabilities.canRunConnectorJobs must be a camelCase bool",
-        )
+        _require(isinstance(user_id, str) and bool(user_id), "missing user_id")
+        or _require(isinstance(email, str) and bool(email), "missing email")
+        or _validate_session_capabilities(capabilities)
     )
 
 
@@ -310,6 +394,24 @@ def _build_checks(month: str) -> list[_Check]:
             "GET",
             f"/adsense/payments?month={month}",
             _validate_adsense_payments,
+        ),
+        # The Connectors screen opens its payment filter on the LAST COMPLETE
+        # month, not the seeded current month — probe that default explicitly.
+        # When --month is PINNED to that same month (e.g. --month 2026-07 run
+        # during August) the probe degenerates to the seeded path: it MUST have
+        # rows, so the empty-month validator does not apply there (PR #211
+        # review). Otherwise the unseeded month must be honestly EMPTY — rows
+        # there would mean cross-month leakage into an untouched finance month.
+        _Check(
+            "Connectors",
+            "adsense payments (write-default month)",
+            "GET",
+            f"/adsense/payments?month={_connector_write_default_month()}",
+            (
+                _validate_adsense_payments
+                if _connector_write_default_month() == month
+                else _validate_adsense_payments_empty_month
+            ),
         ),
         # Write-path smoke: unlock → create export job → re-lock attempt (409 expected).
         # The demo month uses single-source channels so lock_month() always hits the
@@ -556,8 +658,11 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     )
     parser.add_argument(
         "--month",
-        default=_DEFAULT_MONTH,
-        help=f"Finance month YYYY-MM to seed + probe (default {_DEFAULT_MONTH}).",
+        default=_default_month(),
+        help=(
+            "Finance month YYYY-MM to seed + probe (default: the CURRENT calendar"
+            " month, which is the month the dashboard's selector opens on)."
+        ),
     )
     return parser.parse_args(argv)
 

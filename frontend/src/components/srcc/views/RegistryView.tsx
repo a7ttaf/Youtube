@@ -7,6 +7,7 @@ import { useChannels } from "@/lib/api/useChannels";
 import { useProposeAccountLinkAction } from "@/lib/api/useChannelAccountLinks";
 import { useOrgUnits } from "@/lib/api/useOrgUnits";
 import type { Severity } from "@/lib/mock/data";
+import { currentMonthKey } from "@/lib/months";
 import {
   Badge,
   Dot,
@@ -584,6 +585,14 @@ export const warnedIdsForAcknowledgement = (
   return captured.length > 0 ? captured : livePendingIds;
 };
 
+/**
+ * Warning callout rendered while an import response never arrived
+ * (importUnsettled): the rows below may predate the import, so reload before
+ * judging and never re-import blindly. canViewAudit switches only the guidance
+ * copy and the acknowledge button's label — acknowledgement itself is NOT
+ * permission-gated; a viewer without audit access acknowledges on trust that
+ * someone with access confirmed the outcome.
+ */
 const UnsettledImportNotice = ({
   canViewAudit,
   onReload,
@@ -922,12 +931,6 @@ const MappingChangeRequestPanel = ({
   );
 };
 
-/** Current month as YYYY-MM for the proposal default (operator can change it). */
-const currentMonth = (): string => {
-  const now = new Date();
-  return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
-};
-
 /** May the operator act on the proposal form at all (permission held, no submit in flight)? */
 const canActOnProposal = (canManageRegistry: boolean, busy: boolean): boolean =>
   canManageRegistry && !busy;
@@ -995,7 +998,9 @@ const AccountLinkProposalPanel = ({
 }) => {
   const [adsenseAccountId, setAdsenseAccountId] = useState("");
   const [contentOwnerId, setContentOwnerId] = useState("");
-  const [effectiveMonthStart, setEffectiveMonthStart] = useState(currentMonth);
+  // Current month as YYYY-MM for the proposal default (operator can change it);
+  // the shared months.ts derivation, not a second local copy of the arithmetic.
+  const [effectiveMonthStart, setEffectiveMonthStart] = useState(currentMonthKey);
   const [reason, setReason] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -1011,7 +1016,7 @@ const AccountLinkProposalPanel = ({
     if (context) {
       setAdsenseAccountId("");
       setContentOwnerId("");
-      setEffectiveMonthStart(currentMonth());
+      setEffectiveMonthStart(currentMonthKey());
       setReason("");
       setConfirmation(null);
       setError(null);
@@ -1041,7 +1046,7 @@ const AccountLinkProposalPanel = ({
       setBusy(false);
       setAdsenseAccountId("");
       setContentOwnerId("");
-      setEffectiveMonthStart(currentMonth());
+      setEffectiveMonthStart(currentMonthKey());
       setReason("");
       setConfirmation(
         "Link proposed (UNVERIFIED) — verification is a separate admin step.",
