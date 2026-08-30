@@ -922,6 +922,12 @@ const AdsenseSyncForm = ({
   const [amount, setAmount] = useState<string>("");
   const [currency, setCurrency] = useState<string>("USD");
   const [reason, setReason] = useState<string>("");
+  // FIX (PR #211 review): the month the LAST successful sync filed under,
+  // captured at submit time. SyncSuccess must not read the live paymentDate
+  // derivation — editing or clearing the date field after a submit relabeled
+  // the completed payment. Cleared when a new request starts, alongside
+  // actions.data.
+  const [filedSuccessMonth, setFiledSuccessMonth] = useState<string | null>(null);
 
   // FIX (PR #211 review): the month this payment row files under comes from
   // the entered payment date, so an August 21 payment files under August even
@@ -943,6 +949,9 @@ const AdsenseSyncForm = ({
   /** Submit the single entered payment row for audited upsert into finance. */
   const onSubmit = () => {
     if (!canSubmit) return;
+    // A new request invalidates the previous success banner's month, mirroring
+    // actions.data being cleared while a sync is in flight.
+    setFiledSuccessMonth(null);
     // The backend rejects an empty batch; supply exactly the one payment row the
     // operator entered, filed under the month of its payment date (canSubmit's
     // required-field gate already proved filingMonth non-empty).
@@ -972,6 +981,10 @@ const AdsenseSyncForm = ({
       .then((synced) => {
         if (synced !== null) {
           setReason("");
+          // Capture the month THIS submit filed under, not the live field —
+          // the banner must keep naming the posted month even if the operator
+          // edits or clears the date field afterwards.
+          setFiledSuccessMonth(filingMonth);
           onSynced(filingMonth);
         }
       })
@@ -1048,8 +1061,8 @@ const AdsenseSyncForm = ({
       </div>
 
       {actions.error ? <SyncError error={actions.error} /> : null}
-      {actions.data ? (
-        <SyncSuccess count={actions.data.synced_count} filedMonth={filingMonth} />
+      {actions.data && filedSuccessMonth ? (
+        <SyncSuccess count={actions.data.synced_count} filedMonth={filedSuccessMonth} />
       ) : null}
 
       {canRunConnectors ? null : (

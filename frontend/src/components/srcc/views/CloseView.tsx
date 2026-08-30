@@ -363,7 +363,9 @@ const closeStatusValue = (status: FinanceMonthCloseStatus | null): string =>
 
 /** The Status tile's footnote: LOCKED allows exports; no row means not started. */
 const closeStatusNote = (status: FinanceMonthCloseStatus | null): string => {
-  if (!status) return NO_CLOSE_RECORD_NOTE;
+  if (!status) {
+    return NO_CLOSE_RECORD_NOTE;
+  }
   return status.status === "LOCKED" ? "Exports allowed" : "Open for edits";
 };
 

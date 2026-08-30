@@ -1137,6 +1137,16 @@ describe("ConnectorsView wired to the connector + AdSense endpoints", () => {
       expect(
         screen.getByText(/upserted into the finance source under aug 2026/i),
       ).toBeInTheDocument();
+
+      // The banner names the SUBMITTED month, not the live date field: editing
+      // the payment date after a successful sync must not relabel the completed
+      // payment (PR #211 review).
+      fireEvent.change(screen.getByLabelText("Payment date"), {
+        target: { value: "2026-05-09" },
+      });
+      expect(
+        screen.getByText(/upserted into the finance source under aug 2026/i),
+      ).toBeInTheDocument();
     } finally {
       vi.useRealTimers();
       vi.resetModules();
