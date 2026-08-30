@@ -22,7 +22,7 @@ import {
   WORKFLOW_STEPS,
 } from "@/lib/mock/data";
 import type { Role, ViewKey } from "@/lib/mock/data";
-import ErrorBoundary from "./ErrorBoundary";
+import ErrorBoundary, { reloadDocumentForRecovery } from "./ErrorBoundary";
 import { BrandIcon, NAV_ICONS, RefreshIcon } from "./icons";
 import AuditView from "./views/AuditView";
 import CloseView from "./views/CloseView";
@@ -1049,6 +1049,20 @@ const AppShell = () => {
   const importScopeSettled = isImportScopeSettled(sessionBootstrap.session, tenantSettled);
   const copy = VIEW_COPY[view];
 
+  // ============================================================================
+  // Purpose: Keep every view-owned render, including the command workflow rail,
+  //   inside one stable error boundary while the shell chrome remains mounted.
+  // Database/ORM: None (frontend composition only).
+  // Standards: Navigation changes reset the boundary through resetKey; recovery
+  //   reloads the document so server state is reconciled before another write.
+  // Blast Radius: View availability and recovery; session/auth gating above is
+  //   unchanged and remains fail-closed.
+  // Connections:
+  //   - File: frontend/src/components/srcc/ErrorBoundary.tsx -> safe fallback,
+  //     redacted report, focus target, and reload action.
+  //   - File: frontend/src/contexts/WriteInFlightContext.tsx -> existing import
+  //     navigation latch remains outside the guarded view state.
+  // ============================================================================
 
   return (
     <WriteInFlightProvider value={writeInFlight}>
@@ -1070,8 +1084,10 @@ const AppShell = () => {
           canViewFinance={canViewFinance}
           canCreateExport={canCreateAnyExport(permissions)}
         />
-        {/* Keyed by the active view so navigating away clears a caught error. */}
-        <ErrorBoundary key={view}>
+        <ErrorBoundary
+          resetKey={view}
+          onReload={reloadDocumentForRecovery}
+        >
         <ViewRouter
           view={view}
           permissions={permissions}
@@ -1085,8 +1101,8 @@ const AppShell = () => {
             setView("trace");
           }}
         />
-        </ErrorBoundary>
         {view === "command" && <WorkflowRail />}
+        </ErrorBoundary>
       </main>
     </div>
     </WriteInFlightProvider>

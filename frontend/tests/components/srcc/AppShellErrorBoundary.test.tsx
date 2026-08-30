@@ -13,7 +13,8 @@ import type { SessionMe } from "@/lib/api/types";
 //   during render tore down the entire React root — React 19 unmounts the tree
 //   — leaving a blank page with no sidebar and no route back. These assert the
 //   degraded shape instead: the crashed view becomes one card, the shell chrome
-//   around it stays mounted, and navigating away clears the caught error.
+//   around it stays mounted, recovery is reconciliation-only, and navigation
+//   clears the caught error without a keyed child remount.
 // Standards: The crash is injected by MOCKING one view to throw rather than by
 //   feeding a real view malformed data — the point under test is the shell's
 //   containment, and a data-shaped crash would silently stop reproducing the
@@ -179,7 +180,7 @@ describe("AppShell view error boundary", () => {
     const fallback = await screen.findByTestId("view-error-fallback");
     expect(within(fallback).getByText("TypeError")).toBeInTheDocument();
     expect(
-      within(fallback).getByRole("button", { name: "Try again" }),
+      within(fallback).getByRole("button", { name: "Reload and reconcile" }),
     ).toBeInTheDocument();
 
     // ...and everything around it survived: the sidebar is still there, its
