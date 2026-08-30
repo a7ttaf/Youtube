@@ -619,6 +619,24 @@ closed unmerged and superseded by the consolidated batch in #156.
   The summary tiles are now wired to the live `GET /audit/summary` aggregate-count
   route (see the audit summary endpoint entry below); the Retention tile stays a
   static policy constant.
+- ⏳ Rolling month window (item P1.2, branch `feat/p1-rolling-months`) — the
+  frozen `DEFAULT_MONTH = "2026-03"` / `MONTH_OPTIONS` literals and the AppShell
+  topbar month `<select>` now all derive from `frontend/src/lib/months.ts`:
+  current calendar month + the 3 before it, from LOCAL date components with an
+  injectable `now`. Integration follow-ups on the same branch, from the audit of
+  what the new current-month default exposed: (a) Month Close reads the
+  close-status `404` as "no close record yet" — data absent, not an error — and
+  renders the honest OPEN / not-started summary, because close rows are only
+  created by finance writes so the rolling default month has none by
+  construction; every other status still renders today's error tile.
+  (b) Connectors seeds its month state (a WRITE default: the connector run's
+  `report_month` and the AdSense payment month, both whole-calendar-month pulls)
+  from the new `lastCompleteMonthKey` — `MONTH_OPTIONS[1]` — so accepting the
+  default cannot ingest a PARTIAL month; the current month stays selectable.
+  (c) `scripts/seed_demo_month.py` and `scripts/smoke_mvp.py` compute their
+  default `--month` at run time (local civil date) instead of the frozen
+  `"2026-03"`, and `frontend/README.md` documents seeding the current month with
+  both a bash and a PowerShell form. Converts to `✅ PR #N` on merge.
 
 ## P2 — Advanced features
 

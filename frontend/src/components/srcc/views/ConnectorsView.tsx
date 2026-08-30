@@ -3,6 +3,7 @@ import { useCallback, useEffect, useRef, useState, type Dispatch, type SetStateA
 import { ApiError } from "@/lib/api/client";
 import type {
   AdsensePayment,
+  AdsenseSyncResponse,
   ConnectorCredential,
   ConnectorCredentialHealth,
   ConnectorCredentialHealthState,
@@ -23,13 +24,14 @@ import {
 import { useConnectorRuns } from "@/lib/api/useConnectorRuns";
 import { useConnectorTest } from "@/lib/api/useConnectorTest";
 import type { Severity } from "@/lib/mock/data";
+import { monthKeyLabel, monthKeyOfDateInput } from "@/lib/months";
 import {
   Badge,
-  DEFAULT_MONTH,
   Dot,
   financeDisplay,
   formatTimestamp,
   MONTH_OPTIONS,
+  WRITE_DEFAULT_MONTH,
 } from "../shared";
 import { describeError } from "./CommandView";
 
@@ -76,6 +78,11 @@ import { describeError } from "./CommandView";
 // Hint shown wherever a connector-operations control is disabled because the
 // viewer's role cannot run connector jobs (mirrors the honest no-permission UX).
 const CONNECTOR_ROLE_HINT = "Requires a connector-operations role.";
+/**
+ * State updater that clears a run-history cursor param back to undefined so
+ * the next useConnectorRuns fetch restarts from the first page (typed to
+ * return undefined, matching the string | undefined cursor state).
+ */
 const clearCursorValue = (): undefined => undefined;
 
 // Wire-string -> badge-tone map for connector credential statuses. Statuses
@@ -638,9 +645,14 @@ const AdsensePaymentsSection = ({
 /**
  * The inline, always-visible "Sync reason" field that every per-row Run pull
  * uses; the reason is recorded on the audit event. It also carries the dry-run
- * toggle (validate-only, no facts written) that the pull request honors. When the
- * viewer cannot run connectors both controls are disabled and the field shows the
- * connector-operations hint.
+ * toggle (validate-only, no facts written), the pull request honors, and the
+ * PULL MONTH control — the one and only value submitted as the connector run's
+ * report_month. That control is deliberately separate from the AdSense
+ * payments selector: a payment sync moves the payments filter for visibility
+ * but can never retarget a whole-month pull, and the pull's visible value is
+ * always exactly what the next Run pull submits (PR #211 review). When the
+ * viewer cannot run connectors the controls are disabled and the field shows
+ * the connector-operations hint.
  */
 const SyncReasonField = ({
   canRunConnectors,
@@ -648,12 +660,16 @@ const SyncReasonField = ({
   onReason,
   dryRun,
   onDryRun,
+  reportMonth,
+  onReportMonth,
 }: {
   canRunConnectors: boolean;
   reason: string;
   onReason: (value: string) => void;
   dryRun: boolean;
   onDryRun: (value: boolean) => void;
+  reportMonth: string;
+  onReportMonth: (value: string) => void;
 }) => {
   return (
     <div className="field-row" style={{ margin: 13 }}>
@@ -665,6 +681,23 @@ const SyncReasonField = ({
         placeholder="Why this sync is being requested"
         onChange={(e) => onReason(e.target.value)}
       />
+      <label htmlFor="connectorPullMonth" className="item-sub">
+        {" Pull month (becomes report_month)"}
+      </label>
+      <select
+        id="connectorPullMonth"
+        className="control"
+        aria-label="Pull month"
+        value={reportMonth}
+        disabled={!canRunConnectors}
+        onChange={(e) => onReportMonth(e.target.value)}
+      >
+        {MONTH_OPTIONS.map((m) => (
+          <option key={m} value={m}>
+            {m}
+          </option>
+        ))}
+      </select>
       <label htmlFor="connectorDryRun" className="item-sub">
         <input
           id="connectorDryRun"
@@ -675,6 +708,11 @@ const SyncReasonField = ({
         />
         {" Dry run (validate only, no facts written)"}
       </label>
+      <span className="item-sub" role="status">
+        {
+          "Pulls report a WHOLE calendar month — the payments selector above does not change this control."
+        }
+      </span>
       {canRunConnectors ? null : (
         <span className="item-sub" role="note">
           {CONNECTOR_ROLE_HINT}
@@ -708,6 +746,8 @@ const DataSourcesPanel = ({
   connectorTest,
   month,
   onMonth,
+  reportMonth,
+  onReportMonth,
   payments,
   paymentsLoading,
   paymentsError,
@@ -731,6 +771,8 @@ const DataSourcesPanel = ({
   connectorTest: ReturnType<typeof useConnectorTest>;
   month: string;
   onMonth: (value: string) => void;
+  reportMonth: string;
+  onReportMonth: (value: string) => void;
   payments: AdsensePayment[];
   paymentsLoading: boolean;
   paymentsError: ApiError | Error | null;
@@ -767,6 +809,8 @@ const DataSourcesPanel = ({
         onReason={onReason}
         dryRun={dryRun}
         onDryRun={onDryRun}
+        reportMonth={reportMonth}
+        onReportMonth={onReportMonth}
       />
 
       <ConnectorCredentialsTable
@@ -829,13 +873,19 @@ const SyncError = ({ error }: { error: ApiError | Error }) => {
 };
 
 /** Banner confirming how many AdSense payments were upserted into finance. */
-const SyncSuccess = ({ count }: { count: number }) => {
+/**
+ * Success banner for a payment sync. Names the month the rows were filed under
+ * (derived from the payment date): when that month is outside the selector's
+ * rolling window the rows cannot be shown by switching the filter, so the
+ * banner is the only on-screen record of where they landed.
+ */
+const SyncSuccess = ({ count, filedMonth }: { count: number; filedMonth: string }) => {
   return (
     <div className="permission-band" role="status">
       <Dot tone="green" />
       <span>
         <strong>Payments synced</strong>
-        <span>{`${count} payment${count === 1 ? "" : "s"} upserted into the finance source`}</span>
+        <span>{`${count} payment${count === 1 ? "" : "s"} upserted into the finance source under ${monthKeyLabel(filedMonth)}`}</span>
       </span>
       <Badge tone="green">Synced</Badge>
     </div>
@@ -874,21 +924,55 @@ const adsenseSyncCanSubmit = (
   requiredFields.every((value) => value.trim().length > 0);
 
 /**
+ * The hint under the payment-date field: which month the entered payment will
+ * file under, derived from the payment date itself. Empty until the date field
+ * holds a complete YYYY-MM-DD value.
+ */
+const paymentFilingHint = (filingMonth: string): string => {
+  return filingMonth
+    ? `Files under ${monthKeyLabel(filingMonth)} — the month of the payment date, matching the automated AdSense mapping.`
+    : "The payment files under the month of its payment date.";
+};
+
+/**
+ * The sync-success banner, rendered only when a completed sync result AND its
+ * captured filed month are both present. The month is stored at submit time
+ * (see filedSuccessMonth), so a later edit of the date field cannot relabel
+ * the completed payment; holding this guard outside AdsenseSyncForm also keeps
+ * that component's branch count under the complexity threshold.
+ */
+const SyncSuccessBanner = ({
+  result,
+  filedMonth,
+}: {
+  result: AdsenseSyncResponse | null;
+  filedMonth: string | null;
+}) => {
+  if (result === null || filedMonth === null) {
+    return null;
+  }
+  return <SyncSuccess count={result.synced_count} filedMonth={filedMonth} />;
+};
+
+/**
  * The AdSense payment-sync form: collects one payment row plus an audited reason
- * and POSTs it for upsert into the finance source. Disabled with a role hint
- * when the viewer cannot run connectors; the submit button stays disabled until
- * every required field (and the reason) is filled.
+ * and POSTs it for upsert into the finance source. The row's month is DERIVED
+ * from the entered payment date (the same settlement-month derivation the
+ * automated AdSense mapping uses) and shown next to the field — never inherited
+ * from the screen's month state, which opens on the last COMPLETE month for
+ * connector pulls and would misfile a current-month payment under the previous
+ * month. Disabled with a role hint when the viewer cannot run connectors; the
+ * submit button stays disabled until every required field (and the reason) is
+ * filled.
  */
 const AdsenseSyncForm = ({
-  defaultMonth,
   canRunConnectors,
   actions,
   onSynced,
 }: {
-  defaultMonth: string;
   canRunConnectors: boolean;
   actions: ReturnType<typeof useAdsenseSyncActions>;
-  onSynced: () => void;
+  onSynced: (filedMonth: string) => void;
 }) => {
   const [accountId, setAccountId] = useState<string>("");
   const [paymentName, setPaymentName] = useState<string>("");
@@ -896,6 +980,33 @@ const AdsenseSyncForm = ({
   const [amount, setAmount] = useState<string>("");
   const [currency, setCurrency] = useState<string>("USD");
   const [reason, setReason] = useState<string>("");
+  // ==========================================================================
+  // Purpose: The month the LAST successful payment sync filed under, captured
+  //   in the submit closure at POST time. FIX (PR #211 review): SyncSuccess
+  //   must not read the live paymentDate derivation — editing or clearing the
+  //   date field after a submit relabeled the completed payment.
+  // Database/ORM: None (frontend form state over an already-posted value).
+  // Standards: Cleared when a new request starts, mirroring actions.data being
+  //   cleared while a sync is in flight, so the banner and its month always
+  //   belong to the same completed request; the banner renders only when both
+  //   are present (SyncSuccessBanner), so a data-without-month edge renders
+  //   nothing rather than a guessed month.
+  // Blast Radius: Display only (the success banner's label); no write path —
+  //   the posted month itself comes from filingMonth in the request body.
+  // Connections:
+  //   - File: SyncSuccessBanner / SyncSuccess (this file) -> render it.
+  //   - File: frontend/tests/.../ConnectorsView.test.tsx -> pins that editing
+  //     the date after submit does not relabel the banner.
+  // ==========================================================================
+  const [filedSuccessMonth, setFiledSuccessMonth] = useState<string | null>(null);
+
+  // FIX (PR #211 review): the month this payment row files under comes from
+  // the entered payment date, so an August 21 payment files under August even
+  // while the screen selector opens on the last complete month (July). Empty
+  // until the date field holds a complete YYYY-MM-DD value, and that emptiness
+  // is part of the submit gate — a malformed date can never POST a guessed
+  // month.
+  const filingMonth = monthKeyOfDateInput(paymentDate);
 
   const canSubmit = adsenseSyncCanSubmit(canRunConnectors, actions.loading, [
     accountId,
@@ -903,13 +1014,18 @@ const AdsenseSyncForm = ({
     paymentDate,
     amount,
     reason,
+    filingMonth,
   ]);
 
   /** Submit the single entered payment row for audited upsert into finance. */
   const onSubmit = () => {
     if (!canSubmit) return;
+    // A new request invalidates the previous success banner's month, mirroring
+    // actions.data being cleared while a sync is in flight.
+    setFiledSuccessMonth(null);
     // The backend rejects an empty batch; supply exactly the one payment row the
-    // operator entered. month is derived from the screen's selected month.
+    // operator entered, filed under the month of its payment date (canSubmit's
+    // required-field gate already proved filingMonth non-empty).
     actions
       .syncPayments({
         connector_key: "adsense",
@@ -918,7 +1034,7 @@ const AdsenseSyncForm = ({
         payments: [
           {
             source_account_id: accountId.trim(),
-            month: defaultMonth,
+            month: filingMonth,
             payment_name: paymentName.trim(),
             payment_date: paymentDate.trim(),
             payment_amount: amount.trim(),
@@ -936,7 +1052,11 @@ const AdsenseSyncForm = ({
       .then((synced) => {
         if (synced !== null) {
           setReason("");
-          onSynced();
+          // Capture the month THIS submit filed under, not the live field —
+          // the banner must keep naming the posted month even if the operator
+          // edits or clears the date field afterwards.
+          setFiledSuccessMonth(filingMonth);
+          onSynced(filingMonth);
         }
       })
       .catch(() => {
@@ -977,6 +1097,9 @@ const AdsenseSyncForm = ({
           onChange={(e) => setPaymentDate(e.target.value)}
         />
       </div>
+      <p className="item-sub" role="status">
+        {paymentFilingHint(filingMonth)}
+      </p>
       <div className="field-row">
         <label htmlFor="adsenseAmount">Amount</label>
         <input
@@ -1009,7 +1132,7 @@ const AdsenseSyncForm = ({
       </div>
 
       {actions.error ? <SyncError error={actions.error} /> : null}
-      {actions.data ? <SyncSuccess count={actions.data.synced_count} /> : null}
+      <SyncSuccessBanner result={actions.data} filedMonth={filedSuccessMonth} />
 
       {canRunConnectors ? null : (
         <span className="item-sub" role="note">
@@ -1429,6 +1552,12 @@ const TokenHealthList = ({
  */
 type TokenHealthFeedView = "error" | "loading" | "empty" | "list";
 
+/**
+ * Pick the credential-health feed's render state with strict precedence:
+ * error wins over everything, "loading" applies only while no rows are on
+ * screen yet (a background refetch over existing rows keeps the list — no
+ * skeleton flash), then empty vs list by row count.
+ */
 const tokenHealthFeedView = (
   error: ApiError | Error | null,
   loading: boolean,
@@ -1440,6 +1569,14 @@ const tokenHealthFeedView = (
   return "list";
 };
 
+/**
+ * Render the credential-health feed from GET /connectors/credentials/health:
+ * one of the four states chosen by tokenHealthFeedView, with a 403 surfacing
+ * as the no-permission copy inside the error state. Only mounted inside the
+ * health panel, which itself returns null when the viewer lacks
+ * canViewConnectorHealth, so the fetch never runs for a viewer who cannot see
+ * it.
+ */
 const TokenHealthFeed = () => {
   const { data, loading, error } = useConnectorCredentialHealth();
   const rows = data ?? [];
@@ -1502,18 +1639,16 @@ const TokenHealth = ({
  * the run-history honesty note. Extracted to keep the root JSX tree shallow.
  */
 const ConnectorSidebar = ({
-  month,
   canRunConnectors,
   canViewConnectorHealth,
   syncActions,
   onSynced,
   reloadToken,
 }: {
-  month: string;
   canRunConnectors: boolean;
   canViewConnectorHealth: boolean;
   syncActions: ReturnType<typeof useAdsenseSyncActions>;
-  onSynced: () => void;
+  onSynced: (filedMonth: string) => void;
   reloadToken: number;
 }) => {
   return (
@@ -1521,7 +1656,6 @@ const ConnectorSidebar = ({
       <section className="panel">
         <AdsenseSyncHeader canRunConnectors={canRunConnectors} />
         <AdsenseSyncForm
-          defaultMonth={month}
           canRunConnectors={canRunConnectors}
           actions={syncActions}
           onSynced={onSynced}
@@ -1558,7 +1692,31 @@ export const ConnectorsView = ({
   canViewFinance: boolean;
   canViewConnectorHealth: boolean;
 }) => {
-  const [month, setMonth] = useState<string>(DEFAULT_MONTH);
+  // FIX: this screen's month state is a WRITE default, not just a filter — it
+  // becomes the connector run's report_month and the AdSense payment row's
+  // month. The Google clients pull a whole calendar month and the backend only
+  // validates the "YYYY-MM" format, so seeding the IN-PROGRESS month (the
+  // rolling DEFAULT_MONTH the read views open on) would ingest a partial month
+  // as if it were final. Seed the last COMPLETE month instead — and from the
+  // SAME module-load snapshot as MONTH_OPTIONS: WRITE_DEFAULT_MONTH is that
+  // frozen window's index-1 entry, never a fresh clock read at mount. Reading
+  // the wall clock here again (the previous code) let a tab left open across
+  // two month boundaries seed a month absent from the frozen <option> list,
+  // rendering a blank selector that still submitted its invisible month
+  // (PR #211 review). The selector still offers every MONTH_OPTIONS entry,
+  // current month included, so this fixes the default, not the operator's
+  // choice.
+  const [month, setMonth] = useState<string>(WRITE_DEFAULT_MONTH);
+  // FIX (PR #211 review): the payments-list FILTER is deliberately separate
+  // from the connector-run REPORT MONTH. A successful payment sync switches
+  // the filter so the new row is visible, but that auto-switch must never
+  // retarget the next connector pull — a current-month payment would
+  // otherwise silently move report_month onto the in-progress month and
+  // ingest a partial month as final, the exact hazard the write default
+  // prevents. The AdSense selector drives ONLY this filter; the pull month
+  // has its own visible control in SyncReasonField bound to `month`, so each
+  // control's displayed value is exactly what it submits or queries.
+  const [filterMonth, setFilterMonth] = useState<string>(WRITE_DEFAULT_MONTH);
   const [reason, setReason] = useState<string>("");
   const [dryRun, setDryRun] = useState<boolean>(false);
   // Nonce bumped after a successful executing-path submit so the run-history feed
@@ -1578,6 +1736,13 @@ export const ConnectorsView = ({
   // clear them; previously the timers persisted after the component
   // unmounted and could fire setReloadToken on an unmounted React tree.
   const pollTimersRef = useRef<number[]>([]);
+  /**
+   * Bump the run-history reload token now and again at 1/3/5s so the feed
+   * catches the connector_runs row once the worker commits it after its OAuth
+   * refresh (a single immediate refetch can run before the RUNNING row
+   * exists). Timer ids land in pollTimersRef and are cleared on unmount so a
+   * navigation away cannot setState on a dead tree.
+   */
   const runsReloadPoll = () => {
     setReloadToken((n) => n + 1);
     const timers = pollTimersRef.current;
@@ -1601,7 +1766,7 @@ export const ConnectorsView = ({
   const jobActions = useConnectorJobActions();
   const connectorTest = useConnectorTest();
 
-  const payments = useAdsensePayments({ month });
+  const payments = useAdsensePayments({ month: filterMonth });
   const syncActions = useAdsenseSyncActions();
 
   const credentialRows = credentials.data?.items ?? [];
@@ -1615,9 +1780,65 @@ export const ConnectorsView = ({
     () => payments.reload(),
     [payments],
   );
+  // ==========================================================================
+  // Purpose: The AdSense payments selector is now PURELY the list filter. FIX
+  //   (PR #211 review, codex deDWi): while it also implied the connector
+  //   pull's report_month, a payment sync that moved the filter left the
+  //   displayed month and the submitted report_month silently divergent — and
+  //   re-selecting the displayed value emits no change event, so an operator
+  //   could pull "the month on screen" and write the previous month's report.
+  //   The pull month now has its OWN visible control (SyncReasonField's
+  //   "Pull month" select); the displayed value and the submitted value are
+  //   the same state by construction.
+  // Database/ORM: None (frontend filter/pull-target state).
+  // Standards: One control, one concern, one state: the AdSense selector
+  //   drives ONLY the payments query; the pull select drives ONLY
+  //   report_month. No cross-moving, no hidden defaults after a sync.
+  // Blast Radius: Which month the payments list filters and which month a
+  //   connector run reports — both now exactly what their controls display.
+  // Connections:
+  //   - File: AdsensePaymentsSection (this file) -> the filter selector.
+  //   - File: SyncReasonField (this file) -> the pull-month control.
+  //   - File: onRequestSync (this file) -> submits report_month = month.
+  // ==========================================================================
+  const handleMonthChange = useCallback((value: string) => {
+    setFilterMonth(value);
+  }, []);
+
+  // ==========================================================================
+  // Purpose: Post-sync visibility for a filed payment WITHOUT retargeting the
+  //   connector pull. FIX (PR #211 review, Devin): a synced payment files under
+  //   the month of its payment date, which can differ from the filter month.
+  // Database/ORM: None (frontend filter state; the row itself was already
+  //   posted by AdsenseSyncForm).
+  // Standards: Only the payments FILTER follows the filed month — when it IS
+  //   one of the rolling options the filter switches so the just-written row
+  //   appears (the month change refetches the list); when it is OLDER than the
+  //   window, switching would render a value with no matching option (the same
+  //   blank-selector defect this PR fixes elsewhere), so the filter stays and
+  //   the success banner names the month instead. The report month for
+  //   connector pulls NEVER moves here: an auto-switch once retargeted the
+  //   next pull onto the in-progress month, silently scheduling a partial-
+  //   month ingest (the exact hazard WRITE_DEFAULT_MONTH exists to prevent).
+  // Blast Radius: The payments list filter only; display. The connector-run
+  //   report_month path is untouched by construction.
+  // Connections:
+  //   - File: AdsenseSyncForm (this file) -> calls onSynced(filingMonth) from
+  //     the submit closure, so the month here is the POSTED one.
+  //   - File: frontend/src/components/srcc/shared.tsx -> MONTH_OPTIONS, the
+  //     offered window membership is checked against.
+  //   - File: SyncReasonField (this file) -> always displays the pull's
+  //     report month, which this callback no longer moves.
+  // ==========================================================================
   const handleSynced = useCallback(
-    () => payments.reload(),
-    [payments],
+    (filedMonth: string) => {
+      if (MONTH_OPTIONS.includes(filedMonth) && filterMonth !== filedMonth) {
+        setFilterMonth(filedMonth); // the filter change itself refetches the list
+        return;
+      }
+      payments.reload();
+    },
+    [filterMonth, payments],
   );
 
   // ==========================================================================
@@ -1684,8 +1905,10 @@ export const ConnectorsView = ({
           requestingJob={jobActions.loading}
           onRequestSync={onRequestSync}
           connectorTest={connectorTest}
-          month={month}
-          onMonth={setMonth}
+          month={filterMonth}
+          onMonth={handleMonthChange}
+          reportMonth={month}
+          onReportMonth={setMonth}
           payments={paymentRows}
           paymentsLoading={payments.loading}
           paymentsError={payments.error}
@@ -1694,7 +1917,6 @@ export const ConnectorsView = ({
         />
 
         <ConnectorSidebar
-          month={month}
           canRunConnectors={canRunConnectors}
           canViewConnectorHealth={canViewConnectorHealth}
           syncActions={syncActions}

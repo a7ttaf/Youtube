@@ -4,9 +4,11 @@ import { StrictMode } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import AppShell, { isImportScopeSettled } from "@/components/srcc/AppShell";
+import { DEFAULT_MONTH, MONTH_OPTIONS } from "@/components/srcc/shared";
 import { SessionProvider } from "@/contexts/SessionContext";
 import { TenantProvider } from "@/contexts/TenantContext";
 import type { SessionMe } from "@/lib/api/types";
+import { monthKeyLabel } from "@/lib/months";
 import { withDisplayDigest } from "../../helpers/displayDigestFixtures";
 
 const ORIGINAL_FETCH = globalThis.fetch;
@@ -690,6 +692,28 @@ describe("AppShell production session hydration", () => {
       name: /run pull/i,
     })) as HTMLButtonElement;
     expect(runPull).toBeDisabled();
+  });
+});
+
+// ------------------------------------------------------------- month chrome
+
+describe("AppShell topbar month filter", () => {
+  it("MONTH CHROME: options and the default derive from the rolling window", async () => {
+    (globalThis.fetch as ReturnType<typeof vi.fn>).mockImplementation(
+      routeFetchWithSession(() => jsonResponse(sessionBody({ canViewRevenue: true }))),
+    );
+    renderShell();
+
+    // The wired CommandView carries its own aria-label="Month" selector, so
+    // scope to the topbar's "Report filters" control row before querying.
+    const reportFilters = await screen.findByLabelText("Report filters");
+    const monthSelect = within(reportFilters).getByLabelText("Month") as HTMLSelectElement;
+    const renderedLabels = within(monthSelect)
+      .getAllByRole("option")
+      .map((option) => option.textContent);
+    // Same source as every wired view's selector — no second hardcoded list.
+    expect(renderedLabels).toEqual(MONTH_OPTIONS.map(monthKeyLabel));
+    expect(monthSelect.value).toBe(monthKeyLabel(DEFAULT_MONTH));
   });
 });
 

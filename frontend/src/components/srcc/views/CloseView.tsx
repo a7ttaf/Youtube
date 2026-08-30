@@ -1,4 +1,4 @@
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import { ApiError } from "@/lib/api/client";
 import type {
@@ -349,6 +349,50 @@ const lockReasonDisabled = (
   busy: boolean,
 ): boolean => (!canCloseMonth && !canUnlockMonth) || busy;
 
+// FIX (PR #211 review): hoisted above LockControlsPanel, whose badge renders
+// the same absent-row fallback the summary tiles use — defining it lower made
+// the analyzer flag a use-before-define even though the TDZ is unreachable at
+// render time.
+/** The "no close row yet" status label — an untouched month is simply OPEN. */
+const NO_CLOSE_RECORD_STATUS = "OPEN";
+const NO_CLOSE_RECORD_NOTE = "No close record yet";
+
+/** The Status tile's value: the close row's status, or OPEN when no row exists yet. */
+const closeStatusValue = (status: FinanceMonthCloseStatus | null): string =>
+  status?.status ?? NO_CLOSE_RECORD_STATUS;
+
+/** The Status tile's footnote: LOCKED allows exports; no row means not started. */
+const closeStatusNote = (status: FinanceMonthCloseStatus | null): string => {
+  if (!status) {
+    return NO_CLOSE_RECORD_NOTE;
+  }
+  return status.status === "LOCKED" ? "Exports allowed" : "Open for edits";
+};
+
+// ============================================================================
+// Purpose: The Lock Controls badge value: the close status with the absent-row
+//   OPEN fallback — but ONLY once the status read has SETTLED without an error
+//   AND the verdict belongs to the selected month. A still-loading, failed, or
+//   switched-away read is UNKNOWN, not open: the badge then renders an em dash
+//   so it never asserts OPEN for a month whose state the panel does not
+//   actually have.
+// Database/ORM: None (frontend, pure derivation over the status read state).
+// Standards: Single source for the badge's label; the tone comes from the same
+//   value via statusTone so label and tone can never disagree. Fail-closed:
+//   unknown renders "—", never a guessed status.
+// Blast Radius: Display only (one badge); no write path, no stored value.
+// Connections:
+//   - File: CloseStatusSummary (this file) -> renders the same verdict via
+//     closeStatusValue for the summary tiles, sharing the fallback semantics.
+//   - File: frontend/src/lib/api/useMonthClose.ts -> the settled (data=null,
+//     error=null) no-record verdict this falls back to.
+// ============================================================================
+/** The Lock Controls badge label, or undefined when the status is unknown. */
+const lockStatusBadgeValue = (
+  status: FinanceMonthCloseStatus | null,
+  statusKnown: boolean,
+): string | undefined => (statusKnown ? closeStatusValue(status) : undefined);
+
 /**
  * Lock Controls panel: status badge, lock/unlock actor + timestamp grid, the
  * audited reason input, and the two-step arm/confirm lock & unlock buttons. The
@@ -356,6 +400,7 @@ const lockReasonDisabled = (
  */
 const LockControlsPanel = ({
   status,
+  statusKnown,
   month,
   canCloseMonth,
   canUnlockMonth,
@@ -368,6 +413,7 @@ const LockControlsPanel = ({
   onCancel,
 }: {
   status: FinanceMonthCloseStatus | null;
+  statusKnown: boolean;
   month: string;
   canCloseMonth: boolean;
   canUnlockMonth: boolean;
@@ -380,6 +426,7 @@ const LockControlsPanel = ({
   onCancel: () => void;
 }) => {
   const reasonEmpty = reason.trim().length === 0;
+  const badgeStatus = lockStatusBadgeValue(status, statusKnown);
 
   return (
     <section className="panel">
@@ -388,7 +435,13 @@ const LockControlsPanel = ({
           <strong>Lock Controls</strong>
           <span>The backend rejects a lock until blockers are cleared</span>
         </div>
-        <Badge tone={statusTone(status?.status)}>{status?.status ?? "—"}</Badge>
+        {/* FIX (PR #211 review): the same absent-row fallback as the summary
+            tiles — a mapped 404 (no close row yet) reads OPEN here too, never
+            "—", or the two status indicators on one screen disagree. But the
+            fallback applies ONLY to a SETTLED, error-free read: while the
+            status request is loading or has failed, the month's state is
+            unknown and the badge says so instead of asserting OPEN. */}
+        <Badge tone={statusTone(badgeStatus)}>{badgeStatus ?? "—"}</Badge>
       </div>
       <LockDetailGrid status={status} />
       <div className="control-row" style={{ marginTop: 8 }}>
@@ -476,10 +529,15 @@ const ReconciliationPanel = () => {
   );
 };
 
-/** The Status tile's footnote: LOCKED allows exports, anything else is open for edits. */
-const closeStatusNote = (statusValue: string | undefined): string =>
-  statusValue === "LOCKED" ? "Exports allowed" : "Open for edits";
-
+// A month with no finance_month_close row is honestly OPEN: nothing has locked
+// it, and the backend only creates the row once a finance write touches the
+// month. This is not a UI invention — the backend itself already resolves a
+// missing close row to "OPEN" (backend/ums_smart_revenue/api/revenue.py:1742
+// and :3060, `close.status if close else "OPEN"`), which is the same verdict
+// this screen now states. useMonthClose maps that GET's 404 to
+// (data=null, error=null), so these two strings are what the summary shows for
+// a month nobody has closed yet — the state the rolling CURRENT-month default
+// lands on.
 /** The Readiness tile value: Ready/Blocked once readiness has loaded, an em dash before. */
 const readinessTileValue = (readiness: FinanceCloseReadinessResponse | null): string => {
   if (!readiness) return "—";
@@ -492,11 +550,18 @@ const blockerCountLabel = (blockerCount: number): string =>
     ? `${blockerCount} blocker${blockerCount === 1 ? "" : "s"}`
     : "No blockers";
 
-/** The loaded month/status/readiness/allocation summary tiles. */
+/**
+ * The loaded month/status/readiness/allocation summary tiles. Reached only once
+ * the status read has SETTLED without an error, so a null `status` here means
+ * the month simply has no close record yet (the mapped 404) — it falls back to
+ * the selected `month` and the honest not-started copy rather than em dashes.
+ */
 const CloseSummaryTiles = ({
+  month,
   status,
   readiness,
 }: {
+  month: string;
   status: FinanceMonthCloseStatus | null;
   readiness: FinanceCloseReadinessResponse | null;
 }) => {
@@ -505,13 +570,13 @@ const CloseSummaryTiles = ({
     <div className="view-summary" aria-label="Month close summary">
       <article className="summary-tile">
         <span>Month</span>
-        <strong>{status?.month ?? "—"}</strong>
+        <strong>{status?.month ?? month}</strong>
         <small>Finance close control</small>
       </article>
       <article className="summary-tile">
         <span>Status</span>
-        <strong>{status?.status ?? "—"}</strong>
-        <small>{closeStatusNote(status?.status)}</small>
+        <strong>{closeStatusValue(status)}</strong>
+        <small>{closeStatusNote(status)}</small>
       </article>
       <article className="summary-tile">
         <span>Readiness</span>
@@ -530,20 +595,94 @@ const CloseSummaryTiles = ({
 /**
  * Top summary tiles for the close screen: month, status, readiness, and allocation
  * method, with explicit error and initial-loading states mirroring CommandView.
+ *
+ * Branch order is load-bearing. An `error` wins ONLY when it belongs to the
+ * selected month (`settledStatusMonth === month`): useAsync clears the error
+ * in its effect one frame after a month switch, so gating keeps a switched-
+ * away month's failure from painting under the new selection (PR #211 review);
+ * same-month 403/5xx/network failures keep their role="alert" tile exactly as
+ * before. A known-verdict month whose read 404'd as "no close row yet" —
+ * useMonthClose has already turned that into (status=null, error=null) — falls
+ * through to the tiles and their not-started copy instead of an error banner.
+ * Any other state (in-flight first read, or a verdict month that is not the
+ * selection) renders the loading tile: a null status is only "no close record"
+ * once a read for the SELECTED month settled on it.
  */
+/** The CloseStatusSummary render modes, decided by closeSummaryMode. */
+type CloseSummaryMode = "error" | "loading" | "tiles";
+
+/** True when the error belongs to the selected month — the only error we render. */
+const errorBelongsToMonth = (
+  error: ApiError | Error | null,
+  settledStatusMonth: string | null,
+  month: string,
+): boolean => error !== null && settledStatusMonth === month;
+
+/** True while the verdict is in flight or belongs to another month. */
+const verdictUnknown = (
+  loading: boolean,
+  status: FinanceMonthCloseStatus | null,
+  settledStatusMonth: string | null,
+  month: string,
+): boolean => (loading && !status) || settledStatusMonth !== month;
+
+// ============================================================================
+// Purpose: Decide the close summary's render mode from the status read's
+//   lifecycle: the error tile ONLY for an error that belongs to the selected
+//   month, the loading tile while the verdict is in flight or belongs to
+//   another month (the month-switch frame before useAsync's effect clears the
+//   stale verdict), and the settled tiles otherwise.
+// Database/ORM: None (frontend, pure derivation).
+// Standards: Single decision point — the component renders, this decides, so
+//   label and precedence can never drift apart. Fail-closed: anything not
+//   provably this month's verdict renders the loading state, never a guessed
+//   status or a stale failure.
+// Blast Radius: Display only (which summary block renders). No write path.
+// Connections:
+//   - File: useSettledStatusMonth (this file) -> supplies the verdict month.
+//   - File: frontend/src/lib/api/useAsync.ts -> the effect-timed clears whose
+//     one-frame gaps both guards close.
+// ============================================================================
+const closeSummaryMode = (
+  error: ApiError | Error | null,
+  settledStatusMonth: string | null,
+  month: string,
+  loading: boolean,
+  status: FinanceMonthCloseStatus | null,
+): CloseSummaryMode => {
+  if (errorBelongsToMonth(error, settledStatusMonth, month)) {
+    return "error";
+  }
+  if (verdictUnknown(loading, status, settledStatusMonth, month)) {
+    return "loading";
+  }
+  return "tiles";
+};
+
 const CloseStatusSummary = ({
+  month,
   status,
   loading,
   error,
+  settledStatusMonth,
   readiness,
 }: {
+  month: string;
   status: FinanceMonthCloseStatus | null;
   loading: boolean;
   error: ApiError | Error | null;
+  settledStatusMonth: string | null;
   readiness: FinanceCloseReadinessResponse | null;
 }) => {
-  if (error) {
-    const { title, detail } = describeError(error);
+  // FIX (PR #211 review): render the error only when it belongs to the
+  // SELECTED month; the frame after a month switch still holds the previous
+  // month's verdict (error or no-record) until useAsync's effect clears it.
+  // See closeSummaryMode above for the full precedence contract.
+  const mode = closeSummaryMode(error, settledStatusMonth, month, loading, status);
+  if (mode === "error") {
+    // closeSummaryMode's contract: "error" is only reachable when error is
+    // non-null, but a string mode cannot narrow the type — assert it here.
+    const { title, detail } = describeError(error as ApiError | Error);
     return (
       <div className="view-summary" aria-label="Month close summary" role="alert">
         <article className="summary-tile">
@@ -555,7 +694,7 @@ const CloseStatusSummary = ({
     );
   }
 
-  if (loading && !status) {
+  if (mode === "loading") {
     return (
       <div className="view-summary" aria-label="Month close summary" aria-busy="true">
         <article className="summary-tile">
@@ -567,7 +706,7 @@ const CloseStatusSummary = ({
     );
   }
 
-  return <CloseSummaryTiles status={status} readiness={readiness} />;
+  return <CloseSummaryTiles month={month} status={status} readiness={readiness} />;
 };
 
 /** True while the readiness fetch is in flight with nothing loaded yet. */
@@ -715,6 +854,46 @@ const MonthCloseWorkbench = ({
   );
 };
 
+// ============================================================================
+// Purpose: Track WHICH month's read produced the current settled status
+//   verdict — data or error alike — closing the month-switch flash (PR #211
+//   review): useAsync clears data/error and flips loading inside its effect,
+//   one paint frame AFTER the selection changes, so for that frame the stale
+//   verdict (a null status read as "no record", or a previous month's error)
+//   rendered under the NEWLY selected month.
+// Database/ORM: None (frontend display-state derivation).
+// Standards: The verdict month is cleared synchronously DURING the render
+//   that changes the selection (React's adjust-state-during-render pattern —
+//   guarded to run only while it differs from the selection, so it converges),
+//   putting the unknown verdict in the DOM before the browser paints. The
+//   settle effect re-records the month whenever a read for the current
+//   selection finishes, WHATEVER the outcome, so both the data and error
+//   branches can gate on it. Hooks-order safe: same hook calls every render.
+// Blast Radius: Display only — which summary tile / badge renders while a
+//   switched-to month's read is in flight. No write path, no stored value.
+// Connections:
+//   - File: frontend/src/lib/api/useAsync.ts -> the effect-timed data/error
+//     clear whose one-frame gap this closes.
+//   - File: CloseView + CloseStatusSummary (this file) -> gate both the
+//     error branch and the not-started/badge branches on the verdict month.
+// ============================================================================
+/** The month whose read produced the current settled verdict; null = unknown. */
+const useSettledStatusMonth = (
+  month: string,
+  loading: boolean,
+): string | null => {
+  const [settledStatusMonth, setSettledStatusMonth] = useState<string | null>(null);
+  if (settledStatusMonth !== null && settledStatusMonth !== month) {
+    setSettledStatusMonth(null);
+  }
+  useEffect(() => {
+    if (!loading) {
+      setSettledStatusMonth(month);
+    }
+  }, [loading, month]);
+  return settledStatusMonth;
+};
+
 /**
  * The real-data Month-Close screen: status summary, readiness checklist, and the
  * inline reason + arm/confirm lock/unlock workflow wired to the finance-close API.
@@ -753,6 +932,16 @@ const CloseView = ({
   const actions = useMonthCloseActions({ month });
 
   const isLocked = status?.status?.toUpperCase() === "LOCKED";
+
+  // FIX (PR #211 review): a null status only means "no close record" once a
+  // read for the SELECTED month settled on it, and an ERROR only renders once
+  // it belongs to the selected month — see useSettledStatusMonth above for why
+  // the (status/error, loading=false) pair alone cannot tell the current
+  // month's verdict from the previous month's in the frame right after a
+  // month switch.
+  const settledStatusMonth = useSettledStatusMonth(month, statusLoading);
+  const statusKnown =
+    !statusLoading && statusError === null && settledStatusMonth === month;
 
   // ==========================================================================
   // Purpose: POST a lock/unlock action using the trimmed, audited reason already
@@ -832,9 +1021,11 @@ const CloseView = ({
   return (
     <section className="view-page" aria-labelledby="closeViewTitle">
       <CloseStatusSummary
+        month={month}
         status={status}
         loading={statusLoading}
         error={statusError}
+        settledStatusMonth={settledStatusMonth}
         readiness={readiness}
       />
 
@@ -858,6 +1049,7 @@ const CloseView = ({
         <aside className="view-stack">
           <LockControlsPanel
             status={status}
+            statusKnown={statusKnown}
             month={month}
             canCloseMonth={canCloseMonth}
             canUnlockMonth={canUnlockMonth}
