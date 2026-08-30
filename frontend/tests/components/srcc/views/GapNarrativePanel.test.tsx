@@ -1,6 +1,7 @@
 import { render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { DEFAULT_MONTH } from "@/components/srcc/shared";
 import CommandView from "@/components/srcc/views/CommandView";
 import type {
   MonthGapExplanation,
@@ -250,7 +251,9 @@ describe("GapNarrativePanel in CommandView", () => {
     // The panel is labeled holding-wide: the endpoint aggregates all scopes
     // and must not read as following the view's scope selector.
     expect(
-      screen.getByText("Holding-wide payment and bank gaps for 2026-03 (all scopes)"),
+      screen.getByText(
+        `Holding-wide payment and bank gaps for ${DEFAULT_MONTH} (all scopes)`,
+      ),
     ).toBeInTheDocument();
     // Month narrative line plus the read-only close badge.
     expect(
@@ -360,7 +363,9 @@ describe("GapNarrativePanel in CommandView", () => {
     // selected month — restriction is per month, not global-only.
     const selectedMonthOnly: ScopedFinanceViewHint = {
       globalScope: false,
-      financeMonths: ["2026-03"],
+      // The grant must cover the month the view is actually on — the rolling
+      // DEFAULT_MONTH — or this stops testing the month-scoped admit path.
+      financeMonths: [DEFAULT_MONTH],
     };
     routeFetch({});
     renderCommandView({
