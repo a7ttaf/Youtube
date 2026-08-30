@@ -1768,7 +1768,13 @@ class _TenantRecordingHealthRepository:
         offset: int = 0,
         connector_keys: frozenset[str] | None = None,
     ) -> ConnectorCredentialPage:
-        """Record the connector-key filter and return an empty page."""
+        """Record the connector-key filter and return a one-entry page.
+
+        The single ``acct-other`` entry is the fixture the caller asserts
+        on; the page is intentionally non-empty so the test proves the
+        entries came through the tenant-bound read, not from a vacuous
+        empty result.
+        """
         self.connector_keys = connector_keys
         return ConnectorCredentialPage(
             items=[
