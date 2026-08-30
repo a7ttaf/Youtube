@@ -113,7 +113,9 @@ own environment on top of all of them:
 4. `.env.development.local` (`.env.[mode].local`)
 5. the dashboard terminal's exported environment — highest
 
-If a protected route still 401s after following these steps, a stale
+The development server refuses to start when the token is blank; it does not
+open a proxy that is guaranteed to 401. If a protected route still 401s after
+following these steps, a stale non-blank
 `UMS_TRUSTED_GATEWAY_TOKEN` in one of those higher-precedence sources is why;
 clear it there rather than editing `.env` again.
 
@@ -242,14 +244,23 @@ bun run dev
 The dev proxy (`vite.config.ts`) forwards every tenant-scoped route to the backend and
 injects the full trusted-principal header set (`X-User-ID`, `X-User-Email`, `X-Role`,
 `X-Scope-Type`, `X-UMS-Trusted-Gateway-Token`, `X-UMS-Tenant`). The browser bundle
-never holds the gateway secret.
+never holds the gateway secret. Before injection, the proxy removes every
+caller-supplied trusted identity, role, scope, tenant, and token header — including
+optional `X-Scope-ID` — so browser input cannot survive as a principal claim.
 
-`TENANT_SCOPED_ROUTES` (`vite.config.ts:16-49`) is the full list, in declaration order:
+`TENANT_SCOPED_ROUTES` (`devProxy.ts`) is the full list, in declaration order:
 
 ```text
 /tenants  /session  /revenue  /finance-close  /exports  /connectors
 /adsense  /channels  /org-units  /groups       /audit    /users
 ```
+
+Matching is on the exact first path segment: `/users` and `/users/123` proxy;
+`/users.evil`, encoded separators/traversal, absolute-form request targets, and a
+query that only mentions `/users` do not. Requests carrying an `Origin` must be
+same-origin with the Vite Host, and Vite retains its Host allowlist. `changeOrigin`
+rewrites the upstream Host to the validated backend target while preserving the
+safe browser Origin.
 
 > **This list used to be wrong here, and it was wrong in a way that hid a real bug.**
 > The paragraph above previously named seven of these routes and omitted `/session`,
@@ -283,7 +294,7 @@ Change Request** company `<select>`, so the operator could not assign a channel 
 company from the UI at all.
 
 `frontend/tests/devProxyRoutes.test.ts` now guards this by **deriving** the required
-set from the path literals under `src/lib/api/**`, so a new API call to an unproxied
+set from request-path literals across `src/**`, so a new API call to an unproxied
 prefix fails the suite instead of failing silently in the browser.
 
 **Known, currently harmless gap:** four backend prefixes are mounted and not proxied —
@@ -311,6 +322,17 @@ VITE_DEV_GATEWAY_ROLE=finance_admin
 VITE_DEV_GATEWAY_SCOPE_TYPE=global
 VITE_DEV_GATEWAY_TENANT_SLUG=ums
 ```
+
+The proxy is active only for Vite's `serve` command in `development` mode; builds
+and production-mode preview servers receive no trusted-header proxy. It fails before
+listening when `UMS_TRUSTED_GATEWAY_TOKEN` is blank. A non-global
+`VITE_DEV_GATEWAY_SCOPE_TYPE` also requires a non-blank
+`VITE_DEV_GATEWAY_SCOPE_ID`; global scope requires that id to be absent.
+
+`VITE_DEV_BACKEND_URL` must be an exact origin. Loopback is trusted by default. To
+target a non-loopback backend, add that exact origin to the Node-only
+`UMS_DEV_TRUSTED_BACKEND_ORIGINS` allowlist; without it Vite refuses to start rather
+than sending the gateway token to an untrusted host.
 
 `finance_admin` covers net-revenue, smart-alerts, finance-close + readiness,
 explain, exports, and AdSense payments. The Connectors **credentials** list

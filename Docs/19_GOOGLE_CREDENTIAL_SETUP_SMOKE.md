@@ -41,7 +41,7 @@ credential reference. The packet must not be copied into repo docs.
 | Secret location | GCP Secret Manager secret name/version; do not paste the secret value into UMS |
 | Runtime IAM | UMS runtime identity has read access only to the needed secret version |
 | Tenant/account mapping | UMS tenant id, `connector_key`, and Google `account_id` or CMS content owner id |
-| Service actor | A service-actor UUID **you provisioned**, holding `connectors.run_jobs`, recorded in the tracker. Never the placeholder `.env.example` ships. Under `docker compose` it cannot be supplied through `.env` — see [Supplying the service actor under `docker compose`](#supplying-the-service-actor-under-docker-compose) |
+| Service actor | A stable service-account UUID recorded in the tracker. Prefer an account created through the audited `/users` APIs and assigned `system_integration_user`; never the public placeholder from `.env.example`. The runtime currently validates UUID syntax but does not load that account. Under `docker compose` the value cannot be supplied through `.env` alone — see [Supplying the service actor under `docker compose`](#supplying-the-service-actor-under-docker-compose) |
 | Smoke month | A non-closed month or approved historical month to use for the first dry-run |
 
 ## Secret payload contract
@@ -229,15 +229,12 @@ ValueError: UMS_GOOGLE_CONNECTOR_SERVICE_ACTOR_ID must be set to a UUID before
 connector audit emitters can build a service principal
 ```
 
-— while the operator is looking at the line they set in `.env`. The
-variable is withheld on purpose: `.env.example` currently ships it uncommented as
-the public placeholder `00000000-0000-0000-0000-0000000000bb`, and
-`connectors/google/audit.py` refuses only on *unset*, accepting any syntactically
-valid UUID. Forwarding it would attribute the connector audit trail of every
-operator who ran `cp .env.example .env` to one well-known id from a public
-template. A refused run is recoverable; a mis-attributed audit trail is not.
-See the comment block in `docker-compose.yml` for the two fixes that would let
-the pass-through be restored.
+— while the operator is looking at the line they set in `.env`. This is a
+deployment gap, not an intentional safety mechanism. It is especially dangerous
+because `.env.example` currently ships the public placeholder
+`00000000-0000-0000-0000-0000000000bb`, and `connectors/google/audit.py` refuses
+only on *unset*, accepting any syntactically valid UUID. Replace or comment out
+the placeholder and use a recorded service-account UUID.
 
 To supply the value under compose, add an untracked `docker-compose.override.yml`
 beside `docker-compose.yml`. Compose merges it automatically — no `-f` flag:
@@ -283,13 +280,17 @@ Before the first `dry_run: false` job:
 - `POST /connectors/credentials/{connector_key}/{account_id}/test` returned
   `status: "ok"` for the exact connector/account.
 - CLI `--dry-run` passed for the exact tenant/connector/account/month.
-- `UMS_GOOGLE_CONNECTOR_SERVICE_ACTOR_ID` is set to an active service actor with
-  `connectors.run_jobs`, **and the process that will run the job has been shown
-  to see it.** Sign this off against observed output, not against a line in
-  `.env`: compose does not forward this particular variable, so
+- `UMS_GOOGLE_CONNECTOR_SERVICE_ACTOR_ID` is set to the recorded service-account
+  UUID, **and the process that will run the job has been shown to see it.** Sign
+  this off against observed output, not against a line in `.env`: Compose does
+  not forward this particular variable, so
   `docker compose config | Select-String SERVICE_ACTOR` must print the variable.
   If it prints nothing, this item is NOT satisfied however the env file looks —
   see [Supplying the service actor under `docker compose`](#supplying-the-service-actor-under-docker-compose).
+- The service account was created and assigned through the audited `/users`
+  API. This is a governance check: the current runtime builds an in-memory
+  principal carrying `connectors.run_jobs` and validates only that the configured
+  value is a UUID; it does not verify an active SQL user or role assignment.
 - The value is a service actor you provisioned, not the
   `00000000-0000-0000-0000-0000000000bb` placeholder from `.env.example`. The
   runtime check refuses only on *unset* and will accept the placeholder silently.
@@ -309,115 +310,44 @@ Before the first `dry_run: false` job:
 - Re-run the credential probe after any rotation. Do not reuse old smoke
   evidence for a new secret version.
 
-## Verified operator checklist for THIS deployment (2026-08-25)
+## Operator checklist for a local smoke
 
-Command-by-command path from the Desktop credential to a proven UMS credential row,
-verified against the code: every flag was checked with `--help`, and the Step-3 SQL was
-executed verbatim (rolled back) against a freshly migrated Postgres — `INSERT 0 1`, and
-the re-run failed on exactly `uq_api_connector_credentials_connector_account`, which is
-the intended idempotency signal.
+This checklist is limited to capabilities present in this branch. Keep
+workstation paths, credential payloads, account ids, and secret references in
+the approved operator tracker or secret store, not in repository docs.
 
-> ⚠️ **Currency sequencing (decided 2026-08-25: main currency = EGP).** The connector
-> currently ingests **USD**. Run at most ONE smoke month through this checklist as
-> disposable plumbing proof, then **STOP — no multi-month backfill, no daily sync —
-> until EGP program Phase 4** (`Docs/21`). Backfilled USD months can never match the
-> EGP workbook acceptance baseline and would all be re-ingested.
-
-**Step 0 — ROTATE the Google OAuth credential first (~1–2h incl. the consent round-trip).**
-The current payload (`Desktop\cms-revenue-2026H1\secrets\google_oauth.json`, plus the
-client-secret file in `Desktop\UMS report\`) has prior chat exposure. Mint a fresh client
-secret and refresh token BEFORE any upload — enshrining a compromised credential in
-Secret Manager is worse than the Desktop file. Consent screen must not be in "Testing"
-status (7-day token expiry; see the get_revenue.py docstring's own warning).
-
-**Step 1 — install the Google Cloud SDK, then upload.** `gcloud` is **not installed on
-this PC** (verified) — install + `gcloud init` first (~0.5–1h), or use the Cloud Console
-UI instead. Payload contract per this doc's "Secret payload contract" section: UTF-8
-JSON with `refresh_token`, `client_id`, `client_secret`, `token_uri` (optional `scopes`).
-
-```powershell
-gcloud secrets create ums-google-oauth --replication-policy=automatic
-gcloud secrets versions add ums-google-oauth --data-file="C:\<secure-path>\payload.json"
-```
-
-Delete the local payload file after the upload succeeds. (gcloud flag syntax needs
-confirmation against current Google docs.)
-
-**Step 2 — GCP auth for the resolver (the missing fourth piece).**
-
-*Host CLI path (Steps 2/4):* `gcloud auth application-default login` on the
-Windows host, or set host `GOOGLE_APPLICATION_CREDENTIALS` to a service-account
-key. The identity needs `roles/secretmanager.secretAccessor`. Without this, the
-host credential probe exits 2 with `SecretFetchError`.
-
-*Compose `app` / in-process jobs:* host ADC is **not** visible inside the
-container. `docker-compose.yml` does not mount ADC or forward
-`GOOGLE_APPLICATION_CREDENTIALS`. Before treating Step 2 as sufficient for
-Compose live runs, mount a service-account key (or ADC directory) into `app`
-and set `GOOGLE_APPLICATION_CREDENTIALS` via an untracked
-`docker-compose.override.yml` (same override pattern as
-[Supplying the service actor under `docker compose`](#supplying-the-service-actor-under-docker-compose)).
-Otherwise the host probe can pass while API credential tests and connector jobs
-fail with `SecretFetchError` inside the container.
-
-**Step 3 — the credential row** (superuser SQL bypasses RLS deliberately; the audited
-alternative is `POST /connectors/credentials` per the Setup sequence above):
-
-```powershell
-docker compose exec postgres psql -U "<UMS_DB_USER>" -d "<UMS_DB_NAME>" -c "INSERT INTO api_connector_credentials (tenant_id, connector_key, account_id, encrypted_secret_ref) VALUES ('00000000-0000-0000-0000-000000000001', 'youtube-analytics', '<CONTENT_OWNER_ID>', 'gcp-secret-manager://projects/<project>/secrets/ums-google-oauth/versions/latest');"
-```
-
-(The `-U`/`-d` placeholders are quoted: unquoted angle brackets are parsed by
-PowerShell as redirection operators, so the command failed before psql ever
-ran. The placeholders inside the SQL string are safe — PowerShell does not
-parse the contents of a quoted argument.)
-
-Expected `INSERT 0 1`; a re-run fails on the unique constraint (correct — rotate the ref
-with `UPDATE`, not a second `INSERT`).
-
-**Step 4 — prove it** (host process; must target the Compose Postgres published on
-localhost — Step 3 inserted into that container, and Compose's in-network hostname
-`postgres` is unreachable from the host):
-
-```powershell
-# Use 127.0.0.1 and the published port (UMS_POSTGRES_PORT, default 5432), not hostname postgres.
-$env:UMS_DATABASE_URL = "postgresql+psycopg://<UMS_DB_USER>:<UMS_DB_PASSWORD_URLENC>@127.0.0.1:<UMS_POSTGRES_PORT>/<UMS_DB_NAME>"
-uv run python scripts/check_google_connector_credential.py --tenant 00000000-0000-0000-0000-000000000001 --connector youtube-analytics --account <CONTENT_OWNER_ID>
-```
-
-Expected exit 0 with `OK … token_expiry=<iso>`. This commits the telemetry that ARMS the
-live-run gate for roughly one hour. Exit-2 first lines map to causes:
-`SecretFetchError` → Step 2/IAM; `SecretNotFoundError` → the ref path;
-`MalformedSecretPayloadError` → payload JSON; `OAuthRefreshError` → Step 0's token;
-`CredentialNotFoundError` → Step 3.
-
-**Step 5 — service actor (live runs only).** Provision a dedicated service
-account (not a human operator): Super Owner `POST /users` with
-`is_service_account: true`, grant `connectors.run_jobs`, then set
-`UMS_GOOGLE_CONNECTOR_SERVICE_ACTOR_ID` to that UUID. Do **not** reuse the UUID
-printed by `bootstrap_operator.py` — that helper creates
-`is_service_account=False` humans, and using it would attribute unattended
-connector audit rows to the operator. Never use the public `.env.example`
-placeholder. Under Compose, supply the UUID via the override documented in
-[Supplying the service actor under `docker compose`](#supplying-the-service-actor-under-docker-compose).
-
-**Step 6 — optional dry-run.** Costs the same ~54 API calls as a live run.
-⚠️ *Not* free of side effects: the dry-run performs the full credential resolve, and a
-transient `OAuthRefreshError` here commits a FAILED telemetry stamp that **disarms the
-gate Step 4 just armed** — Step 7 then exits 2 even inside the hour. Recovery: re-run
-Step 4.
-
-**Step 7 — ONE live smoke month, within ~1h of Step 4.** First confirm the target month
-is **not closed/locked** (this doc's own smoke-month rule): the locked-month prefilter
-skips silently, so a locked month exits 0 `SUCCEEDED` with **zero facts written** —
-reading as success while proving nothing. Expected on an open month: exit 0,
-`SUCCEEDED … failures=[]`, facts written (in USD — disposable, per the sequencing box).
-`PARTIAL` = zero facts, source rows only. Never run two copies concurrently (no
-CLI-side lock). **Then stop until EGP Phase 4.**
-
-Ops total: **~3–5.5h** including the SDK install and a realistic consent round-trip.
-No UMS code is missing for this checklist — both scripts, the resolver, the schema and
-the gates all exist and match.
+1. Rotate any credential that may have been exposed, then upload the JSON payload
+   described above to GCP Secret Manager. Verify current `gcloud` syntax against
+   the installed SDK or use the Cloud Console.
+2. Give the runtime identity `roles/secretmanager.secretAccessor` on the exact
+   secret version. Host ADC is not automatically visible in Compose; mount and
+   configure container credentials through an untracked override when the API
+   container will resolve the secret.
+3. Register the external reference through audited
+   `POST /connectors/credentials` with an authorized principal. Expected status
+   is `201`, `has_secret_ref: true`, and a `CONNECTOR_SETTINGS_CHANGED` audit
+   event. A duplicate returns `409`. **Do not use superuser SQL:** it bypasses
+   gateway authentication, RBAC, tenant RLS, actor stamping, and the required
+   audit write.
+4. If the audited API is unavailable, stop. Database recovery is a break-glass
+   incident, not an alternate credential setup path. This runbook intentionally
+   provides no copy-paste privileged SQL.
+5. Run `scripts/check_google_connector_credential.py` against the operator-
+   approved database URL and exact tenant/connector/account. A Compose database
+   is reached from the host through `127.0.0.1` and its published port, not the
+   container-only hostname `postgres`.
+6. Provision a service account through audited `POST /users`, then assign the
+   `system_integration_user` role through `POST /users/{user_id}/roles`. Set
+   `UMS_GOOGLE_CONNECTOR_SERVICE_ACTOR_ID` to that account UUID using the Compose
+   override above. Record the current runtime limitation: connector execution
+   validates only UUID syntax and fabricates its in-memory permission; the SQL
+   account/role is operator governance, not yet a runtime-enforced lookup.
+7. Run the credential probe, then the CLI dry-run. A dry-run still resolves the
+   credential and can update refresh telemetry; if it records a failed refresh,
+   re-run the credential probe before the live gate.
+8. Run at most one owner-approved live smoke month, confirm the month is open,
+   verify facts and audit rows, and stop before any backfill. The current finance
+   path is USD-only; do not represent the smoke as EGP-ready.
 
 ## Validation references
 

@@ -12,8 +12,8 @@ This service ingests YouTube + AdSense data, reconciles it against bank movement
 |---|---|
 | Backend | Python 3.14 · FastAPI · SQLAlchemy 2 · Alembic |
 | Frontend | Vite 8 · React 19 · TypeScript 6 (shipped) |
-| Storage | PostgreSQL 18 (single source of truth) · local file store (export artifacts) |
-| Background jobs | In-process `ThreadPoolExecutor` (bounded queue; off by default via `UMS_CONNECTOR_JOB_EXECUTOR_ENABLED` env var) |
+| Storage | PostgreSQL 18 (single source of truth) · ephemeral local files for export artifacts and default connector blobs |
+| Background jobs | In-process `ThreadPoolExecutor` (bounded queue; off by default; Compose does not forward its enable flag in this snapshot) |
 | Multi-tenant | Postgres Row-Level Security with `FORCE ROW LEVEL SECURITY` on 26 tenant-scoped tables (`db/rls.py`, `TENANT_SCOPED_TABLES`; shipped PR #106) |
 | Currency | **USD only** on the finance path today. All math in `Decimal`. See the note below. |
 | Auth modes | `headers` (dev / bootstrap) · `database` (production; SQL-backed principal) |
@@ -26,9 +26,8 @@ This service ingests YouTube + AdSense data, reconciles it against bank movement
 > alone, non-USD source rows and deductions are skipped, non-USD exports hard-fail,
 > and the USD-only property is deliberately **test-locked** by
 > `tests/finance/test_finance_no_fx_dependency.py:40-53`. Representing EGP end to end
-> is a 3–6 week programme, not a configuration switch — see
-> [`Docs/16_OPEN_DECISIONS.md`](Docs/16_OPEN_DECISIONS.md) and
-> [`Docs/21_BETA_IMPLEMENTATION_PLAN.md`](Docs/21_BETA_IMPLEMENTATION_PLAN.md).
+> is a programme, not a configuration switch — see
+> [`Docs/16_OPEN_DECISIONS.md`](Docs/16_OPEN_DECISIONS.md).
 
 For the long-form vision, read [PRODUCT.md](PRODUCT.md) and [DESIGN.md](DESIGN.md). For the spec pack, see [Docs/](Docs/).
 
@@ -167,23 +166,21 @@ uv run pytest -q tests/api
 | `UMS_DATABASE_URL` | yes (prod) | none | SQLAlchemy URL for PostgreSQL. Use `postgresql+psycopg://…` (psycopg3 binary driver). Update `.env.example` to match. |
 | `UMS_AUTHZ_SOURCE` | no | `headers` | `headers` for dev/bootstrap, `database` for production (loads principal + roles from SQL). |
 | `UMS_TRUSTED_GATEWAY_TOKEN` | yes for protected routes | none | Shared secret asserted by the upstream identity gateway. Required for both `headers` bootstrap auth and `database` auth. Also read by `frontend/vite.config.ts` in Node to inject the dev proxy `X-UMS-Trusted-Gateway-Token` header. Keep the value in the repo-root `.env` and load it from there: the API and the dashboard normally run in separate terminals, so a value exported in one shell alone makes the two disagree and every protected route 401s. Note that `.env` is the lowest-precedence source Vite reads — `loadEnv` also picks up `.env.local`, `.env.[mode]`, and `.env.[mode].local`, then overlays the dashboard shell's own environment, in that increasing order — so clear a stale token from those rather than re-editing `.env`. **Never use a `VITE_*` alias** — any `VITE_*` env is embedded in the client bundle. |
-| `UMS_GOOGLE_CONNECTOR_SERVICE_ACTOR_ID` | required for Google connector runs — **but not currently forwarded by compose**, see below | none | UUID used as the connector service principal for audit events. Optional at process boot so non-connector workloads can start; connector execution fails closed at runtime when unset, and malformed values fail settings load. |
-| `UMS_LOG_LEVEL` | no | `INFO` | Application log verbosity: `DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL` (case-insensitive; blank = default). Applies to the `ums_smart_revenue` logger only — third-party libraries stay pinned at `WARNING`. **A non-empty unrecognised value raises at startup**, which under compose is a restart loop; see the fail-fast note in [Running with `docker compose`](#running-with-docker-compose). |
-| `VITE_DEV_BACKEND_URL` | no (dev) | `http://127.0.0.1:8000` | Backend origin the frontend dev proxy forwards `/tenants/*` to. Dev-only; read by `frontend/vite.config.ts`. |
+| `UMS_GOOGLE_CONNECTOR_SERVICE_ACTOR_ID` | required for Google connector runs — **but not currently forwarded by compose**, see below | none | UUID stamped onto connector audit events. Optional at process boot so non-connector workloads can start; connector execution fails closed when unset, and malformed values fail settings load. The runtime currently validates UUID syntax only and fabricates the connector permission on the in-memory service principal; it does not prove that the UUID maps to an active SQL service account. |
+| `VITE_DEV_BACKEND_URL` | no (dev) | `http://127.0.0.1:8000` | Exact backend origin for the development proxy. Loopback is accepted by default; a non-loopback origin must also appear in `UMS_DEV_TRUSTED_BACKEND_ORIGINS` before it can receive the gateway token. |
+| `UMS_DEV_TRUSTED_BACKEND_ORIGINS` | no (dev) | none | Comma-separated exact `http(s)` origins trusted to receive the dev gateway token when `VITE_DEV_BACKEND_URL` is not loopback. Node-side only; never use a `VITE_*` name for this allowlist. |
 | `VITE_DEV_GATEWAY_USER_ID` | no (dev) | `00000000-0000-0000-0000-0000000000aa` | Dev `X-User-ID` injected by the Vite proxy on tenant-scoped routes. Non-secret. |
 | `VITE_DEV_GATEWAY_USER_EMAIL` | no (dev) | `dev@ums.local` | Dev `X-User-Email` injected by the Vite proxy. Required by `current_principal_from_headers` in default `headers` auth mode. Non-secret. |
 | `VITE_DEV_GATEWAY_ROLE` | no (dev) | `assistant_analyst` | Dev `X-Role` injected by the Vite proxy. Non-secret. **Change this before you judge the product** — see the note below. |
 | `VITE_DEV_GATEWAY_SCOPE_TYPE` | no (dev) | `global` | Dev `X-Scope-Type` injected by the Vite proxy. Non-secret. |
+| `VITE_DEV_GATEWAY_SCOPE_ID` | required for non-global dev scope | none | Dev `X-Scope-ID`. Vite refuses to start if this is blank for a non-global scope, or non-blank for `global`. |
 
-> ⚠️ **`UMS_GOOGLE_CONNECTOR_SERVICE_ACTOR_ID` is deliberately NOT forwarded by
-> `docker-compose.yml`** (see the comment at `docker-compose.yml:112-158`). Setting it
-> in `.env` therefore has **no effect on the compose `app` service**, and connector
-> runs there will report it as unset even though you set it. That is intentional:
-> `.env.example` currently ships the variable uncommented as a public placeholder UUID,
-> and the runtime check refuses only on *unset* — any syntactically valid UUID is
-> accepted. Forwarding it would mean every operator who ran `cp .env.example .env`
-> attributed their connector audit trail to one well-known id from a public template.
-> A refused connector run is recoverable; a mis-attributed audit trail is not.
+> ⚠️ **`UMS_GOOGLE_CONNECTOR_SERVICE_ACTOR_ID` is not forwarded by
+> `docker-compose.yml`.** Setting it in `.env` therefore has **no effect on the
+> compose `app` service**, and connector runs there report it as unset. Do not infer
+> intent from that omission: it is a deployment gap. `.env.example` also ships a
+> public placeholder UUID that passes the runtime's syntax-only check, so replace or
+> comment out that value rather than attributing audit rows to a known placeholder.
 >
 > To run Google connectors under compose in the meantime, add a
 > `docker-compose.override.yml` beside `docker-compose.yml` setting the variable on
@@ -198,10 +195,7 @@ uv run pytest -q tests/api
 > container, not the long-running `app` service. Running the backend directly with
 > `uv run uvicorn` reads the variable normally. The full operator runbook for this
 > is in
-> [`Docs/19_GOOGLE_CREDENTIAL_SETUP_SMOKE.md`](Docs/19_GOOGLE_CREDENTIAL_SETUP_SMOKE.md);
-> the durable fix — having the backend reject the known placeholder explicitly — is
-> costed in [`Docs/21_BETA_IMPLEMENTATION_PLAN.md`](Docs/21_BETA_IMPLEMENTATION_PLAN.md)
-> (P2).
+> [`Docs/19_GOOGLE_CREDENTIAL_SETUP_SMOKE.md`](Docs/19_GOOGLE_CREDENTIAL_SETUP_SMOKE.md).
 
 > ⚠️ **The default dev role sees almost nothing.** `assistant_analyst` holds **2 of
 > the 26** permissions in `auth/permissions.py` — `analytics.view` and
@@ -216,14 +210,14 @@ There is no cluster secrets layer in this repository: no `deploy/` directory and
 Helm chart exist, and none ever has. If a clustered deployment is wanted, it has to be
 built first.
 
-**Frontend env-var safety:** Vite exposes every `VITE_*` variable to client code via `import.meta.env` at build time. The trusted-gateway secret therefore lives under the non-`VITE_*` `UMS_TRUSTED_GATEWAY_TOKEN` name only; the Vite dev proxy reads it in Node and never includes it in the browser bundle.
+**Frontend env-var safety:** Vite exposes every `VITE_*` variable to client code via `import.meta.env` at build time. The trusted-gateway secret therefore lives under the non-`VITE_*` `UMS_TRUSTED_GATEWAY_TOKEN` name only; the Vite dev proxy reads it in Node and never includes it in the browser bundle. The proxy starts only for `vite serve` in `development` mode, fails fast on a blank token or incomplete scope, and refuses a non-loopback backend unless its exact origin is explicitly trusted.
 
 ---
 
 ## Running with `docker compose`
 
-`docker-compose.yml` is the deployment for the first beta: one operator, one box, every
-published port bound to `127.0.0.1`.
+`docker-compose.yml` is a local single-box development/smoke stack: one operator, one
+box, every published port bound to `127.0.0.1`. It is not a completed beta deployment.
 
 ```powershell
 docker compose --env-file .env config   # renders the stack; fails loudly on anything missing
@@ -232,14 +226,19 @@ docker compose logs -f app
 docker compose down                     # stop + remove containers, KEEP the data volumes
 ```
 
-> ⚠️ **`docker compose down -v` is not an ordinary teardown.** `-v` deletes the named
-> volumes — `postgres-data` (every revenue fact, audit row, tenant and role grant),
-> `app-data` (every export artifact and connector blob) and `redis-data`. No prompt, no
-> undo. A verified **database** backup + restore rehearsal protects **`postgres-data`
-> only** — see
-> [`Docs/22_BACKUP_RESTORE_AND_REHEARSAL.md`](Docs/22_BACKUP_RESTORE_AND_REHEARSAL.md).
-> **`app-data` is not in that backup.** Losing it means re-requesting exports; connector
-> blobs may be gone. Do not use `-v` unless you accept wiping both volumes.
+> ⚠️ **Application files are already ephemeral in this Compose file.** Only
+> `postgres-data` and `redis-data` are declared. Export artifacts default to
+> `/tmp/ums-smart-revenue-export-artifacts` inside the app container, and the default
+> connector blob store resolves under the app working directory. Neither path has a
+> volume, so recreating/removing the app container can discard those bytes even when
+> PostgreSQL metadata still points at them. Configure and mount durable storage before
+> treating generated artifacts or connector blobs as retained evidence.
+>
+> **`docker compose down -v` is destructive.** It additionally deletes the real named
+> volumes: `postgres-data` (revenue facts, audit rows, tenants, roles, and grants) and
+> `redis-data`. There is no repository backup/restore runbook in this snapshot. Do not
+> use `-v` unless the database reset is intentional and recoverability is handled
+> outside these docs.
 
 > ⚠️ **`.env.example` is not yet a complete template for compose.** It predates the
 > database variables, so `docker compose --env-file .env.example config` exits 1 on
@@ -247,41 +246,15 @@ docker compose down                     # stop + remove containers, KEEP the dat
 > does, this file is the authoritative list"* — enumerates the five variables that have
 > no default. Completing the template is plan item P0.3.
 
-> ⚠️ **A typo in an optional variable restart-loops the API.** Compose forwards **six**
-> variables from `.env` to the app — `UMS_CONNECTOR_JOB_EXECUTOR_ENABLED`,
-> `UMS_CONNECTOR_JOB_MAX_WORKERS`, `UMS_CONNECTOR_JOB_STALE_RUNNING_HOURS`,
-> `UMS_GROUP_SYNC_SCHEDULE_ENABLED`, `UMS_GROUP_SYNC_INTERVAL_HOURS` and
-> `UMS_LOG_LEVEL` — where `config/settings.py` parses them during `create_app` and
-> raises rather than falling back to a default. `UMS_CONNECTOR_JOB_MAX_WORKERS=two`
-> ends startup with
-> `ValueError: UMS_CONNECTOR_JOB_MAX_WORKERS must be a positive integer`; so does
-> `UMS_LOG_LEVEL=verbose`, naming its own variable. That is the intended fail-fast
-> contract, but under `restart: unless-stopped` it presents as a container that
-> silently cycles rather than one that stops with an error — the traceback naming the
-> variable is only in `docker compose logs app`, last line. Fix the value and
-> `docker compose up -d app`. A **blank** value is safe and needs no action: `VAR=`
-> yields the same default as omitting the line entirely.
+> **Logging contract in this snapshot:** there is no `UMS_LOG_LEVEL`, no
+> `config/logging_config.py`, and no Compose `logging:` rotation block. Uvicorn's
+> normal logging is what `docker compose logs app` shows. Do not set invented
+> `UMS_LOG_*` variables and assume retention or redaction changed; configure the
+> process/container logging explicitly in a separate deployment change.
 
-> **`UMS_LOG_LEVEL` — the process log verbosity.** `DEBUG`, `INFO` (the default),
-> `WARNING`, `ERROR` or `CRITICAL`, case-insensitive. It reaches the **application**
-> loggers only; third-party libraries stay pinned at `WARNING`
-> (`config/logging_config.py`, `THIRD_PARTY_LOG_LEVEL`), which is what keeps `httpx2`'s
-> INFO request line — and the CMS content-owner id in its query string — out of
-> `docker compose logs app`. Turning it to `DEBUG` is therefore safe: it does not widen
-> what third-party code prints. Not to be confused with `UMS_LOG_MAX_SIZE` /
-> `UMS_LOG_MAX_FILE`, which size Docker's json-file **rotation** (how much log is kept
-> on disk) rather than deciding what the app writes. Similar names, unrelated
-> mechanisms, and only one of them is a disk-space control.
-
-Before a first beta, read
-[`Docs/20_DEPLOYMENT_READINESS_AUDIT.md`](Docs/20_DEPLOYMENT_READINESS_AUDIT.md) (what
-stands between `main` and a runnable beta) and
-[`Docs/21_BETA_IMPLEMENTATION_PLAN.md`](Docs/21_BETA_IMPLEMENTATION_PLAN.md) (the
-costed plan). Two facts from that audit belong here rather than only there: **UMS has
-no login of its own** — identity arrives as gateway-asserted headers, and the compose
-stack ships no gateway — so the localhost port binding is the only thing standing
-between the app and anyone who can reach it. Do not expose it to a LAN, tunnel, or
-Tailscale address.
+UMS has no login of its own: identity arrives as gateway-asserted headers, and the
+Compose stack ships no gateway. The loopback binding is the only network boundary in
+this stack. Do not expose it to a LAN, tunnel, or Tailscale address.
 
 ---
 
@@ -341,9 +314,6 @@ For the full role/permission matrix, see [Docs/security/PERMISSION_MATRIX.md](Do
 | [Docs/12_BACKEND_API_SPEC.md](Docs/12_BACKEND_API_SPEC.md) | API contract |
 | [Docs/15_DELIVERY_BACKLOG.md](Docs/15_DELIVERY_BACKLOG.md) | P0/P1/P2/P3 backlog |
 | [Docs/16_OPEN_DECISIONS.md](Docs/16_OPEN_DECISIONS.md) | Unresolved questions |
-| [Docs/20_DEPLOYMENT_READINESS_AUDIT.md](Docs/20_DEPLOYMENT_READINESS_AUDIT.md) | What stands between `main` and a first beta |
-| [Docs/21_BETA_IMPLEMENTATION_PLAN.md](Docs/21_BETA_IMPLEMENTATION_PLAN.md) | The costed beta plan, with per-item status |
-| [Docs/22_BACKUP_RESTORE_AND_REHEARSAL.md](Docs/22_BACKUP_RESTORE_AND_REHEARSAL.md) | Database backup, restore, and the restore rehearsal |
 | [SECURITY.md](SECURITY.md) | Reporting vulnerabilities |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | Contribution flow |
 | [CHANGELOG.md](CHANGELOG.md) | Notable changes |

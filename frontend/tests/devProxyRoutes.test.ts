@@ -4,7 +4,12 @@ import { fileURLToPath } from "node:url";
 
 import { describe, expect, it } from "vitest";
 
-import { TENANT_SCOPED_ROUTES, buildTenantScopedProxy } from "../vite.config";
+import {
+  TENANT_SCOPED_ROUTES,
+  TRUSTED_GATEWAY_HEADERS,
+  buildTenantScopedProxy,
+  proxyContextForRoute,
+} from "../vite.config";
 
 // ============================================================================
 // Purpose: Guard the dev proxy's route list against OMISSION, which is the bug
@@ -553,7 +558,10 @@ const GATEWAY_HEADERS: [string, string][] = [
   ["X-UMS-Trusted-Gateway-Token", "test-token"],
 ];
 
-type ProxyReqHandler = (proxyReq: { setHeader: (header: string, value: string) => void }) => void;
+type ProxyReqHandler = (proxyReq: {
+  removeHeader: (header: string) => void;
+  setHeader: (header: string, value: string) => void;
+}) => void;
 
 type ConfigurableProxyEntry = {
   target: string;
@@ -573,9 +581,13 @@ const asConfigurableEntry = (entry: unknown, route: string): ConfigurableProxyEn
   return candidate as ConfigurableProxyEntry;
 };
 
-/** Run a route's configure hook and collect the headers it injects on proxyReq. */
-const injectedHeaders = (entry: ConfigurableProxyEntry, route: string): [string, string][] => {
-  const collected: [string, string][] = [];
+/** Run a route's configure hook and collect its ordered proxyReq mutations. */
+const headerMutations = (
+  entry: ConfigurableProxyEntry,
+  route: string,
+): { removed: string[]; injected: [string, string][] } => {
+  const removed: string[] = [];
+  const injected: [string, string][] = [];
   let handler: ProxyReqHandler | undefined;
   entry.configure({
     on: (event, fn) => {
@@ -588,11 +600,14 @@ const injectedHeaders = (entry: ConfigurableProxyEntry, route: string): [string,
     throw new Error(`expected ${route} to register a proxyReq handler`);
   }
   handler({
+    removeHeader: (header: string) => {
+      removed.push(header);
+    },
     setHeader: (header: string, value: string) => {
-      collected.push([header, value]);
+      injected.push([header, value]);
     },
   });
-  return collected;
+  return { removed, injected };
 };
 
 describe("dev proxy route coverage (derived from frontend/src)", () => {
@@ -684,12 +699,15 @@ describe("dev proxy route list", () => {
 
   it("builds a header-injecting entry for every route", () => {
     const proxy = buildTenantScopedProxy(TENANT_SCOPED_ROUTES, BACKEND_TARGET, GATEWAY_HEADERS);
-    expect(Object.keys(proxy)).toEqual(EXPECTED_ROUTES);
+    expect(Object.keys(proxy)).toEqual(EXPECTED_ROUTES.map(proxyContextForRoute));
     for (const route of EXPECTED_ROUTES) {
-      const entry = asConfigurableEntry(proxy[route], route);
+      const entry = asConfigurableEntry(proxy[proxyContextForRoute(route)], route);
       expect(entry.target).toBe(BACKEND_TARGET);
       expect(entry.changeOrigin).toBe(true);
-      expect(injectedHeaders(entry, route)).toEqual(GATEWAY_HEADERS);
+      expect(headerMutations(entry, route)).toEqual({
+        removed: TRUSTED_GATEWAY_HEADERS,
+        injected: GATEWAY_HEADERS,
+      });
     }
   });
 });
