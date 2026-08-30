@@ -3,6 +3,7 @@ import { useCallback, useEffect, useRef, useState, type Dispatch, type SetStateA
 import { ApiError } from "@/lib/api/client";
 import type {
   AdsensePayment,
+  AdsenseSyncResponse,
   ConnectorCredential,
   ConnectorCredentialHealth,
   ConnectorCredentialHealthState,
@@ -897,6 +898,26 @@ const paymentFilingHint = (filingMonth: string): string => {
 };
 
 /**
+ * The sync-success banner, rendered only when a completed sync result AND its
+ * captured filed month are both present. The month is stored at submit time
+ * (see filedSuccessMonth), so a later edit of the date field cannot relabel
+ * the completed payment; holding this guard outside AdsenseSyncForm also keeps
+ * that component's branch count under the complexity threshold.
+ */
+const SyncSuccessBanner = ({
+  result,
+  filedMonth,
+}: {
+  result: AdsenseSyncResponse | null;
+  filedMonth: string | null;
+}) => {
+  if (result === null || filedMonth === null) {
+    return null;
+  }
+  return <SyncSuccess count={result.synced_count} filedMonth={filedMonth} />;
+};
+
+/**
  * The AdSense payment-sync form: collects one payment row plus an audited reason
  * and POSTs it for upsert into the finance source. The row's month is DERIVED
  * from the entered payment date (the same settlement-month derivation the
@@ -1061,9 +1082,7 @@ const AdsenseSyncForm = ({
       </div>
 
       {actions.error ? <SyncError error={actions.error} /> : null}
-      {actions.data && filedSuccessMonth ? (
-        <SyncSuccess count={actions.data.synced_count} filedMonth={filedSuccessMonth} />
-      ) : null}
+      <SyncSuccessBanner result={actions.data} filedMonth={filedSuccessMonth} />
 
       {canRunConnectors ? null : (
         <span className="item-sub" role="note">
