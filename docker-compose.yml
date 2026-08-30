@@ -168,7 +168,7 @@ x-app-env: &app-env
   # debugging a refused connector run will look, so it must not be the only
   # place this is written down.
   #
-  # ⚠️  BEFORE YOU SET ANY OF THE SEVEN BELOW: a malformed value takes the API
+  # ⚠️  BEFORE YOU SET ANY OF THE SIX BELOW: a malformed value takes the API
   #     down and keeps it down. These pass-throughs are what made these
   #     variables reachable from `.env` at all, and settings.py parses them
   #     while `create_app` is still running — `_load_int`, `_load_bool` and
@@ -185,7 +185,7 @@ x-app-env: &app-env
   #       grep -n '_load_int' backend/ums_smart_revenue/config/settings.py
   #
   #     `UMS_CONNECTOR_JOB_MAX_WORKERS=two` (or `=0`, or a bool var set to
-  #     `maybe`, or `UMS_LOG_LEVEL=verbose`) ends startup with:
+  #     `maybe`) ends startup with:
   #
   #       ValueError: UMS_CONNECTOR_JOB_MAX_WORKERS must be a positive integer
   #
@@ -206,8 +206,7 @@ x-app-env: &app-env
   #     `UMS_CONNECTOR_JOB_MAX_WORKERS=` yields max_workers=1, and blank
   #     executor/interval yield False/24, i.e. exactly the defaults. So `VAR=`
   #     behaves identically to leaving the line out. Only a non-empty
-  #     malformed value is dangerous. `UMS_LOG_LEVEL=` is safe on the same
-  #     terms — verified, it yields the INFO default.
+  #     malformed value is dangerous.
   #
   #     One asymmetry worth knowing while triaging: `migrate` inherits this
   #     whole block but never calls `load_app_settings` (its env.py reaches
@@ -216,30 +215,23 @@ x-app-env: &app-env
   #     `app` then restart-loops, and the successful migration is a red
   #     herring pointing away from the actual cause.
   #
-  #     UMS_LOG_LEVEL is the process log verbosity: DEBUG, INFO (default),
-  #     WARNING, ERROR or CRITICAL, case-insensitive. It long had no way
-  #     into this stack — no service here
-  #     declares `env_file:`, and this block did not list it, so an operator
-  #     could set it in `.env` and see nothing change. It reaches the
-  #     APPLICATION loggers only; third-party libraries stay at WARNING
-  #     regardless (config/logging_config.py::THIRD_PARTY_LOG_LEVEL), which is
-  #     what keeps httpx2's INFO request line — and the CMS content-owner id
-  #     in its query string — out of `docker compose logs app`. Turning this
-  #     to DEBUG is therefore safe to hand to an operator; it does not widen
-  #     what third-party code prints.
-  #
-  #     Not to be confused with UMS_LOG_MAX_SIZE / UMS_LOG_MAX_FILE in the
-  #     x-logging anchor at the top of this file. Those size docker's
-  #     json-file ROTATION — how much log is kept on disk. UMS_LOG_LEVEL
-  #     decides what the app writes in the first place. Similar names,
-  #     unrelated mechanisms, and only one of them is a disk-space control.
+  #     UMS_LOG_LEVEL is deliberately NOT forwarded and is not a setting of
+  #     this stack: nothing under backend/ reads it — no settings loader, no
+  #     logging-config consumer, `grep -rn UMS_LOG_LEVEL backend/` is empty.
+  #     An earlier revision of this comment described a `_load_log_level`
+  #     parser and a config/logging_config.py THIRD_PARTY_LOG_LEVEL split
+  #     that do not exist; forwarding the variable here would have advertised
+  #     an ineffective configuration contract. The only log controls that
+  #     exist are UMS_LOG_MAX_SIZE / UMS_LOG_MAX_FILE in the x-logging anchor
+  #     at the top of this file, which size docker's json-file ROTATION (how
+  #     much log is kept on disk). If process-log verbosity is ever wanted,
+  #     implement the settings consumer first, then re-add the pass-through.
   UMS_CONNECTOR_JOB_EXECUTOR_ENABLED:
   UMS_GOOGLE_CONNECTOR_SERVICE_ACTOR_ID:
   UMS_CONNECTOR_JOB_MAX_WORKERS:
   UMS_CONNECTOR_JOB_STALE_RUNNING_HOURS:
   UMS_GROUP_SYNC_SCHEDULE_ENABLED:
   UMS_GROUP_SYNC_INTERVAL_HOURS:
-  UMS_LOG_LEVEL:
   PYTHONDONTWRITEBYTECODE: "1"
   PYTHONUNBUFFERED: "1"
 
