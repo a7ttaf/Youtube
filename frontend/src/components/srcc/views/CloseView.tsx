@@ -665,7 +665,9 @@ const CloseStatusSummary = ({
   // See closeSummaryMode above for the full precedence contract.
   const mode = closeSummaryMode(error, settledStatusMonth, month, loading, status);
   if (mode === "error") {
-    const { title, detail } = describeError(error);
+    // closeSummaryMode's contract: "error" is only reachable when error is
+    // non-null, but a string mode cannot narrow the type — assert it here.
+    const { title, detail } = describeError(error as ApiError | Error);
     return (
       <div className="view-summary" aria-label="Month close summary" role="alert">
         <article className="summary-tile">
