@@ -396,14 +396,22 @@ def _build_checks(month: str) -> list[_Check]:
             _validate_adsense_payments,
         ),
         # The Connectors screen opens its payment filter on the LAST COMPLETE
-        # month, not the seeded current month — probe that default explicitly
-        # and assert it is honestly EMPTY (no cross-month leakage).
+        # month, not the seeded current month — probe that default explicitly.
+        # When --month is PINNED to that same month (e.g. --month 2026-07 run
+        # during August) the probe degenerates to the seeded path: it MUST have
+        # rows, so the empty-month validator does not apply there (PR #211
+        # review). Otherwise the unseeded month must be honestly EMPTY — rows
+        # there would mean cross-month leakage into an untouched finance month.
         _Check(
             "Connectors",
             "adsense payments (write-default month)",
             "GET",
             f"/adsense/payments?month={_connector_write_default_month()}",
-            _validate_adsense_payments_empty_month,
+            (
+                _validate_adsense_payments
+                if _connector_write_default_month() == month
+                else _validate_adsense_payments_empty_month
+            ),
         ),
         # Write-path smoke: unlock → create export job → re-lock attempt (409 expected).
         # The demo month uses single-source channels so lock_month() always hits the
