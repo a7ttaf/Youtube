@@ -126,7 +126,7 @@ Expected result:
 
 ```powershell
 $env:UMS_DATABASE_URL = "<operator-approved-database-url>"
-uv run python scripts/check_google_connector_credential.py --tenant <tenant-uuid> --connector youtube-reporting --account <content-owner-id>
+uv run python scripts/check_google_connector_credential.py --tenant "<tenant-uuid>" --connector youtube-reporting --account "<content-owner-id>"
 ```
 
 Expected result:
@@ -180,7 +180,7 @@ Preferred smoke path:
 
 ```powershell
 $env:UMS_DATABASE_URL = "<operator-approved-database-url>"
-uv run python scripts/run_google_connector.py --tenant <tenant-uuid> --connector youtube-reporting --account <content-owner-id> --month <YYYY-MM> --dry-run
+uv run python scripts/run_google_connector.py --tenant "<tenant-uuid>" --connector youtube-reporting --account "<content-owner-id>" --month "<YYYY-MM>" --dry-run
 ```
 
 Expected result:
@@ -304,44 +304,44 @@ Before the first `dry_run: false` job:
 - Disable or destroy the affected GCP Secret Manager version after confirming no
   other UMS environment uses it.
 - Until a credential lifecycle API exists, disabling an already-registered UMS
-  credential row requires an owner-approved database/admin operation against
-  `api_connector_credentials.status`.
+  credential row requires an owner-approved recovery-only database/admin
+  operation against `api_connector_credentials.status`; use the break-glass
+  boundary below, not ad-hoc setup SQL.
 - Re-run the credential probe after any rotation. Do not reuse old smoke
   evidence for a new secret version.
 
-## Verified operator checklist for THIS deployment (2026-08-25)
+## Verified operator checklist for a local smoke
 
-Command-by-command path from the Desktop credential to a proven UMS credential row,
-verified against the code: every flag was checked with `--help`, and the Step-3 SQL was
-executed verbatim (rolled back) against a freshly migrated Postgres — `INSERT 0 1`, and
-the re-run failed on exactly `uq_api_connector_credentials_connector_account`, which is
-the intended idempotency signal.
+This checklist is deliberately limited to the code and dependencies present on this
+branch. Keep credential payloads and operator-specific paths in the approved secret
+store and operator tracker, not in this repository. Confirm command flags against the
+installed tools before a live run.
 
 > ⚠️ **Currency sequencing (decided 2026-08-25: main currency = EGP).** The connector
 > currently ingests **USD**. Run at most ONE smoke month through this checklist as
 > disposable plumbing proof, then **STOP — no multi-month backfill, no daily sync —
-> until EGP program Phase 4** (`Docs/21`). Backfilled USD months can never match the
-> EGP workbook acceptance baseline and would all be re-ingested.
+> until the separately approved multi-currency work lands. Backfilled USD months can
+> never match an EGP workbook acceptance baseline and would all be re-ingested.
 
 **Step 0 — ROTATE the Google OAuth credential first (~1–2h incl. the consent round-trip).**
-The current payload (`Desktop\cms-revenue-2026H1\secrets\google_oauth.json`, plus the
-client-secret file in `Desktop\UMS report\`) has prior chat exposure. Mint a fresh client
+If a credential payload or client-secret file may have been exposed, mint a fresh client
 secret and refresh token BEFORE any upload — enshrining a compromised credential in
-Secret Manager is worse than the Desktop file. Consent screen must not be in "Testing"
-status (7-day token expiry; see the get_revenue.py docstring's own warning).
+Secret Manager is worse than retaining it locally. Keep local filenames and workstation
+paths out of tickets and repository docs. Consent screen must not be in "Testing" status
+(7-day token expiry; see the get_revenue.py docstring's own warning).
 
-**Step 1 — install the Google Cloud SDK, then upload.** `gcloud` is **not installed on
-this PC** (verified) — install + `gcloud init` first (~0.5–1h), or use the Cloud Console
-UI instead. Payload contract per this doc's "Secret payload contract" section: UTF-8
-JSON with `refresh_token`, `client_id`, `client_secret`, `token_uri` (optional `scopes`).
+**Step 1 — install the Google Cloud SDK, then upload.** Install + `gcloud init` when the
+SDK is unavailable, or use the Cloud Console UI instead. Verify the command syntax
+against the installed SDK. Payload contract per this doc's "Secret payload contract"
+section: UTF-8 JSON with `refresh_token`, `client_id`, `client_secret`, `token_uri`
+(optional `scopes`).
 
 ```powershell
 gcloud secrets create ums-google-oauth --replication-policy=automatic
 gcloud secrets versions add ums-google-oauth --data-file="C:\<secure-path>\payload.json"
 ```
 
-Delete the local payload file after the upload succeeds. (gcloud flag syntax needs
-confirmation against current Google docs.)
+Delete the local payload file after the upload succeeds.
 
 **Step 2 — GCP auth for the resolver (the missing fourth piece).**
 
@@ -360,32 +360,55 @@ and set `GOOGLE_APPLICATION_CREDENTIALS` via an untracked
 Otherwise the host probe can pass while API credential tests and connector jobs
 fail with `SecretFetchError` inside the container.
 
-**Step 3 — the credential row** (superuser SQL bypasses RLS deliberately; the audited
-alternative is `POST /connectors/credentials` per the Setup sequence above):
+**Step 3 — register the credential through the audited API.** Use a gateway-authenticated
+principal with `connectors.manage`; do not insert the row with a database superuser.
+The request body is the same as the Setup sequence above. For a direct local API, an
+operator can use the following shape without placing the token in the command line:
 
 ```powershell
-docker compose exec postgres psql -U "<UMS_DB_USER>" -d "<UMS_DB_NAME>" -c "INSERT INTO api_connector_credentials (tenant_id, connector_key, account_id, encrypted_secret_ref) VALUES ('00000000-0000-0000-0000-000000000001', 'youtube-analytics', '<CONTENT_OWNER_ID>', 'gcp-secret-manager://projects/<project>/secrets/ums-google-oauth/versions/latest');"
+$headers = @{
+  "X-User-ID" = "<operator-user-id>"
+  "X-User-Email" = "<operator-email>"
+  "X-Role" = "connector_admin"
+  "X-Scope-Type" = "global"
+  "X-UMS-Trusted-Gateway-Token" = $env:UMS_TRUSTED_GATEWAY_TOKEN
+  "X-UMS-Tenant" = "<tenant-slug>"
+}
+$payload = @{
+  connector_key = "youtube-analytics"
+  account_id = "<content-owner-or-account-id>"
+  encrypted_secret_ref = "secret-manager://projects/<project>/secrets/ums-google-oauth/versions/latest"
+  reason = "Register owner-approved Google credential reference for smoke"
+} | ConvertTo-Json
+Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:8000/connectors/credentials" `
+  -Headers $headers -ContentType "application/json" -Body $payload
 ```
 
-(The `-U`/`-d` placeholders are quoted: unquoted angle brackets are parsed by
-PowerShell as redirection operators, so the command failed before psql ever
-ran. The placeholders inside the SQL string are safe — PowerShell does not
-parse the contents of a quoted argument.)
+Expected status `201`, `has_secret_ref: true`, and a `CONNECTOR_SETTINGS_CHANGED`
+audit event. The response must not contain the external secret reference or raw
+credential payload. A duplicate returns `409`; use the approved credential lifecycle
+operation for rotation rather than a second insert.
 
-Expected `INSERT 0 1`; a re-run fails on the unique constraint (correct — rotate the ref
-with `UPDATE`, not a second `INSERT`).
+**Recovery-only database intervention — not normal setup.** If the audited API is
+unavailable, stop and open an approved break-glass incident before touching Postgres.
+A database operator may restore or reconcile an already-approved credential row only
+with the exact tenant, connector, account, and external reference recorded in that
+incident. Direct database access bypasses gateway authentication, RBAC, RLS, actor
+stamping, and the `CONNECTOR_SETTINGS_CHANGED` audit write; it is therefore not a
+credential-registration path. Reconcile the missing audit evidence through the
+approved incident process and verify the row through the API before any connector run.
+No copy-paste SQL is provided here intentionally.
 
-**Step 4 — prove it** (host process; must target the Compose Postgres published on
-localhost — Step 3 inserted into that container, and Compose's in-network hostname
-`postgres` is unreachable from the host):
+**Step 4 — prove it** (host process; target the Compose Postgres published on localhost
+when the API and database run in the compose stack):
 
 ```powershell
 # Use 127.0.0.1 and the published port (UMS_POSTGRES_PORT, default 5432), not hostname postgres.
 $env:UMS_DATABASE_URL = "postgresql+psycopg://<UMS_DB_USER>:<UMS_DB_PASSWORD_URLENC>@127.0.0.1:<UMS_POSTGRES_PORT>/<UMS_DB_NAME>"
-uv run python scripts/check_google_connector_credential.py --tenant 00000000-0000-0000-0000-000000000001 --connector youtube-analytics --account <CONTENT_OWNER_ID>
+uv run python scripts/check_google_connector_credential.py --tenant 00000000-0000-0000-0000-000000000001 --connector youtube-analytics --account "<CONTENT_OWNER_ID>"
 ```
 
-Expected exit 0 with `OK … token_expiry=<iso>`. This commits the telemetry that ARMS the
+Expected exit 0 with `OK … token_expiry=<iso>`. This commits the telemetry that arms the
 live-run gate for roughly one hour. Exit-2 first lines map to causes:
 `SecretFetchError` → Step 2/IAM; `SecretNotFoundError` → the ref path;
 `MalformedSecretPayloadError` → payload JSON; `OAuthRefreshError` → Step 0's token;
@@ -416,8 +439,9 @@ reading as success while proving nothing. Expected on an open month: exit 0,
 CLI-side lock). **Then stop until EGP Phase 4.**
 
 Ops total: **~3–5.5h** including the SDK install and a realistic consent round-trip.
-No UMS code is missing for this checklist — both scripts, the resolver, the schema and
-the gates all exist and match.
+The scripts, resolver, schema, and gates referenced here exist on this branch. Durable
+application storage, deployment-readiness planning, and structured logging are separate
+prerequisites and are not implied by this checklist.
 
 ## Validation references
 

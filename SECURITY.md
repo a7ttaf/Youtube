@@ -50,7 +50,8 @@ In scope:
   named `deploy/helm/`. That directory has never existed in this repository —
   `git log --all -- deploy` returns zero commits — so the reference has been removed
   rather than left implying a deployment surface that could be reviewed.)*
-- Operational scripts under `scripts/`, including the backup and restore CLIs.
+- Operational scripts under `scripts/`, including credential checks, connector
+  runs, and seed CLIs.
 - Spec documents that describe authorization, audit, or data handling.
 
 Out of scope:
@@ -79,7 +80,7 @@ Good-faith research conducted under this policy will not be subject to legal act
 
 - **Secrets via HashiCorp Vault / External Secrets Operator.** Neither is wired up. Secrets come from the operator's untracked `.env` (compose) or the process environment. The only implemented connector-secret backend is GCP Secret Manager; every other accepted URI scheme fails closed.
 - **TLS 1.3 on ingress; encrypted PV; KMS-wrapped secrets.** There is no ingress. The single deployment shape is `docker compose` on one machine with every published port bound to `127.0.0.1`, and there is no Helm chart or `deploy/` directory to attach these controls to.
-- **An authentication front door.** UMS has no login of its own — no password, session, cookie, or token login exists. Identity arrives as gateway-asserted headers behind one shared secret, and the compose stack ships no gateway. In the default `headers` authz mode the caller's `X-Role` *is* their role. This is acceptable only for the single-operator localhost beta it is scoped to, and only because of the port binding. See [`Docs/20_DEPLOYMENT_READINESS_AUDIT.md`](Docs/20_DEPLOYMENT_READINESS_AUDIT.md), blockers B1/B2.
+- **An authentication front door.** UMS has no login of its own — no password, session, cookie, or token login exists. Identity arrives as gateway-asserted headers behind one shared secret, and the compose stack ships no gateway. In the default `headers` authz mode the caller's `X-Role` *is* their role. This is acceptable only for the single-operator localhost beta it is scoped to, and only because of the port binding. Deployment-readiness planning is outside this branch; keep every published port on loopback until that prerequisite exists.
 
 *This section previously listed all six bullets without distinction. The split above is
 a correction, not a change in posture: the unimplemented items were never implemented.*

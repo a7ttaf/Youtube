@@ -12,8 +12,8 @@ This service ingests YouTube + AdSense data, reconciles it against bank movement
 |---|---|
 | Backend | Python 3.14 · FastAPI · SQLAlchemy 2 · Alembic |
 | Frontend | Vite 8 · React 19 · TypeScript 6 (shipped) |
-| Storage | PostgreSQL 18 (single source of truth) · local file store (export artifacts) |
-| Background jobs | In-process `ThreadPoolExecutor` (bounded queue; off by default via `UMS_CONNECTOR_JOB_EXECUTOR_ENABLED` env var) |
+| Storage | PostgreSQL 18 (single source of truth) · ephemeral local file store for export artifacts |
+| Background jobs | In-process `ThreadPoolExecutor` (bounded queue; off by default; compose does not forward the executor setting on this branch) |
 | Multi-tenant | Postgres Row-Level Security with `FORCE ROW LEVEL SECURITY` on 26 tenant-scoped tables (`db/rls.py`, `TENANT_SCOPED_TABLES`; shipped PR #106) |
 | Currency | **USD only** on the finance path today. All math in `Decimal`. See the note below. |
 | Auth modes | `headers` (dev / bootstrap) · `database` (production; SQL-backed principal) |
@@ -27,8 +27,8 @@ This service ingests YouTube + AdSense data, reconciles it against bank movement
 > and the USD-only property is deliberately **test-locked** by
 > `tests/finance/test_finance_no_fx_dependency.py:40-53`. Representing EGP end to end
 > is a 3–6 week programme, not a configuration switch — see
-> [`Docs/16_OPEN_DECISIONS.md`](Docs/16_OPEN_DECISIONS.md) and
-> [`Docs/21_BETA_IMPLEMENTATION_PLAN.md`](Docs/21_BETA_IMPLEMENTATION_PLAN.md).
+> [`Docs/16_OPEN_DECISIONS.md`](Docs/16_OPEN_DECISIONS.md). The beta planning
+> documents are maintained outside this branch.
 
 For the long-form vision, read [PRODUCT.md](PRODUCT.md) and [DESIGN.md](DESIGN.md). For the spec pack, see [Docs/](Docs/).
 
@@ -90,8 +90,15 @@ $env:UMS_AUTHZ_SOURCE = "headers"
 uv run alembic upgrade head
 
 # 5) Run the API
-uv run uvicorn ums_smart_revenue.app:app --reload --host 0.0.0.0 --port 8000
+# Keep the direct local API on loopback. Expose a non-loopback address only
+# behind a real trusted gateway and TLS termination.
+uv run uvicorn ums_smart_revenue.app:app --reload --host 127.0.0.1 --port 8000
 ```
+
+The quickstart intentionally binds the direct API to loopback. A non-loopback
+deployment requires a real trusted gateway in front of UMS and TLS; the local
+Vite proxy likewise accepts only loopback targets over HTTP, or explicitly
+allowlisted HTTPS origins.
 
 On Linux/macOS, run step 3 in bash instead — steps 1, 2, 4, and 5 are the same
 commands in either shell:
@@ -168,15 +175,15 @@ uv run pytest -q tests/api
 | `UMS_AUTHZ_SOURCE` | no | `headers` | `headers` for dev/bootstrap, `database` for production (loads principal + roles from SQL). |
 | `UMS_TRUSTED_GATEWAY_TOKEN` | yes for protected routes | none | Shared secret asserted by the upstream identity gateway. Required for both `headers` bootstrap auth and `database` auth. Also read by `frontend/vite.config.ts` in Node to inject the dev proxy `X-UMS-Trusted-Gateway-Token` header. Keep the value in the repo-root `.env` and load it from there: the API and the dashboard normally run in separate terminals, so a value exported in one shell alone makes the two disagree and every protected route 401s. Note that `.env` is the lowest-precedence source Vite reads — `loadEnv` also picks up `.env.local`, `.env.[mode]`, and `.env.[mode].local`, then overlays the dashboard shell's own environment, in that increasing order — so clear a stale token from those rather than re-editing `.env`. **Never use a `VITE_*` alias** — any `VITE_*` env is embedded in the client bundle. |
 | `UMS_GOOGLE_CONNECTOR_SERVICE_ACTOR_ID` | required for Google connector runs — **but not currently forwarded by compose**, see below | none | UUID used as the connector service principal for audit events. Optional at process boot so non-connector workloads can start; connector execution fails closed at runtime when unset, and malformed values fail settings load. |
-| `UMS_LOG_LEVEL` | no | `INFO` | Application log verbosity: `DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL` (case-insensitive; blank = default). Applies to the `ums_smart_revenue` logger only — third-party libraries stay pinned at `WARNING`. **A non-empty unrecognised value raises at startup**, which under compose is a restart loop; see the fail-fast note in [Running with `docker compose`](#running-with-docker-compose). |
-| `VITE_DEV_BACKEND_URL` | no (dev) | `http://127.0.0.1:8000` | Backend origin the frontend dev proxy forwards `/tenants/*` to. Dev-only; read by `frontend/vite.config.ts`. |
+| `VITE_DEV_BACKEND_URL` | no (dev) | `http://127.0.0.1:8000` | Backend origin the frontend dev proxy forwards the listed tenant-scoped routes to. Verified loopback (`localhost`, `127.0.0.0/8`, `::1`) may use HTTP; every non-loopback origin must be HTTPS and listed in `UMS_DEV_TRUSTED_BACKEND_ORIGINS`. |
+| `UMS_DEV_TRUSTED_BACKEND_ORIGINS` | no (dev) | none | Comma-separated exact origins allowed for a non-loopback `VITE_DEV_BACKEND_URL`; non-loopback entries must be HTTPS (HTTP is permitted only for verified loopback), read by Node-side Vite config, and never bundled. |
 | `VITE_DEV_GATEWAY_USER_ID` | no (dev) | `00000000-0000-0000-0000-0000000000aa` | Dev `X-User-ID` injected by the Vite proxy on tenant-scoped routes. Non-secret. |
 | `VITE_DEV_GATEWAY_USER_EMAIL` | no (dev) | `dev@ums.local` | Dev `X-User-Email` injected by the Vite proxy. Required by `current_principal_from_headers` in default `headers` auth mode. Non-secret. |
 | `VITE_DEV_GATEWAY_ROLE` | no (dev) | `assistant_analyst` | Dev `X-Role` injected by the Vite proxy. Non-secret. **Change this before you judge the product** — see the note below. |
 | `VITE_DEV_GATEWAY_SCOPE_TYPE` | no (dev) | `global` | Dev `X-Scope-Type` injected by the Vite proxy. Non-secret. |
 
 > ⚠️ **`UMS_GOOGLE_CONNECTOR_SERVICE_ACTOR_ID` is deliberately NOT forwarded by
-> `docker-compose.yml`** (see the comment at `docker-compose.yml:112-158`). Setting it
+> `docker-compose.yml`**. Setting it
 > in `.env` therefore has **no effect on the compose `app` service**, and connector
 > runs there will report it as unset even though you set it. That is intentional:
 > `.env.example` currently ships the variable uncommented as a public placeholder UUID,
@@ -199,9 +206,8 @@ uv run pytest -q tests/api
 > `uv run uvicorn` reads the variable normally. The full operator runbook for this
 > is in
 > [`Docs/19_GOOGLE_CREDENTIAL_SETUP_SMOKE.md`](Docs/19_GOOGLE_CREDENTIAL_SETUP_SMOKE.md);
-> the durable fix — having the backend reject the known placeholder explicitly — is
-> costed in [`Docs/21_BETA_IMPLEMENTATION_PLAN.md`](Docs/21_BETA_IMPLEMENTATION_PLAN.md)
-> (P2).
+> the durable placeholder rejection is a separate dependency and is not included
+> in this branch.
 
 > ⚠️ **The default dev role sees almost nothing.** `assistant_analyst` holds **2 of
 > the 26** permissions in `auth/permissions.py` — `analytics.view` and
@@ -216,14 +222,15 @@ There is no cluster secrets layer in this repository: no `deploy/` directory and
 Helm chart exist, and none ever has. If a clustered deployment is wanted, it has to be
 built first.
 
-**Frontend env-var safety:** Vite exposes every `VITE_*` variable to client code via `import.meta.env` at build time. The trusted-gateway secret therefore lives under the non-`VITE_*` `UMS_TRUSTED_GATEWAY_TOKEN` name only; the Vite dev proxy reads it in Node and never includes it in the browser bundle.
+**Frontend env-var safety:** Vite exposes every `VITE_*` variable to client code via `import.meta.env` at build time. The trusted-gateway secret therefore lives under the non-`VITE_*` `UMS_TRUSTED_GATEWAY_TOKEN` name only; the Vite dev proxy reads it in Node and never includes it in the browser bundle. `VITE_DEV_BACKEND_URL` defaults to loopback. HTTP is accepted only for verified loopback; a non-loopback target must use HTTPS and its exact origin must appear in `UMS_DEV_TRUSTED_BACKEND_ORIGINS`, which prevents the token from being sent to an accidental or cleartext target.
 
 ---
 
 ## Running with `docker compose`
 
-`docker-compose.yml` is the deployment for the first beta: one operator, one box, every
-published port bound to `127.0.0.1`.
+`docker-compose.yml` is the local single-box stack for development and smoke work: one
+operator, one box, every published port bound to `127.0.0.1`. It is not the completed
+deployment-readiness package for a beta.
 
 ```powershell
 docker compose --env-file .env config   # renders the stack; fails loudly on anything missing
@@ -232,14 +239,19 @@ docker compose logs -f app
 docker compose down                     # stop + remove containers, KEEP the data volumes
 ```
 
+> ⚠️ **`docker compose down` removes the application container and its local files.**
+> This branch declares only `postgres-data` and `redis-data`; it does **not** declare
+> an `app-data` volume or a backup/restore runbook. Export artifacts default to the
+> container's temporary directory and local connector blobs default under the app
+> working directory, so both are disposable when the app container is recreated.
+> Do not treat a successful export as durable evidence until an operator-managed
+> persistent store is supplied by the storage prerequisite.
+>
 > ⚠️ **`docker compose down -v` is not an ordinary teardown.** `-v` deletes the named
-> volumes — `postgres-data` (every revenue fact, audit row, tenant and role grant),
-> `app-data` (every export artifact and connector blob) and `redis-data`. No prompt, no
-> undo. A verified **database** backup + restore rehearsal protects **`postgres-data`
-> only** — see
-> [`Docs/22_BACKUP_RESTORE_AND_REHEARSAL.md`](Docs/22_BACKUP_RESTORE_AND_REHEARSAL.md).
-> **`app-data` is not in that backup.** Losing it means re-requesting exports; connector
-> blobs may be gone. Do not use `-v` unless you accept wiping both volumes.
+> `postgres-data` and `redis-data` volumes. The database volume contains revenue facts,
+> audit rows, tenants, and role grants; Redis is not the financial source of truth. No
+> prompt, no undo. Do not use `-v` unless you have an approved database backup and
+> restore procedure outside this branch and intentionally accept a fresh database.
 
 > ⚠️ **`.env.example` is not yet a complete template for compose.** It predates the
 > database variables, so `docker compose --env-file .env.example config` exits 1 on
@@ -247,41 +259,19 @@ docker compose down                     # stop + remove containers, KEEP the dat
 > does, this file is the authoritative list"* — enumerates the five variables that have
 > no default. Completing the template is plan item P0.3.
 
-> ⚠️ **A typo in an optional variable restart-loops the API.** Compose forwards **six**
-> variables from `.env` to the app — `UMS_CONNECTOR_JOB_EXECUTOR_ENABLED`,
-> `UMS_CONNECTOR_JOB_MAX_WORKERS`, `UMS_CONNECTOR_JOB_STALE_RUNNING_HOURS`,
-> `UMS_GROUP_SYNC_SCHEDULE_ENABLED`, `UMS_GROUP_SYNC_INTERVAL_HOURS` and
-> `UMS_LOG_LEVEL` — where `config/settings.py` parses them during `create_app` and
-> raises rather than falling back to a default. `UMS_CONNECTOR_JOB_MAX_WORKERS=two`
-> ends startup with
-> `ValueError: UMS_CONNECTOR_JOB_MAX_WORKERS must be a positive integer`; so does
-> `UMS_LOG_LEVEL=verbose`, naming its own variable. That is the intended fail-fast
-> contract, but under `restart: unless-stopped` it presents as a container that
-> silently cycles rather than one that stops with an error — the traceback naming the
-> variable is only in `docker compose logs app`, last line. Fix the value and
-> `docker compose up -d app`. A **blank** value is safe and needs no action: `VAR=`
-> yields the same default as omitting the line entirely.
+> **Compose environment boundary:** `docker-compose.yml` passes the database, auth,
+> CORS, rate-limit, forwarding, and Redis settings shown in its `x-app-env` block.
+> The connector executor, group-sync scheduler, and service-actor settings are **not
+> forwarded by this branch**, so setting those names in `.env` alone does not change
+> the long-running `app` container. Run the backend directly with `uv run uvicorn`
+> when testing those process-level settings, or use the dependency that adds the
+> corresponding Compose pass-throughs. `UMS_LOG_LEVEL` is not read by this branch and
+> has no effect.
 
-> **`UMS_LOG_LEVEL` — the process log verbosity.** `DEBUG`, `INFO` (the default),
-> `WARNING`, `ERROR` or `CRITICAL`, case-insensitive. It reaches the **application**
-> loggers only; third-party libraries stay pinned at `WARNING`
-> (`config/logging_config.py`, `THIRD_PARTY_LOG_LEVEL`), which is what keeps `httpx2`'s
-> INFO request line — and the CMS content-owner id in its query string — out of
-> `docker compose logs app`. Turning it to `DEBUG` is therefore safe: it does not widen
-> what third-party code prints. Not to be confused with `UMS_LOG_MAX_SIZE` /
-> `UMS_LOG_MAX_FILE`, which size Docker's json-file **rotation** (how much log is kept
-> on disk) rather than deciding what the app writes. Similar names, unrelated
-> mechanisms, and only one of them is a disk-space control.
-
-Before a first beta, read
-[`Docs/20_DEPLOYMENT_READINESS_AUDIT.md`](Docs/20_DEPLOYMENT_READINESS_AUDIT.md) (what
-stands between `main` and a runnable beta) and
-[`Docs/21_BETA_IMPLEMENTATION_PLAN.md`](Docs/21_BETA_IMPLEMENTATION_PLAN.md) (the
-costed plan). Two facts from that audit belong here rather than only there: **UMS has
-no login of its own** — identity arrives as gateway-asserted headers, and the compose
-stack ships no gateway — so the localhost port binding is the only thing standing
-between the app and anyone who can reach it. Do not expose it to a LAN, tunnel, or
-Tailscale address.
+This branch does not include deployment-readiness, backup/restore, or structured-log
+planning documents. Until those prerequisites land, keep the compose ports bound to
+`127.0.0.1`, do not expose the stack to a LAN, tunnel, or Tailscale address, and treat
+the local application files as disposable.
 
 ---
 
@@ -303,9 +293,9 @@ backend/ums_smart_revenue/
 Docs/                     Design docs + security pack + Codex implementation notes
 frontend/                 Vite + React SPA (TypeScript); tests in frontend/tests/
 mockups/                  Static HTML mockup + QA screenshots
-scripts/                  Operational CLIs (backup, restore, connector runs, seeds)
+scripts/                  Operational CLIs (credential checks, connector runs, seeds)
 tests/                    api / auth / db / finance / org / reports / scripts
-docker-compose.yml        The single-box deployment (first beta)
+docker-compose.yml        The local single-box stack
 ```
 
 > **Correction:** this tree previously listed `deploy/helm/  Helm chart for Kubernetes
@@ -341,9 +331,7 @@ For the full role/permission matrix, see [Docs/security/PERMISSION_MATRIX.md](Do
 | [Docs/12_BACKEND_API_SPEC.md](Docs/12_BACKEND_API_SPEC.md) | API contract |
 | [Docs/15_DELIVERY_BACKLOG.md](Docs/15_DELIVERY_BACKLOG.md) | P0/P1/P2/P3 backlog |
 | [Docs/16_OPEN_DECISIONS.md](Docs/16_OPEN_DECISIONS.md) | Unresolved questions |
-| [Docs/20_DEPLOYMENT_READINESS_AUDIT.md](Docs/20_DEPLOYMENT_READINESS_AUDIT.md) | What stands between `main` and a first beta |
-| [Docs/21_BETA_IMPLEMENTATION_PLAN.md](Docs/21_BETA_IMPLEMENTATION_PLAN.md) | The costed beta plan, with per-item status |
-| [Docs/22_BACKUP_RESTORE_AND_REHEARSAL.md](Docs/22_BACKUP_RESTORE_AND_REHEARSAL.md) | Database backup, restore, and the restore rehearsal |
+| [Docs/19_GOOGLE_CREDENTIAL_SETUP_SMOKE.md](Docs/19_GOOGLE_CREDENTIAL_SETUP_SMOKE.md) | Google credential reference and smoke procedure |
 | [SECURITY.md](SECURITY.md) | Reporting vulnerabilities |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | Contribution flow |
 | [CHANGELOG.md](CHANGELOG.md) | Notable changes |

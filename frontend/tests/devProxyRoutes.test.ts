@@ -1,66 +1,46 @@
 import { readFileSync, readdirSync } from "node:fs";
+import {
+  createServer as createHttpServer,
+  request as httpRequest,
+  type Server,
+} from "node:http";
+import type { AddressInfo } from "node:net";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+import ts from "typescript";
 import { describe, expect, it } from "vitest";
+import { createServer as createViteServer } from "vite";
 
-import { TENANT_SCOPED_ROUTES, buildTenantScopedProxy } from "../vite.config";
+import {
+  TENANT_SCOPED_ROUTES,
+  buildTenantScopedProxy,
+  resolveDevBackendTarget,
+  resolveGatewayHeaders,
+} from "@/devProxy";
 
 // ============================================================================
-// Purpose: Guard the dev proxy's route list against OMISSION, which is the bug
-//   class that produced the /org-units defect. A tenant-scoped backend prefix
-//   that is NOT in this list is not merely "unproxied" — the request never
-//   leaves the dev server. The client sends `Accept: application/json`
-//   (client.ts buildHeaders), which Vite's html fallback declines, so the dev
-//   server answers with a bare 404, a zero-length body and no Content-Type,
-//   and the calling view degrades silently (RegistryView renders raw org-unit
-//   ids instead of Company/Sector names and leaves the mapping form's company
-//   picker empty). Measured against a real Vite createServer, not assumed:
-//   Accept: application/json -> 404 / contentType null / 0 bytes, while
-//   Accept: text/html -> 200 / text/html / index.html.
-// Database/ORM: None (frontend dev-server config).
-// Standards: The load-bearing assertion is DERIVED, not hand-copied. Every
-//   leading-slash path literal the application actually issues is scanned out
-//   of frontend/src and required to be covered by TENANT_SCOPED_ROUTES, so a
-//   new API call to an unproxied prefix fails here instead of failing silently
-//   in a browser. The previous revision of this file compared the route list to
-//   a duplicate of itself, which could only ever catch removal — it would have
-//   passed on the exact defect it was written after.
-//   The hand-written EXPECTED_ROUTES list is kept, demoted to what it honestly
-//   is: a change-detector for ADDITIONS. Adding a route means injecting
-//   trusted-principal headers onto one more prefix, which is a deliberate trust
-//   decision that should have to touch a test. It is not evidence of coverage.
-//   Two collection hazards this file deliberately avoids:
-//     - Its name must not match vitest's default `exclude`, which carries
-//       `**/vite.config.*`; naming it after the module under test would have
-//       silently collected nothing.
-//     - It imports the route list and the builder rather than invoking the
-//       default-exported config factory. Vite's own asset transform rewrites
-//       `new URL("./src", import.meta.url)` (vite.config.ts, the `@` alias)
-//       against `self.location`, so under vitest that factory throws
-//       "The URL must be of scheme file" — a transform artifact, not a defect
-//       in the config.
-// Blast Radius: Dev-server only. No production bundle and no runtime
-//   authorization path — outside dev the real gateway injects these headers.
+// Purpose: Guard the development proxy's route and trusted-header contracts.
+// Database/ORM: None (frontend dev-server configuration and static source scan).
+// Standards: Derive requested API prefixes from the TypeScript AST instead of
+//   a hand parser, exclude the proxy declaration itself to avoid self-coverage,
+//   assert every forwarded header, and keep authorization tests on the backend
+//   boundary where the real policy is enforced.
+// Blast Radius: Development proxy only. No production bundle or runtime data.
 // Connections:
-//   - File: frontend/vite.config.ts -> TENANT_SCOPED_ROUTES and
-//     buildTenantScopedProxy, the values under test.
-//   - File: frontend/src/lib/api/client.ts -> buildHeaders sets the
-//     Accept: application/json that makes an unproxied route a bare 404.
-//   - File: frontend/src/lib/api/useOrgUnits.ts -> GET /org-units, the call
-//     that exposed the gap (RegistryView.tsx:1216 mounts it; the same data
-//     feeds the mapping form's company select at RegistryView.tsx:840-845).
-//   - File: backend/ums_smart_revenue/api/org_units.py -> the backend route the
-//     proxy must reach; backend/ums_smart_revenue/api/users.py for /users.
-//   - File: frontend/README.md -> documents the route list and the four
-//     mounted-but-unproxied backend prefixes.
+//   - File: frontend/vite.config.ts -> route, header, and target helpers.
+//   - File: frontend/src/lib/api/client.ts -> JSON Accept header on API calls.
+//   - File: backend/ums_smart_revenue/api/dependencies.py -> gateway-header
+//     authentication contract; route denial cases live in tests/api/.
+//   - File: frontend/README.md -> documents the route and import exceptions.
 // ============================================================================
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const SRC_DIR = path.resolve(HERE, "..", "src");
+const DEV_PROXY_SOURCE = path.join(SRC_DIR, "devProxy.ts");
 const SOURCE_SUFFIXES = [".ts", ".tsx"];
 
-// Change-detector only — see Standards above. Not the coverage assertion.
+// Change-detector only — the derived assertion below is the coverage proof.
 const EXPECTED_ROUTES = [
   "/tenants",
   "/session",
@@ -76,10 +56,7 @@ const EXPECTED_ROUTES = [
   "/users",
 ];
 
-// Prefixes we know the application calls today. Their only job is to prove the
-// scanner below still works: if a future syntax breaks it, the derived
-// assertion would pass vacuously on an empty set, and this fails loudly
-// instead. Shrinking this list to make a run green defeats the whole file.
+// Prove the AST walk cannot pass vacuously after a future syntax change.
 const SCANNER_HEALTH_PREFIXES = [
   "/adsense",
   "/audit",
@@ -96,396 +73,66 @@ const SCANNER_HEALTH_PREFIXES = [
 
 type ScannedLiteral = {
   value: string;
-  /**
-   * True when the literal is concatenated onto a preceding expression — the
-   * token before it is `+`. Such a literal is a path *fragment*, not a request
-   * path: useExplanation.ts builds
-   *   `/revenue/channels/${id}` + `/months/${month}/explain` + `?metric=...`
-   * so `/months` must not be mistaken for a top-level backend prefix.
-   */
+  /** True when the literal is the right operand of string concatenation. */
   continuesExpression: boolean;
 };
 
-const isWhitespace = (ch: string): boolean =>
-  ch === " " || ch === "\t" || ch === "\n" || ch === "\r";
-
-/** True where a `/` starts a regex literal rather than division, by the usual heuristic. */
-const startsRegex = (previous: string): boolean =>
-  previous === "" || !/[)\]}\w$]/.test(previous);
-
-// Placeholder standing in for a `${...}` interpolation inside a template
-// literal. NUL cannot occur in real source, and firstSegment treats it as a
-// segment terminator, so `/exports${qs}` yields `/exports` rather than a
-// fragment carrying the interpolation's text.
 const INTERPOLATION = "\u0000";
 
-/** Skip a `//` line comment; returns the index of the newline (or EOF). */
-const skipLineComment = (source: string, index: number): number => {
-  let cursor = index;
-  while (cursor < source.length && source[cursor] !== "\n") {
-    cursor += 1;
+const isRightOperandOfPlus = (node: ts.Node): boolean => {
+  let current = node;
+  while (ts.isParenthesizedExpression(current.parent)) {
+    current = current.parent;
   }
-  return cursor;
+  const parent = current.parent;
+  return (
+    ts.isBinaryExpression(parent) &&
+    parent.operatorToken.kind === ts.SyntaxKind.PlusToken &&
+    parent.right === current
+  );
 };
 
-/** Skip a block comment starting at `/*`; returns the index just past it. */
-const skipBlockComment = (source: string, index: number): number => {
-  let cursor = index + 2;
-  while (cursor < source.length && !(source[cursor] === "*" && source[cursor + 1] === "/")) {
-    cursor += 1;
-  }
-  return cursor + 2;
-};
+const templateValue = (node: ts.TemplateExpression): string =>
+  [
+    node.head.text,
+    ...node.templateSpans.flatMap((span) => [INTERPOLATION, span.literal.text]),
+  ].join("");
 
-/** Skip a line or block comment; returns the index just past it. */
-const skipComment = (source: string, index: number): number =>
-  source[index + 1] === "/" ? skipLineComment(source, index) : skipBlockComment(source, index);
-
-type RegexCharKind = "escape" | "stop" | "openClass" | "closeClass" | "other";
-
-/** Regex-body kinds when not inside a character class. */
-const REGEX_KIND_OUTSIDE: Record<string, RegexCharKind> = {
-  "\\": "escape",
-  "\n": "stop",
-  "/": "stop",
-  "[": "openClass",
-  "]": "closeClass",
-};
-
-/** Regex-body kinds inside a character class (`/` is ordinary). */
-const REGEX_KIND_IN_CLASS: Record<string, RegexCharKind> = {
-  "\\": "escape",
-  "\n": "stop",
-  "]": "closeClass",
-};
-
-/** Classify one regex-body character for the skipper. */
-const regexCharKind = (ch: string, inClass: boolean): RegexCharKind =>
-  (inClass ? REGEX_KIND_IN_CLASS : REGEX_KIND_OUTSIDE)[ch] ?? "other";
-
-/** Character-class membership after one non-escape, non-stop regex step. */
-const REGEX_CLASS_AFTER: Partial<Record<RegexCharKind, boolean>> = {
-  openClass: true,
-  closeClass: false,
-};
-
-/** Advance one escaped regex-literal character. */
-const advanceRegexEscape = (
-  cursor: number,
-  inClass: boolean,
-): { cursor: number; inClass: boolean; stop: boolean } => ({
-  cursor: cursor + 2,
-  inClass,
-  stop: false,
-});
-
-/** Stop scanning at the closing regex delimiter. */
-const advanceRegexStop = (
-  cursor: number,
-  inClass: boolean,
-): { cursor: number; inClass: boolean; stop: boolean } => ({
-  cursor,
-  inClass,
-  stop: true,
-});
-
-/** Advance one regex body character, updating class membership when needed. */
-const advanceRegexClass = (
-  source: string,
-  cursor: number,
-  inClass: boolean,
-): { cursor: number; inClass: boolean; stop: boolean } => {
-  const kind = regexCharKind(source[cursor] ?? "", inClass);
-  return {
-    cursor: cursor + 1,
-    inClass: REGEX_CLASS_AFTER[kind] ?? inClass,
-    stop: false,
-  };
-};
-
-/** One step through a regex literal body. */
-const stepRegexBody = (
-  source: string,
-  cursor: number,
-  inClass: boolean,
-): { cursor: number; inClass: boolean; stop: boolean } => {
-  const kind = regexCharKind(source[cursor] ?? "", inClass);
-  if (kind === "escape") {
-    return advanceRegexEscape(cursor, inClass);
-  }
-  if (kind === "stop") {
-    return advanceRegexStop(cursor, inClass);
-  }
-  return advanceRegexClass(source, cursor, inClass);
-};
-
-/** Skip a regex literal, honouring escapes and character classes. */
-const skipRegex = (source: string, index: number): number => {
-  let cursor = index + 1;
-  let inClass = false;
-  while (cursor < source.length) {
-    const step = stepRegexBody(source, cursor, inClass);
-    cursor = step.cursor;
-    inClass = step.inClass;
-    if (step.stop) {
-      break;
-    }
-  }
-  return cursor + 1;
-};
-
-/** Append one escaped or raw character from a string literal body. */
-const appendLiteralChar = (
-  source: string,
-  index: number,
-  value: string,
-): { index: number; value: string } => {
-  if (source[index] === "\\") {
-    return { index: index + 2, value: value + (source[index + 1] ?? "") };
-  }
-  return { index: index + 1, value: value + source[index] };
-};
-
-/** True when index starts a `${` interpolation inside a template literal. */
-const isTemplateInterpolation = (quote: string, source: string, index: number): boolean =>
-  quote === "`" && source[index] === "$" && source[index + 1] === "{";
-
-/** Advance past a `/` that starts a comment or a regex literal. */
-const advanceSlashToken = (
-  source: string,
-  index: number,
-  previousToken: string,
-  next: string,
-): { index: number; previousToken: string } | null => {
-  if ("/*".includes(next)) {
-    return { index: skipComment(source, index), previousToken };
-  }
-  if (startsRegex(previousToken)) {
-    return { index: skipRegex(source, index), previousToken: "/" };
-  }
-  return null;
-};
-
-type ScanAdvance = {
-  index: number;
-  depth: number;
-  previousToken: string;
-  done: boolean;
-};
-
-/** Enter one nested `{` while scanning a template interpolation. */
-const advanceOpenBrace = (index: number, depth: number, ch: string): ScanAdvance => ({
-  index: index + 1,
-  depth: depth + 1,
-  previousToken: ch,
-  done: false,
-});
-
-/** Leave one nested `}` while scanning a template interpolation. */
-const advanceCloseBrace = (index: number, depth: number, ch: string): ScanAdvance =>
-  depth === 0
-    ? { index: index + 1, depth, previousToken: ch, done: true }
-    : { index: index + 1, depth: depth - 1, previousToken: ch, done: false };
-
-/** Apply brace nesting rules when scanning inside a template interpolation. */
-const advanceBraceToken = (
-  ch: string,
-  index: number,
-  depth: number,
-  stopAtCloseBrace: boolean,
-): ScanAdvance | null => {
-  if (!stopAtCloseBrace) {
-    return null;
-  }
-  if (ch === "{") {
-    return advanceOpenBrace(index, depth, ch);
-  }
-  if (ch === "}") {
-    return advanceCloseBrace(index, depth, ch);
-  }
-  return null;
-};
-
-/** True when ``ch`` opens a string or template literal. */
-const isStringOpener = (ch: string): boolean => "'\"`".includes(ch);
-
-/** Advance one ordinary (non-special) character in a scan region. */
-const advancePlainToken = (
-  ch: string,
-  index: number,
-  depth: number,
-  previousToken: string,
-): ScanAdvance => ({
-  index: index + 1,
-  depth,
-  previousToken: isWhitespace(ch) ? previousToken : ch,
-  done: false,
-});
-
-/** Try to consume a `/` comment or regex at the current index. */
-const tryAdvanceSlash = (
-  source: string,
-  index: number,
-  previousToken: string,
-  depth: number,
-): ScanAdvance | null => {
-  if (source[index] !== "/") {
-    return null;
-  }
-  const slash = advanceSlashToken(source, index, previousToken, source[index + 1] ?? "");
-  if (slash === null) {
-    return null;
-  }
-  return { ...slash, depth, done: false };
-};
-
-/** Advance one character or template interpolation inside a string literal scan. */
-const advanceOneLiteralChar = (
-  source: string,
-  index: number,
-  quote: string,
-  value: string,
-  scanRegion: (
-    source: string,
-    start: number,
-    stopAtCloseBrace: boolean,
-    literals: ScannedLiteral[],
-  ) => number,
-  literals: ScannedLiteral[],
-): { index: number; value: string; closed: boolean } => {
-  if (source[index] === quote) {
-    return { index, value, closed: true };
-  }
-  if (isTemplateInterpolation(quote, source, index)) {
-    return {
-      index: scanRegion(source, index + 2, true, literals),
-      value: value + INTERPOLATION,
-      closed: false,
-    };
-  }
-  const advanced = appendLiteralChar(source, index, value);
-  return { index: advanced.index, value: advanced.value, closed: false };
-};
-
-/**
- * Held on one object so mutual recursion does not hit the Temporal Dead Zone
- * and does not use module-scope `function` (JS-0067/0357).
- */
-const scanners: {
-  readLiteral: (
-    source: string,
-    openIndex: number,
-    continuesExpression: boolean,
-    literals: ScannedLiteral[],
-  ) => number;
-  scanRegion: (
-    source: string,
-    start: number,
-    stopAtCloseBrace: boolean,
-    literals: ScannedLiteral[],
-  ) => number;
-  tryAdvanceString: (
-    source: string,
-    index: number,
-    previousToken: string,
-    depth: number,
-    literals: ScannedLiteral[],
-  ) => ScanAdvance | null;
-  advanceScanToken: (
-    source: string,
-    index: number,
-    previousToken: string,
-    stopAtCloseBrace: boolean,
-    depth: number,
-    literals: ScannedLiteral[],
-  ) => ScanAdvance;
-} = {
-  readLiteral(source, openIndex, continuesExpression, literals) {
-    const quote = source[openIndex];
-    let index = openIndex + 1;
-    let value = "";
-    let closed = false;
-    while (index < source.length && !closed) {
-      const step = advanceOneLiteralChar(
-        source,
-        index,
-        quote,
-        value,
-        scanners.scanRegion,
-        literals,
-      );
-      index = step.index;
-      value = step.value;
-      closed = step.closed;
-    }
-    literals.push({ value, continuesExpression });
-    return index + 1;
-  },
-
-  scanRegion(source, start, stopAtCloseBrace, literals) {
-    let index = start;
-    let depth = 0;
-    let previousToken = "";
-    while (index < source.length) {
-      const advanced = scanners.advanceScanToken(
-        source,
-        index,
-        previousToken,
-        stopAtCloseBrace,
-        depth,
-        literals,
-      );
-      if (advanced.done) {
-        return advanced.index;
-      }
-      index = advanced.index;
-      depth = advanced.depth;
-      previousToken = advanced.previousToken;
-    }
-    return index;
-  },
-
-  tryAdvanceString(source, index, previousToken, depth, literals) {
-    const ch = source[index];
-    if (!isStringOpener(ch)) {
-      return null;
-    }
-    return {
-      index: scanners.readLiteral(source, index, previousToken === "+", literals),
-      depth,
-      previousToken: ch,
-      done: false,
-    };
-  },
-
-  advanceScanToken(source, index, previousToken, stopAtCloseBrace, depth, literals) {
-    const ch = source[index];
-    return (
-      tryAdvanceSlash(source, index, previousToken, depth) ??
-      scanners.tryAdvanceString(source, index, previousToken, depth, literals) ??
-      advanceBraceToken(ch, index, depth, stopAtCloseBrace) ??
-      advancePlainToken(ch, index, depth, previousToken)
-    );
-  },
-};
-
-/**
- * Purpose: Extract every string/template literal from TypeScript source,
- *   skipping comments and regex literals, and record whether each literal
- *   continues a `+` concatenation.
- * Standards: A hand-rolled character scan rather than a regex, because comments
- *   in this repository quote API paths ("// GET /revenue/months/{month}/...")
- *   and a regex over raw text cannot tell those from real call sites. Template
- *   interpolations are scanned as code, so a nested template such as
- *   `` `/exports${qs ? `?${qs}` : ""}` `` yields `/exports<placeholder>` rather
- *   than the truncated fragment a naive scan produces. The regex heuristic is
- *   the one place a mis-scan could hide a literal, which is why
- *   SCANNER_HEALTH_PREFIXES exists.
- * Blast Radius: Test-only.
- */
+// ============================================================================
+// Purpose: Extract string and template literals from TypeScript source while
+//   letting the compiler distinguish comments, regexes, division, and strings.
+// Database/ORM: None.
+// Standards: TypeScript's parser is the source grammar; malformed files still
+//   produce the compiler's best-effort AST, and no raw-text regex can hide a
+//   request path. Concatenated right operands remain fragments.
+// Blast Radius: Test-only route coverage; no application behavior.
+// Connections:
+//   - File: typescript -> parser/token contract for .ts/.tsx source.
+//   - File: frontend/src/lib/api -> requested path literals discovered below.
+// ============================================================================
 export const scanStringLiterals = (source: string): ScannedLiteral[] => {
+  const sourceFile = ts.createSourceFile(
+    "dev-proxy-scan.tsx",
+    source,
+    ts.ScriptTarget.Latest,
+    true,
+    ts.ScriptKind.TSX,
+  );
   const literals: ScannedLiteral[] = [];
-  scanners.scanRegion(source, 0, false, literals);
+  const visit = (node: ts.Node): void => {
+    if (ts.isStringLiteral(node)) {
+      literals.push({ value: node.text, continuesExpression: isRightOperandOfPlus(node) });
+    } else if (ts.isNoSubstitutionTemplateLiteral(node)) {
+      literals.push({ value: node.text, continuesExpression: isRightOperandOfPlus(node) });
+    } else if (ts.isTemplateExpression(node)) {
+      literals.push({
+        value: templateValue(node),
+        continuesExpression: isRightOperandOfPlus(node),
+      });
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(sourceFile);
   return literals;
 };
 
@@ -499,35 +146,36 @@ const sourceFiles = (dir: string): string[] =>
     return SOURCE_SUFFIXES.some((suffix) => entry.name.endsWith(suffix)) ? [full] : [];
   });
 
-/**
- * The first path segment of a literal, e.g. "/revenue/months/x" -> "/revenue".
- * Split on INTERPOLATION as a string first so no control character appears in a
- * regex (DeepSource JS-0004); then terminate on / ? # only.
- */
+/** Return the first path segment of a literal such as /revenue/months/x. */
 const firstSegment = (literal: string): string => {
   const untilPlaceholder = literal.slice(1).split(INTERPOLATION, 1)[0] ?? "";
   return `/${untilPlaceholder.split(/[/?#]/u, 1)[0] ?? ""}`;
 };
 
-/** True when a scanned literal is a leading-slash API path (not a fragment). */
+/** True for a leading-slash API path, not a concatenated path fragment. */
 const isRequestPathLiteral = (literal: ScannedLiteral): boolean =>
   literal.value.startsWith("/") &&
   !literal.continuesExpression &&
   literal.value.length >= 2 &&
   /^[a-z]/iu.test(literal.value[1] ?? "");
 
-/**
- * Purpose: Derive the set of backend prefixes the application actually
- *   requests, by scanning frontend/src for leading-slash path literals.
- * Standards: Scans the whole of src/, not only src/lib/api/ — `/session/me`
- *   lives in contexts/SessionContext.tsx and `/tenants/me` in
- *   components/srcc/AppShell.tsx, so an api-directory-only scan would miss two
- *   of the twelve proxied routes and under-report coverage.
- * Blast Radius: Test-only.
- */
+// ============================================================================
+// Purpose: Derive the backend prefixes the frontend actually requests.
+// Database/ORM: None.
+// Standards: Scan all application frontend/src files through the TypeScript AST
+//   (excluding devProxy.ts, which declares the expected list), then fail closed
+//   when any leading-slash request prefix lacks a proxy entry.
+// Blast Radius: Test-only coverage; no runtime or authorization effect.
+// Connections:
+//   - File: frontend/vite.config.ts -> TENANT_SCOPED_ROUTES.
+//   - File: frontend/src/lib/api -> request call sites.
+// ============================================================================
 export const discoverRequestedPrefixes = (): string[] => {
   const found = new Set<string>();
   for (const file of sourceFiles(SRC_DIR)) {
+    if (file === DEV_PROXY_SOURCE) {
+      continue;
+    }
     for (const literal of scanStringLiterals(readFileSync(file, "utf8"))) {
       if (isRequestPathLiteral(literal)) {
         found.add(firstSegment(literal.value));
@@ -537,23 +185,38 @@ export const discoverRequestedPrefixes = (): string[] => {
   return [...found].sort();
 };
 
-/** Prefixes the application requests that the given proxy list does not cover. */
+/** Prefixes requested by the app but absent from a candidate proxy list. */
 export const uncoveredPrefixes = (prefixes: string[], routes: readonly string[]): string[] =>
   prefixes.filter((prefix) => !routes.includes(prefix)).sort();
 
 const REQUESTED_PREFIXES = discoverRequestedPrefixes();
-
 const BACKEND_TARGET = "http://127.0.0.1:8000";
 
-// Deliberately includes the gateway token: the point of the proxy is that this
-// header is added in Node and never reaches the browser bundle.
-const GATEWAY_HEADERS: [string, string][] = [
+const ALL_GATEWAY_HEADERS: [string, string][] = [
   ["X-User-ID", "00000000-0000-0000-0000-0000000000aa"],
+  ["X-User-Email", "dev@ums.local"],
   ["X-Role", "finance_admin"],
+  ["X-Scope-Type", "company"],
   ["X-UMS-Trusted-Gateway-Token", "test-token"],
+  ["X-UMS-Tenant", "ums"],
+  ["X-Scope-ID", "company-tv"],
 ];
 
-type ProxyReqHandler = (proxyReq: { setHeader: (header: string, value: string) => void }) => void;
+const ALL_GATEWAY_ENV: Record<string, string> = {
+  VITE_DEV_GATEWAY_USER_ID: ALL_GATEWAY_HEADERS[0][1],
+  VITE_DEV_GATEWAY_USER_EMAIL: ALL_GATEWAY_HEADERS[1][1],
+  VITE_DEV_GATEWAY_ROLE: ALL_GATEWAY_HEADERS[2][1],
+  VITE_DEV_GATEWAY_SCOPE_TYPE: ALL_GATEWAY_HEADERS[3][1],
+  UMS_TRUSTED_GATEWAY_TOKEN: ALL_GATEWAY_HEADERS[4][1],
+  VITE_DEV_GATEWAY_TENANT_SLUG: ALL_GATEWAY_HEADERS[5][1],
+  VITE_DEV_GATEWAY_SCOPE_ID: ALL_GATEWAY_HEADERS[6][1],
+};
+
+type ProxyReqHandler = (proxyReq: {
+  getHeaderNames: () => string[];
+  removeHeader: (header: string) => void;
+  setHeader: (header: string, value: string) => void;
+}) => void;
 
 type ConfigurableProxyEntry = {
   target: string;
@@ -561,7 +224,7 @@ type ConfigurableProxyEntry = {
   configure: (proxy: { on: (event: string, fn: ProxyReqHandler) => void }) => void;
 };
 
-/** Narrow one built proxy entry, failing loudly rather than skipping an odd shape. */
+/** Narrow one built proxy entry, failing loudly rather than skipping its shape. */
 const asConfigurableEntry = (entry: unknown, route: string): ConfigurableProxyEntry => {
   if (typeof entry !== "object" || entry === null) {
     throw new Error(`expected an object proxy entry for ${route}`);
@@ -573,9 +236,23 @@ const asConfigurableEntry = (entry: unknown, route: string): ConfigurableProxyEn
   return candidate as ConfigurableProxyEntry;
 };
 
-/** Run a route's configure hook and collect the headers it injects on proxyReq. */
-const injectedHeaders = (entry: ConfigurableProxyEntry, route: string): [string, string][] => {
+type ProxyProbe = {
+  configured: [string, string][];
+  operations: string[];
+  remaining: [string, string][];
+};
+
+/** Run a route's configure hook against preloaded inbound headers. */
+const probeProxyRequest = (
+  entry: ConfigurableProxyEntry,
+  route: string,
+  preloaded: [string, string][] = [],
+): ProxyProbe => {
   const collected: [string, string][] = [];
+  const operations: string[] = [];
+  const headers = new Map<string, [string, string]>(
+    preloaded.map(([header, value]) => [header.toLowerCase(), [header, value]]),
+  );
   let handler: ProxyReqHandler | undefined;
   entry.configure({
     on: (event, fn) => {
@@ -588,12 +265,147 @@ const injectedHeaders = (entry: ConfigurableProxyEntry, route: string): [string,
     throw new Error(`expected ${route} to register a proxyReq handler`);
   }
   handler({
+    getHeaderNames: () => [...headers.values()].map(([header]) => header),
+    removeHeader: (header: string) => {
+      operations.push(`remove:${header}`);
+      headers.delete(header.toLowerCase());
+    },
     setHeader: (header: string, value: string) => {
+      operations.push(`set:${header}`);
       collected.push([header, value]);
+      headers.set(header.toLowerCase(), [header, value]);
     },
   });
-  return collected;
+  return {
+    configured: collected,
+    operations,
+    remaining: [...headers.values()],
+  };
 };
+
+/** Run a clean request probe and return only the configured headers. */
+const injectedHeaders = (entry: ConfigurableProxyEntry, route: string): [string, string][] =>
+  probeProxyRequest(entry, route).configured;
+
+const ATTACKER_PRELOADED_HEADERS: [string, string][] = [
+  ["x-user-id", "attacker-user"],
+  ["X-User-Impersonated", "attacker-shadow"],
+  ["x-user-email", "attacker@example.test"],
+  ["x-role", "super_owner"],
+  ["X-Permissions", "finance.close"],
+  ["x-company-id", "attacker-company"],
+  ["x-scope-type", "global"],
+  ["X-Scope-Forged", "attacker-scope"],
+  ["x-scope-id", "attacker-scope-id"],
+  ["x-ums-trusted-gateway-token", "attacker-token"],
+  ["x-ums-tenant", "attacker-tenant"],
+  ["X-UMS-Impersonation", "attacker-identity"],
+  ["X-Unrelated-Header", "preserve-me"],
+];
+
+type BackendRequest = {
+  method?: string;
+  url?: string;
+  headers: Record<string, string | string[] | undefined>;
+};
+
+type HttpResponse = {
+  statusCode: number;
+  body: string;
+};
+
+const listenOnLoopback = (server: Server): Promise<number> =>
+  new Promise((resolve, reject) => {
+    const onError = (error: Error) => {
+      server.off("listening", onListening);
+      reject(error);
+    };
+    const onListening = () => {
+      server.off("error", onError);
+      const address = server.address();
+      if (!address || typeof address === "string") {
+        reject(new Error("expected an ephemeral TCP address"));
+        return;
+      }
+      resolve((address as AddressInfo).port);
+    };
+    server.once("error", onError);
+    server.once("listening", onListening);
+    server.listen(0, "127.0.0.1");
+  });
+
+const closeHttpServer = (server: Server): Promise<void> =>
+  new Promise((resolve, reject) => {
+    if (!server.listening) {
+      resolve();
+      return;
+    }
+    server.close((error) => (error ? reject(error) : resolve()));
+  });
+
+const portOf = (server: { address: () => string | AddressInfo | null }): number => {
+  const address = server.address();
+  if (!address || typeof address === "string") {
+    throw new Error("expected a listening TCP address");
+  }
+  return address.port;
+};
+
+// ============================================================================
+// Purpose: Exercise the real Vite proxy and an HTTP backend across normal and
+//   Expect: 100-continue requests, proving headers are safe before setupOutgoing.
+// Database/ORM: None; the backend fixture records only request metadata.
+// Standards: Use real TCP servers, drain request bodies, assert trusted-header
+//   replacement and unrelated-header preservation, and prove the token stays
+//   out of browser-served source.
+// Blast Radius: Test-only development proxy coverage; no production or data
+//   state is changed.
+// Connections:
+//   - File: frontend/src/devProxy.ts -> proxy boundary under test.
+//   - File: frontend/vite.config.ts -> production Vite wiring of the proxy.
+//   - File: backend/ums_smart_revenue/api/dependencies.py -> trusted-header
+//     consumer represented by the receiving HTTP fixture.
+// ============================================================================
+const requestThroughVite = (
+  port: number,
+  route: string,
+  expectContinue: boolean,
+): Promise<HttpResponse> =>
+  new Promise((resolve, reject) => {
+    const body = expectContinue ? JSON.stringify({ probe: "expect-continue" }) : "";
+    const headers: Record<string, string> = Object.fromEntries(ATTACKER_PRELOADED_HEADERS);
+    if (expectContinue) {
+      headers.Expect = "100-continue";
+      headers["Content-Type"] = "application/json";
+      headers["Content-Length"] = String(Buffer.byteLength(body));
+    }
+    const request = httpRequest(
+      {
+        host: "127.0.0.1",
+        port,
+        path: route,
+        method: expectContinue ? "POST" : "GET",
+        headers,
+      },
+      (response) => {
+        const chunks: Buffer[] = [];
+        response.on("data", (chunk: Buffer) => chunks.push(chunk));
+        response.on("end", () => {
+          resolve({
+            statusCode: response.statusCode ?? 0,
+            body: Buffer.concat(chunks).toString("utf8"),
+          });
+        });
+      },
+    );
+    request.once("error", reject);
+    if (expectContinue) {
+      request.once("continue", () => request.end(body));
+      request.flushHeaders();
+    } else {
+      request.end();
+    }
+  });
 
 describe("dev proxy route coverage (derived from frontend/src)", () => {
   it("still finds the API calls we know exist, so the scan cannot pass vacuously", () => {
@@ -602,16 +414,11 @@ describe("dev proxy route coverage (derived from frontend/src)", () => {
     }
   });
 
-  it("treats a `+`-concatenated fragment as a fragment, not a backend prefix", () => {
-    // The exact shape from useExplanation.ts. `/months` is a suffix of the
-    // /revenue path, and must never be reported as an unproxied prefix.
-    // Build `${` via fromCharCode so the fixture avoids template literals,
-    // regular-string `${` (JS-0038), and literal concatenation (JS-0096/0246).
-    const interpolation = String.fromCharCode(36, 123);
+  it("treats a + concatenated fragment as a fragment, not a backend prefix", () => {
     const source = [
       "const p =",
-      ["  `/revenue/channels/", interpolation, "encodeURIComponent(id)}` +"].join(""),
-      ["  `/months/", interpolation, "encodeURIComponent(month)}/explain`;"].join(""),
+      "  `/revenue/channels/${encodeURIComponent(id)}` +",
+      "  `/months/${encodeURIComponent(month)}/explain`;",
     ].join("\n");
     const scanned = scanStringLiterals(source);
     expect(scanned.map((literal) => literal.continuesExpression)).toEqual([false, true]);
@@ -619,77 +426,244 @@ describe("dev proxy route coverage (derived from frontend/src)", () => {
   });
 
   it("ignores API paths that appear only in comments", () => {
-    const source = '// GET /reports/raw-files is documented here\nconst x = 1;\n';
+    const source = "// GET /reports/raw-files is documented here\nconst x = 1;\n";
     expect(scanStringLiterals(source)).toEqual([]);
+  });
+
+  it("does not hide a request path after division following a string literal", () => {
+    const source = 'const ratio = "x" / 2;\nconst requestPath = "/hidden";';
+    expect(scanStringLiterals(source)).toContainEqual({
+      value: "/hidden",
+      continuesExpression: false,
+    });
+  });
+
+  it("ignores regex literals while retaining later request strings", () => {
+    const source = 'const pattern = /"\\/hidden"/;\nconst requestPath = "/visible";';
+    expect(scanStringLiterals(source)).toContainEqual({
+      value: "/visible",
+      continuesExpression: false,
+    });
+    expect(scanStringLiterals(source).some((literal) => literal.value === "/hidden")).toBe(false);
   });
 
   it("proxies every backend prefix the application requests", () => {
     expect(uncoveredPrefixes(REQUESTED_PREFIXES, TENANT_SCOPED_ROUTES)).toEqual([]);
   });
 
-  it("would have caught the historical /org-units omission", () => {
-    // The list exactly as it stood before W0.2. This is the whole point of the
-    // rewrite: the previous revision of this file compared TENANT_SCOPED_ROUTES
-    // to a hand-copy of itself, so against THIS list it was still green.
-    // `/users` does not appear in the expectation because nothing under src/
-    // calls it yet — it is proxied ahead of the UI that will.
-    const preW02Routes = [
-      "/tenants",
-      "/session",
-      "/revenue",
-      "/finance-close",
-      "/exports",
-      "/connectors",
-      "/adsense",
-      "/channels",
-      "/groups",
-      "/audit",
-    ];
-    expect(uncoveredPrefixes(REQUESTED_PREFIXES, preW02Routes)).toEqual(["/org-units"]);
+  it.each(REQUESTED_PREFIXES)("fails when %s is omitted from the route list", (prefix) => {
+    const withoutPrefix = TENANT_SCOPED_ROUTES.filter((route) => route !== prefix);
+    expect(uncoveredPrefixes(REQUESTED_PREFIXES, withoutPrefix)).toEqual([prefix]);
   });
-
-  // REJECT side of the matrix. One case per prefix the application actually
-  // calls: drop that prefix from the list and the check must name it. This is
-  // what the old hand-copied assertion could not do — it compared the list to
-  // itself, so an omission was invisible on both sides.
-  it.each(REQUESTED_PREFIXES)(
-    "fails when %s is omitted from TENANT_SCOPED_ROUTES",
-    (prefix) => {
-      const withoutPrefix = TENANT_SCOPED_ROUTES.filter((route) => route !== prefix);
-      expect(uncoveredPrefixes(REQUESTED_PREFIXES, withoutPrefix)).toEqual([prefix]);
-    },
-  );
 });
 
-describe("dev proxy route list", () => {
-  it("proxies exactly the tenant-scoped routes (change-detector for additions)", () => {
-    expect(TENANT_SCOPED_ROUTES).toEqual(EXPECTED_ROUTES);
+describe("dev proxy trust and header contracts", () => {
+  it("resolves all seven configured forwarded headers", () => {
+    expect(resolveGatewayHeaders(ALL_GATEWAY_ENV)).toEqual(ALL_GATEWAY_HEADERS);
   });
 
-  it("includes /org-units so the Registry view's Company/Sector names resolve", () => {
-    // Regression guard: RegistryView calls useOrgUnits() on mount. Unproxied,
-    // that GET is answered by the dev server itself with an empty 404, the
-    // columns show raw ids for the whole session, and the mapping form's
-    // company picker holds nothing but its placeholder — with no error
-    // surfaced anywhere.
-    expect(TENANT_SCOPED_ROUTES).toContain("/org-units");
+  it("omits blank optional headers, including a missing gateway token", () => {
+    const headers = resolveGatewayHeaders({ ...ALL_GATEWAY_ENV, UMS_TRUSTED_GATEWAY_TOKEN: "" });
+    expect(headers).not.toContainEqual(["X-UMS-Trusted-Gateway-Token", ""]);
+    expect(headers).toContainEqual(["X-User-ID", ALL_GATEWAY_HEADERS[0][1]]);
   });
 
-  it("includes /users, which rides the same trusted-gateway lane", () => {
-    // Listed ahead of the UI that will call it, so the first screen to need it
-    // does not have to rediscover the unproxied-route 404. It is therefore
-    // expected NOT to appear in REQUESTED_PREFIXES yet.
-    expect(TENANT_SCOPED_ROUTES).toContain("/users");
+  it("accepts loopback targets and rejects a remote target without explicit trust", () => {
+    expect(resolveDevBackendTarget("http://127.0.0.1:8000")).toBe("http://127.0.0.1:8000");
+    expect(resolveDevBackendTarget("http://[::1]:8000")).toBe("http://[::1]:8000");
+    expect(() => resolveDevBackendTarget("https://api.example.test")).toThrow(/loopback/iu);
   });
 
-  it("builds a header-injecting entry for every route", () => {
-    const proxy = buildTenantScopedProxy(TENANT_SCOPED_ROUTES, BACKEND_TARGET, GATEWAY_HEADERS);
+  it("accepts only an exact explicitly trusted remote origin", () => {
+    expect(
+      resolveDevBackendTarget("https://api.example.test/v1", ["https://api.example.test"]),
+    ).toBe("https://api.example.test/v1");
+    expect(() =>
+      resolveDevBackendTarget("https://api.example.test/v1", ["https://other.example.test"]),
+    ).toThrow(/loopback/iu);
+    expect(() =>
+      resolveDevBackendTarget("http://api.example.test/v1", ["http://api.example.test"]),
+    ).toThrow(/https/iu);
+    expect(() =>
+      resolveDevBackendTarget("https://api.example.test/v1", ["http://api.example.test"]),
+    ).toThrow(/https/iu);
+    expect(() => resolveDevBackendTarget("https://user:password@api.example.test")).toThrow(
+      /credentials/iu,
+    );
+  });
+
+  it("canonicalizes IDNA origins before applying the exact trust check", () => {
+    const unicodeOrigin = new URL("https://例え.テスト").origin;
+    const asciiOrigin = new URL("https://xn--r8jz45g.xn--zckzah").origin;
+    expect(unicodeOrigin).toBe(asciiOrigin);
+    expect(resolveDevBackendTarget("https://例え.テスト/v1", [asciiOrigin])).toBe(
+      `${asciiOrigin}/v1`,
+    );
+  });
+
+  it("injects every configured header into every tenant-scoped proxy entry", () => {
+    const proxy = buildTenantScopedProxy(TENANT_SCOPED_ROUTES, BACKEND_TARGET, ALL_GATEWAY_HEADERS);
     expect(Object.keys(proxy)).toEqual(EXPECTED_ROUTES);
     for (const route of EXPECTED_ROUTES) {
       const entry = asConfigurableEntry(proxy[route], route);
       expect(entry.target).toBe(BACKEND_TARGET);
       expect(entry.changeOrigin).toBe(true);
-      expect(injectedHeaders(entry, route)).toEqual(GATEWAY_HEADERS);
+      expect(injectedHeaders(entry, route)).toEqual(ALL_GATEWAY_HEADERS);
     }
   });
+
+  it("refuses to construct a token-forwarding proxy for an untrusted target", () => {
+    expect(() =>
+      buildTenantScopedProxy(TENANT_SCOPED_ROUTES, "https://api.example.test", ALL_GATEWAY_HEADERS),
+    ).toThrow(/loopback/iu);
+    const trustedProxy = buildTenantScopedProxy(
+      TENANT_SCOPED_ROUTES,
+      "https://api.example.test",
+      ALL_GATEWAY_HEADERS,
+      ["https://api.example.test"],
+    );
+    expect(asConfigurableEntry(trustedProxy["/tenants"], "/tenants").target).toBe(
+      "https://api.example.test",
+    );
+  });
+
+  it("scrubs attacker-preloaded trusted headers on every route before setting values", () => {
+    const blankOptionalHeaders = resolveGatewayHeaders({
+      ...ALL_GATEWAY_ENV,
+      UMS_TRUSTED_GATEWAY_TOKEN: "",
+      VITE_DEV_GATEWAY_SCOPE_ID: "",
+    });
+    const proxy = buildTenantScopedProxy(TENANT_SCOPED_ROUTES, BACKEND_TARGET, blankOptionalHeaders);
+    const configuredByName = new Map(
+      blankOptionalHeaders.map(([header, value]) => [header.toLowerCase(), value]),
+    );
+
+    for (const route of EXPECTED_ROUTES) {
+      const result = probeProxyRequest(
+        asConfigurableEntry(proxy[route], route),
+        route,
+        ATTACKER_PRELOADED_HEADERS,
+      );
+      const remaining = new Map(result.remaining.map(([header, value]) => [header.toLowerCase(), value]));
+      expect(result.configured).toEqual(blankOptionalHeaders);
+      expect(remaining.get("x-unrelated-header")).toBe("preserve-me");
+      expect(remaining.size).toBe(blankOptionalHeaders.length + 1);
+      for (const [header, attackerValue] of ATTACKER_PRELOADED_HEADERS) {
+        if (header === "X-Unrelated-Header") {
+          continue;
+        }
+        const normalizedHeader = header.toLowerCase();
+        if (configuredByName.has(normalizedHeader)) {
+          expect(remaining.get(normalizedHeader), `${route} retained attacker ${header}`).toBe(
+            configuredByName.get(normalizedHeader),
+          );
+        } else {
+          expect(remaining.has(normalizedHeader), `${route} retained ${header}`).toBe(false);
+        }
+        expect(remaining.get(normalizedHeader)).not.toBe(attackerValue);
+      }
+      const firstSet = result.operations.findIndex((operation) => operation.startsWith("set:"));
+      const lastRemove = result.operations.reduce(
+        (last, operation, index) => (operation.startsWith("remove:") ? index : last),
+        -1,
+      );
+      expect(lastRemove).toBeGreaterThanOrEqual(0);
+      expect(lastRemove).toBeLessThan(firstSet);
+    }
+  });
+
+  it("scrubs Expect requests at the real Vite/backend boundary", async () => {
+    const backendRequests: BackendRequest[] = [];
+    const backend = createHttpServer((request, response) => {
+      request.resume();
+      request.once("end", () => {
+        backendRequests.push({
+          method: request.method,
+          url: request.url,
+          headers: { ...request.headers },
+        });
+        response.writeHead(200, { "Content-Type": "application/json" });
+        response.end(JSON.stringify({ ok: true }));
+      });
+    });
+    const backendPort = await listenOnLoopback(backend);
+    const gatewayToken = "real-vite-server-only-secret";
+    const gatewayHeaders: [string, string][] = [
+      ["X-User-ID", "real-user"],
+      ["X-User-Email", "real@example.test"],
+      ["X-Role", "finance_admin"],
+      ["X-Scope-Type", "company"],
+      ["X-UMS-Trusted-Gateway-Token", gatewayToken],
+      ["X-UMS-Tenant", "ums"],
+      ["X-Scope-ID", "company-tv"],
+    ];
+    let vite: Awaited<ReturnType<typeof createViteServer>> | undefined;
+    try {
+      const startedVite = await createViteServer({
+        root: path.resolve(HERE, ".."),
+        configFile: false,
+        logLevel: "silent",
+        resolve: {
+          alias: {
+            "@": path.resolve(HERE, "..", "src"),
+          },
+        },
+        server: {
+          host: "127.0.0.1",
+          port: 0,
+          strictPort: true,
+          proxy: buildTenantScopedProxy(
+            TENANT_SCOPED_ROUTES,
+            `http://127.0.0.1:${backendPort}`,
+            gatewayHeaders,
+          ),
+        },
+      });
+      vite = startedVite;
+      await startedVite.listen();
+      if (!startedVite.httpServer) {
+        throw new Error("expected Vite to expose its listening HTTP server");
+      }
+      const vitePort = portOf(startedVite.httpServer);
+      const cases = [
+        { route: "/tenants", expectContinue: false },
+        { route: "/revenue", expectContinue: false },
+        { route: "/connectors", expectContinue: true },
+        { route: "/finance-close", expectContinue: true },
+      ];
+
+      for (const [index, testCase] of cases.entries()) {
+        const result = await requestThroughVite(vitePort, testCase.route, testCase.expectContinue);
+        expect(result.statusCode, testCase.route).toBe(200);
+        expect(backendRequests).toHaveLength(index + 1);
+        const forwarded = backendRequests.at(-1);
+        expect(forwarded?.method, testCase.route).toBe(testCase.expectContinue ? "POST" : "GET");
+        expect(forwarded?.url, testCase.route).toBe(testCase.route);
+        expect(forwarded?.headers.expect, testCase.route).toBe(
+          testCase.expectContinue ? "100-continue" : undefined,
+        );
+        for (const [header, value] of gatewayHeaders) {
+          expect(forwarded?.headers[header.toLowerCase()], `${testCase.route} ${header}`).toBe(
+            value,
+          );
+        }
+        for (const [header, attackerValue] of ATTACKER_PRELOADED_HEADERS) {
+          if (header === "X-Unrelated-Header") {
+            expect(forwarded?.headers[header.toLowerCase()]).toBe("preserve-me");
+          } else {
+            expect(forwarded?.headers[header.toLowerCase()]).not.toBe(attackerValue);
+          }
+        }
+      }
+
+      const browserModule = await requestThroughVite(vitePort, "/src/main.tsx", false);
+      expect(browserModule.statusCode).toBe(200);
+      expect(browserModule.body).not.toContain(gatewayToken);
+    } finally {
+      if (vite) {
+        await vite.close();
+      }
+      await closeHttpServer(backend);
+    }
+  }, 15_000);
 });

@@ -62,6 +62,8 @@ Rules:
 - Name test files `*.test.ts` / `*.test.tsx`. `.spec.*` is **not** collected.
 - Import the code under test through the `@/` alias, never a relative path.
   The alias is what makes the tests movable and the layout cheap to change.
+  The dev-proxy contract lives in `src/devProxy.ts`, so its test follows this
+  rule; the root `vite.config.ts` imports that Node-side module relatively.
 - Do not create `__tests__/` directories. That convention is retired.
 
 The layout is declared by `test.include` in `vitest.config.ts` and enforced by
@@ -240,11 +242,18 @@ bun run dev
 ```
 
 The dev proxy (`vite.config.ts`) forwards every tenant-scoped route to the backend and
-injects the full trusted-principal header set (`X-User-ID`, `X-User-Email`, `X-Role`,
-`X-Scope-Type`, `X-UMS-Trusted-Gateway-Token`, `X-UMS-Tenant`). The browser bundle
-never holds the gateway secret.
+injects the trusted-principal header set (`X-User-ID`, `X-User-Email`, `X-Role`,
+`X-Scope-Type`, `X-UMS-Trusted-Gateway-Token`, `X-UMS-Tenant`, and optional
+`X-Scope-ID`). Caller-supplied trusted identity headers are removed at the incoming
+request boundary before http-proxy copies headers (and again in `proxyReq` when that
+event exists), including blank configured optionals, so browser headers cannot survive
+as a fallback even for `Expect: 100-continue` requests. The browser bundle never holds
+the gateway secret. Its backend target defaults to loopback;
+HTTP is accepted only for verified loopback, while a non-loopback
+`VITE_DEV_BACKEND_URL` must be HTTPS and its exact origin must be listed in the Node-only
+`UMS_DEV_TRUSTED_BACKEND_ORIGINS` variable.
 
-`TENANT_SCOPED_ROUTES` (`vite.config.ts:16-49`) is the full list, in declaration order:
+`TENANT_SCOPED_ROUTES` (`src/devProxy.ts`) is the full list, in declaration order:
 
 ```text
 /tenants  /session  /revenue  /finance-close  /exports  /connectors
@@ -283,14 +292,17 @@ Change Request** company `<select>`, so the operator could not assign a channel 
 company from the UI at all.
 
 `frontend/tests/devProxyRoutes.test.ts` now guards this by **deriving** the required
-set from the path literals under `src/lib/api/**`, so a new API call to an unproxied
-prefix fails the suite instead of failing silently in the browser.
+set from TypeScript string/template literals under `src/` (excluding the proxy
+declaration itself), so a new API call to an unproxied prefix fails the suite instead
+of failing silently in the browser.
 
 **Known, currently harmless gap:** four backend prefixes are mounted and not proxied —
 `/reports`, `/security`, `/exchange-rates`, `/export-templates`. Nothing under
-`src/lib/api/` calls them today, so there is no live defect; add the prefix to
-`TENANT_SCOPED_ROUTES` in the same change that adds the first call to one of them, and
-the guard test will tell you if you forget.
+`src/` calls them today, so there is no live frontend defect. `/security` is an
+auditor-gated authorization catalog, not a tenant-scoped dashboard route; adding it
+requires an explicit product and permission review. Add any other prefix to
+`TENANT_SCOPED_ROUTES` in the same change that adds its first frontend call, and the
+guard test will tell you if you forget.
 
 ### Demo headers the dev proxy injects
 
