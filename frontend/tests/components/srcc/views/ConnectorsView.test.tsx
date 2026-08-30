@@ -1076,6 +1076,19 @@ describe("ConnectorsView wired to the connector + AdSense endpoints", () => {
               audit_event: {},
             });
           }
+          if (url === "/connectors/jobs" && methodOf(init) === "POST") {
+            return jsonResponse(
+              {
+                connector_key: "youtube_reporting",
+                account_id: "acct-1",
+                report_month: "2026-07",
+                dry_run: false,
+                execution_status: "submitted",
+                audit_event: {},
+              },
+              202,
+            );
+          }
           return null;
         }),
       );
@@ -1129,14 +1142,41 @@ describe("ConnectorsView wired to the connector + AdSense endpoints", () => {
         String((syncCall?.[1] as RequestInit | undefined)?.body ?? "{}"),
       );
       expect(body.payments[0].month).toBe("2026-08");
-      // The filed month IS one of the offered options here, so the selector
-      // switches to it and the refreshed list shows the new row.
+      // The filed month IS one of the offered options here, so the payments
+      // FILTER switches to it and the refreshed list shows the new row.
       const monthSelectAfter =
         screen.getByLabelText<HTMLSelectElement>("AdSense month");
       await waitFor(() => expect(monthSelectAfter.value).toBe("2026-08"));
       expect(
         screen.getByText(/upserted into the finance source under aug 2026/i),
       ).toBeInTheDocument();
+
+      // Regression (PR #211 review, Devin): the filter's auto-switch must NOT
+      // retarget the connector pull. The pull's report month stays on the
+      // operator's deliberate choice (July), is DISPLAYED next to the reason
+      // field, and the next Run pull still submits it — never the in-progress
+      // month a current-month payment would otherwise drag it onto.
+      expect(screen.getByText(/pull reports the whole month jul 2026/i)).toBeInTheDocument();
+      await waitFor(() =>
+        expect(screen.getByText("youtube_reporting")).toBeInTheDocument(),
+      );
+      fireEvent.change(
+        screen.getByLabelText("Sync reason (required, audited)"),
+        { target: { value: "Post-sync pull keeps its month" } },
+      );
+      fireEvent.click(screen.getByRole("button", { name: /run pull/i }));
+      await waitFor(() =>
+        expect(screen.getByText(/Submitted to executor/i)).toBeInTheDocument(),
+      );
+      const jobCall = fetchMock().mock.calls.find(
+        ([input, init]) =>
+          urlOf(input) === "/connectors/jobs" && methodOf(init) === "POST",
+      );
+      expect(jobCall).toBeDefined();
+      const pullBody = JSON.parse(
+        String((jobCall?.[1] as RequestInit | undefined)?.body ?? "{}"),
+      );
+      expect(pullBody.report_month).toBe("2026-07");
 
       // The banner names the SUBMITTED month, not the live date field: editing
       // the payment date after a successful sync must not relabel the completed

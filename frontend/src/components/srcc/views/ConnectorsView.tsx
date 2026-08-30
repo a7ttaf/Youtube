@@ -645,9 +645,12 @@ const AdsensePaymentsSection = ({
 /**
  * The inline, always-visible "Sync reason" field that every per-row Run pull
  * uses; the reason is recorded on the audit event. It also carries the dry-run
- * toggle (validate-only, no facts written) that the pull request honors. When the
- * viewer cannot run connectors both controls are disabled and the field shows the
- * connector-operations hint.
+ * toggle (validate-only, no facts written) that the pull request honors, and
+ * states the REPORT MONTH the pull will file under — that month is the
+ * operator's deliberate selector choice and a payment sync cannot move it
+ * (PR #211 review), so it is displayed here rather than left as hidden state.
+ * When the viewer cannot run connectors both controls are disabled and the
+ * field shows the connector-operations hint.
  */
 const SyncReasonField = ({
   canRunConnectors,
@@ -655,12 +658,14 @@ const SyncReasonField = ({
   onReason,
   dryRun,
   onDryRun,
+  reportMonth,
 }: {
   canRunConnectors: boolean;
   reason: string;
   onReason: (value: string) => void;
   dryRun: boolean;
   onDryRun: (value: boolean) => void;
+  reportMonth: string;
 }) => {
   return (
     <div className="field-row" style={{ margin: 13 }}>
@@ -682,6 +687,9 @@ const SyncReasonField = ({
         />
         {" Dry run (validate only, no facts written)"}
       </label>
+      <span className="item-sub" role="status">
+        {`Pull reports the whole month ${monthKeyLabel(reportMonth)} — the selector changes it; a payment sync does not.`}
+      </span>
       {canRunConnectors ? null : (
         <span className="item-sub" role="note">
           {CONNECTOR_ROLE_HINT}
@@ -715,6 +723,7 @@ const DataSourcesPanel = ({
   connectorTest,
   month,
   onMonth,
+  reportMonth,
   payments,
   paymentsLoading,
   paymentsError,
@@ -738,6 +747,7 @@ const DataSourcesPanel = ({
   connectorTest: ReturnType<typeof useConnectorTest>;
   month: string;
   onMonth: (value: string) => void;
+  reportMonth: string;
   payments: AdsensePayment[];
   paymentsLoading: boolean;
   paymentsError: ApiError | Error | null;
@@ -774,6 +784,7 @@ const DataSourcesPanel = ({
         onReason={onReason}
         dryRun={dryRun}
         onDryRun={onDryRun}
+        reportMonth={reportMonth}
       />
 
       <ConnectorCredentialsTable
@@ -1670,6 +1681,15 @@ export const ConnectorsView = ({
   // current month included, so this fixes the default, not the operator's
   // choice.
   const [month, setMonth] = useState<string>(WRITE_DEFAULT_MONTH);
+  // FIX (PR #211 review, Devin): the payments-list FILTER is deliberately
+  // separate from the connector-run REPORT MONTH. A successful payment sync
+  // switches the filter so the new row is visible, but that auto-switch must
+  // never retarget the next connector pull — a current-month payment would
+  // otherwise silently move report_month onto the in-progress month and ingest
+  // a partial month as final, the exact hazard the write default prevents.
+  // Only an explicit selector change (handleMonthChange) moves both together;
+  // the SyncReasonField always displays the pull's report month.
+  const [filterMonth, setFilterMonth] = useState<string>(WRITE_DEFAULT_MONTH);
   const [reason, setReason] = useState<string>("");
   const [dryRun, setDryRun] = useState<boolean>(false);
   // Nonce bumped after a successful executing-path submit so the run-history feed
@@ -1719,7 +1739,7 @@ export const ConnectorsView = ({
   const jobActions = useConnectorJobActions();
   const connectorTest = useConnectorTest();
 
-  const payments = useAdsensePayments({ month });
+  const payments = useAdsensePayments({ month: filterMonth });
   const syncActions = useAdsenseSyncActions();
 
   const credentialRows = credentials.data?.items ?? [];
@@ -1734,35 +1754,60 @@ export const ConnectorsView = ({
     [payments],
   );
   // ==========================================================================
-  // Purpose: Post-sync visibility for a filed payment. FIX (PR #211 review): a
-  //   synced payment files under the month of its payment date, which can
-  //   differ from the selected filter month.
+  // Purpose: An explicit selector change is the OPERATOR's deliberate month
+  //   choice: it retargets both the payments filter AND the connector-run
+  //   report_month together, so the visible selector and the pull target can
+  //   never silently disagree.
+  // Database/ORM: None (frontend filter/pull-target state).
+  // Standards: The only path besides the initial default that sets the pull
+  //   month; a payment sync (handleSynced) deliberately does NOT come through
+  //   here. Fail-closed pairing: both states always move together here.
+  // Blast Radius: The connector run's report_month (a whole-month finance
+  //   write) and the list filter. No stored value set client-side.
+  // Connections:
+  //   - File: AdsensePaymentsSection (this file) -> the selector the operator
+  //     uses.
+  //   - File: onRequestSync (this file) -> submits report_month = month.
+  // ==========================================================================
+  const handleMonthChange = useCallback((value: string) => {
+    setMonth(value);
+    setFilterMonth(value);
+  }, []);
+
+  // ==========================================================================
+  // Purpose: Post-sync visibility for a filed payment WITHOUT retargeting the
+  //   connector pull. FIX (PR #211 review, Devin): a synced payment files under
+  //   the month of its payment date, which can differ from the filter month.
   // Database/ORM: None (frontend filter state; the row itself was already
   //   posted by AdsenseSyncForm).
-  // Standards: When the filed month IS one of the rolling options, switch the
-  //   selector to it — the month change refetches the list, so the just-written
-  //   row appears. When it is OLDER than the window the selector offers,
-  //   switching would render a value with no matching option (the same
+  // Standards: Only the payments FILTER follows the filed month — when it IS
+  //   one of the rolling options the filter switches so the just-written row
+  //   appears (the month change refetches the list); when it is OLDER than the
+  //   window, switching would render a value with no matching option (the same
   //   blank-selector defect this PR fixes elsewhere), so the filter stays and
-  //   the success banner names the month instead. Fail-closed: never sets a
-  //   month the selector cannot display.
-  // Blast Radius: The payments list filter + one selection; display only. The
-  //   connector-run report_month path is untouched.
+  //   the success banner names the month instead. The report month for
+  //   connector pulls NEVER moves here: an auto-switch once retargeted the
+  //   next pull onto the in-progress month, silently scheduling a partial-
+  //   month ingest (the exact hazard WRITE_DEFAULT_MONTH exists to prevent).
+  // Blast Radius: The payments list filter only; display. The connector-run
+  //   report_month path is untouched by construction.
   // Connections:
   //   - File: AdsenseSyncForm (this file) -> calls onSynced(filingMonth) from
   //     the submit closure, so the month here is the POSTED one.
   //   - File: frontend/src/components/srcc/shared.tsx -> MONTH_OPTIONS, the
   //     offered window membership is checked against.
+  //   - File: SyncReasonField (this file) -> always displays the pull's
+  //     report month, which this callback no longer moves.
   // ==========================================================================
   const handleSynced = useCallback(
     (filedMonth: string) => {
-      if (MONTH_OPTIONS.includes(filedMonth) && month !== filedMonth) {
-        setMonth(filedMonth); // the month change itself refetches the list
+      if (MONTH_OPTIONS.includes(filedMonth) && filterMonth !== filedMonth) {
+        setFilterMonth(filedMonth); // the filter change itself refetches the list
         return;
       }
       payments.reload();
     },
-    [month, payments],
+    [filterMonth, payments],
   );
 
   // ==========================================================================
@@ -1829,8 +1874,9 @@ export const ConnectorsView = ({
           requestingJob={jobActions.loading}
           onRequestSync={onRequestSync}
           connectorTest={connectorTest}
-          month={month}
-          onMonth={setMonth}
+          month={filterMonth}
+          onMonth={handleMonthChange}
+          reportMonth={month}
           payments={paymentRows}
           paymentsLoading={payments.loading}
           paymentsError={payments.error}
