@@ -107,3 +107,23 @@ def test_monthly_channel_revenue_fact_model_declares_channel_foreign_key():
         "youtube_channel_id",
     ]
     assert foreign_key.ondelete == "RESTRICT"
+
+
+def test_monthly_channel_revenue_fact_model_declares_source_uniqueness_constraint():
+    """One source fact is allowed per tenant, month, channel, and source kind."""
+    unique_constraint = next(
+        (
+            constraint
+            for constraint in MonthlyChannelRevenueFactORM.__table__.constraints
+            if constraint.name == "uq_monthly_channel_revenue_source"
+        ),
+        None,
+    )
+
+    assert unique_constraint is not None, "uq_monthly_channel_revenue_source missing"
+    assert [column.name for column in unique_constraint.columns] == [
+        "tenant_id",
+        "month",
+        "youtube_channel_id",
+        "source_kind",
+    ]

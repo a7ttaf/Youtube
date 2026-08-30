@@ -1,4 +1,5 @@
 import json
+from dataclasses import replace
 from datetime import UTC, datetime
 from decimal import Decimal
 from uuid import UUID
@@ -615,6 +616,30 @@ def test_build_explanation_warns_on_no_facts_and_yields_zero_value():
     assert entry.confidence == {"label": "LOW", "score": "0"}
 
 
+def test_build_explanation_preserves_null_primary_source_report_id():
+    """A missing report identifier remains null in the provenance component."""
+    fact = replace(
+        revenue_fact(source_kind="YOUTUBE_CMS", gross_revenue_usd="1000.00"),
+        source_report_id=None,
+    )
+
+    entry = build_channel_month_revenue_explanation(
+        facts=[fact],
+        manual_overrides=[],
+        month="2026-03",
+        youtube_channel_id="channel-tv-a",
+        metric=ADJUSTED_GROSS_REVENUE_METRIC,
+    )
+
+    baseline_component = next(
+        component
+        for component in entry.components
+        if component["key"] == "baseline_gross_revenue_usd"
+    )
+    assert baseline_component["source_kind"] == "YOUTUBE_CMS"
+    assert baseline_component["source_report_id"] is None
+
+
 def test_build_explanation_pluralizes_pending_override_warning():
     """The pending-override warning is pluralized for multiple pending overrides."""
     entry = build_channel_month_revenue_explanation(
@@ -637,6 +662,30 @@ def test_build_explanation_pluralizes_pending_override_warning():
             ),
         }
     ]
+
+
+def test_build_explanation_keeps_combined_pending_and_no_fact_warnings():
+    """Pending overrides and absent facts retain both warnings in stable order."""
+    entry = build_channel_month_revenue_explanation(
+        facts=[],
+        manual_overrides=[
+            manual_override(
+                status="PENDING",
+                adjustment_revenue_usd="50.00",
+                youtube_channel_id="channel-orphan",
+            )
+        ],
+        month="2026-03",
+        youtube_channel_id="channel-orphan",
+        metric=ADJUSTED_GROSS_REVENUE_METRIC,
+    )
+
+    assert entry.value == Decimal("0")
+    assert [warning["code"] for warning in entry.warnings] == [
+        "PENDING_MANUAL_OVERRIDES",
+        "NO_REVENUE_FACTS",
+    ]
+    assert entry.confidence == {"label": "LOW", "score": "0"}
 
 
 def test_build_explanation_never_labels_a_warned_fact_high():
@@ -664,6 +713,35 @@ def test_build_explanation_never_labels_a_warned_fact_high():
 
     assert [w["code"] for w in entry.warnings] == ["PENDING_MANUAL_OVERRIDES"]
     assert entry.confidence == {"label": "MEDIUM", "score": "0.9"}
+
+
+@pytest.mark.parametrize(
+    ("confidence_score", "expected_confidence"),
+    [
+        ("0.9000", {"label": "MEDIUM", "score": "0.9"}),
+        ("0.7000", {"label": "MEDIUM", "score": "0.7"}),
+        ("0.6999", {"label": "LOW", "score": "0.6999"}),
+    ],
+)
+def test_build_explanation_warned_confidence_band_boundaries(
+    confidence_score: str, expected_confidence: dict[str, str]
+):
+    """Warnings preserve the medium floor and keep the HIGH badge unavailable."""
+    entry = build_channel_month_revenue_explanation(
+        facts=[
+            revenue_fact(
+                source_kind="YOUTUBE_CMS",
+                gross_revenue_usd="1000.00",
+                confidence_score=confidence_score,
+            )
+        ],
+        manual_overrides=[manual_override(status="PENDING", adjustment_revenue_usd="50.00")],
+        month="2026-03",
+        youtube_channel_id="channel-tv-a",
+        metric=ADJUSTED_GROSS_REVENUE_METRIC,
+    )
+
+    assert entry.confidence == expected_confidence
 
 
 def test_build_explanation_labels_a_clean_fact_high():
@@ -704,6 +782,36 @@ def test_build_explanation_labels_a_clean_fact_at_the_high_floor_high():
 
     assert entry.warnings == []
     assert entry.confidence == {"label": "HIGH", "score": "0.9"}
+
+
+@pytest.mark.parametrize(
+    ("confidence_score", "expected_confidence"),
+    [
+        ("0.7000", {"label": "MEDIUM", "score": "0.7"}),
+        ("0.6999", {"label": "LOW", "score": "0.6999"}),
+        ("0.8999", {"label": "MEDIUM", "score": "0.8999"}),
+    ],
+)
+def test_build_explanation_clean_confidence_band_boundaries(
+    confidence_score: str, expected_confidence: dict[str, str]
+):
+    """Clean scores honor the inclusive medium floor and exclusive high band."""
+    entry = build_channel_month_revenue_explanation(
+        facts=[
+            revenue_fact(
+                source_kind="YOUTUBE_CMS",
+                gross_revenue_usd="1000.00",
+                confidence_score=confidence_score,
+            )
+        ],
+        manual_overrides=[],
+        month="2026-03",
+        youtube_channel_id="channel-tv-a",
+        metric=ADJUSTED_GROSS_REVENUE_METRIC,
+    )
+
+    assert entry.warnings == []
+    assert entry.confidence == expected_confidence
 
 
 def test_build_explanation_keeps_the_low_band_for_a_warned_low_score_fact():
@@ -811,12 +919,32 @@ def test_build_explanation_round_trip_through_to_api_serializes_full_shape():
     )
 
     api = entry.to_api()
-    assert api["metric"] == ADJUSTED_GROSS_REVENUE_METRIC
-    assert api["value"] == "1125.5"
-    assert api["currency"] == "USD"
-    assert api["confidence"] == {"label": "HIGH", "score": "0.98"}
-    assert api["warnings"] == []
-    assert api["formula"] == ("baseline_gross_revenue_usd + approved_manual_override_total_usd")
+    assert api == {
+        "month": "2026-03",
+        "entity_type": "channel",
+        "entity_id": "channel-tv-a",
+        "metric": ADJUSTED_GROSS_REVENUE_METRIC,
+        "value": "1125.5",
+        "currency": "USD",
+        "formula": "baseline_gross_revenue_usd + approved_manual_override_total_usd",
+        "confidence": {"label": "HIGH", "score": "0.98"},
+        "components": [
+            {
+                "key": "baseline_gross_revenue_usd",
+                "label": "Baseline gross revenue",
+                "value": "1000",
+                "source_kind": "YOUTUBE_CMS",
+                "source_report_id": "report-YOUTUBE_CMS",
+            },
+            {
+                "key": "approved_manual_override_total_usd",
+                "label": "Approved manual overrides",
+                "value": "125.5",
+                "count": 1,
+            },
+        ],
+        "warnings": [],
+    }
 
 
 # -----------------------------------------------------------------------------

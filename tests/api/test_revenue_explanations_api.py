@@ -1,3 +1,4 @@
+import json
 from datetime import UTC, datetime
 from decimal import Decimal
 from uuid import UUID, uuid4
@@ -170,7 +171,21 @@ def test_finance_viewer_gets_adjusted_revenue_explanation_with_audit_and_snapsho
         audit_log = session.scalars(select(AuditLogORM)).one()
 
     assert response.status_code == 200
-    assert response.json()["metric"] == "adjusted_gross_revenue_usd"
+    body = response.json()
+    assert set(body) == {
+        "month",
+        "entity_type",
+        "entity_id",
+        "metric",
+        "value",
+        "currency",
+        "formula",
+        "confidence",
+        "components",
+        "warnings",
+        "audit_event",
+    }
+    assert body["metric"] == "adjusted_gross_revenue_usd"
     assert response.json()["value"] == "1125.5"
     assert response.json()["currency"] == "USD"
     assert (
@@ -204,6 +219,7 @@ def test_finance_viewer_gets_adjusted_revenue_explanation_with_audit_and_snapsho
     assert response.json()["audit_event"]["event_type"] == "REVENUE_VIEWED"
     assert explanation.value == Decimal("1125.50")
     assert explanation.metric == "adjusted_gross_revenue_usd"
+    assert json.loads(explanation.confidence) == {"label": "MEDIUM", "score": "0.9"}
     assert audit_log.event_type == "REVENUE_VIEWED"
     assert audit_log.sensitive is True
 
