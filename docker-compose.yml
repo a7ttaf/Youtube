@@ -55,16 +55,18 @@
 #     Note that `pg_dump` alone does not capture the `app_tenant` /
 #     `app_platform` roles the RLS policies depend on, so a roles-only dump
 #     has to exist too, taken while postgres is up (run from Git Bash or
-#     PowerShell — but see the encoding note):
-#       docker compose exec postgres sh -c 'pg_dumpall --roles-only -U "$POSTGRES_USER"' > ums-roles.sql
+#     PowerShell — but see the encoding note), written OUTSIDE the
+#     checkout because it contains the superuser password hash:
+#       docker compose exec postgres sh -c 'pg_dumpall --roles-only -U "$POSTGRES_USER"' > ../ums-roles.sql
 #     The quoting is deliberate: $POSTGRES_USER expands inside the
 #     container, the same variable the healthcheck below reads. In
 #     PowerShell 5.1 use `docker compose exec -T postgres sh -c '...' |
-#     Out-File -Encoding utf8 ums-roles.sql` instead of `>` — the shell
+#     Out-File -Encoding utf8 ../ums-roles.sql` instead of `>` — the shell
 #     redirect writes UTF-16 with a BOM, which psql cannot replay. On a
 #     fresh cluster replay ums-roles.sql BEFORE the pg_dump: the dump's
 #     GRANT/policy statements name those roles. ums-roles.sql contains the
-#     superuser password hash — guard it like .env.
+#     superuser password hash — guard it like .env; a narrow `/ums-roles.sql`
+#     ignore is a backstop for anyone who redirects it inside anyway.
 #
 # `app` is the FastAPI service running with --reload disabled by default.
 # For interactive dev with hot reload, use the `dev` override profile:

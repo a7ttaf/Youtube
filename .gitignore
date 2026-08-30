@@ -227,6 +227,8 @@ docker-compose.override.yml
 # Backstop: the header backup command writes its archive OUTSIDE the
 # checkout; if an operator redirects it inside, never stage it either.
 /ums-app-data-*.tgz
+# Same for the roles-only dump (contains the superuser password hash).
+/ums-roles.sql
 
 # Helm
 deploy/helm/*/charts/

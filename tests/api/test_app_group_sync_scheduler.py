@@ -44,6 +44,7 @@ def _sqlite_url(tmp_path) -> str:
 
 
 def _clear_envs() -> None:
+    """Unset the three wiring env vars and drop the cached settings."""
     os.environ.pop(_SCHEDULE_ENV, None)
     os.environ.pop(_EXECUTOR_ENV, None)
     os.environ.pop(_ACTOR_ENV, None)
