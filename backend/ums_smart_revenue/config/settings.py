@@ -35,14 +35,38 @@ GOOGLE_CONNECTOR_SERVICE_ACTOR_ID_ENV = "UMS_GOOGLE_CONNECTOR_SERVICE_ACTOR_ID"
 GOOGLE_CONNECTOR_SERVICE_ACTOR_PLACEHOLDER_ID = "00000000-0000-0000-0000-0000000000bb"
 
 
+# ============================================================================
+# Purpose: Canonical "service actor is configured" test shared by every
+#          admission gate (API route pre-flight, scheduler boot wiring):
+#          both a missing value and the well-known .env.example template
+#          placeholder count as NOT configured, so a copied-template
+#          deployment is refused early and synchronously.
+# Database/ORM: None. The value gates audit-actor construction in
+#               connectors/google/audit.py, which feeds record_audit_event.
+# Standards: Fail-closed admission; single spelling of the placeholder via
+#            GOOGLE_CONNECTOR_SERVICE_ACTOR_PLACEHOLDER_ID so consumers
+#            cannot drift. Refusing at pre-flight/boot avoids the
+#            202-then-fail and restart-loop-after-misattribution modes.
+# Blast Radius: Connector job admission + scheduler startup; audit actor
+#               identity for connector runs. No finance-number impact.
+# Connections:
+#   - File: backend/ums_smart_revenue/api/connectors.py -> route pre-flight.
+#   - File: backend/ums_smart_revenue/app.py -> scheduler boot gate.
+#   - File: backend/ums_smart_revenue/connectors/google/audit.py ->
+#     build_connector_service_principal (use-time rejection).
+# ============================================================================
 def is_configured_service_actor_id(actor_id: str | None) -> bool:
-    """True when the actor id is a real configured value.
+    """Return whether the actor id is a real configured value.
 
-    The canonical "treated as configured" test shared by every consumer
-    gate (API pre-flight, scheduler boot wiring): both a missing value and
-    the well-known template placeholder are NOT configured — refusing the
-    placeholder late (worker-time only) turned a synchronous 503 into a
-    202 for a job that can never start.
+    Args:
+        actor_id: The parsed ``UMS_GOOGLE_CONNECTOR_SERVICE_ACTOR_ID``
+            value — ``None`` when unset, the canonical UUID string
+            otherwise.
+
+    Returns:
+        True only when the value is present AND is not the well-known
+        ``.env.example`` template placeholder — the two states every
+        admission gate must treat as unconfigured.
     """
     return actor_id is not None and actor_id != GOOGLE_CONNECTOR_SERVICE_ACTOR_PLACEHOLDER_ID
 

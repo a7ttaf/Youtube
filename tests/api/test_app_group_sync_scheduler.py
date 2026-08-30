@@ -39,6 +39,7 @@ _ACTOR_ENV = "UMS_GOOGLE_CONNECTOR_SERVICE_ACTOR_ID"
 
 
 def _sqlite_url(tmp_path) -> str:
+    """Return a per-test SQLite file URL under tmp_path for create_app."""
     return f"sqlite+pysqlite:///{(tmp_path / 'app.db').as_posix()}"
 
 
