@@ -224,6 +224,9 @@ docker-compose.override.yml
 # as the stack runs. Anchored to the repo root so nested source dirs named
 # data/ elsewhere stay trackable.
 /data/
+# Backstop: the header backup command writes its archive OUTSIDE the
+# checkout; if an operator redirects it inside, never stage it either.
+/ums-app-data-*.tgz
 
 # Helm
 deploy/helm/*/charts/

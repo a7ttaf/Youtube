@@ -26,9 +26,14 @@
 #     blobs are written with Path.write_bytes, so tarring under a live
 #     writer can capture a half-written raw-evidence file):
 #       docker compose stop app app-dev
-#       tar -czf ums-app-data-$(date +%F).tgz ./data/ums
+#       tar -czf ../ums-app-data-$(date +%F).tgz ./data/ums
 #     (stopping a service that is not running is a no-op, so the same
 #     command is safe when the dev profile is inactive)
+#     The archive is written OUTSIDE the checkout on purpose — a tgz of
+#     raw revenue evidence and finance exports has no business sitting in
+#     the worktree where a later `git add .` could stage it; a narrow
+#     `/ums-app-data-*.tgz` ignore exists as a backstop for anyone who
+#     redirects it inside anyway.
 #     tar ships with Windows 10+, Git Bash and Linux; adjust the path if
 #     UMS_APP_DATA_HOST is set. No dedicated backup/restore runbook exists
 #     yet — this header is the procedure.
