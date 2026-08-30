@@ -15,7 +15,7 @@ afterEach(() => {
   globalThis.fetch = ORIGINAL_FETCH;
   vi.restoreAllMocks();
   // The base-URL tests stub VITE_API_BASE_URL; unstub so it never leaks into a
-  // later test that expects the default (relative) href.
+  // later test that expects the default relative API path.
   vi.unstubAllEnvs();
 });
 
@@ -100,6 +100,13 @@ const jsonResponse = (body: unknown, status = 200) => {
   });
 };
 
+const blobResponse = (body = "export bytes") => {
+  return new Response(body, {
+    status: 200,
+    headers: { "Content-Type": "application/octet-stream" },
+  });
+};
+
 const urlOf = (input: unknown): string => {
   if (typeof input === "string") return input;
   if (input instanceof URL) return input.toString();
@@ -149,13 +156,13 @@ describe("ExportsView wired to the exports endpoint", () => {
         screen.getByText(/No export jobs yet/i),
       ).toBeInTheDocument(),
     );
-    // No download links in the empty state.
+    // No download actions in the empty state.
     expect(
-      screen.queryByRole("link", { name: /download/i }),
+      screen.queryByRole("button", { name: /^(download|generate) (xlsx|pdf|pptx|csv)$/i }),
     ).not.toBeInTheDocument();
   });
 
-  it("renders a populated list with a COMPLETED job and a download link to the proxied binary path", async () => {
+  it("renders a populated list with a COMPLETED job and an authenticated download action", async () => {
     fetchMock().mockResolvedValue(jsonResponse(POPULATED_LIST));
     renderExportsView();
 
@@ -165,40 +172,62 @@ describe("ExportsView wired to the exports endpoint", () => {
     expect(screen.getByText("COMPLETED")).toBeInTheDocument();
     expect(screen.getByText("company · company-a")).toBeInTheDocument();
 
-    const link = screen.getByRole("link", { name: /download xlsx/i });
-    expect(link).toHaveAttribute(
-      "href",
-      "/exports/11111111-1111-1111-1111-111111111111/finance-workbook.xlsx",
-    );
-    expect(link).toHaveAttribute("download");
+    const button = screen.getByRole("button", { name: /download xlsx/i });
+    expect(button).toBeEnabled();
   });
 
-  it("keeps the download href relative when VITE_API_BASE_URL is unset", async () => {
-    // Explicitly empty base: the href must stay byte-identical to the
-    // same-origin (proxied) relative path so the dev proxy injects the headers.
+  it("fetches the relative download route through the shared client with the tenant header", async () => {
+    const createObjectURL = vi.fn(() => "blob:export-relative");
+    const revokeObjectURL = vi.fn();
+    vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => undefined);
+    vi.stubGlobal("URL", { ...URL, createObjectURL, revokeObjectURL });
     vi.stubEnv("VITE_API_BASE_URL", "");
-    fetchMock().mockResolvedValue(jsonResponse(POPULATED_LIST));
+    fetchMock().mockImplementation((input: unknown) =>
+      urlOf(input).includes("finance-workbook.xlsx")
+        ? Promise.resolve(blobResponse())
+        : Promise.resolve(jsonResponse(POPULATED_LIST)),
+    );
     renderExportsView();
 
-    const link = await screen.findByRole("link", { name: /download xlsx/i });
-    expect(link).toHaveAttribute(
-      "href",
+    fireEvent.click(await screen.findByRole("button", { name: /download xlsx/i }));
+    await waitFor(() => expect(createObjectURL).toHaveBeenCalledTimes(1));
+    const binaryCall = fetchMock().mock.calls.find(([input]) =>
+      urlOf(input).includes("finance-workbook.xlsx"),
+    );
+    expect(binaryCall).toBeDefined();
+    expect(urlOf(binaryCall?.[0])).toBe(
       "/exports/11111111-1111-1111-1111-111111111111/finance-workbook.xlsx",
     );
+    const headers = new Headers((binaryCall?.[1] as RequestInit).headers);
+    expect(headers.get("X-UMS-Tenant")).toBe("ums");
+    expect(revokeObjectURL).toHaveBeenCalledWith("blob:export-relative");
   });
 
-  it("targets the configured API origin in the download href when VITE_API_BASE_URL is set", async () => {
-    // With a separate API origin, the binary anchor must point at THAT origin —
-    // not the frontend origin — matching the base-URL logic the JSON client uses.
+  it("fetches direct-origin downloads with shared-client headers and revokes the object URL", async () => {
+    const createObjectURL = vi.fn(() => "blob:export-direct");
+    const revokeObjectURL = vi.fn();
+    vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => undefined);
+    vi.stubGlobal("URL", { ...URL, createObjectURL, revokeObjectURL });
     vi.stubEnv("VITE_API_BASE_URL", "https://api.example.com/");
-    fetchMock().mockResolvedValue(jsonResponse(POPULATED_LIST));
+    fetchMock().mockImplementation((input: unknown) =>
+      urlOf(input).includes("finance-workbook.xlsx")
+        ? Promise.resolve(blobResponse())
+        : Promise.resolve(jsonResponse(POPULATED_LIST)),
+    );
     renderExportsView();
 
-    const link = await screen.findByRole("link", { name: /download xlsx/i });
-    expect(link).toHaveAttribute(
-      "href",
+    fireEvent.click(await screen.findByRole("button", { name: /download xlsx/i }));
+    await waitFor(() => expect(createObjectURL).toHaveBeenCalledTimes(1));
+    const binaryCall = fetchMock().mock.calls.find(([input]) =>
+      urlOf(input).includes("finance-workbook.xlsx"),
+    );
+    expect(binaryCall).toBeDefined();
+    expect(urlOf(binaryCall?.[0])).toBe(
       "https://api.example.com/exports/11111111-1111-1111-1111-111111111111/finance-workbook.xlsx",
     );
+    const headers = new Headers((binaryCall?.[1] as RequestInit).headers);
+    expect(headers.get("X-UMS-Tenant")).toBe("ums");
+    expect(revokeObjectURL).toHaveBeenCalledWith("blob:export-direct");
   });
 
   it("renders no mock Export Guardrails panel", async () => {
@@ -233,7 +262,7 @@ describe("ExportsView wired to the exports endpoint", () => {
     ).not.toBeInTheDocument();
   });
 
-  it("does NOT fetch the binary through the api client (download is a plain anchor only)", async () => {
+  it("does not fetch a binary route before the operator activates its download action", async () => {
     fetchMock().mockResolvedValue(jsonResponse(POPULATED_LIST));
     renderExportsView();
 
@@ -309,7 +338,7 @@ describe("ExportsView wired to the exports endpoint", () => {
     expect(screen.getByRole("button", { name: /^generate$/i })).toBeEnabled();
   });
 
-  it("maps a 403 from the list to a no-permission message", async () => {
+  it("maps a 403 from the list to export-specific no-permission copy", async () => {
     fetchMock().mockResolvedValue(
       jsonResponse({ detail: "Missing permission: exports.analytics" }, 403),
     );
@@ -318,6 +347,10 @@ describe("ExportsView wired to the exports endpoint", () => {
     await waitFor(() =>
       expect(screen.getByText("No permission")).toBeInTheDocument(),
     );
+    expect(
+      screen.getByText("Your role cannot view export jobs."),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/net revenue/i)).not.toBeInTheDocument();
     expect(screen.getByRole("alert")).toBeInTheDocument();
   });
 
@@ -345,7 +378,7 @@ describe("ExportsView wired to the exports endpoint", () => {
     );
   });
 
-  it("exposes a Generate link for a QUEUED finance job (download routes generate on demand)", async () => {
+  it("exposes a Generate action for a QUEUED finance job (download routes generate on demand)", async () => {
     fetchMock().mockResolvedValue(
       jsonResponse({
         items: [QUEUED_FINANCE_JOB],
@@ -354,15 +387,12 @@ describe("ExportsView wired to the exports endpoint", () => {
     );
     renderExportsView();
 
-    const link = await screen.findByRole("link", { name: /generate xlsx/i });
-    expect(link).toHaveAttribute(
-      "href",
-      "/exports/22222222-2222-2222-2222-222222222222/finance-workbook.xlsx",
-    );
-    expect(link).toHaveAttribute("download");
+    expect(
+      await screen.findByRole("button", { name: /generate xlsx/i }),
+    ).toBeEnabled();
   });
 
-  it("does not expose a download link for CANCELLED or FAILED jobs", async () => {
+  it("does not expose a download action for CANCELLED or FAILED jobs", async () => {
     fetchMock().mockResolvedValue(
       jsonResponse({
         items: [CANCELLED_JOB, FAILED_JOB],
@@ -376,11 +406,11 @@ describe("ExportsView wired to the exports endpoint", () => {
     );
     expect(screen.getByText("Not ready")).toBeInTheDocument();
     expect(
-      screen.queryByRole("link", { name: /download|generate/i }),
+      screen.queryByRole("button", { name: /^(download|generate) (xlsx|pdf|pptx|csv)$/i }),
     ).not.toBeInTheDocument();
   });
 
-  it("exposes a Generate CSV link for a queued analytics CSV job", async () => {
+  it("exposes a Generate CSV action for a queued analytics CSV job", async () => {
     fetchMock().mockResolvedValue(
       jsonResponse({
         items: [CSV_JOB],
@@ -392,15 +422,10 @@ describe("ExportsView wired to the exports endpoint", () => {
     await waitFor(() =>
       expect(screen.getByText("ANALYTICS_SUMMARY_CSV")).toBeInTheDocument(),
     );
-    const link = screen.getByRole("link", { name: /generate csv/i });
-    expect(link).toHaveAttribute(
-      "href",
-      "/exports/55555555-5555-5555-5555-555555555555/analytics-summary.csv",
-    );
-    expect(link).toHaveAttribute("download");
+    expect(screen.getByRole("button", { name: /generate csv/i })).toBeEnabled();
   });
 
-  it("hides analytics CSV download links when revenue visibility is withheld", async () => {
+  it("hides analytics CSV download actions when revenue visibility is withheld", async () => {
     fetchMock().mockResolvedValue(
       jsonResponse({
         items: [CSV_JOB],
@@ -417,7 +442,7 @@ describe("ExportsView wired to the exports endpoint", () => {
       expect(screen.getByText("ANALYTICS_SUMMARY_CSV")).toBeInTheDocument(),
     );
     expect(
-      screen.queryByRole("link", { name: /generate csv/i }),
+      screen.queryByRole("button", { name: /generate csv/i }),
     ).not.toBeInTheDocument();
     expect(screen.getByText("Not ready")).toBeInTheDocument();
   });

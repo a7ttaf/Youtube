@@ -32,9 +32,9 @@ export class ApiError extends Error {
  * An already-absolute http(s) URL is returned untouched. Otherwise the path is
  * prefixed with VITE_API_BASE_URL (trailing slashes stripped); when no base is
  * configured this returns the original relative path unchanged, so same-origin
- * deployments keep byte-identical relative URLs. Exported so non-JSON surfaces
- * (e.g. binary download anchors) can target the same API origin the JSON client
- * uses instead of hard-coding a relative href against the frontend origin.
+ * deployments keep byte-identical relative URLs. Exported so non-JSON callers
+ * (e.g. binary download flows) can target the same API origin as JSON requests
+ * instead of hard-coding a frontend-relative URL.
  */
 export const resolveUrl = (path: string): string => {
   if (/^https?:\/\//i.test(path)) return path;
@@ -284,10 +284,12 @@ export const useApiClient = () => {
      *   path in the client, so the header injection and the non-2xx throw are
      *   what keep a cross-tenant or unauthorized artifact from being handed
      *   back. Read-only: no finance math, no mutation.
-     * Connections: AuditLogPanelHeader.tsx (sole caller), buildHeaders +
-     *   ApiError (shared header/failure boundary).
+     * Connections: AuditLogPanelHeader.tsx + ExportsView.tsx (Blob callers),
+     *   buildHeaders + ApiError (shared header/failure boundary).
      *   - File: frontend/src/components/srcc/views/AuditLogPanelHeader.tsx ->
-     *     sole caller; saves the CSV blob and reads the truncation header.
+     *     saves the CSV blob and reads the truncation header.
+     *   - File: frontend/src/components/srcc/views/ExportsView.tsx -> saves
+     *     generated export artifacts through a temporary object URL.
      *   - File: frontend/src/lib/api/client.ts -> buildHeaders supplies the
      *     tenant/auth headers; ApiError is the shared failure boundary.
      */

@@ -1,6 +1,6 @@
 import { useState } from "react";
 
-import { ApiError, resolveUrl } from "@/lib/api/client";
+import { ApiError, useApiClient } from "@/lib/api/client";
 import type {
   ExportJob,
   ExportRequestBody,
@@ -23,24 +23,22 @@ import { describeError } from "./CommandView";
 // Purpose: The REAL-data Exports screen, extracted from AppShell. The operator
 //   fills a request form (report type + scope + month + currency + reason),
 //   "Generate" POSTs to /exports (creating a QUEUED job + audit event), and the
-//   jobs table reloads from GET /exports. Each COMPLETED job exposes a DOWNLOAD
-//   link — a plain browser anchor whose href is resolved against the same API
-//   origin the JSON client uses (resolveUrl): relative (proxied) when no base is
-//   configured so the Vite dev proxy injects the trusted-gateway + X-UMS-Tenant
-//   headers, or the configured VITE_API_BASE_URL origin otherwise — because the
-//   JSON-strict useApiClient cannot fetch binary. Loading / error / 403 states
-//   mirror CommandView and TraceView. The mock Export Guardrails side panel was
+//   jobs table reloads from GET /exports. Each QUEUED or COMPLETED job exposes a
+//   download action that uses the shared API client's Blob path, so tenant/auth
+//   headers are present even when VITE_API_BASE_URL points at a separate origin;
+//   the temporary object URL is revoked after the browser save. Loading / error /
+//   403 states mirror CommandView and TraceView. The mock Export Guardrails side panel was
 //   DELETED in P1.4: its three rows carried fabricated On/Open/Blocked statuses
 //   that no endpoint reports, and the exports API exposes no guardrail state to
 //   derive them from — the per-job status column is the honest signal.
 // Database/ORM: None (frontend) — consumes GET /exports (list), POST /exports
-//   (create, server-side insert + audit), and links to the binary download
-//   routes; downloads are served by the backend, never fetched client-side.
+//   (create, server-side insert + audit), and the shared client's Blob reads of
+//   binary download routes; downloads are served by the backend.
 // Standards: No client-side export authorization is invented — the backend gate
 //   (EXPORT_REVENUE/ANALYTICS_REPORT + VIEW_* @scope, plus VIEW_FINALIZED_PAYMENTS
 //   @finance_month for finance exports) is authoritative; a 403 surfaces as
 //   no-permission copy. The browser never holds the gateway secret; downloads
-//   ride the same proxied, header-injected path as every other call.
+//   ride the same client header path as every other call.
 // Blast Radius: Export create (write path) + artifact download — both via the
 //   backend's own guarded, audited routes only. No source-of-truth finance
 //   number is computed or mutated client-side.
@@ -89,6 +87,7 @@ const DOWNLOAD_ROUTES: Partial<Record<ExportType, DownloadRoute>> = {
   },
 };
 
+/** Return whether the export type has a known binary download route. */
 const hasDownloadRoute = (
   exportType: string,
 ): exportType is ExportType =>
@@ -139,6 +138,7 @@ const SCOPE_TYPE_OPTIONS: Array<{ value: ExportScopeType; label: string }> = [
   { value: "group", label: "Group" },
 ];
 
+/** Return whether the viewer holds the capability required by this report type. */
 const hasReportCapability = (
   option: ReportTypeOption,
   permissions: ReportTypePermissions,
@@ -148,6 +148,7 @@ const hasReportCapability = (
     : permissions.canExportFinance;
 };
 
+/** Return whether the viewer may create a report with its revenue visibility requirement. */
 const hasCreateRevenueVisibility = (
   option: ReportTypeOption,
   permissions: ReportTypePermissions,
@@ -155,6 +156,7 @@ const hasCreateRevenueVisibility = (
   return !option.requiresRevenueVisibility || permissions.canViewRevenue;
 };
 
+/** Return whether a report type may be offered by the create form. */
 const canOfferReportType = (
   option: ReportTypeOption,
   permissions: ReportTypePermissions,
@@ -211,23 +213,20 @@ const effectiveReportType = (
 //   Only one route is valid per type (the backend 422s a mismatched type). The
 //   action verb (Download vs Generate) is derived from job status by the caller;
 //   this returns the route and the format suffix only.
-// Standards: The href is resolved through the SAME base-URL logic the JSON
-//   client uses (resolveUrl), so when VITE_API_BASE_URL points at a separate API
-//   origin the download anchor targets that origin instead of the frontend's.
-//   With no base configured the href stays relative (byte-identical to before),
-//   so the Vite dev proxy still injects the trusted-gateway + X-UMS-Tenant
-//   headers and a plain <a download> works without the browser ever holding the
-//   gateway secret. Never fetched through useApiClient (JSON-strict; cannot read
-//   binary).
+// Standards: The path is resolved through the SAME base-URL logic the JSON
+//   client uses (resolveUrl inside useApiClient), so when VITE_API_BASE_URL
+//   points at a separate API origin, direct-origin downloads receive the same
+//   tenant/auth headers as JSON requests. The Blob path is separate from the
+//   JSON parser because these routes return binary content.
 // ============================================================================
 /**
- * Returns the binary download route (resolved against the configured API origin)
- * and artifact format for a job, or null if the type has no GET route.
+ * Returns the API-relative binary download route and artifact format for a job,
+ * or null if the type has no GET route or its revenue gate is absent.
  */
 const downloadFor = (
   job: ExportJob,
   canViewRevenue: boolean,
-): { href: string; format: string } | null => {
+): { path: string; format: string } | null => {
   const route = hasDownloadRoute(job.export_type)
     ? DOWNLOAD_ROUTES[job.export_type]
     : null;
@@ -237,11 +236,26 @@ const downloadFor = (
     return null;
   }
   const id = encodeURIComponent(job.id);
-  return { href: resolveUrl(route.path(id)), format: route.format };
+  return { path: route.path(id), format: route.format };
+};
+
+/** Save a fetched export Blob through a temporary object URL and always revoke it. */
+const saveBlobAsFile = (blob: Blob, filename: string): void => {
+  const objectUrl = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  try {
+    anchor.href = objectUrl;
+    anchor.download = filename;
+    document.body.appendChild(anchor);
+    anchor.click();
+  } finally {
+    anchor.remove();
+    URL.revokeObjectURL(objectUrl);
+  }
 };
 
 // ============================================================================
-// Purpose: The action verb for a downloadable job's link. A QUEUED job triggers
+// Purpose: The action verb for a downloadable job's action. A QUEUED job triggers
 //   server-side generation on first click; a COMPLETED job serves cached bytes.
 // ============================================================================
 /** Returns "Generate" for QUEUED jobs (generate-on-demand) and "Download" otherwise. */
@@ -522,7 +536,10 @@ const RequestExportForm = ({
 
 /** Inline alert banner shown when an export request POST fails. */
 const RequestError = ({ error }: { error: ApiError | Error }) => {
-  const { title, detail } = describeError(error);
+  const { title, detail } = describeError(
+    error,
+    "Your role cannot create this export.",
+  );
   return (
     <div className="permission-band" role="alert" style={{ margin: 13 }}>
       <Dot tone="red" />
@@ -567,9 +584,9 @@ const ExportJobsTableHead = () => {
 };
 
 /**
- * The download cell for a job: a link (Generate for QUEUED, Download for
- * COMPLETED) when the type has a route, otherwise a failure reason or
- * not-ready note.
+ * The download cell for a job: an authenticated Blob action (Generate for
+ * QUEUED, Download for COMPLETED) when the type has a route, otherwise a
+ * failure reason or not-ready note.
  */
 const ExportDownloadCell = ({
   job,
@@ -578,18 +595,49 @@ const ExportDownloadCell = ({
   job: ExportJob;
   canViewRevenue: boolean;
 }) => {
+  const client = useApiClient();
+  const [busy, setBusy] = useState(false);
+  const [errorDetail, setErrorDetail] = useState<string | null>(null);
   const download = downloadFor(job, canViewRevenue);
   if (isDownloadable(job) && download) {
-    // Plain anchor: the href is resolved against the configured API origin
-    // (resolveUrl). When no base is set it stays relative so the dev proxy
-    // injects the trusted-gateway + X-UMS-Tenant headers; with VITE_API_BASE_URL
-    // it targets that API origin. NOT fetched via useApiClient (which is
-    // JSON-strict and cannot read binary). A QUEUED job triggers server-side
-    // generation on the first click.
+    /** Fetch and save one export artifact while preventing concurrent clicks. */
+    const handleDownload = async (): Promise<void> => {
+      if (busy) return;
+      setBusy(true);
+      setErrorDetail(null);
+      try {
+        const { blob } = await client.getBlob(download.path);
+        saveBlobAsFile(
+          blob,
+          job.artifact_filename ?? `export-${job.id}.${download.format.toLowerCase()}`,
+        );
+      } catch (caught) {
+        const error = caught instanceof Error ? caught : new Error("Download failed");
+        setErrorDetail(
+          describeError(error, "Your role cannot download this export.").detail,
+        );
+      } finally {
+        setBusy(false);
+      }
+    };
     return (
-      <a className="mini-button" href={download.href} download>
-        {`${downloadVerb(job)} ${download.format}`}
-      </a>
+      <>
+        <button
+          className="mini-button"
+          type="button"
+          disabled={busy}
+          onClick={() => void handleDownload()}
+        >
+          {busy
+            ? `Downloading ${download.format}`
+            : `${downloadVerb(job)} ${download.format}`}
+        </button>
+        {errorDetail ? (
+          <span className="form-error" role="alert">
+            {errorDetail}
+          </span>
+        ) : null}
+      </>
     );
   }
   return (
@@ -639,7 +687,10 @@ const ExportJobsTableBody = ({
   canViewRevenue: boolean;
 }) => {
   if (error) {
-    const { title, detail } = describeError(error);
+    const { title, detail } = describeError(
+      error,
+      "Your role cannot view export jobs.",
+    );
     return (
       <div className="table-wrap" role="alert">
         <div style={{ padding: 16 }}>

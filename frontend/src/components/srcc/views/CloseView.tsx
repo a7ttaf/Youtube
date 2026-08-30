@@ -651,7 +651,10 @@ const CloseStatusSummary = ({
   if (mode === "error") {
     // closeSummaryMode's contract: "error" is only reachable when error is
     // non-null, but a string mode cannot narrow the type — assert it here.
-    const { title, detail } = describeError(error as ApiError | Error);
+    const { title, detail } = describeError(
+      error as ApiError | Error,
+      "Your role cannot view month-close status for this month.",
+    );
     return (
       <div className="view-summary" aria-label="Month close summary" role="alert">
         <article className="summary-tile">
@@ -698,7 +701,10 @@ const ReadinessChecklist = ({
   error: ApiError | Error | null;
 }) => {
   if (error) {
-    const { title, detail } = describeError(error);
+    const { title, detail } = describeError(
+      error,
+      "Your role cannot view month-close readiness for this month.",
+    );
     return (
       <div className="table-wrap" role="alert">
         <div style={{ padding: 16 }}>

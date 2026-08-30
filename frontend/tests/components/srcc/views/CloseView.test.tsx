@@ -236,6 +236,13 @@ describe("CloseView wired to finance-close", () => {
     await waitFor(() =>
       expect(screen.getAllByText("No permission").length).toBeGreaterThan(0),
     );
+    expect(
+      screen.getByText("Your role cannot view month-close status for this month."),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText("Your role cannot view month-close readiness for this month."),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/net revenue/i)).not.toBeInTheDocument();
   });
 
   it("renders the honest not-started state when the month has no close row (404)", async () => {    // The rolling default opens on the CURRENT calendar month, which has no
