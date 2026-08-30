@@ -124,23 +124,30 @@ decomposes the number we already trust, no drift). No writes, no UMS changes.
 
 ### U2 — Ingest the US slice (10–16h) — **blocked until normalization fence**
 
-The PR227 contract keeps country evidence on the existing allowlisted
-`source_system="youtube_analytics"`; do not invent a second source-system value.
-The parser owns the dimension shape by emitting `raw_payload.dimensions` with a
-`country` key (alongside `channel`). Before `_source_row_buckets` groups rows, the
-normalizer detects that exact parser-owned shape, appends
-`SkippedSourceRow(..., SkipReason.NON_PROJECTING_EVIDENCE)` to `result.skipped`, and
-does not add the row to any canonical bucket. The existing `youtube_analytics` rows
-without a country key (including worldwide rows) remain in the normal bucket.
+**Required contract for pending PR #227:** U2 remains **blocked** until the exact
+#227 head implements and tests this behavior. This is a target contract, not a
+claim that the currently pushed #227 head already satisfies it; do not treat the
+old separate-source implementation as valid.
 
-Country-dimensional rows remain persisted in the source-row evidence table; the
-explicit `NON_PROJECTING_EVIDENCE` skip reaches the normal `ROWS_SKIPPED` audit
-summary. No new source-system allowlist, migration, or key namespace is required.
-Any future evidence discriminator would need its full migration, parser/source
-allowlist, source-row-key, and audit-contract changes before it could be proposed.
-The existing channel-month canonical lane is untouched.
+The cleanup must keep country evidence on the existing allowlisted
+`source_system="youtube_analytics"`; it must not invent a second source-system
+value. The parser must own the dimension shape by emitting
+`raw_payload.dimensions` with a `country` key (alongside `channel`). Before
+`_source_row_buckets` groups rows, the normalizer must detect that exact
+parser-owned shape, append
+`SkippedSourceRow(..., SkipReason.NON_PROJECTING_EVIDENCE)` to `result.skipped`,
+and not add the row to any canonical bucket. Existing `youtube_analytics` rows
+without a country key (including worldwide rows) must remain in the normal bucket.
+
+Country-dimensional rows must remain persisted in the source-row evidence table;
+the explicit `NON_PROJECTING_EVIDENCE` skip must reach the normal `ROWS_SKIPPED`
+audit summary. This contract requires no new source-system allowlist, migration,
+or key namespace. Any future evidence discriminator would need its full migration,
+parser/source allowlist, source-row-key, and audit-contract changes before it could
+be proposed. The existing channel-month canonical lane remains untouched.
 
 **Acceptance criteria (U2):**
+- [ ] Exact PR #227 head is pushed and independently verified against this contract; U2 stays blocked until then
 - [ ] Parser emits country rows with `source_system="youtube_analytics"` and parser-owned `raw_payload.dimensions.country`
 - [ ] Country rows persist as evidence with distinct keys (F5), then are skipped with `NON_PROJECTING_EVIDENCE`
 - [ ] `ROWS_SKIPPED` audit telemetry includes the explicit non-projecting reason
