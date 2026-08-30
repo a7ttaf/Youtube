@@ -26,6 +26,13 @@ DATABASE_URL_ENV = "UMS_DATABASE_URL"
 TRUSTED_GATEWAY_TOKEN_ENV = "UMS_TRUSTED_GATEWAY_TOKEN"
 AUTHZ_SOURCE_ENV = "UMS_AUTHZ_SOURCE"
 GOOGLE_CONNECTOR_SERVICE_ACTOR_ID_ENV = "UMS_GOOGLE_CONNECTOR_SERVICE_ACTOR_ID"
+# Well-known placeholder shipped UNCOMMENTED in the tracked .env.example.
+# Parsed here only so every consumer imports one canonical spelling;
+# connectors/google/audit.py::build_connector_service_principal rejects it
+# at use time — a `cp .env.example .env` deployment must fail closed with a
+# named placeholder rather than attribute connector audit rows to a UUID
+# published in a public template.
+GOOGLE_CONNECTOR_SERVICE_ACTOR_PLACEHOLDER_ID = "00000000-0000-0000-0000-0000000000bb"
 CONNECTOR_JOB_EXECUTOR_ENABLED_ENV = "UMS_CONNECTOR_JOB_EXECUTOR_ENABLED"
 CONNECTOR_JOB_MAX_WORKERS_ENV = "UMS_CONNECTOR_JOB_MAX_WORKERS"
 CONNECTOR_JOB_STALE_RUNNING_HOURS_ENV = "UMS_CONNECTOR_JOB_STALE_RUNNING_HOURS"

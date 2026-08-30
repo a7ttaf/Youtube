@@ -113,55 +113,46 @@ x-app-env: &app-env
   # stays the single source of truth for what each default is, so this list
   # cannot drift out of sync with it.
   #
-  # UMS_GOOGLE_CONNECTOR_SERVICE_ACTOR_ID is deliberately NOT in this list.
-  # It belongs here on the merits — it is a settings.py variable like the rest
-  # — and it was added here once, but forwarding it right now silently breaks
-  # a fail-closed path, so it is held back until one of the two fixes below
-  # lands. Do not re-add it before then.
-  #
-  # Why: `connectors/google/audit.py`'s build_connector_service_principal()
-  # refuses to build a service principal when the variable is unset, so every
-  # connector-emitted audit row is either attributed to a real provisioned
-  # actor or the run does not happen. But it only checks for *unset* — any
-  # syntactically valid UUID is accepted. The tracked `.env.example` ships
+  # UMS_GOOGLE_CONNECTOR_SERVICE_ACTOR_ID (below) is forwarded like the rest,
+  # but it earned its explanation. It was held back for a while because
+  # forwarding it silently broke a fail-closed path: the tracked
+  # `.env.example` ships
   #   UMS_GOOGLE_CONNECTOR_SERVICE_ACTOR_ID=00000000-0000-0000-0000-0000000000bb
-  # UNCOMMENTED, and README.md tells the operator to `cp .env.example .env`,
-  # which compose then reads automatically. Forwarding the variable therefore
-  # converts "refuse to run" into "run, and attribute the audit trail to a
-  # placeholder UUID published in a public template" — for every operator who
+  # UNCOMMENTED, README.md tells the operator to `cp .env.example .env`, and
+  # build_connector_service_principal() only checked for *unset* — any
+  # syntactically valid UUID was accepted. Forwarding the variable would have
+  # converted "refuse to run" into "run, and attribute the audit trail to a
+  # placeholder UUID published in a public template" for every operator who
   # followed the README, with no error and nothing to notice. The audit trail
   # is the record of who touched real revenue data; a shared well-known id in
   # that column is worse than no connector runs at all.
   #
-  # Re-add this line once EITHER holds:
-  #   1. the backend rejects the well-known placeholder value explicitly (the
-  #      durable fix — it also covers `docker run --env-file`, a bare uvicorn,
-  #      and any future template), or
-  #   2. `.env.example` ships the placeholder commented out (P0.3).
+  # That fail-open hole is now closed at the source:
+  # connectors/google/audit.py::build_connector_service_principal rejects the
+  # placeholder value itself, with a ValueError naming it. This covers compose
+  # AND `docker run --env-file`, a bare uvicorn, and any future template —
+  # anywhere the placeholder reaches the builder, the run fails closed as a
+  # typed ConnectorServicePrincipalUnavailableError (a job_failed_before_start
+  # audit row, never a mis-attributed one).
   #
-  # Be clear about the cost in the meantime: with this line absent, connector
-  # runs inside the long-running `app` service refuse, so Google connector
-  # ingestion is off until one of those two lands. That is the intended
-  # trade — a refusal is recoverable, a mis-attributed audit trail is not.
-  # An operator who needs it before then adds an untracked
-  # docker-compose.override.yml (compose merges it automatically):
-  #   services:
-  #     app:
-  #       environment:
-  #         UMS_GOOGLE_CONNECTOR_SERVICE_ACTOR_ID: "<their own provisioned uuid>"
-  # which is deliberately an explicit, per-box act rather than something a
-  # `cp .env.example .env` can do by accident. Verified against this file with
-  # no `-f` flags: compose picks the override up by filename alone and the
-  # value lands in `app`'s environment. It lands ONLY there — `app-dev` needs
-  # its own entry under the same `services:` key if you run the dev profile.
+  # Consequence for the operator: setting the schedule flags with the
+  # placeholder still in `.env` boots fine but every connector job refuses —
+  # check `docker compose logs app` for the ValueError naming the
+  # placeholder. Setting a REAL provisioned actor
+  # (Docs/19_GOOGLE_CREDENTIAL_SETUP_SMOKE.md "Live-run gate") is what turns
+  # scheduled mode on. Boot-time gating is unchanged: enabling
+  # UMS_GROUP_SYNC_SCHEDULE_ENABLED without the executor, or with no actor
+  # value at all, still fails create_app and restart-loops under
+  # `restart: unless-stopped` — same failure mode as a malformed value in any
+  # pass-through below.
   #
-  # Operator-facing copies of this live in README.md ("Environment variables")
-  # and Docs/19_GOOGLE_CREDENTIAL_SETUP_SMOKE.md ("Supplying the service actor
-  # under docker compose"). Keep all three in step: a YAML comment is the last
-  # place someone debugging a refused connector run will look, so it must not
-  # be the only place this is written down.
+  # Operator-facing copies of the placeholder contract live in README.md
+  # ("Environment variables") and Docs/19_GOOGLE_CREDENTIAL_SETUP_SMOKE.md.
+  # Keep all three in step: a YAML comment is the last place someone
+  # debugging a refused connector run will look, so it must not be the only
+  # place this is written down.
   #
-  # ⚠️  BEFORE YOU SET ANY OF THE SIX BELOW: a malformed value takes the API
+  # ⚠️  BEFORE YOU SET ANY OF THE SEVEN BELOW: a malformed value takes the API
   #     down and keeps it down. These pass-throughs are what made these
   #     variables reachable from `.env` at all, and settings.py parses them
   #     while `create_app` is still running — `_load_int`, `_load_bool` and
@@ -227,6 +218,7 @@ x-app-env: &app-env
   #     decides what the app writes in the first place. Similar names,
   #     unrelated mechanisms, and only one of them is a disk-space control.
   UMS_CONNECTOR_JOB_EXECUTOR_ENABLED:
+  UMS_GOOGLE_CONNECTOR_SERVICE_ACTOR_ID:
   UMS_CONNECTOR_JOB_MAX_WORKERS:
   UMS_CONNECTOR_JOB_STALE_RUNNING_HOURS:
   UMS_GROUP_SYNC_SCHEDULE_ENABLED:
