@@ -9,8 +9,14 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { createServer as createViteServer, type ViteDevServer } from "vite";
+import {
+  createServer as createViteServer,
+  type ConfigEnv,
+  type UserConfig,
+  type ViteDevServer,
+} from "vite";
 
+import viteConfig from "../vite.config";
 import {
   TENANT_SCOPED_ROUTES,
   buildTenantScopedProxy,
@@ -115,10 +121,26 @@ const sendRequest = (
 describe("development gateway config", () => {
   it("activates only for the development serve command", () => {
     expect(shouldEnableDevGateway("serve", "development")).toBe(true);
+    expect(shouldEnableDevGateway("serve", "development", true)).toBe(false);
     expect(shouldEnableDevGateway("serve", "production")).toBe(false);
     expect(shouldEnableDevGateway("build", "development")).toBe(false);
     expect(resolveDevGatewayProxy("build", "production", {})).toBeUndefined();
     expect(resolveDevGatewayProxy("serve", "production", {})).toBeUndefined();
+    expect(resolveDevGatewayProxy("serve", "development", {}, true)).toBeUndefined();
+  });
+
+  it("keeps the actual default config proxy-free for development-mode preview", async () => {
+    if (typeof viteConfig !== "function") {
+      throw new Error("expected vite.config default export to be a config callback");
+    }
+    const previewEnv: ConfigEnv = {
+      command: "serve",
+      isPreview: true,
+      isSsrBuild: false,
+      mode: "development",
+    };
+    const resolved = (await viteConfig(previewEnv)) as UserConfig;
+    expect(resolved.server?.proxy).toBeUndefined();
   });
 
   it("fails closed before startup when the proxy token is blank", () => {

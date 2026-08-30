@@ -323,8 +323,9 @@ VITE_DEV_GATEWAY_SCOPE_TYPE=global
 VITE_DEV_GATEWAY_TENANT_SLUG=ums
 ```
 
-The proxy is active only for Vite's `serve` command in `development` mode; builds
-and production-mode preview servers receive no trusted-header proxy. It fails before
+The proxy is active only for Vite's development server; builds and **all preview
+servers** receive no trusted-header proxy, even `vite preview --mode development`.
+It fails before
 listening when `UMS_TRUSTED_GATEWAY_TOKEN` is blank. A non-global
 `VITE_DEV_GATEWAY_SCOPE_TYPE` also requires a non-blank
 `VITE_DEV_GATEWAY_SCOPE_ID`; global scope requires that id to be absent.

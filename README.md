@@ -210,7 +210,7 @@ There is no cluster secrets layer in this repository: no `deploy/` directory and
 Helm chart exist, and none ever has. If a clustered deployment is wanted, it has to be
 built first.
 
-**Frontend env-var safety:** Vite exposes every `VITE_*` variable to client code via `import.meta.env` at build time. The trusted-gateway secret therefore lives under the non-`VITE_*` `UMS_TRUSTED_GATEWAY_TOKEN` name only; the Vite dev proxy reads it in Node and never includes it in the browser bundle. The proxy starts only for `vite serve` in `development` mode, fails fast on a blank token or incomplete scope, and refuses a non-loopback backend unless its exact origin is explicitly trusted.
+**Frontend env-var safety:** Vite exposes every `VITE_*` variable to client code via `import.meta.env` at build time. The trusted-gateway secret therefore lives under the non-`VITE_*` `UMS_TRUSTED_GATEWAY_TOKEN` name only; the Vite dev proxy reads it in Node and never includes it in the browser bundle. The proxy starts only for the development server — never build or preview, including `vite preview --mode development` — fails fast on a blank token or incomplete scope, and refuses a non-loopback backend unless its exact origin is explicitly trusted.
 
 ---
 

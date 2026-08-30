@@ -1,5 +1,5 @@
 import path from "node:path";
-import { fileURLToPath, URL } from "node:url";
+import { fileURLToPath } from "node:url";
 
 import tailwindcss from "@tailwindcss/vite";
 import react from "@vitejs/plugin-react";
@@ -35,13 +35,14 @@ export {
 // without this, loadEnv resolved to frontend/.env and silently skipped the
 // repo-root .env where UMS_TRUSTED_GATEWAY_TOKEN and the VITE_DEV_* dev
 // defaults are documented, leaving the dev proxy 401-ing.
-const REPO_ROOT = path.resolve(
-  path.dirname(fileURLToPath(import.meta.url)),
-  "..",
-);
+const FRONTEND_ROOT = path.dirname(fileURLToPath(import.meta.url));
+const REPO_ROOT = path.resolve(FRONTEND_ROOT, "..");
 
-export const shouldEnableDevGateway = (command: string, mode: string): boolean =>
-  command === "serve" && mode === "development";
+export const shouldEnableDevGateway = (
+  command: string,
+  mode: string,
+  isPreview = false,
+): boolean => command === "serve" && mode === "development" && !isPreview;
 
 // ============================================================================
 // Purpose: Resolve the complete development proxy only for Vite's development
@@ -58,8 +59,9 @@ export const resolveDevGatewayProxy = (
   command: string,
   mode: string,
   env: Record<string, string>,
+  isPreview = false,
 ) => {
-  if (!shouldEnableDevGateway(command, mode)) {
+  if (!shouldEnableDevGateway(command, mode, isPreview)) {
     return undefined;
   }
   const trustedOrigins = parseTrustedBackendOrigins(
@@ -78,7 +80,7 @@ export const resolveDevGatewayProxy = (
   );
 };
 
-export default defineConfig(({ command, mode }) => {
+export default defineConfig(({ command, mode, isPreview }) => {
   // ============================================================================
   // Purpose: Load env from the repository root in Node only. VITE_-prefixed
   //          names are EXPOSED to the client bundle via import.meta.env, so
@@ -95,8 +97,8 @@ export default defineConfig(({ command, mode }) => {
   //   - File: frontend/devProxy.ts -> validates routes, target, origin, and headers.
   //   - File: .env.example -> documents the development gateway inputs.
   // ============================================================================
-  const devProxy = shouldEnableDevGateway(command, mode)
-    ? resolveDevGatewayProxy(command, mode, loadEnv(mode, REPO_ROOT, ""))
+  const devProxy = shouldEnableDevGateway(command, mode, isPreview)
+    ? resolveDevGatewayProxy(command, mode, loadEnv(mode, REPO_ROOT, ""), isPreview)
     : undefined;
 
   return {
@@ -104,7 +106,7 @@ export default defineConfig(({ command, mode }) => {
     envDir: REPO_ROOT,
     resolve: {
       alias: {
-        "@": fileURLToPath(new URL("./src", import.meta.url)),
+        "@": path.resolve(FRONTEND_ROOT, "src"),
       },
     },
     server: {
