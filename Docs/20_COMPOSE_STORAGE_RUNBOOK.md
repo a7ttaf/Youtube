@@ -560,3 +560,18 @@ uv run python scripts/compose_storage.py prepare --path $env:UMS_APP_DATA_HOST
 The command refuses non-empty unmarked directories. For an existing populated
 bind, first back it up and inspect it, then move the two known subdirectories
 into a newly prepared target. Do not hand-create or copy the marker.
+
+## Cross-PR integration warning
+
+PR 225 was authored against the pre-PR221 Compose and storage contract. Its
+current branch overlaps `.env.example`, `README.md`, and `docker-compose.yml`;
+the overlapping documentation still describes application artifact/blob files
+as ephemeral, omits this coordinated backup and recovery contract, and uses
+plain `docker compose up` lifecycle commands.
+
+Re-author PR 225 after PR 221 lands. Do not merge or cherry-pick its overlapping
+hunks as-is. The re-authored change must preserve the prepared host bind,
+wrapper-issued invocation receipt, Compose-only readiness entrypoint,
+`create_host_path: false`, and this coordinated database-plus-artifact recovery
+runbook. Re-run Compose rendering and the storage contract tests after the
+re-author.
