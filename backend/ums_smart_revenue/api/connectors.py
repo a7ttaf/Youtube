@@ -640,10 +640,14 @@ def _submitted_connector_job_response(
     user: UserPrincipal,
     payload: ConnectorJobRequest,
     superseded_run_id: str | None,
+    job_id: UUID,
 ) -> dict[str, object]:
     """Build the successful route response and matching audit details."""
     details: dict[str, object] = {
         "action": "job_submitted",
+        "job_kind": "pull",
+        "connector_key": payload.connector_key,
+        "account_id": payload.account_id,
         "report_month": payload.report_month,
         "dry_run": payload.dry_run,
     }
@@ -657,6 +661,7 @@ def _submitted_connector_job_response(
         account_id=payload.account_id,
         reason=payload.reason,
         details=details,
+        request_id=str(job_id),
     )
     return {
         "connector_key": payload.connector_key,
@@ -803,6 +808,7 @@ def request_connector_job(
         user=user,
         payload=payload,
         superseded_run_id=superseded_run_id,
+        job_id=reservation.job_id,
     )
 
     # FIX: defer the worker enqueue to AFTER the request session commits the
@@ -995,6 +1001,7 @@ def _audit_connector_change(
     account_id: str,
     reason: str,
     details: dict[str, object],
+    request_id: str | None = None,
 ):
     """Write and return a CONNECTOR_* audit record via the request-scoped sink."""
     return record_audit_event(
@@ -1006,6 +1013,7 @@ def _audit_connector_change(
         scope=AccessScope.connector(connector_key),
         reason=reason,
         details=details,
+        request_id=request_id,
     )
 
 
@@ -1272,6 +1280,7 @@ def _make_after_commit_handler(executor: ConnectorJobExecutor, reservation: _Slo
                     report_month=reservation.report_month,
                     error_class=type(exc).__name__,
                     actor_identity=reservation.actor_identity,
+                    job_id=reservation.job_id,
                 )
             except Exception:  # noqa: BLE001 — best-effort audit
                 logger.exception("Failed to persist activation-failure audit for reservation")

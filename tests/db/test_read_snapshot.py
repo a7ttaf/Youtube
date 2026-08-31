@@ -1,8 +1,8 @@
 # ============================================================================
 # Purpose: Dialect-contract pins for db.read_snapshot.begin_composed_read_snapshot
-#   — the non-Postgres branch must be a transparent no-op (SQLite serializes
-#   every lane through one shared StaticPool connection, so its reads are
-#   already snapshot-consistent within a transaction and the REPEATABLE READ
+#   — the non-Postgres branch must be a transparent no-op (SQLite reuses the
+#   request Session across lanes and serializes independent checkouts through
+#   one QueuePool slot, so its reads are already snapshot-consistent and the REPEATABLE READ
 #   token does not even exist for its dialect).
 # Database/ORM: Real SQLite sessions only; the Postgres-side behavior (begin
 #   REPEATABLE READ, reject active transactions, reset at checkin) is pinned

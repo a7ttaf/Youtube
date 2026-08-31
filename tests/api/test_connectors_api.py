@@ -133,6 +133,7 @@ class _FakeExecutor:
         self.submit_calls: list[dict] = []
         self.activate_calls: list[dict] = []
         self.cancel_calls: list[dict] = []
+        self.audit_failure_calls: list[dict] = []
 
     def has_active_job(self, **kwargs) -> bool:
         return self.active
@@ -152,12 +153,20 @@ class _FakeExecutor:
         self.cancel_calls.append({"reservation": reservation})
         return True
 
+    def audit_failed_before_start(self, **kwargs):
+        """Record the durable activation-failure handoff."""
+        self.audit_failure_calls.append(kwargs)
+        return True
+
 
 class _FakeReservation:
     """Marker object for the in-flight slot the executor will activate on commit."""
 
     def __init__(self, kwargs: dict) -> None:
         self.kwargs = kwargs
+        self.job_id = uuid4()
+        for name, value in kwargs.items():
+            setattr(self, name, value)
 
 
 def _set_service_actor_env() -> None:
@@ -428,6 +437,8 @@ def test_revenue_operations_admin_can_request_connector_job_and_audit(tmp_path):
     # Reserve-then-activate: the route held a slot during request handling
     # and the after_commit hook activated it (recorded by the fake).
     assert len(fake.activate_calls) == 1
+    reservation = fake.activate_calls[0]["reservation"]
+    assert audit_log.request_id == str(reservation.job_id)
     assert fake.cancel_calls == []
 
 
@@ -938,9 +949,7 @@ def test_request_connector_job_after_rollback_cancels_reservation(tmp_path, monk
     assert fake.activate_calls == []
 
 
-def test_request_connector_job_activate_failure_writes_bucket_a_audit(
-    tmp_path, monkeypatch
-) -> None:
+def test_request_connector_job_activate_failure_writes_bucket_a_audit(tmp_path) -> None:
     """If executor.activate() raises after the audit commits, a job_failed_before_start
     audit row is written.
 
@@ -964,21 +973,6 @@ def test_request_connector_job_activate_failure_writes_bucket_a_audit(
     fake = _ActivateFailExecutor(active=False)
     app = _enable_executor_app(database_url, fake)
 
-    # Wrap the real executor's _audit_failed_before_start on the instance
-    # so we can record its calls (and have it still write the real audit).
-    # _FakeExecutor doesn't ship with that method, so install a passthrough.
-
-    def _noop(*_args, **_kwargs):
-        return None
-
-    real_audit = _ActivateFailExecutor.__dict__.get("_audit_failed_before_start")
-    if real_audit is None:
-        # The fake's parent class doesn't define it; we just verify the
-        # code path tries to call it (the after_commit handler invokes
-        # ``executor._audit_failed_before_start``; the missing attribute
-        # is what we're protecting against, so we monkey-patch it onto
-        # the fake instance as a no-op to keep the handler from raising).
-        _ActivateFailExecutor._audit_failed_before_start = staticmethod(_noop)  # type: ignore[attr-defined]
     client = TestClient(app)
 
     response = client.post(
@@ -998,13 +992,9 @@ def test_request_connector_job_activate_failure_writes_bucket_a_audit(
     assert len(fake.activate_calls) == 1
     # The reservation was cancelled when activate failed.
     assert len(fake.cancel_calls) == 1
-    # Give the hook a moment to finish writing the audit. In the unit
-    # test environment the hook ran synchronously in after_commit, so
-    # the audit attempt has already been made. We assert the
-    # _audit_failed_before_start path was invoked (or attempted) by
-    # checking that the fake has the method installed; the real
-    # _audit_failed_before_start would persist a row in the DB.
-    assert hasattr(fake, "_audit_failed_before_start")
+    assert len(fake.audit_failure_calls) == 1
+    reservation = fake.activate_calls[0]["reservation"]
+    assert fake.audit_failure_calls[0]["job_id"] == reservation.job_id
 
 
 def test_request_connector_job_activate_runs_only_after_commit(tmp_path):

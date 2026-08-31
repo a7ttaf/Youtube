@@ -79,6 +79,14 @@ class _RecordedSubmission:
     tenant_id: UUID
     content_owner_id: str
     actor_identity: ConnectorJobActor
+    job_id: UUID
+    connector_key: str = "cms_group_sync"
+    report_month: str = "-"
+
+    @property
+    def account_id(self) -> str:
+        """Mirror the real reservation's account-id field."""
+        return self.content_owner_id
 
 
 class _RecordingExecutor:
@@ -96,6 +104,9 @@ class _RecordingExecutor:
         self.attempted: list[tuple[UUID, str]] = []
         self.submissions: list[_RecordedSubmission] = []
         self.activated: list[_RecordedSubmission] = []
+        self.persisted: list[_RecordedSubmission] = []
+        self.cancelled: list[_RecordedSubmission] = []
+        self.failure_audits: list[dict[str, object]] = []
 
     def submit_group_sync_if_absent(
         self,
@@ -112,6 +123,7 @@ class _RecordingExecutor:
             tenant_id=tenant_id,
             content_owner_id=content_owner_id,
             actor_identity=actor_identity,
+            job_id=uuid4(),
         )
         self.submissions.append(submission)
         return submission
@@ -120,6 +132,23 @@ class _RecordingExecutor:
         """Mirror ConnectorJobExecutor.activate's one-positional-arg signature."""
         self.activated.append(reservation)
         return reservation
+
+    def persist_submission_intent(
+        self, *, session: Session, reservation: _RecordedSubmission, reason: str
+    ) -> None:
+        """Record the scheduler's pre-activation durable-intent call."""
+        _ = session, reason
+        self.persisted.append(reservation)
+
+    def cancel_reservation(self, reservation: _RecordedSubmission) -> bool:
+        """Record rollback/activation cleanup."""
+        self.cancelled.append(reservation)
+        return True
+
+    def audit_failed_before_start(self, **kwargs: object) -> bool:
+        """Record an activation failure audit call."""
+        self.failure_audits.append(kwargs)
+        return True
 
 
 def _factory(tmp_path: Path, *, db_name: str = "scheduler.db") -> sessionmaker:
@@ -264,8 +293,10 @@ def test_tick_submits_exactly_active_youtube_analytics_credentials(tmp_path: Pat
 
     expected = {(TENANT_A, OWNER_A_ACTIVE), (TENANT_B, OWNER_B_ACTIVE)}
     submitted = {(s.tenant_id, s.content_owner_id) for s in fake.submissions}
+    persisted = {(s.tenant_id, s.content_owner_id) for s in fake.persisted}
     activated = {(s.tenant_id, s.content_owner_id) for s in fake.activated}
     assert submitted == expected
+    assert persisted == expected
     assert activated == expected
     for submission in fake.submissions:
         assert submission.actor_identity == EXPECTED_ACTOR
@@ -275,6 +306,54 @@ def test_tick_submits_exactly_active_youtube_analytics_credentials(tmp_path: Pat
     assert (TENANT_SUSPENDED, OWNER_SUSPENDED) not in fake.attempted
     assert (TENANT_A, OWNER_A_INACTIVE) not in fake.attempted
     assert (TENANT_A, OWNER_A_OTHER_CONNECTOR) not in fake.attempted
+
+
+def test_tick_cancels_reservation_when_durable_intent_write_fails(
+    tmp_path: Path,
+) -> None:
+    """An uncommitted intent never activates and its in-memory slot is released."""
+    factory = _seeded_factory(tmp_path)
+    fake = _RecordingExecutor()
+
+    def _persist_failure(
+        *, session: Session, reservation: _RecordedSubmission, reason: str
+    ) -> None:
+        """Fail before commit at the durable acceptance boundary."""
+        _ = session, reservation, reason
+        raise RuntimeError("audit intent unavailable")
+
+    fake.persist_submission_intent = _persist_failure  # type: ignore[method-assign]
+    scheduler = _scheduler(factory, fake)
+
+    scheduler.tick()
+
+    assert fake.submissions
+    assert fake.cancelled == fake.submissions
+    assert fake.activated == []
+    assert fake.failure_audits == []
+
+
+def test_tick_audits_committed_intent_when_activation_fails(tmp_path: Path) -> None:
+    """A committed intent gets an attributable failure edge if activation rejects it."""
+    factory = _seeded_factory(tmp_path)
+    fake = _RecordingExecutor()
+
+    def _activation_failure(_reservation: _RecordedSubmission) -> None:
+        """Reject activation after persist_submission_intent has succeeded."""
+        raise RuntimeError("executor stopped")
+
+    fake.activate = _activation_failure  # type: ignore[method-assign]
+    scheduler = _scheduler(factory, fake)
+
+    scheduler.tick()
+
+    assert fake.persisted == fake.submissions
+    assert fake.cancelled == fake.submissions
+    assert len(fake.failure_audits) == len(fake.submissions)
+    assert {audit["job_id"] for audit in fake.failure_audits} == {
+        submission.job_id for submission in fake.submissions
+    }
+    assert {audit["error_class"] for audit in fake.failure_audits} == {"RuntimeError"}
 
 
 # ---------------------------------------------------------------------------
@@ -421,10 +500,10 @@ def test_start_close_lifecycle_joins_promptly(tmp_path: Path) -> None:
     assert scheduler._thread is not None
     assert scheduler._thread.is_alive()
 
-    scheduler.close()
+    assert scheduler.close() is True
     assert scheduler._thread.is_alive() is False
 
-    scheduler.close()  # double-close is harmless
+    assert scheduler.close() is True  # double-close is harmless
 
 
 def test_close_without_start_is_harmless(tmp_path: Path) -> None:
@@ -432,7 +511,27 @@ def test_close_without_start_is_harmless(tmp_path: Path) -> None:
     factory = _factory(tmp_path)
     scheduler = _scheduler(factory, _RecordingExecutor())
 
-    scheduler.close()  # must not raise
+    assert scheduler.close() is True
+
+
+def test_start_failure_leaves_close_with_no_unstarted_thread(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Thread.start failure is preserved and close never joins an unstarted thread."""
+    factory = _factory(tmp_path)
+    scheduler = _scheduler(factory, _RecordingExecutor())
+
+    def _start_failure(_thread: threading.Thread) -> None:
+        """Reject thread startup at the exact publication boundary."""
+        raise RuntimeError("thread start failed")
+
+    monkeypatch.setattr(scheduler_module.threading.Thread, "start", _start_failure)
+
+    with pytest.raises(RuntimeError, match="thread start failed"):
+        scheduler.start()
+
+    assert scheduler._thread is None
+    assert scheduler.close() is True
 
 
 # ---------------------------------------------------------------------------
@@ -517,10 +616,10 @@ def test_close_warns_when_thread_outlives_join(
     monkeypatch.setattr(scheduler_module, "_CLOSE_JOIN_TIMEOUT_SECONDS", 0.01)
 
     with caplog.at_level(logging.WARNING, logger=scheduler_module.logger.name):
-        scheduler.close()
+        assert scheduler.close() is False
 
     gate.set()
-    zombie.join(timeout=1)
+    scheduler.wait_for_shutdown_completion()
     assert "still running" in caplog.text
     assert not zombie.is_alive()
 

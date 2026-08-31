@@ -22,9 +22,12 @@ from __future__ import annotations
 import os
 import threading
 
+import pytest
 from fastapi.testclient import TestClient
 
+import ums_smart_revenue.app as app_module
 from ums_smart_revenue.app import create_app
+from ums_smart_revenue.config.logging_config import LoggingConfiguration
 from ums_smart_revenue.config.settings import load_app_settings
 from ums_smart_revenue.connectors.runs.scheduler import GroupSyncScheduler
 
@@ -102,28 +105,33 @@ def test_schedule_enabled_builds_scheduler_and_closes_in_order(tmp_path) -> None
         # mirrors test_app_connector_executor.py's spy pattern.
         real_scheduler_close = scheduler.close
         real_executor_close = app.state.connector_job_executor.close
+        # This lifecycle-only scratch database is intentionally not migrated.
+        # Recovery against real tenants/audit_logs rows is covered directly in
+        # test_executor.py, so stub only that startup scan here.
+        setattr(
+            app.state.connector_job_executor,
+            "recover_abandoned_submission_intents",
+            lambda: 0,
+        )
 
-        def _spy_scheduler_close() -> None:
+        def _spy_scheduler_close() -> bool:
             """Record scheduler close order and delegate to the real close()."""
             close_order.append("scheduler")
-            real_scheduler_close()
+            return real_scheduler_close()
 
         def _spy_executor_close() -> bool:
             """Record executor close order and delegate to the real close()."""
             close_order.append("executor")
-            # close() now reports drain health; the lifespan skips the logging
-            # restore on a falsy return, so the spy must forward the real value
-            # or this test leaks the app's root handler into the whole suite.
+            # Preserve the real drain result so the lifespan also exercises its
+            # clean/unclean diagnostic branch.
             return real_executor_close()
 
         setattr(scheduler, "close", _spy_scheduler_close)
         setattr(app.state.connector_job_executor, "close", _spy_executor_close)
 
         with TestClient(app):
-            # The scheduler is started inside create_app (not deferred to the
-            # lifespan startup event, same precedent as the executor's own
-            # construction), so by the time lifespan startup has run the tick
-            # thread is already alive.
+            # Startup recovery runs before the scheduler begins ticking; by the
+            # time TestClient enters, the deferred thread must be alive.
             assert scheduler._thread is not None
             assert scheduler._thread.is_alive()
 
@@ -138,3 +146,190 @@ def test_no_scheduler_when_disabled(tmp_path) -> None:
     app = create_app(database_url=_sqlite_url(tmp_path))
     assert getattr(app.state, "group_sync_scheduler", None) is None
     assert not any(t.name == "ums-group-sync-scheduler" for t in threading.enumerate())
+
+
+def test_startup_recovers_durable_intents_before_scheduler_start(tmp_path) -> None:
+    """No scheduler tick can race the prior process's intent reconciliation."""
+    _clear_envs()
+    os.environ[_SCHEDULE_ENV] = "true"
+    os.environ[_EXECUTOR_ENV] = "true"
+    os.environ[_ACTOR_ENV] = _VALID_ACTOR_UUID
+    load_app_settings.cache_clear()
+    try:
+        app = create_app(database_url=_sqlite_url(tmp_path))
+        scheduler = app.state.group_sync_scheduler
+        executor = app.state.connector_job_executor
+        real_executor_close = executor.close
+        startup_order: list[str] = []
+
+        setattr(
+            executor,
+            "recover_abandoned_submission_intents",
+            lambda: startup_order.append("recover"),
+        )
+        setattr(scheduler, "start", lambda: startup_order.append("scheduler"))
+        setattr(scheduler, "close", lambda: True)
+        setattr(executor, "close", real_executor_close)
+
+        with TestClient(app):
+            assert startup_order == ["recover", "scheduler"]
+    finally:
+        _clear_envs()
+
+
+def test_scheduler_close_exception_still_closes_executor_and_restores_once(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A scheduler close error cannot skip executor close or double-release logging."""
+    _clear_envs()
+    os.environ[_SCHEDULE_ENV] = "true"
+    os.environ[_EXECUTOR_ENV] = "true"
+    os.environ[_ACTOR_ENV] = _VALID_ACTOR_UUID
+    load_app_settings.cache_clear()
+    try:
+        app = create_app(database_url=_sqlite_url(tmp_path))
+        scheduler = app.state.group_sync_scheduler
+        executor = app.state.connector_job_executor
+        real_scheduler_close = scheduler.close
+        real_executor_close = executor.close
+        real_restore = app_module.restore_logging
+        close_order: list[str] = []
+        restore_calls = {"count": 0}
+        restored = threading.Event()
+
+        setattr(executor, "recover_abandoned_submission_intents", lambda: 0)
+
+        def _raising_scheduler_close() -> bool:
+            """Model a post-stop close failure with no surviving thread."""
+            close_order.append("scheduler")
+            assert real_scheduler_close() is True
+            raise RuntimeError("scheduler close failed")
+
+        def _executor_close() -> bool:
+            """Prove executor teardown still runs after scheduler failure."""
+            close_order.append("executor")
+            return real_executor_close()
+
+        def _restore_once(configuration: LoggingConfiguration) -> None:
+            """Count and forward the one logging-lease release."""
+            restore_calls["count"] += 1
+            real_restore(configuration)
+            restored.set()
+
+        setattr(scheduler, "close", _raising_scheduler_close)
+        setattr(executor, "close", _executor_close)
+        monkeypatch.setattr(app_module, "restore_logging", _restore_once)
+
+        with pytest.raises(ExceptionGroup, match="background worker shutdown failed"):
+            with TestClient(app):
+                pass
+
+        assert close_order == ["scheduler", "executor"]
+        assert restored.wait(timeout=2)
+        assert restore_calls["count"] == 1
+    finally:
+        _clear_envs()
+
+
+def test_scheduler_survivor_defers_logging_restore_until_completion(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A False scheduler close result retains logging until its thread exits."""
+    _clear_envs()
+    os.environ[_SCHEDULE_ENV] = "true"
+    os.environ[_EXECUTOR_ENV] = "true"
+    os.environ[_ACTOR_ENV] = _VALID_ACTOR_UUID
+    load_app_settings.cache_clear()
+    wait_started = threading.Event()
+    completion_allowed = threading.Event()
+    restored = threading.Event()
+    restore_calls = {"count": 0}
+    try:
+        app = create_app(database_url=_sqlite_url(tmp_path))
+        scheduler = app.state.group_sync_scheduler
+        executor = app.state.connector_job_executor
+        real_executor_close = executor.close
+        real_restore = app_module.restore_logging
+
+        setattr(executor, "recover_abandoned_submission_intents", lambda: 0)
+        setattr(scheduler, "start", lambda: None)
+        setattr(scheduler, "close", lambda: False)
+
+        def _wait_for_scheduler() -> None:
+            """Expose deterministic control of the scheduler completion edge."""
+            wait_started.set()
+            assert completion_allowed.wait(timeout=5)
+
+        def _restore_once(configuration: LoggingConfiguration) -> None:
+            """Count and forward the real logging-lease release."""
+            restore_calls["count"] += 1
+            real_restore(configuration)
+            restored.set()
+
+        setattr(scheduler, "wait_for_shutdown_completion", _wait_for_scheduler)
+        setattr(executor, "close", real_executor_close)
+        monkeypatch.setattr(app_module, "restore_logging", _restore_once)
+
+        with TestClient(app):
+            pass
+
+        assert wait_started.wait(timeout=2)
+        assert restore_calls["count"] == 0
+        completion_allowed.set()
+        assert restored.wait(timeout=2)
+        assert restore_calls["count"] == 1
+    finally:
+        completion_allowed.set()
+        _clear_envs()
+
+
+def test_scheduler_start_failure_closes_both_workers_and_restores_once(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A startup Thread.start failure still runs complete lifespan cleanup."""
+    _clear_envs()
+    os.environ[_SCHEDULE_ENV] = "true"
+    os.environ[_EXECUTOR_ENV] = "true"
+    os.environ[_ACTOR_ENV] = _VALID_ACTOR_UUID
+    load_app_settings.cache_clear()
+    try:
+        app = create_app(database_url=_sqlite_url(tmp_path))
+        scheduler = app.state.group_sync_scheduler
+        executor = app.state.connector_job_executor
+        real_scheduler_close = scheduler.close
+        real_executor_close = executor.close
+        real_restore = app_module.restore_logging
+        close_order: list[str] = []
+        restore_calls = {"count": 0}
+
+        setattr(executor, "recover_abandoned_submission_intents", lambda: 0)
+
+        def _start_failure() -> None:
+            """Model Thread.start() rejecting scheduler startup."""
+            raise RuntimeError("thread start failed")
+
+        def _scheduler_close() -> bool:
+            close_order.append("scheduler")
+            return real_scheduler_close()
+
+        def _executor_close() -> bool:
+            close_order.append("executor")
+            return real_executor_close()
+
+        def _restore_once(configuration: LoggingConfiguration) -> None:
+            restore_calls["count"] += 1
+            real_restore(configuration)
+
+        setattr(scheduler, "start", _start_failure)
+        setattr(scheduler, "close", _scheduler_close)
+        setattr(executor, "close", _executor_close)
+        monkeypatch.setattr(app_module, "restore_logging", _restore_once)
+
+        with pytest.raises(RuntimeError, match="thread start failed"):
+            with TestClient(app):
+                pass
+
+        assert close_order == ["scheduler", "executor"]
+        assert restore_calls["count"] == 1
+    finally:
+        _clear_envs()

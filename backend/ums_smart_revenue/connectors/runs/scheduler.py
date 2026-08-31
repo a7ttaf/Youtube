@@ -12,9 +12,9 @@
 #   TenantORM (db/tenant_models.py, deliberately unscoped -- see Standards)
 #   and, per tenant under connector_tenant_context, api_connector_credentials
 #   via SqlAlchemyConnectorCredentialRepository.list_credentials (paged).
-#   Writes NOTHING itself: submission is an in-memory registry reservation on
-#   the executor; the worker (executor.py::_run_group_sync_job) owns every
-#   domain and audit row for the job it runs.
+#   Writes one audit_logs job_submitted intent per accepted reservation and
+#   commits it before activation; the worker owns every domain row and later
+#   lifecycle edge.
 # Standards: `tenants` is deliberately OUTSIDE TENANT_SCOPED_TABLES (db/rls.py's
 #   own guard query excludes it: "table_name <> 'tenants'"), so the enumeration
 #   query needs no tenant context and no RLS policy applies to it either way.
@@ -35,11 +35,10 @@
 #   logged and skipped inside tick() itself; a failure in the enumeration
 #   sliver before the per-tenant loop even starts is NOT caught here -- that
 #   is _tick_safely's job one level up, so tick() stays directly testable for
-#   its per-tenant behavior. Activation is immediate, no after-commit dance:
-#   the scheduler writes no submission audit row of its own to defer behind --
-#   audit rows are governance events the WORKER owns, not a heartbeat for the
-#   submitter.
-# Blast Radius: Triggers CMS group-sync jobs on a timer. No direct writes; the
+#   its per-tenant behavior. Activation follows a durable intent commit so a
+#   cancelled queued future remains recoverable after process loss.
+# Blast Radius: Triggers CMS group-sync jobs on a timer and adds its submission
+#   intent to audit_logs. The
 #   jobs it submits run through the SAME core (group_sync.py) and worker
 #   (executor.py) the manual route and Sched 2 already exercise, so their
 #   audit/RLS/atomicity guarantees are inherited here, not reimplemented.
@@ -131,8 +130,8 @@ def _owner_log_label(account_id: str) -> str:
 #   exemption, shared-session rollback discipline, fault isolation) sits in
 #   the module contract block at the top of this file.
 # Database/ORM: reads TenantORM + api_connector_credentials through one
-#   shared, explicitly-rolled-back session per tick; writes NOTHING itself --
-#   the executor worker it activates owns every domain and audit row.
+#   shared, explicitly-rolled-back session per tick; writes one audit_logs
+#   submission intent before each activation.
 # Standards: explicit start()/close() with a weakref.finalize GC backstop;
 #   per-tenant fault isolation inside tick(); the stop flag is checked per
 #   tenant and per submission so close() halts NEW submissions promptly;
@@ -241,15 +240,19 @@ class GroupSyncScheduler:
                 if not _tick_once():
                     return
 
-        self._thread = threading.Thread(
+        thread = threading.Thread(
             target=_detached_loop,
             name="ums-group-sync-scheduler",
             daemon=True,
         )
-        self._thread.start()
+        # FIX: Publish only a successfully started thread. If Thread.start()
+        # raises, close() must continue to see ``None`` instead of trying to
+        # join a never-started thread and masking the startup failure.
+        thread.start()
+        self._thread = thread
 
-    def close(self) -> None:
-        """Stop the tick thread deterministically: set the stop flag, then join.
+    def close(self) -> bool:
+        """Request stop, perform the bounded join, and report drain health.
 
         Safe to call multiple times and safe to call on a scheduler that was
         never started (``_thread`` stays ``None``; the join is skipped).
@@ -260,19 +263,44 @@ class GroupSyncScheduler:
         A thread still alive after the bounded join is winding down, not
         starting new work -- ``tick`` checks the stop flag per tenant and per
         submission -- but the app lifespan closes the executor right behind
-        us, so that case is logged as a warning rather than silently racing
-        executor shutdown.
+        us. The ``False`` return lets the lifespan retain redaction safety
+        until :meth:`wait_for_shutdown_completion` observes the thread exit.
+
+        Returns:
+            True when no scheduler thread survives the bounded join.
+            False when the scheduler thread is still winding down.
         """
         self._stop.set()
+        stopped = True
         if self._thread is not None:
             self._thread.join(timeout=_CLOSE_JOIN_TIMEOUT_SECONDS)
             if self._thread.is_alive():
+                stopped = False
                 logger.warning(
                     "group-sync scheduler thread still running after %.1fs join;"
                     " shutdown proceeds (stop flag blocks new submissions)",
                     _CLOSE_JOIN_TIMEOUT_SECONDS,
                 )
         self._finalizer.detach()
+        return stopped
+
+    # ========================================================================
+    # Purpose: Provide the unbounded completion edge used only by the app's
+    #   deferred logging-release watcher after bounded close() returns False.
+    # Database/ORM: None directly; an in-flight tick may finish its existing
+    #   transaction before the scheduler thread exits.
+    # Standards: This method does not request shutdown and must follow close();
+    #   joining the same completed thread repeatedly is harmless.
+    # Blast Radius: Process lifecycle and logging-release ordering only.
+    # Connections:
+    #   - File: backend/ums_smart_revenue/app.py -> waits here before releasing
+    #     the lifespan's redaction-safety lease.
+    # ========================================================================
+    def wait_for_shutdown_completion(self) -> None:
+        """Wait until a scheduler thread surviving bounded close() exits."""
+        thread = self._thread
+        if thread is not None:
+            thread.join()
 
     def _tick_safely(self) -> None:
         """Catch-all wrapper around one tick: log and move on, never die.
@@ -407,14 +435,34 @@ class GroupSyncScheduler:
                     )
                     in_flight_skipped += 1
                     continue
-                # Activate IMMEDIATELY, unlike the jobs route's after-commit
-                # dance: the route defers enqueue behind ITS OWN audit-row
-                # commit so a failed commit can cancel the reservation instead
-                # of orphaning a worker. The scheduler writes no submission
-                # audit of its own to defer behind -- audit rows are
-                # governance events the WORKER owns, not a heartbeat for the
-                # submitter -- so there is nothing to commit first.
-                self._executor.activate(reservation)
+                # FIX: Commit a durable intent before activation. The previous
+                # in-memory-only queue entry disappeared under SIGKILL when the
+                # shutdown audit thread missed its deadline, leaving no row a
+                # later process could reconcile.
+                try:
+                    self._executor.persist_submission_intent(
+                        session=session,
+                        reservation=reservation,
+                        reason="scheduled CMS group sync submitted",
+                    )
+                    session.commit()
+                except Exception:
+                    self._executor.cancel_reservation(reservation)
+                    raise
+                try:
+                    self._executor.activate(reservation)
+                except Exception as exc:
+                    self._executor.cancel_reservation(reservation)
+                    self._executor.audit_failed_before_start(
+                        tenant_id=reservation.tenant_id,
+                        connector_key=reservation.connector_key,
+                        account_id=reservation.account_id,
+                        report_month=reservation.report_month,
+                        error_class=type(exc).__name__,
+                        actor_identity=reservation.actor_identity,
+                        job_id=reservation.job_id,
+                    )
+                    raise
                 submitted += 1
             if not page.has_more:
                 break

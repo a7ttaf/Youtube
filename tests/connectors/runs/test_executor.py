@@ -147,7 +147,7 @@ def test_run_job_removes_registry_entry_on_success(tmp_path) -> None:
 
 
 def test_run_job_bucket_a_failure_writes_audit_and_does_not_propagate(
-    tmp_path,
+    tmp_path, caplog
 ) -> None:
     """A Bucket-A GoogleConnectorError is caught, audited, never re-raised."""
     factory = _factory(tmp_path)
@@ -156,10 +156,19 @@ def test_run_job_bucket_a_failure_writes_audit_and_does_not_propagate(
 
     def _boom(session, **kwargs):
         """boom."""
-        raise OAuthRefreshError(inner=RuntimeError("revoked"))
+        raise OAuthRefreshError(
+            inner=RuntimeError(
+                "https://user:password@example.test/token?X-Goog-Signature=signed-secret"
+            )
+        )
 
     try:
-        with patch("ums_smart_revenue.connectors.runs.executor.run_one", _boom):
+        with (
+            patch("ums_smart_revenue.connectors.runs.executor.run_one", _boom),
+            caplog.at_level(
+                "ERROR", logger="ums_smart_revenue.connectors.runs.executor"
+            ),
+        ):
             executor._register(key)
             # Must NOT raise out of the worker body.
             executor._run_job(
@@ -189,7 +198,16 @@ def test_run_job_bucket_a_failure_writes_audit_and_does_not_propagate(
     assert row.details["action"] == "job_failed_before_start"
     assert row.details["error_class"] == "OAuthRefreshError"
     # Canned class name only — never the exception text.
-    assert "revoked" not in str(row.details)
+    assert "signed-secret" not in str(row.details)
+    expected = [
+        record
+        for record in caplog.records
+        if "Connector job failed" in record.getMessage()
+    ]
+    assert len(expected) == 1
+    assert expected[0].exc_info is None
+    assert "failure_category=google_connector_failure" in expected[0].getMessage()
+    assert "signed-secret" not in expected[0].getMessage()
 
 
 def test_run_job_unexpected_exception_swallowed_and_registry_cleared(
@@ -715,8 +733,8 @@ def test_close_audits_queued_jobs_cancelled_by_shutdown(tmp_path) -> None:
     assert executor._registry == {}
 
 
-def test_close_returns_within_timeout_when_worker_hangs(tmp_path, monkeypatch) -> None:
-    """close() must not block forever when a worker never finishes."""
+def test_close_retains_hung_worker_until_it_really_settles(tmp_path, monkeypatch) -> None:
+    """Repeated close calls stay false while the same retained worker hangs."""
     import threading
     import time
 
@@ -737,7 +755,7 @@ def test_close_returns_within_timeout_when_worker_hangs(tmp_path, monkeypatch) -
 
     try:
         with patch("ums_smart_revenue.connectors.runs.executor.run_one", _hang_forever):
-            executor.submit(
+            future = executor.submit(
                 tenant_id=TENANT,
                 connector_key="youtube_reporting",
                 account_id="acct-hang",
@@ -748,12 +766,75 @@ def test_close_returns_within_timeout_when_worker_hangs(tmp_path, monkeypatch) -
             )
             assert started.wait(timeout=5)
             began = time.monotonic()
-            executor.close()
+            assert executor.close() is False
+            assert executor.close() is False
             elapsed = time.monotonic() - began
+            # FIX: The dedup registry is cleared at shutdown, but the worker
+            # must remain separately reachable until it actually settles.
+            assert executor._registry == {}
+            assert future in executor._shutdown_pending_futures
         assert elapsed < 2.0, f"close() hung for {elapsed:.2f}s"
+        release.set()
+        future.result(timeout=5)
+        assert executor.close() is True
     finally:
         release.set()
-        executor.close()
+        executor.wait_for_shutdown_completion()
+
+
+def test_wait_for_shutdown_completion_retains_timed_out_audit_thread(
+    tmp_path, monkeypatch
+) -> None:
+    """The unbounded waiter keeps a timed-out shutdown audit reachable."""
+    import threading
+    import time
+
+    import ums_smart_revenue.connectors.runs.executor as executor_module
+
+    monkeypatch.setattr(executor_module, "SHUTDOWN_AUDIT_BUDGET_SECONDS", 0.05)
+
+    factory = _factory(tmp_path)
+    executor = ConnectorJobExecutor(session_factory=factory, max_workers=1, stale_running_hours=6)
+    audit_started = threading.Event()
+    audit_release = threading.Event()
+    waiter_finished = threading.Event()
+
+    def _blocked_audit(cancelled) -> bool:
+        """Hold the synthetic audit beyond close's bounded audit budget."""
+        _ = cancelled
+        audit_started.set()
+        audit_release.wait(timeout=30)
+        return True
+
+    job_key = (TENANT, "youtube_reporting", "acct-audit", "2026-03")
+    try:
+        with patch.object(executor, "_write_shutdown_audits", _blocked_audit):
+            deadline = time.monotonic() + 1.0
+            assert (
+                executor._audit_cancelled_within_budget(
+                    [(job_key, ACTOR, uuid4())], deadline=deadline
+                )
+                is False
+            )
+            assert audit_started.is_set()
+
+            waiter = threading.Thread(
+                target=lambda: (
+                    executor.wait_for_shutdown_completion(),
+                    waiter_finished.set(),
+                )
+            )
+            waiter.start()
+            assert not waiter_finished.wait(timeout=0.1)
+            audit_release.set()
+            assert waiter_finished.wait(timeout=5)
+            waiter.join(timeout=5)
+
+        assert executor.close() is True
+        executor.wait_for_shutdown_completion()
+    finally:
+        audit_release.set()
+        executor.wait_for_shutdown_completion()
 
 
 def test_close_logs_worker_exception_from_done_futures(tmp_path, caplog) -> None:
@@ -767,7 +848,11 @@ def test_close_logs_worker_exception_from_done_futures(tmp_path, caplog) -> None
     boom.set_exception(RuntimeError("drain boom"))
 
     with (
-        patch.object(executor, "_audit_pending_on_shutdown", return_value=[boom]),
+        patch.object(
+            executor,
+            "_audit_pending_on_shutdown",
+            return_value=([boom], True),
+        ),
         caplog.at_level(logging.ERROR),
     ):
         executor.close()
@@ -779,3 +864,101 @@ def test_close_logs_worker_exception_from_done_futures(tmp_path, caplog) -> None
     ]
     assert matching, caplog.text
     assert any(record.exc_info is not None for record in matching)
+
+
+def test_close_reports_unclean_while_immediate_shutdown_audit_is_outstanding(
+    tmp_path,
+) -> None:
+    """A timed-out audit cannot be reported as a fully clean close."""
+    factory = _factory(tmp_path)
+    executor = ConnectorJobExecutor(session_factory=factory, max_workers=1, stale_running_hours=6)
+
+    with patch.object(
+        executor,
+        "_audit_pending_on_shutdown",
+        return_value=([], False),
+    ):
+        assert executor.close() is False
+
+
+def test_abandoned_durable_intent_recovers_exactly_once(tmp_path) -> None:
+    """Startup reconciliation closes a committed, never-dispatched intent once."""
+    factory = _factory(tmp_path)
+    executor = ConnectorJobExecutor(session_factory=factory, max_workers=1, stale_running_hours=6)
+    reservation = executor.submit_if_absent(
+        tenant_id=TENANT,
+        connector_key="youtube_reporting",
+        account_id="acct-recovery",
+        report_month="2026-03",
+        dry_run=False,
+        triggered_by_user_id=UUID(ACTOR.user_id),
+        actor_identity=ACTOR,
+    )
+    assert reservation is not None
+    with factory() as session:
+        executor.persist_submission_intent(
+            session=session,
+            reservation=reservation,
+            reason="recovery test submission",
+        )
+        session.commit()
+    assert executor.cancel_reservation(reservation) is True
+
+    assert executor.recover_abandoned_submission_intents() == 1
+    assert executor.recover_abandoned_submission_intents() == 0
+    executor.close()
+
+    with factory() as session:
+        rows = session.scalars(
+            select(AuditLogORM).where(AuditLogORM.request_id == str(reservation.job_id))
+        ).all()
+    actions = [row.details["action"] for row in rows]
+    assert len(actions) == 2
+    assert set(actions) == {"job_submitted", "job_failed_before_start"}
+    failure = next(row for row in rows if row.details["action"] == "job_failed_before_start")
+    assert failure.details["error_class"] == "ExecutorShutdownRecovery"
+
+
+def test_dispatch_started_edge_prevents_false_shutdown_recovery(tmp_path) -> None:
+    """A committed dispatch edge proves the job was not cancelled while queued."""
+    factory = _factory(tmp_path)
+    executor = ConnectorJobExecutor(session_factory=factory, max_workers=1, stale_running_hours=6)
+    reservation = executor.submit_if_absent(
+        tenant_id=TENANT,
+        connector_key="youtube_reporting",
+        account_id="acct-started",
+        report_month="2026-04",
+        dry_run=False,
+        triggered_by_user_id=UUID(ACTOR.user_id),
+        actor_identity=ACTOR,
+    )
+    assert reservation is not None
+    with factory() as session:
+        executor.persist_submission_intent(
+            session=session,
+            reservation=reservation,
+            reason="started recovery test submission",
+        )
+        session.commit()
+        executor._record_dispatch_started(
+            session=session,
+            tenant_id=reservation.tenant_id,
+            connector_key=reservation.connector_key,
+            account_id=reservation.account_id,
+            report_month=reservation.report_month,
+            actor_identity=reservation.actor_identity,
+            job_id=reservation.job_id,
+        )
+        session.commit()
+    assert executor.cancel_reservation(reservation) is True
+
+    assert executor.recover_abandoned_submission_intents() == 0
+    executor.close()
+
+    with factory() as session:
+        rows = session.scalars(
+            select(AuditLogORM).where(AuditLogORM.request_id == str(reservation.job_id))
+        ).all()
+    actions = [row.details["action"] for row in rows]
+    assert len(actions) == 2
+    assert set(actions) == {"job_submitted", "job_dispatch_started"}

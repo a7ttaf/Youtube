@@ -1,6 +1,6 @@
 # ============================================================================
-# Purpose: Install the process-level logging configuration exactly once, at
-#   ASGI startup, and hand the caller a token that undoes it. Before this
+# Purpose: Install one shared process-level logging configuration at ASGI
+#   startup and hand each lifespan independent output and safety leases. Before this
 #   module the backend had no basicConfig, no dictConfig, and no handler at
 #   all against 11 module loggers, so `logging.lastResort` was the whole
 #   configuration: WARNING+ reached stderr with no timestamp, no level, and
@@ -9,18 +9,18 @@
 # Database/ORM: None.
 # Standards: Standard library only (no structlog, no python-json-logger);
 #   tests/test_version_baseline.py asserts exact-set equality on the
-#   dependency manifest, so a logging dependency is a build break, and a
-#   stdlib logging.Formatter covers the required fields anyway. Idempotent:
-#   a second call while the handler is installed is a no-op, so "configure
-#   once" is a property of the function, not of its call sites.
+#   dependency manifest, so a logging dependency is a build break. Stdlib
+#   handler filters sanitize the shared LogRecord before any formatter, and a
+#   formatter provides defense in depth. Shared handler ownership is idempotent;
+#   overlapping leases still recompute the most verbose surviving app level.
 #   UMS_LOG_LEVEL is an APPLICATION verbosity knob, so it is applied to the
 #   first-party logger, never to the root logger -- see the
 #   configure_logging contract block and THIRD_PARTY_LOG_LEVEL below.
 # Blast Radius: Process-global logging state (root handler list, root level,
 #   and the `ums_smart_revenue` logger's level). No authorization, finance,
 #   audit, tenancy, or export behavior.
-#   Deliberately NOT in the blast radius: the `uvicorn`, `uvicorn.error`, and
-#   `uvicorn.access` loggers -- see the configure_logging contract block.
+#   Uvicorn logger levels, handlers, and propagation flags are not changed;
+#   their existing handlers receive/removal-match exact safety filter objects.
 # Connections:
 #   - File: backend/ums_smart_revenue/config/settings.py -> UMS_LOG_LEVEL is
 #     parsed and validated there; this module only maps the name to an int.
@@ -32,12 +32,15 @@
 
 from __future__ import annotations
 
+import hmac
 import logging
+import re
+import secrets
 import sys
 import threading
 import time
-from collections.abc import Callable
-from dataclasses import dataclass
+import weakref
+from dataclasses import dataclass, field
 from typing import TextIO
 
 from ums_smart_revenue.config.settings import (
@@ -52,6 +55,22 @@ from ums_smart_revenue.config.settings import (
 # installed?" answerable without a module-global flag that a forked worker or
 # a reimport would get wrong.
 UMS_LOG_HANDLER_NAME = "ums-smart-revenue"
+
+# Public handler names are observability metadata, not ownership proof. These
+# private markers and persisted lease attributes survive importlib.reload and
+# prevent an embedding application's same-named handler from being adopted or
+# closed as ours.
+_HANDLER_ID_ATTR = "_ums_smart_revenue_handler_id"
+_HANDLER_ID_VALUE = "ums-smart-revenue-v3"
+_HANDLER_LEVELS_ATTR = "_ums_smart_revenue_output_levels"
+_HANDLER_SAFETY_COUNT_ATTR = "_ums_smart_revenue_safety_count"
+_HANDLER_SAFETY_LEASES_ATTR = "_ums_smart_revenue_safety_leases"
+_HANDLER_REDACTION_BINDINGS_ATTR = "_ums_smart_revenue_redaction_bindings"
+_HANDLER_FLOOR_BINDINGS_ATTR = "_ums_smart_revenue_floor_bindings"
+_FILTER_ID_ATTR = "_ums_smart_revenue_filter_id"
+_FLOOR_FILTER_ID = "third-party-floor-v2"
+_REDACTION_FILTER_ID = "redaction-v2"
+_LOG_FINGERPRINT_KEY = secrets.token_bytes(32)
 
 # The three fields P0.6 exists to add -- timestamp, level, logger name -- plus
 # the thread name. The thread name is not decoration here: the connector job
@@ -111,35 +130,137 @@ FIRST_PARTY_LOGGER_NAME = __name__.partition(".")[0]
 # real logger tree of an imported app and fails the build.
 THIRD_PARTY_LOG_LEVEL = logging.WARNING
 
+# A single stable replacement makes every sanitizer idempotent. Credential
+# recognizers are bounded by URL/assignment delimiters. SQL detection is
+# deliberately conservative: explicit SQL/parameter labels always redact,
+# while an unlabeled statement must begin a line with a strong SQL shape.
+_REDACTED = "[REDACTED]"
+_CONTROL_CHARACTER_RE = re.compile(r"[\x00-\x1f\x7f-\x9f\u2028\u2029]")
+_AUTHORIZATION_ASSIGNMENT_RE = re.compile(
+    r"(?i)(?P<prefix>authorization\s*[:=]\s*"
+    r"(?!(?:(?:bearer|basic|digest)\s+)?\[REDACTED\])"
+    r"(?:(?:bearer|basic|digest)\s+)?)(?P<quote>[\"']?)"
+    r"(?!\[REDACTED\])(?P<value>[^\s,;&\"'}]+)(?P=quote)"
+)
+_SECRET_ASSIGNMENT_RE = re.compile(
+    r"(?i)(?P<prefix>"
+    r"(?:bearer\s+|"
+    r"(?:access[_-]?token|refresh[_-]?token|id[_-]?token|auth[_-]?token|"
+    r"client[_-]?secret|api[_-]?key|apikey|token|password|passwd|pwd|"
+    r"secret|credential|signature|sig|private[_-]?key|cookie|session|"
+    r"csrf|set[_-]?cookie)\s*[:=]\s*)"
+    r")(?P<quote>[\"']?)(?!\[REDACTED\])"
+    r"(?P<value>[^\s,;&\"'}]+)(?P=quote)"
+)
+_QUOTED_SECRET_ASSIGNMENT_RE = re.compile(
+    r"(?i)(?P<prefix>(?:authorization|access[_-]?token|refresh[_-]?token|"
+    r"id[_-]?token|auth[_-]?token|client[_-]?secret|api[_-]?key|apikey|"
+    r"token|password|passwd|pwd|secret|credential|signature|sig|"
+    r"private[_-]?key|cookie|session|csrf|set[_-]?cookie)"
+    r"\s*[\"']?\s*[:=]\s*)(?P<quote>[\"'])(?!\[REDACTED\])"
+    r"(?P<value>.*?)(?P=quote)"
+)
+_SECRET_TUPLE_RE = re.compile(
+    r"(?i)(?P<prefix>[\"'](?:authorization|proxy-authorization|cookie|"
+    r"set-cookie|x-api-key|api-key|x-auth-token|"
+    r"x-(?:amz|goog|google)-(?:credential|signature|security-token)|"
+    r"access[_-]?token|refresh[_-]?token|client[_-]?secret|password|"
+    r"secret|credential|signature|private[_-]?key)[\"']\s*,\s*)"
+    r"(?P<quote>[\"'])(?!\[REDACTED\])(?P<value>.*?)(?P=quote)"
+)
+_URL_SECRET_RE = re.compile(
+    r"(?i)(?P<prefix>[?&;](?:access[_-]?token|refresh[_-]?token|"
+    r"id[_-]?token|auth[_-]?token|client[_-]?secret|api[_-]?key|apikey|"
+    r"token|password|passwd|secret|key|signature|sig|credential|code|"
+    r"authorization|oauth[_-]?token|x[-_](?:google|goog|amz)[-_]"
+    r"(?:signature|credential|security[-_]token)|session|csrf)=)"
+    r"(?!\[REDACTED\])(?P<value>[^&#\s]+)"
+)
+_URL_USERINFO_RE = re.compile(
+    r"(?i)(?P<scheme>\b[a-z][a-z0-9+.-]*://)"
+    r"(?!\[REDACTED\]@)(?P<userinfo>[^/@\s]+@)"
+)
+_JWT_RE = re.compile(
+    r"\b[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\b"
+)
+_PRIVATE_KEY_BLOCK_RE = re.compile(
+    r"(?is)-----BEGIN (?P<label>(?:ENCRYPTED |RSA |EC |OPENSSH )?PRIVATE KEY)-----"
+    r".*?-----END (?P=label)-----"
+)
+_SQL_LABEL_RE = re.compile(
+    r"(?is)(?:\[\s*(?:SQL|parameters)\s*:|"
+    r"(?<![\w-])(?:sql|statement|query|parameters|params)\s*[:=]\s*).*$"
+)
+_SQL_STATEMENT_RE = re.compile(
+    r"(?is)(?:^|[\r\n])\s*(?:"
+    r"SELECT\b(?=.{0,256}\bFROM\b)(?=.{0,512}\b(?:WHERE|JOIN|GROUP\s+BY|"
+    r"ORDER\s+BY|LIMIT|OFFSET|UNION)\b)|"
+    r"INSERT\s+INTO\s+[\"`\[]?[A-Za-z_][\w$]*[\"`\]]?"
+    r"(?:\.[\"`\[]?[A-Za-z_][\w$]*[\"`\]]?)?\s*(?:\(|VALUES\b|DEFAULT\b)|"
+    r"UPDATE\s+[\"`\[]?[A-Za-z_][\w$]*[\"`\]]?"
+    r"(?:\.[\"`\[]?[A-Za-z_][\w$]*[\"`\]]?)?\s+SET\s+"
+    r"[\"`\[]?[A-Za-z_][\w$]*[\"`\]]?\s*=|"
+    r"DELETE\s+FROM\s+[\"`\[]?[A-Za-z_][\w$]*[\"`\]]?"
+    r"(?:\.[\"`\[]?[A-Za-z_][\w$]*[\"`\]]?)?\s+"
+    r"(?:WHERE|USING|RETURNING)\b|"
+    r"WITH\b(?=.{0,256}\bAS\s*\()|"
+    r"CALL\s+(?:[\"`\[]?[A-Za-z_][\w$]*[\"`\]]?\.)*"
+    r"[\"`\[]?[A-Za-z_][\w$]*[\"`\]]?\s*\(|"
+    r"(?:CREATE|ALTER|DROP|TRUNCATE)\s+(?:TABLE|INDEX|SCHEMA)\b|"
+    r"(?:GRANT|REVOKE)\b(?=.{0,256}\bON\b)"
+    r").*$"
+)
+_DATABASE_EXCEPTION_MODULES = frozenset({"sqlite3", "psycopg", "psycopg2"})
+_DATABASE_EXCEPTION_MODULE_PREFIXES = ("sqlalchemy.", "psycopg.", "psycopg2.")
+_DATABASE_EXCEPTION_BASES = frozenset(
+    {
+        ("sqlite3", "Error"),
+        ("sqlalchemy.exc", "SQLAlchemyError"),
+        ("psycopg", "Error"),
+        ("psycopg2", "Error"),
+    }
+)
+_SECRET_STRUCTURED_KEYS = frozenset(
+    {
+        "authorization",
+        "proxyauthorization",
+        "accesstoken",
+        "refreshtoken",
+        "idtoken",
+        "authtoken",
+        "clientsecret",
+        "apikey",
+        "password",
+        "passwd",
+        "pwd",
+        "secret",
+        "credential",
+        "signature",
+        "privatekey",
+        "cookie",
+        "setcookie",
+        "session",
+        "csrf",
+    }
+)
+_SQL_STRUCTURED_KEYS = frozenset({"sql", "statement", "query", "params", "parameters"})
+_STANDARD_LOG_RECORD_FIELDS = frozenset(
+    logging.LogRecord("", 0, "", 0, "", (), None).__dict__
+)
+
 
 @dataclass
 class LoggingConfiguration:
-    """Undo token returned by :func:`configure_logging`.
-
-    ``installed`` is True when this call created the shared UMS handler.
-    Every successful configure call (including a lease on an already-installed
-    handler) increments a process-wide reference count; :func:`restore_logging`
-    decrements it and only removes the handler when the count reaches zero.
-
-    ``released`` makes each token consume its lease AT MOST ONCE. The refcount
-    is process-wide, so without it a second ``restore_logging`` on the same
-    token decremented again and consumed a DIFFERENT lifespan's lease: with two
-    apps configured, a double release dropped the count to zero and removed the
-    shared handler while the second app was still running, silencing its logs.
-    The refcount guard alone cannot catch that -- it only sees "no lease
-    outstanding", never "this token already released".
-
-    Not frozen, because the flag has to travel with the token. Keeping the
-    state on the token rather than in a module-level set is deliberate: a
-    module-level registry is reset by ``importlib.reload`` and by the test
-    fixture, which would recycle lease identities and break the reload
-    re-adoption path.
-    """
+    """Per-lifespan output ownership and redaction-safety lease token."""
 
     installed: bool
     handler: logging.Handler | None
     previous_root_level: int
     previous_first_party_level: int
+    lease_id: str = field(default_factory=lambda: secrets.token_hex(16))
+    numeric_level: int | None = None
+    output_released: bool = False
+    safety_released: bool = False
     released: bool = False
 
 
@@ -148,9 +269,12 @@ _logging_lock = threading.Lock()
 
 @dataclass
 class _LoggingLeaseState:
-    """Process-wide lease counter for the shared UMS root handler."""
+    """Process-wide output-level ownership and independent safety count."""
 
     refcount: int = 0
+    lease_levels: dict[str, int] = field(default_factory=dict)
+    safety_refcount: int = 0
+    safety_leases: set[str] = field(default_factory=set)
     previous_root_level: int | None = None
     previous_first_party_level: int | None = None
 
@@ -161,24 +285,390 @@ _logging_state = _LoggingLeaseState()
 _HANDLER_PREVIOUS_ROOT_ATTR = "_ums_previous_root_level"
 _HANDLER_PREVIOUS_FIRST_PARTY_ATTR = "_ums_previous_first_party_level"
 
+_FilterBinding = tuple[weakref.ReferenceType[logging.Handler], logging.Filter]
+
+
+def _is_owned_handler(handler: logging.Handler) -> bool:
+    """Return whether a handler carries the private UMS ownership marker."""
+    return getattr(handler, _HANDLER_ID_ATTR, None) == _HANDLER_ID_VALUE
+
+
+def _configured_handlers(root: logging.Logger) -> list[logging.Handler]:
+    """Return every current handler once, including non-propagating loggers."""
+    handlers: list[logging.Handler] = []
+    seen: set[int] = set()
+    for handler in root.handlers:
+        if id(handler) not in seen:
+            handlers.append(handler)
+            seen.add(id(handler))
+    for existing in logging.Logger.manager.loggerDict.values():
+        if not isinstance(existing, logging.Logger):
+            continue
+        for handler in existing.handlers:
+            if id(handler) not in seen:
+                handlers.append(handler)
+                seen.add(id(handler))
+    if logging.lastResort is not None and id(logging.lastResort) not in seen:
+        handlers.append(logging.lastResort)
+    return handlers
+
+
+def _remove_exact_filter_bindings(bindings: tuple[_FilterBinding, ...]) -> None:
+    """Remove one filter generation by object identity, never by marker/name."""
+    for handler_ref, owned_filter in bindings:
+        handler = handler_ref()
+        if handler is None:
+            continue
+        handler.filters[:] = [
+            existing for existing in handler.filters if existing is not owned_filter
+        ]
+
+
+def _replace_redaction_filters(
+    root: logging.Logger,
+    owner_handler: logging.Handler,
+) -> None:
+    """Publish redaction on all handlers before retiring the old generation."""
+    previous = getattr(owner_handler, _HANDLER_REDACTION_BINDINGS_ATTR, ())
+    bindings: list[_FilterBinding] = []
+    for handler in _configured_handlers(root):
+        redaction_filter = _RedactionFilter()
+        # Safety runs before operator filters so none can observe a raw record.
+        handler.filters.insert(0, redaction_filter)
+        bindings.append((weakref.ref(handler), redaction_filter))
+    setattr(owner_handler, _HANDLER_REDACTION_BINDINGS_ATTR, tuple(bindings))
+    _remove_exact_filter_bindings(previous)
+
+
+def _replace_floor_filters(
+    root: logging.Logger,
+    owner_handler: logging.Handler,
+    floor: int,
+) -> None:
+    """Replace output-floor filters for the current effective lease level."""
+    previous = getattr(owner_handler, _HANDLER_FLOOR_BINDINGS_ATTR, ())
+    bindings: list[_FilterBinding] = []
+    for handler in _configured_handlers(root):
+        floor_filter = _ThirdPartyFloorFilter(floor)
+        handler.addFilter(floor_filter)
+        bindings.append((weakref.ref(handler), floor_filter))
+    setattr(owner_handler, _HANDLER_FLOOR_BINDINGS_ATTR, tuple(bindings))
+    _remove_exact_filter_bindings(previous)
+
+
+def _remove_owned_filters(owner_handler: logging.Handler, *, safety: bool) -> None:
+    """Remove exact UMS floor filters and optionally the safety generation."""
+    floor_bindings = getattr(owner_handler, _HANDLER_FLOOR_BINDINGS_ATTR, ())
+    _remove_exact_filter_bindings(floor_bindings)
+    setattr(owner_handler, _HANDLER_FLOOR_BINDINGS_ATTR, ())
+    if safety:
+        redaction_bindings = getattr(
+            owner_handler,
+            _HANDLER_REDACTION_BINDINGS_ATTR,
+            (),
+        )
+        _remove_exact_filter_bindings(redaction_bindings)
+        setattr(owner_handler, _HANDLER_REDACTION_BINDINGS_ATTR, ())
+
 
 # ============================================================================
-# Purpose: Build the single stdlib formatter used for every UMS log line, in
-#   UTC with millisecond precision.
+# Purpose: Sanitize the shared LogRecord before any configured handler can
+#   observe or format it, and build the UTC formatter for the UMS output.
 # Database/ORM: None.
-# Standards: logging.Formatter only. The instance attributes
+# Standards: Standard-library only. Handler filters mutate the shared record
+#   before operator/structured formatters run; exception chains, SQL/parameters,
+#   structured extras, PEM blocks, URLs, and line-breaking controls share the
+#   same fail-safe boundary. The instance attributes
 #   default_time_format / default_msec_format / converter are the documented
 #   hooks for this; assigning `converter` on the instance shadows the class
 #   attribute instead of mutating logging.Formatter globally, so an
 #   unrelated formatter elsewhere in the process keeps local time.
-# Blast Radius: Log line rendering only.
+# Blast Radius: Log line rendering only; credential values are replaced with
+#   ``[REDACTED]``. Authorization, finance, audit, and database state are not
+#   modified.
 # Connections:
 #   - File: backend/ums_smart_revenue/config/logging_config.py ->
 #     configure_logging attaches the result to the root handler.
 # ============================================================================
+def _redact_private_sql(text: str) -> str:
+    """Remove explicit or strongly shaped SQL while preserving safe prefixes."""
+    matches = [
+        match
+        for match in (_SQL_LABEL_RE.search(text), _SQL_STATEMENT_RE.search(text))
+        if match is not None
+    ]
+    if not matches:
+        return text
+    first = min(matches, key=lambda match: match.start())
+    prefix = text[: first.start()].rstrip()
+    return f"{prefix} [REDACTED-SQL]" if prefix else "[REDACTED-SQL]"
+
+
+def _redact_log_text(value: object) -> str:
+    """Redact credentials/private SQL and neutralize every line-break control."""
+    try:
+        text = str(value)
+    except Exception:
+        text = "<unrenderable log value>"
+    text = _AUTHORIZATION_ASSIGNMENT_RE.sub(
+        lambda match: (
+            f"{match.group('prefix')}{match.group('quote')}[REDACTED]"
+            f"{match.group('quote')}"
+        ),
+        text,
+    )
+    text = _QUOTED_SECRET_ASSIGNMENT_RE.sub(
+        lambda match: (
+            f"{match.group('prefix')}{match.group('quote')}[REDACTED]"
+            f"{match.group('quote')}"
+        ),
+        text,
+    )
+    text = _SECRET_ASSIGNMENT_RE.sub(
+        lambda match: (
+            f"{match.group('prefix')}{match.group('quote')}[REDACTED]"
+            f"{match.group('quote')}"
+        ),
+        text,
+    )
+    text = _SECRET_TUPLE_RE.sub(
+        lambda match: (
+            f"{match.group('prefix')}{match.group('quote')}[REDACTED]"
+            f"{match.group('quote')}"
+        ),
+        text,
+    )
+    text = _URL_SECRET_RE.sub(
+        lambda match: f"{match.group('prefix')}[REDACTED]",
+        text,
+    )
+    text = _URL_USERINFO_RE.sub(
+        lambda match: f"{match.group('scheme')}[REDACTED]@",
+        text,
+    )
+    text = _JWT_RE.sub(_REDACTED, text)
+    text = _PRIVATE_KEY_BLOCK_RE.sub("[REDACTED-PRIVATE-KEY]", text)
+    text = _redact_private_sql(text)
+
+    def _escape_control(match: re.Match[str]) -> str:
+        character = match.group(0)
+        replacements = {"\r": r"\r", "\n": r"\n", "\t": r"\t"}
+        if character in replacements:
+            return replacements[character]
+        codepoint = ord(character)
+        return f"\\x{codepoint:02x}" if codepoint <= 0xFF else f"\\u{codepoint:04x}"
+
+    return _CONTROL_CHARACTER_RE.sub(_escape_control, text)
+
+
+def redact_sensitive_text(value: object) -> str:
+    """Return safe text for logs and durable operator-facing diagnostics."""
+    return _redact_log_text(value)
+
+
+def _is_database_exception(value: BaseException) -> bool:
+    """Recognize database exceptions by exact modules and inherited bases."""
+    seen: set[int] = set()
+    current: BaseException | None = value
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        exception_type = type(current)
+        module_name = exception_type.__module__
+        if module_name in _DATABASE_EXCEPTION_MODULES or module_name.startswith(
+            _DATABASE_EXCEPTION_MODULE_PREFIXES
+        ):
+            return True
+        if any(
+            (base.__module__, base.__name__) in _DATABASE_EXCEPTION_BASES
+            for base in exception_type.__mro__
+        ):
+            return True
+        current = current.__cause__ or current.__context__
+    return False
+
+
+def redact_exception_summary(value: BaseException) -> str:
+    """Return a useful non-DB summary or class-only database failure."""
+    exception_name = type(value).__name__
+    if _is_database_exception(value):
+        return exception_name
+    return f"{exception_name}: {_redact_log_text(value)}"
+
+
+def _redact_exception_chain(value: BaseException) -> str:
+    """Render a bounded, sanitized exception chain without raw tracebacks."""
+    chain: list[tuple[BaseException, bool]] = []
+    seen: set[int] = set()
+    current: BaseException | None = value
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        cause = current.__cause__
+        chain.append((current, cause is not None))
+        current = cause if cause is not None else current.__context__
+    rendered: list[str] = []
+    for index, (exception, has_direct_cause) in enumerate(reversed(chain)):
+        if index:
+            relation = (
+                "The above exception was the direct cause"
+                if chain[len(chain) - index - 1][1]
+                else "During handling of the above exception"
+            )
+            rendered.append(relation)
+        rendered.append(redact_exception_summary(exception))
+    return " | ".join(rendered)
+
+
+def _structured_key_kind(key: str) -> str | None:
+    """Classify canonical/camel/snake structured keys without prose matching."""
+    separated = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", key)
+    tokens = re.findall(r"[a-z0-9]+", separated.casefold())
+    for start in range(len(tokens)):
+        suffix = "".join(tokens[start:])
+        if suffix in _SQL_STRUCTURED_KEYS:
+            return "sql"
+        if suffix in _SECRET_STRUCTURED_KEYS:
+            return "secret"
+    return None
+
+
+def _redact_structured_value(value: object) -> object:
+    """Recursively sanitize values carried by structured ``extra`` fields."""
+    if isinstance(value, str):
+        return _redact_log_text(value)
+    if isinstance(value, BaseException):
+        return redact_exception_summary(value)
+    if isinstance(value, dict):
+        sanitized: dict[object, object] = {}
+        for key, nested in value.items():
+            key_kind = _structured_key_kind(key) if isinstance(key, str) else None
+            safe_key: object
+            if isinstance(key, str):
+                safe_key = _redact_log_text(key)
+            elif isinstance(key, (int, float, bool, type(None))):
+                safe_key = key
+            else:
+                safe_key = _redact_log_text(key)
+            if key_kind == "secret":
+                sanitized[safe_key] = _REDACTED
+            elif key_kind == "sql":
+                sanitized[safe_key] = "[REDACTED-SQL]"
+            else:
+                sanitized[safe_key] = _redact_structured_value(nested)
+        return sanitized
+    if isinstance(value, list):
+        return [_redact_structured_value(nested) for nested in value]
+    if isinstance(value, tuple):
+        return tuple(_redact_structured_value(nested) for nested in value)
+    if isinstance(value, set):
+        return {_redact_structured_value(nested) for nested in value}
+    if isinstance(value, frozenset):
+        return frozenset(_redact_structured_value(nested) for nested in value)
+    return _redact_log_text(value)
+
+
+def fingerprint_log_identifier(value: str) -> str:
+    """Return a process-local keyed label for a sensitive identifier."""
+    return hmac.new(_LOG_FINGERPRINT_KEY, value.encode(), "sha256").hexdigest()[:12]
+
+
+def _is_first_party_logger(name: str) -> bool:
+    """Return whether a record belongs to the UMS package."""
+    return name == FIRST_PARTY_LOGGER_NAME or name.startswith(
+        FIRST_PARTY_LOGGER_NAME + "."
+    )
+
+
+class _RedactionFilter(logging.Filter):
+    """Sanitize the shared record before every configured handler formats it."""
+
+    _ums_smart_revenue_filter_id = _REDACTION_FILTER_ID
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        """Mutate message, exceptions, controls, and structured extras safely."""
+        try:
+            rendered = record.getMessage()
+        except Exception:
+            rendered = "<unrenderable log message>"
+        if record.exc_info:
+            _exc_type, exc_value, _traceback = record.exc_info
+            # FIX: Logging's exc_info value is typed as optional. A malformed
+            # tuple must still fail safe instead of bypassing the redaction
+            # filter or raising from the logging pipeline.
+            exception_summary = (
+                _redact_exception_chain(exc_value)
+                if isinstance(exc_value, BaseException)
+                else "UnknownError"
+            )
+            rendered = f"{rendered} [exception={exception_summary}]"
+            # FIX: Raw traceback exception strings can contain secrets and SQL.
+            # Replace them before any formatter can cache or serialize them.
+            record.exc_info = None
+            record.exc_text = None
+        elif record.exc_text:
+            record.exc_text = _redact_log_text(record.exc_text)
+        record.msg = _redact_log_text(rendered)
+        record.args = ()
+        if record.stack_info:
+            record.stack_info = _redact_log_text(record.stack_info)
+        for key, nested in tuple(record.__dict__.items()):
+            if key in {
+                "msg",
+                "args",
+                "exc_info",
+                "exc_text",
+                "stack_info",
+                "_ums_log_redacted",
+            }:
+                continue
+            key_kind = _structured_key_kind(key) if isinstance(key, str) else None
+            if key_kind == "secret":
+                setattr(record, key, _REDACTED)
+            elif key_kind == "sql":
+                setattr(record, key, "[REDACTED-SQL]")
+            elif isinstance(nested, (str, dict, list, tuple, set, frozenset)):
+                setattr(record, key, _redact_structured_value(nested))
+            elif key not in _STANDARD_LOG_RECORD_FIELDS:
+                setattr(record, key, _redact_structured_value(nested))
+        # This marker is diagnostic only. We intentionally never trust an
+        # incoming value: callers can spoof extra={"_ums_log_redacted": True}.
+        setattr(record, "_ums_log_redacted", True)
+        return True
+
+
+class _ThirdPartyFloorFilter(logging.Filter):
+    """Allow first-party/Uvicorn records and gate other loggers at a floor."""
+
+    _ums_smart_revenue_filter_id = _FLOOR_FILTER_ID
+
+    def __init__(self, floor: int) -> None:
+        """Store the current effective third-party floor."""
+        super().__init__()
+        self.floor = floor
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        """Apply the floor without disabling Uvicorn's access contract."""
+        return (
+            _is_first_party_logger(record.name)
+            or record.name == "uvicorn"
+            or record.name.startswith("uvicorn.")
+            or record.levelno >= self.floor
+        )
+
+
+class _RedactingFormatter(logging.Formatter):
+    """Defense-in-depth for callers that use the formatter without filters."""
+
+    def format(self, record: logging.LogRecord) -> str:
+        """Sanitize rendered output and any pre-cached exception text."""
+        rendered = super().format(record)
+        if record.exc_text is not None:
+            record.exc_text = _redact_log_text(record.exc_text)
+        return _redact_log_text(rendered)
+
+
 def build_log_formatter() -> logging.Formatter:
-    """Return the UTC, millisecond-precision formatter for UMS log lines."""
-    formatter = logging.Formatter(fmt=LOG_FORMAT)
+    """Return the UTC, millisecond-precision UMS formatter."""
+    formatter = _RedactingFormatter(fmt=LOG_FORMAT)
     formatter.default_time_format = LOG_TIME_FORMAT
     formatter.default_msec_format = LOG_MSEC_FORMAT
     formatter.converter = time.gmtime
@@ -237,24 +727,10 @@ def build_log_formatter() -> logging.Formatter:
 #   operator-supplied --log-config survive. No third-party logger's own level
 #   is ever written to, so an operator --log-config that deliberately raises
 #   one library to INFO keeps that setting.
-# Blast Radius: Root logger handlers + level, and the `ums_smart_revenue`
-#   logger's level. No authorization, finance, audit, or export behavior.
-#   Log CONTENT is unchanged -- this installs a handler, it does not rewrite
-#   any call site.
-#
-#   TWO FIRST-PARTY DISCLOSURES this function newly surfaces, and does NOT
-#   change, because both are `ums_smart_revenue` loggers running at the
-#   configured level by design:
-#     1. connectors/runs/executor.py:755 logs the YouTube CMS content-owner
-#        id at INFO ("Scheduled group sync converged with no changes
-#        (owner=%s)"), once per scheduled sync. Container logs therefore
-#        carry a real infrastructure identifier whenever the group-sync
-#        scheduler is enabled. Redacting it is a change to that file, not to
-#        this one.
-#     2. tenancy/resolver.py attaches `extra=` payloads to six records
-#        (lines 174-176, 189-192, 256-259, 268-270, 294-296, 305-308). LOG_FORMAT
-#        is a fixed field list, so those keys are carried on the LogRecord and
-#        rendered nowhere -- structured detail silently dropped, not leaked.
+# Blast Radius: Root/child handler filters, the shared UMS root handler, root
+#   level, and the `ums_smart_revenue` logger level. Log records are sanitized
+#   for credentials, private SQL, structured keys, and line-breaking controls.
+#   No authorization, finance, audit persistence, or export behavior changes.
 # Connections:
 #   - File: backend/ums_smart_revenue/app.py -> called from the ASGI lifespan.
 #   - File: backend/ums_smart_revenue/config/settings.py -> AppSettings
@@ -268,7 +744,7 @@ def build_log_formatter() -> logging.Formatter:
 #     THIRD_PARTY_LOG_LEVEL keeps out of the log.
 #   - File: docker-compose.yml -> `UMS_LOG_LEVEL` pass-through in x-app-env.
 # ============================================================================
-def _third_party_floor_filter(floor: int) -> Callable[[logging.LogRecord], bool]:
+def _third_party_floor_filter(floor: int) -> logging.Filter:
     """Return a handler filter enforcing the third-party floor by name.
 
     First-party (``ums_smart_revenue.*``) records pass unconditionally --
@@ -278,16 +754,50 @@ def _third_party_floor_filter(floor: int) -> Callable[[logging.LogRecord], bool]
     otherwise publish below-floor output through the shared handler. The
     filter cannot silence first-party or audit output by construction.
     """
+    return _ThirdPartyFloorFilter(floor)
 
-    def _floor_filter(record: logging.LogRecord) -> bool:
-        """Pass first-party records; gate everything else at the floor."""
-        if record.name == FIRST_PARTY_LOGGER_NAME or record.name.startswith(
-            FIRST_PARTY_LOGGER_NAME + "."
-        ):
-            return True
-        return record.levelno >= floor
 
-    return _floor_filter
+def _adopt_persisted_logging_state(handler: logging.Handler) -> None:
+    """Recover active leases and safety ownership after module-state reset."""
+    persisted_levels = getattr(handler, _HANDLER_LEVELS_ATTR, {})
+    if not _logging_state.lease_levels and isinstance(persisted_levels, dict):
+        _logging_state.lease_levels = dict(persisted_levels)
+    _logging_state.refcount = len(_logging_state.lease_levels)
+    persisted_safety_leases: object = getattr(
+        handler,
+        _HANDLER_SAFETY_LEASES_ATTR,
+        set(),
+    )
+    if not _logging_state.safety_leases and isinstance(
+        persisted_safety_leases,
+        (set, frozenset),
+    ):
+        _logging_state.safety_leases = set(persisted_safety_leases)
+    _logging_state.safety_refcount = len(_logging_state.safety_leases)
+    if _logging_state.previous_root_level is None:
+        recovered_root = getattr(handler, _HANDLER_PREVIOUS_ROOT_ATTR, None)
+        if isinstance(recovered_root, int):
+            _logging_state.previous_root_level = recovered_root
+    if _logging_state.previous_first_party_level is None:
+        recovered_first_party = getattr(
+            handler,
+            _HANDLER_PREVIOUS_FIRST_PARTY_ATTR,
+            None,
+        )
+        if isinstance(recovered_first_party, int):
+            _logging_state.previous_first_party_level = recovered_first_party
+
+
+def _apply_effective_output_level(
+    root: logging.Logger,
+    owner_handler: logging.Handler,
+) -> None:
+    """Apply the most verbose active lease and refresh handler floor filters."""
+    effective_level = min(_logging_state.lease_levels.values())
+    root_level = max(effective_level, THIRD_PARTY_LOG_LEVEL)
+    root.setLevel(root_level)
+    logging.getLogger(FIRST_PARTY_LOGGER_NAME).setLevel(effective_level)
+    _replace_floor_filters(root, owner_handler, root_level)
 
 
 def configure_logging(
@@ -316,181 +826,129 @@ def configure_logging(
         allowed = ", ".join(LOG_LEVEL_NAMES)
         raise ValueError(f"{LOG_LEVEL_ENV} must be one of: {allowed}")
     numeric_level = logging.getLevelNamesMapping()[resolved_level]
-    # FIX: the configured level goes on the first-party logger; the root
-    # logger -- which every third-party logger inherits from -- is held at the
-    # third-party floor. Setting root to numeric_level published the guarded
-    # CMS content-owner id through httpx2's INFO request line on every Google
-    # API call. See THIRD_PARTY_LOG_LEVEL for the measurement.
-    root_level = max(numeric_level, THIRD_PARTY_LOG_LEVEL)
+    lease_id = secrets.token_hex(16)
 
     with _logging_lock:
-        # FIX: Snapshot previous levels inside the same critical section that
-        # mutates them. Reading outside the lock raced with a concurrent
-        # restore_logging that put the originals back after this call had
-        # already captured the still-configured values as "previous".
         root = logging.getLogger()
         first_party = logging.getLogger(FIRST_PARTY_LOGGER_NAME)
         previous_root_level = root.level
         previous_first_party_level = first_party.level
 
-        existing_handler = installed_log_handler()
-        if existing_handler is not None:
-            # FIX: importlib.reload clears module globals (refcount=0) while the
-            # named handler can still sit on the root logger. Re-adopt that
-            # orphaned install with one synthetic pre-reload lease so a new
-            # configure/restore pair cannot strip logging from under an older
-            # lifespan that still owns the handler.
-            if _logging_state.refcount <= 0:
-                _logging_state.refcount = 1
-                # FIX: Do not snapshot the already-configured levels as
-                # "previous" — that would restore WARNING/INFO after every
-                # lease ends. Recover the pre-install originals stored on the
-                # surviving handler at first install.
-                recovered_root = getattr(
-                    existing_handler, _HANDLER_PREVIOUS_ROOT_ATTR, None
-                )
-                recovered_first_party = getattr(
-                    existing_handler, _HANDLER_PREVIOUS_FIRST_PARTY_ATTR, None
-                )
-                if recovered_root is not None:
-                    _logging_state.previous_root_level = recovered_root
-                if recovered_first_party is not None:
-                    _logging_state.previous_first_party_level = recovered_first_party
-                root.setLevel(root_level)
-                first_party.setLevel(numeric_level)
-            # FIX: Overlapping create_app() lifespans share one handler. Take a
-            # lease so the first shutdown cannot strip logging from a still-live
-            # second app.
-            _logging_state.refcount += 1
-            return LoggingConfiguration(
-                installed=False,
-                handler=None,
-                previous_root_level=(
-                    _logging_state.previous_root_level
-                    if _logging_state.previous_root_level is not None
-                    else previous_root_level
-                ),
-                previous_first_party_level=(
-                    _logging_state.previous_first_party_level
-                    if _logging_state.previous_first_party_level is not None
-                    else previous_first_party_level
-                ),
+        handler = installed_log_handler()
+        installed = handler is None
+        if handler is None:
+            handler = logging.StreamHandler(sys.stderr if stream is None else stream)
+            handler_name = UMS_LOG_HANDLER_NAME
+            if logging.getHandlerByName(handler_name) is not None:
+                # FIX: Do not overwrite a foreign handler's process-global name
+                # registration. The private marker, not this suffix, proves
+                # ownership during re-adoption and teardown.
+                handler_name = f"{handler_name}-{secrets.token_hex(8)}"
+            handler.set_name(handler_name)
+            setattr(handler, _HANDLER_ID_ATTR, _HANDLER_ID_VALUE)
+            setattr(handler, _HANDLER_LEVELS_ATTR, {})
+            setattr(handler, _HANDLER_SAFETY_COUNT_ATTR, 0)
+            setattr(handler, _HANDLER_SAFETY_LEASES_ATTR, set())
+            setattr(handler, _HANDLER_REDACTION_BINDINGS_ATTR, ())
+            setattr(handler, _HANDLER_FLOOR_BINDINGS_ATTR, ())
+            handler.setFormatter(build_log_formatter())
+        else:
+            _adopt_persisted_logging_state(handler)
+            if handler not in root.handlers:
+                root.addHandler(handler)
+
+        # Snapshot a new output-ownership epoch only when no output lease
+        # survives. A redaction-only safety lease may legitimately retain the
+        # detached handler between two app lifespans.
+        if not _logging_state.lease_levels:
+            _logging_state.previous_root_level = previous_root_level
+            _logging_state.previous_first_party_level = previous_first_party_level
+            setattr(handler, _HANDLER_PREVIOUS_ROOT_ATTR, previous_root_level)
+            setattr(
+                handler,
+                _HANDLER_PREVIOUS_FIRST_PARTY_ATTR,
+                previous_first_party_level,
             )
 
-        handler = logging.StreamHandler(sys.stderr if stream is None else stream)
-        handler.set_name(UMS_LOG_HANDLER_NAME)
-        handler.setFormatter(build_log_formatter())
-        # FIX(codex round-27 P2): a dependency that sets its OWN logger level
-        # (SQLAlchemy sets WARNING) bypasses the root-logger floor -- logger
-        # levels gate only the originating logger, and a NOTSET handler
-        # passes whatever reaches it. Filtering AT THE HANDLER keeps the
-        # documented asymmetry intact: first-party records pass at the
-        # configured application level, every other logger must clear the
-        # third-party floor no matter what level it set on itself. A handler
-        # LEVEL cannot express this -- it would also block first-party
-        # DEBUG/INFO under the WARNING floor.
-        handler.addFilter(
-            _third_party_floor_filter(root_level)
-        )
-        # Survive importlib.reload: module globals reset, handler attributes do not.
-        setattr(handler, _HANDLER_PREVIOUS_ROOT_ATTR, previous_root_level)
-        setattr(handler, _HANDLER_PREVIOUS_FIRST_PARTY_ATTR, previous_first_party_level)
+        _logging_state.lease_levels[lease_id] = numeric_level
+        _logging_state.refcount = len(_logging_state.lease_levels)
+        _logging_state.safety_leases.add(lease_id)
+        _logging_state.safety_refcount = len(_logging_state.safety_leases)
+        setattr(handler, _HANDLER_LEVELS_ATTR, dict(_logging_state.lease_levels))
+        setattr(handler, _HANDLER_SAFETY_COUNT_ATTR, _logging_state.safety_refcount)
+        setattr(handler, _HANDLER_SAFETY_LEASES_ATTR, set(_logging_state.safety_leases))
 
-        logging.basicConfig(handlers=[handler], level=root_level)
-        if handler not in root.handlers:
-            # basicConfig no-opped because the root logger already owns a handler
-            # (pytest, or an operator-supplied --log-config). Add ours alongside
-            # rather than displacing theirs, and apply the level basicConfig
-            # skipped -- without this the handler is installed but the root floor
-            # is whatever the embedding process happened to leave behind.
-            root.addHandler(handler)
-            root.setLevel(root_level)
-        # Unconditional, and after the basicConfig branch: basicConfig never
-        # touches a non-root logger, so this is the only place the application
-        # level is applied on either path.
-        first_party.setLevel(numeric_level)
-        _logging_state.refcount = 1
-        _logging_state.previous_root_level = previous_root_level
-        _logging_state.previous_first_party_level = previous_first_party_level
+        effective_level = min(_logging_state.lease_levels.values())
+        root_level = max(effective_level, THIRD_PARTY_LOG_LEVEL)
+        if installed:
+            logging.basicConfig(handlers=[handler], level=root_level)
+            if handler not in root.handlers:
+                root.addHandler(handler)
+        # FIX: Add the replacement redaction generation before removing the
+        # prior one. Concurrent worker logging therefore never sees a filter
+        # gap while another lifespan configures or changes its level.
+        _replace_redaction_filters(root, handler)
+        _apply_effective_output_level(root, handler)
         return LoggingConfiguration(
-            installed=True,
+            installed=installed,
             handler=handler,
-            previous_root_level=previous_root_level,
-            previous_first_party_level=previous_first_party_level,
+            previous_root_level=(
+                _logging_state.previous_root_level
+                if _logging_state.previous_root_level is not None
+                else previous_root_level
+            ),
+            previous_first_party_level=(
+                _logging_state.previous_first_party_level
+                if _logging_state.previous_first_party_level is not None
+                else previous_first_party_level
+            ),
+            lease_id=lease_id,
+            numeric_level=numeric_level,
         )
 
 
 # ============================================================================
-# Purpose: Undo a configure_logging install -- remove the handler and put BOTH
-#   levels back: the root floor and the first-party application level.
+# Purpose: Release one token's output ownership independently from its
+#   redaction-safety ownership. Restore levels/detach output when the final
+#   output lease ends; filters remain until the final safety lease ends.
 # Database/ORM: None.
 # Standards: create_app is a FACTORY. One process can build many apps (the
 #   test suite builds hundreds), so acquiring process-global logging state on
-#   startup without releasing it on shutdown would make the factory leave a
-#   permanent global side effect behind and make test behaviour depend on
-#   which app was constructed first. Release is symmetric with the scheduler
-#   and executor teardown already in the lifespan. Overlapping lifespans share
-#   one handler via reference counting so the first shutdown cannot silence a
-#   still-active second app. In production, shutdown is immediately followed by
-#   process exit, and it runs AFTER the workers are closed, so no real shutdown
-#   line loses its handler. Because the count is process-wide, the release is
-#   also idempotent PER TOKEN (`LoggingConfiguration.released`): a token that
-#   released once can never decrement again and consume a different lifespan's
-#   lease. The refcount guard cannot do that on its own -- it only detects "no
-#   lease outstanding at all".
-# Blast Radius: Root logger handlers + level, and the `ums_smart_revenue`
-#   logger's level. No authorization, finance, audit, or export behavior.
+#   startup without releasing it would leak process-global state. Output level
+#   recomputation is per lease; duplicate releases are per-token no-ops. A
+#   bounded-shutdown survivor releases output promptly but retains redaction on
+#   every configured handler and logging.lastResort until positive termination.
+# Blast Radius: Root/first-party levels, shared output handler, and exact UMS
+#   filter objects. No authorization, finance, audit persistence, or exports.
 # Connections:
 #   - File: backend/ums_smart_revenue/app.py -> called in the lifespan's
 #     outer finally, after scheduler.close() and executor.close().
 # ============================================================================
-def restore_logging(configuration: LoggingConfiguration) -> None:
-    """Release one logging lease; remove the handler when the last lease ends.
-
-    Reference-counted: each :func:`configure_logging` call takes one lease, and
-    only the release that drops the count to zero touches global logging state.
-    Overlapping app lifespans therefore share a single handler and the first
-    shutdown cannot silence a still-active second app.
-
-    Each token releases AT MOST ONCE. The count is process-wide, so without a
-    per-token flag a second release of the same ``configuration`` decremented
-    again and consumed another lifespan's lease -- with two apps configured,
-    that dropped the count to zero, removed the shared handler and restored the
-    previous levels while the second app was still running, silencing its logs.
-    The refcount guard alone cannot catch that: it only sees "no lease
-    outstanding", never "this token already released". ``configuration.released``
-    closes it, so a repeated release (a ``finally`` that runs twice, a
-    belt-and-braces teardown) is now a genuine no-op.
-
-    Args:
-        configuration: The undo token returned by :func:`configure_logging`.
-            Its ``handler`` is used when ``installed`` is True; otherwise the
-            currently installed handler is resolved instead, so a caller
-            holding a non-installing lease still restores the right one. Its
-            recorded previous levels are the fallback when the module-level
-            state has none.
-
-    Returns:
-        None. The call is a no-op when this token already released, when no
-        lease is outstanding (``refcount`` already zero), when leases remain
-        after this release, or when no handler is installed.
-    """
+def release_logging_output(configuration: LoggingConfiguration) -> None:
+    """Release output/level ownership while retaining redaction safety."""
     with _logging_lock:
-        if configuration.released:
+        if configuration.output_released:
             return
-        if _logging_state.refcount <= 0:
-            return
-        configuration.released = True
-        _logging_state.refcount -= 1
-        if _logging_state.refcount > 0:
+        handler = configuration.handler
+        if handler is None or not _is_owned_handler(handler):
+            handler = installed_log_handler()
+        if handler is not None:
+            _adopt_persisted_logging_state(handler)
+        configuration.output_released = True
+        _logging_state.lease_levels.pop(configuration.lease_id, None)
+        _logging_state.refcount = len(_logging_state.lease_levels)
+        if handler is not None:
+            setattr(handler, _HANDLER_LEVELS_ATTR, dict(_logging_state.lease_levels))
+        if _logging_state.lease_levels:
+            if handler is not None:
+                _apply_effective_output_level(logging.getLogger(), handler)
             return
 
-        handler = configuration.handler if configuration.installed else installed_log_handler()
-        if handler is None:
-            return
         root = logging.getLogger()
-        root.removeHandler(handler)
-        handler.close()
+        if handler is not None:
+            _remove_owned_filters(handler, safety=False)
+            if handler in root.handlers:
+                root.removeHandler(handler)
         previous_root = (
             _logging_state.previous_root_level
             if _logging_state.previous_root_level is not None
@@ -502,17 +960,67 @@ def restore_logging(configuration: LoggingConfiguration) -> None:
             else configuration.previous_first_party_level
         )
         root.setLevel(previous_root)
-        # FIX: configure_logging now also writes the first-party logger's level,
-        # so releasing only the root level would leave the factory holding
-        # process-global state -- the exact leak restore_logging exists to avoid.
         logging.getLogger(FIRST_PARTY_LOGGER_NAME).setLevel(previous_first_party)
         _logging_state.previous_root_level = None
         _logging_state.previous_first_party_level = None
 
 
+def release_logging_safety(configuration: LoggingConfiguration) -> None:
+    """Release redaction only after this token's output ownership has ended."""
+    with _logging_lock:
+        if configuration.safety_released:
+            return
+        # Fail closed: a caller cannot discard the safety boundary while its
+        # own app output lease is still live. restore_logging releases in the
+        # only safe order, and the deferred watcher calls this after workers end.
+        if not configuration.output_released:
+            return
+        handler = configuration.handler
+        if handler is None or not _is_owned_handler(handler):
+            handler = installed_log_handler()
+        if handler is not None:
+            _adopt_persisted_logging_state(handler)
+        configuration.safety_released = True
+        _logging_state.safety_leases.discard(configuration.lease_id)
+        _logging_state.safety_refcount = len(_logging_state.safety_leases)
+        if handler is not None:
+            setattr(
+                handler,
+                _HANDLER_SAFETY_COUNT_ATTR,
+                _logging_state.safety_refcount,
+            )
+            setattr(
+                handler,
+                _HANDLER_SAFETY_LEASES_ATTR,
+                set(_logging_state.safety_leases),
+            )
+        configuration.released = (
+            configuration.output_released and configuration.safety_released
+        )
+        if _logging_state.safety_refcount > 0:
+            return
+        if handler is not None:
+            _remove_owned_filters(handler, safety=True)
+            if not _logging_state.lease_levels:
+                root = logging.getLogger()
+                if handler in root.handlers:
+                    root.removeHandler(handler)
+                handler.close()
+
+
+def restore_logging(configuration: LoggingConfiguration) -> None:
+    """Release one token's output first and its redaction safety second."""
+    release_logging_output(configuration)
+    release_logging_safety(configuration)
+
+
 def installed_log_handler() -> logging.Handler | None:
-    """Return the UMS root handler if this process already installed one."""
+    """Return the registered handler carrying the private ownership marker."""
     for handler in logging.getLogger().handlers:
-        if handler.get_name() == UMS_LOG_HANDLER_NAME:
+        if _is_owned_handler(handler):
             return handler
+    for handler_name in logging.getHandlerNames():
+        registered_handler = logging.getHandlerByName(handler_name)
+        if registered_handler is not None and _is_owned_handler(registered_handler):
+            return registered_handler
     return None
