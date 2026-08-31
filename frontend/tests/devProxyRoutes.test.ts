@@ -661,6 +661,7 @@ const RAW_NETWORK_NAMES = new Set([
 const DYNAMIC_CODE_NAMES = new Set(["Function", "eval", "require"]);
 const DYNAMIC_SOURCE_NAMES = new Set(["importScripts", "serviceWorker"]);
 const WORKER_CONSTRUCTOR_NAMES = new Set(["SharedWorker", "Worker"]);
+const STRING_TIMER_NAMES = new Set(["setInterval", "setTimeout"]);
 const FORBIDDEN_RUNTIME_NAMES = new Set([
   ...RAW_NETWORK_NAMES,
   ...DYNAMIC_CODE_NAMES,
@@ -790,6 +791,39 @@ const isStringCodeTimer = (
       visiting: new Set(),
     }) !== undefined,
   );
+};
+
+/** Allow timers only as direct calls with a statically callable handler. */
+const assertSafeTimerReference = (
+  node: ts.Identifier | ts.PropertyAccessExpression | ts.ElementAccessExpression,
+  checker: ts.TypeChecker,
+): void => {
+  if (
+    ts.isIdentifier(node) &&
+    ts.isPropertyAccessExpression(node.parent) &&
+    node.parent.name === node
+  ) {
+    return;
+  }
+  const name = ts.isIdentifier(node) ? node.text : staticAccessName(node, checker);
+  if (!name || !STRING_TIMER_NAMES.has(name)) {
+    return;
+  }
+  const call = node.parent;
+  const handler = ts.isCallExpression(call) && call.expression === node
+    ? call.arguments[0]
+    : undefined;
+  if (
+    !handler ||
+    knownString(handler, {
+      checker,
+      substitutions: new Map(),
+      visiting: new Set(),
+    }) !== undefined ||
+    checker.getTypeAtLocation(handler).getCallSignatures().length === 0
+  ) {
+    throw new Error("timer references must be direct calls with a callable handler");
+  }
 };
 
 /** Prove a Vite worker entry is a literal compiler-scanned application file. */
@@ -1057,7 +1091,23 @@ const validateDirectApiClientContract = (
         `dynamic code execution is forbidden in scanned application sources: ${normalizedFile}`,
       );
     }
-    if (ts.isIdentifier(node) && WORKER_CONSTRUCTOR_NAMES.has(node.text)) {
+    if (
+      ts.isIdentifier(node) ||
+      ts.isPropertyAccessExpression(node) ||
+      ts.isElementAccessExpression(node)
+    ) {
+      assertSafeTimerReference(node, checker);
+    }
+    const workerName = ts.isIdentifier(node)
+      ? node.text
+      : ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node)
+        ? staticAccessName(node, checker)
+        : undefined;
+    const workerPropertyName =
+      ts.isIdentifier(node) &&
+      ts.isPropertyAccessExpression(node.parent) &&
+      node.parent.name === node;
+    if (workerName && WORKER_CONSTRUCTOR_NAMES.has(workerName) && !workerPropertyName) {
       const parent = node.parent;
       if (
         ts.isTypeReferenceNode(parent) ||
@@ -2460,6 +2510,10 @@ describe("dev proxy route coverage (derived from frontend/src)", () => {
       "module Worker URL",
       'new Worker(new URL("../shared/hidden.ts", import.meta.url), { type: "module" });',
     ],
+    [
+      "computed global Worker URL",
+      'new globalThis["Worker"](new URL("../shared/hidden.ts", import.meta.url));',
+    ],
   ])("fails closed on %s outside the compiler source graph", (_label, source) => {
     expect(() => discoverRequestedPrefixesInSource(source)).toThrow(
       /unaudited network or dynamic-code access is forbidden outside canonical client transports|worker source is outside compiler-scanned src/iu,
@@ -2898,10 +2952,6 @@ describe("dev proxy route coverage (derived from frontend/src)", () => {
       '((() => {}).constructor as FunctionConstructor)("return fetch(\\\"/reports/raw-files\\\")")();',
     ],
     [
-      "string-evaluating timer",
-      'setTimeout("fetch(\\\"/reports/raw-files\\\")", 0);',
-    ],
-    [
       "XMLHttpRequest",
       'new XMLHttpRequest().open("GET", "/reports/raw-files");',
     ],
@@ -2920,6 +2970,16 @@ describe("dev proxy route coverage (derived from frontend/src)", () => {
   ])("fails closed on %s raw network access", (_label, source) => {
     expect(() => discoverRequestedPrefixesInSource(source)).toThrow(
       /unaudited network or dynamic-code access is forbidden outside canonical client transports/iu,
+    );
+  });
+
+  it.each([
+    'setTimeout("fetch(\\\"/hidden\\\")", 0);',
+    'const timer = setTimeout; timer("fetch(\\\"/hidden\\\")", 0);',
+    '(0, setTimeout)("fetch(\\\"/hidden\\\")", 0);',
+  ])("fails closed when a string timer escapes direct-call syntax: %s", (source) => {
+    expect(() => discoverRequestedPrefixesInSource(source)).toThrow(
+      /timer references must be direct calls with a callable handler|unaudited network or dynamic-code access is forbidden/iu,
     );
   });
 
