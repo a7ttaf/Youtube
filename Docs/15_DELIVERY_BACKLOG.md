@@ -620,10 +620,12 @@ closed unmerged and superseded by the consolidated batch in #156.
   route (see the audit summary endpoint entry below); the Retention tile stays a
   static policy constant.
 - ✅ Rolling month window (item P1.2, PR #211, merge `41b495393`) — the
-  frozen `DEFAULT_MONTH = "2026-03"` / `MONTH_OPTIONS` literals and the AppShell
-  topbar month `<select>` now all derive from `frontend/src/lib/months.ts`:
-  current calendar month + the 3 before it, from LOCAL date components with an
-  injectable `now`. Integration follow-ups on the same branch, from the audit of
+  frozen `DEFAULT_MONTH = "2026-03"` / `MONTH_OPTIONS` literals were replaced
+  by `frontend/src/lib/months.ts`: current calendar month + the 3 before it,
+  from LOCAL date components with an injectable `now`. Real controlled view
+  selectors use that rolling source; the later P1 integration removes the
+  AppShell topbar selector because it never controlled those views.
+  Integration follow-ups on the same branch, from the audit of
   what the new current-month default exposed: (a) Month Close reads the
   close-status `404` as "no close record yet" — data absent, not an error — and
   renders the honest OPEN / not-started summary, because close rows are only

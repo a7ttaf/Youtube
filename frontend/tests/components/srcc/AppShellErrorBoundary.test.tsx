@@ -210,13 +210,15 @@ describe("AppShell factual chrome", () => {
     ]);
   });
 
-  it("keeps rolling Month but removes inert scope, currency, refresh, and export controls", async () => {
+  it("removes inert global report controls while the wired view keeps its own Month", async () => {
     renderShell();
-    const filters = await screen.findByRole("group", { name: "Report filters" });
+    const viewFilters = await screen.findByLabelText("Net revenue filters");
 
-    expect(within(filters).getByLabelText("Month")).toBeInTheDocument();
-    expect(within(filters).queryByLabelText("Scope")).not.toBeInTheDocument();
-    expect(within(filters).queryByLabelText(/currency/iu)).not.toBeInTheDocument();
+    expect(screen.queryByRole("group", { name: "Report filters" }))
+      .not.toBeInTheDocument();
+    expect(within(viewFilters).getByLabelText("Month")).toBeInTheDocument();
+    expect(within(viewFilters).getByLabelText("Scope")).toBeInTheDocument();
+    expect(within(viewFilters).queryByLabelText(/currency/iu)).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Refresh reports" }))
       .not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /create export/iu }))
