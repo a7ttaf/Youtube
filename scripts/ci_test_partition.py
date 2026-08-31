@@ -12,7 +12,10 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import os
+import subprocess
+import sys
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -80,8 +83,147 @@ def belongs_to_database_lane(relative_path: Path) -> bool:
 
 
 def _uses_real_postgres(path: Path) -> bool:
-    source = path.read_text(encoding="utf-8")
+    try:
+        source = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as exc:
+        raise PartitionError(f"cannot inspect pytest support file {path}: {exc}") from exc
     return any(sentinel in source for sentinel in REAL_POSTGRES_SENTINELS)
+
+
+def _module_scope_statements(body: Sequence[ast.stmt]) -> tuple[ast.stmt, ...]:
+    """Return import-time statements without descending into functions/classes."""
+
+    statements: list[ast.stmt] = []
+    pending = list(body)
+    while pending:
+        statement = pending.pop(0)
+        statements.append(statement)
+        if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            continue
+        for field_name in ("body", "orelse", "finalbody"):
+            nested = getattr(statement, field_name, ())
+            if isinstance(nested, list):
+                pending.extend(node for node in nested if isinstance(node, ast.stmt))
+        handlers = getattr(statement, "handlers", ())
+        for handler in handlers:
+            pending.extend(handler.body)
+        cases = getattr(statement, "cases", ())
+        for case in cases:
+            pending.extend(case.body)
+    return tuple(statements)
+
+
+def _plugin_literals(value: ast.expr, source_path: Path) -> tuple[str, ...]:
+    """Resolve a literal pytest_plugins value or fail closed on computation."""
+
+    if isinstance(value, ast.Constant) and isinstance(value.value, str):
+        return (value.value,)
+    if isinstance(value, (ast.List, ast.Tuple, ast.Set)):
+        modules: list[str] = []
+        for element in value.elts:
+            modules.extend(_plugin_literals(element, source_path))
+        return tuple(modules)
+    if isinstance(value, ast.BinOp) and isinstance(value.op, ast.Add):
+        return _plugin_literals(value.left, source_path) + _plugin_literals(
+            value.right, source_path
+        )
+    raise PartitionError(
+        f"{source_path} computes pytest_plugins dynamically; "
+        "CI cannot prove its fixture database requirements"
+    )
+
+
+def _pytest_plugin_modules(source_path: Path) -> tuple[str, ...]:
+    """Return literal import-time pytest_plugins declarations from one source."""
+
+    try:
+        source = source_path.read_text(encoding="utf-8")
+        tree = ast.parse(source, filename=str(source_path))
+    except (OSError, UnicodeError, SyntaxError) as exc:
+        raise PartitionError(f"cannot inspect pytest support file {source_path}: {exc}") from exc
+
+    modules: list[str] = []
+    for statement in _module_scope_statements(tree.body):
+        value: ast.expr | None = None
+        targets: Sequence[ast.expr] = ()
+        if isinstance(statement, ast.Assign):
+            value = statement.value
+            targets = statement.targets
+        elif isinstance(statement, ast.AnnAssign):
+            value = statement.value
+            targets = (statement.target,)
+        elif isinstance(statement, ast.AugAssign):
+            value = statement.value
+            targets = (statement.target,)
+        if value is None or not any(
+            isinstance(target, ast.Name) and target.id == "pytest_plugins" for target in targets
+        ):
+            continue
+        modules.extend(_plugin_literals(value, source_path))
+    return tuple(dict.fromkeys(modules))
+
+
+def _resolve_project_plugin(project_root: Path, module: str) -> Path:
+    """Resolve a project-local pytest plugin module without importing it."""
+
+    relative = Path(*module.split("."))
+    candidates = (
+        project_root / relative.with_suffix(".py"),
+        project_root / relative / "__init__.py",
+    )
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+    raise PartitionError(
+        f"pytest plugin {module!r} is not a readable project module; "
+        "CI cannot classify its database requirements"
+    )
+
+
+def _applicable_conftests(test_path: Path, project_root: Path) -> tuple[Path, ...]:
+    """Return every conftest inherited by a test module, root first."""
+
+    resolved_root = project_root.resolve()
+    current = test_path.resolve().parent
+    directories: list[Path] = []
+    while current == resolved_root or current.is_relative_to(resolved_root):
+        directories.append(current)
+        if current == resolved_root:
+            break
+        current = current.parent
+    return tuple(
+        conftest
+        for directory in reversed(directories)
+        if (conftest := directory / "conftest.py").is_file()
+    )
+
+
+def _pytest_support_files(test_path: Path, project_root: Path) -> tuple[Path, ...]:
+    """Resolve applicable conftests and their transitive project plugin closure."""
+
+    pending = [test_path, *_applicable_conftests(test_path, project_root)]
+    support_files: list[Path] = []
+    seen: set[Path] = set()
+    while pending:
+        source_path = pending.pop(0).resolve()
+        if source_path in seen:
+            continue
+        seen.add(source_path)
+        support_files.append(source_path)
+        pending.extend(
+            _resolve_project_plugin(project_root, module)
+            for module in _pytest_plugin_modules(source_path)
+        )
+    return tuple(support_files)
+
+
+def _fixture_support_uses_real_postgres(test_path: Path, project_root: Path) -> bool:
+    """Return whether inherited fixture/plugin support requires real Postgres."""
+
+    return any(
+        support_path != test_path.resolve() and _uses_real_postgres(support_path)
+        for support_path in _pytest_support_files(test_path, project_root)
+    )
 
 
 def build_test_partition(project_root: Path = PROJECT_ROOT) -> TestPartition:
@@ -95,10 +237,13 @@ def build_test_partition(project_root: Path = PROJECT_ROOT) -> TestPartition:
         relative_path = _relative_to_project(path, project_root)
         if belongs_to_database_lane(relative_path):
             database.append(relative_path)
+        elif _uses_real_postgres(path):
+            fast.append(relative_path)
+            leaked_postgres.append(relative_path)
+        elif _fixture_support_uses_real_postgres(path, project_root):
+            database.append(relative_path)
         else:
             fast.append(relative_path)
-            if _uses_real_postgres(path):
-                leaked_postgres.append(relative_path)
 
     if leaked_postgres:
         rendered = "\n".join(f"  - {path.as_posix()}" for path in leaked_postgres)
@@ -134,12 +279,26 @@ def check_partition(project_root: Path = PROJECT_ROOT) -> int:
 def run_lane(lane: str, project_root: Path = PROJECT_ROOT) -> int:
     """Run exactly one validated lane through the locked pytest installation."""
 
-    import pytest
-
-    partition = build_test_partition(project_root)
+    resolved_root = project_root.resolve()
+    partition = build_test_partition(resolved_root)
     selected: Sequence[Path] = getattr(partition, lane)
-    os.environ.pop("PYTEST_ADDOPTS", None)
-    return pytest.main(["-q", *(path.as_posix() for path in selected)])
+    environment = os.environ.copy()
+    environment.pop("PYTEST_ADDOPTS", None)
+    # FIX: Run pytest from the requested project root with absolute inputs; the
+    # previous relative argv silently depended on the caller already being there.
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            "-q",
+            *(str(resolved_root / path) for path in selected),
+        ],
+        cwd=resolved_root,
+        env=environment,
+        check=False,
+    )
+    return completed.returncode
 
 
 def main(argv: Sequence[str] | None = None) -> int:

@@ -17,7 +17,13 @@ jobs:
   fast:
     name: Lint and unit tests
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    env:
+      UV_LOCKED: "1"
+    # The authoritative fast lane measured 25m46s on the managed Windows
+    # validation host before setup, lint, mypy, and frontend checks. Sixty
+    # minutes keeps the timeout useful without turning normal variance into a
+    # false failure.
+    timeout-minutes: 60
     steps:
       - name: Checkout repository
         # actions/checkout@v7.0.1

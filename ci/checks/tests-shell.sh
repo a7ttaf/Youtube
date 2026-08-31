@@ -32,7 +32,11 @@ cd "$ROOT_DIR"
 #
 # Appended rather than prepended: a bats the developer or the image already has
 # stays the one that runs, and this is only the fallback.
-if [ -x "$ROOT_DIR/.ci-gate/bats/bin/bats" ]; then
+# FIX: The negative self-test must still be able to prove fail-closed behavior
+# after CI has provisioned the pinned fallback. Disabling this fallback cannot
+# produce a green skip: the missing-runner branch below exits FAIL_INFRA.
+if [ "${CI_GATE_TEST_WITHOUT_WORKTREE_BATS:-0}" != "1" ] \
+  && [ -x "$ROOT_DIR/.ci-gate/bats/bin/bats" ]; then
   PATH="${PATH}:${ROOT_DIR}/.ci-gate/bats/bin"
   export PATH
 fi
