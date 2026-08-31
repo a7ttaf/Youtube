@@ -111,11 +111,40 @@ Run these from the repository root on the exact PR head being reviewed:
 ```powershell
 git diff --check origin/main...HEAD
 git diff --check
-$files = git diff --name-only origin/main...HEAD
-foreach ($f in $files) { if ($f -like 'Docs/*.md') { Select-String -LiteralPath $f -Pattern '\[[^\]]+\]\(([^)]+)\)' -AllMatches } }
+$files = git diff --name-only origin/main...HEAD -- '*.md'
+$missing = @()
+foreach ($f in $files) {
+  $dir = Split-Path -Parent $f
+  if (-not $dir) { $dir = '.' }
+  foreach ($line in Get-Content -LiteralPath $f) {
+    foreach ($m in [regex]::Matches($line, '\[[^\]]+\]\(([^)]+)\)')) {
+      $target = $m.Groups[1].Value.Trim()
+      if ($target -match '^(https?:|mailto:|#)' -or $target -eq '') { continue }
+      $pathPart = ($target -split '#')[0]
+      if ($pathPart -eq '') { continue }
+      $candidate = Join-Path $dir ([uri]::UnescapeDataString($pathPart))
+      if (-not (Test-Path -LiteralPath $candidate)) { $missing += "${f} -> $target" }
+    }
+  }
+}
+if ($missing.Count) { $missing; exit 1 }
+$tableErrors = @()
+foreach ($f in $files) {
+  $prevCols = $null
+  $lineNo = 0
+  foreach ($line in Get-Content -LiteralPath $f) {
+    $lineNo++
+    if ($line.TrimStart().StartsWith('|')) {
+      $cols = ([regex]::Matches($line, '(?<!\\)\|')).Count - 1
+      if ($null -ne $prevCols -and $cols -ne $prevCols) {
+        $tableErrors += "${f}:${lineNo} row cols $cols expected $prevCols"
+      }
+      $prevCols = $cols
+    } else {
+      $prevCols = $null
+    }
+  }
+}
+if ($tableErrors.Count) { $tableErrors; exit 1 }
 rg -n '2026-08-31|#221 and #225 are open/BLOCKED|#222.?#224 are open/BEHIND|No migration/backfill required|Final PR #227 SHA is supplied|no environment fallback and no default rate' Docs/01_IMPLEMENTATION_PLAN.md Docs/15_DELIVERY_BACKLOG.md Docs/20_DEPLOYMENT_READINESS_AUDIT.md Docs/21_BETA_IMPLEMENTATION_PLAN.md Docs/23_ADMIN_ACCESS_AND_CONFIG_PLAN.md Docs/24_US_WITHHOLDING_AND_US_REVENUE_PLAN.md Docs/25_PROGRAM_DEPENDENCY_GRAPH.md
 ```
-
-The link check must resolve each non-URL Markdown link target relative to the source
-file. The table check must count unescaped `|` separators for each contiguous Markdown
-table and fail on mixed column counts.
