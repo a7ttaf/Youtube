@@ -2943,6 +2943,64 @@ def test_restore_roles_rejects_fatal_even_after_allowed_duplicate(
     assert "terminating connection" in str(caught.value)
 
 
+def test_restore_roles_quiesces_late_file_backend_before_returning_failure(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A docker timeout cannot leave roles.sql replaying behind rollback."""
+    roles_path = tmp_path / restore.ROLES_NAME
+    roles_path.write_text("CREATE ROLE app_tenant;\n", encoding="utf-8")
+    pending_replay = False
+    events: list[str] = []
+
+    monkeypatch.setattr(restore, "_preflight_roles_file", lambda *_a, **_k: None)
+    monkeypatch.setattr(
+        restore, "_reset_existing_protected_role_settings", lambda *_a, **_k: None
+    )
+
+    def host_timeout(
+        argv: list[str], *, timeout: int, source: Path
+    ) -> subprocess.CompletedProcess[str]:
+        """Leave the tagged roles backend active after docker.exe times out."""
+        nonlocal pending_replay
+        command = " ".join(argv)
+        assert source == roles_path
+        assert "PGAPPNAME=ums_restore_mut_" in command
+        assert "statement_timeout=" in command and "lock_timeout=" in command
+        assert "psql -X" in command and "ON_ERROR_STOP=0" in command
+        pending_replay = True
+        events.append("client-timeout")
+        raise subprocess.TimeoutExpired(argv, timeout)
+
+    def backend_pids(*_args: object, **_kwargs: object) -> list[int]:
+        """Expose the modeled backend until the control session terminates it."""
+        events.append("pid-active" if pending_replay else "pid-absent")
+        return [9234] if pending_replay else []
+
+    def terminate_backend(
+        _container: str, sql: str, *, timeout: int, dbname: str | None = None
+    ) -> str:
+        """Stop replay before the roles failure can reach outer rollback."""
+        nonlocal pending_replay
+        _ = timeout
+        assert dbname == "postgres" and "pg_terminate_backend" in sql
+        events.append("terminate")
+        pending_replay = False
+        return ""
+
+    monkeypatch.setattr(restore, "_run_with_file", host_timeout)
+    monkeypatch.setattr(restore, "_mutation_backend_pids", backend_pids)
+    monkeypatch.setattr(restore, "_psql", terminate_backend)
+    monkeypatch.setattr(restore.time, "sleep", lambda _seconds: None)
+
+    with pytest.raises(restore.RestoreError) as caught:
+        restore._restore_roles("container", roles_path, timeout=5)
+
+    assert caught.value.code == restore.EXIT_ROLES_FAILED
+    assert "is quiescent" in str(caught.value)
+    assert pending_replay is False
+    assert events == ["client-timeout", "pid-active", "terminate", "pid-absent", "pid-absent"]
+
+
 def test_destroy_throwaway_false_on_docker_rm_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -5095,15 +5153,37 @@ def test_execute_restore_verifies_replacement_before_cutover_on_every_path(
         "_restore_roles",
         lambda container, path, timeout: order.append("roles") or set(),
     )
+    original_role_settings = {"app_tenant": {"search_path": "legacy"}}
+    desired_role_settings = {"app_tenant": {"statement_timeout": "2min"}}
     monkeypatch.setattr(
         restore,
-        "_desired_database_role_settings",
-        lambda *a, **k: order.append("capture-db-role-settings") or {},
+        "_database_role_settings",
+        lambda *a, **k: order.append("capture-original-db-role-settings")
+        or original_role_settings,
     )
     monkeypatch.setattr(
         restore,
+        "_desired_database_role_settings",
+        lambda *a, **k: order.append("capture-db-role-settings")
+        or desired_role_settings,
+    )
+
+    def fake_apply_role_settings(
+        _container: str,
+        _database: str,
+        settings: dict[str, dict[str, str]],
+        *,
+        timeout: int,
+    ) -> None:
+        """Distinguish promotion settings from pre-replay rollback state."""
+        _ = timeout
+        label = "desired" if settings == desired_role_settings else "original"
+        order.append(f"apply-{label}-db-role-settings")
+
+    monkeypatch.setattr(
+        restore,
         "_apply_database_role_settings_transactionally",
-        lambda *a, **k: order.append("finalize-db-role-settings"),
+        fake_apply_role_settings,
     )
     monkeypatch.setattr(
         restore,
@@ -5126,9 +5206,10 @@ def test_execute_restore_verifies_replacement_before_cutover_on_every_path(
         *,
         timeout: int,
         finalize: Callable[[], None] | None = None,
+        rollback_finalize: Callable[[], None] | None = None,
     ) -> str:
         """Model the rename boundary and database-scoped role finalizer."""
-        _ = timeout
+        _ = (timeout, rollback_finalize)
         order.append(f"cutover:{target_db}<-{replacement}")
         if finalize is not None:
             finalize()
@@ -5159,6 +5240,7 @@ def test_execute_restore_verifies_replacement_before_cutover_on_every_path(
         order.index("guard")
         < order.index("dumpcheck")
         < order.index("preflight")
+        < order.index("capture-original-db-role-settings")
         < order.index("create:appdb")
         < order.index("roles")
         < order.index("capture-db-role-settings")
@@ -5166,7 +5248,7 @@ def test_execute_restore_verifies_replacement_before_cutover_on_every_path(
         < order.index("data:staging-db")
         < order.index("verify:staging-db")
         < order.index("cutover:appdb<-staging-db")
-        < order.index("finalize-db-role-settings")
+        < order.index("apply-desired-db-role-settings")
         < order.index("unlock")
     ), (
         "preflights must precede staging, and the verified replacement must "
@@ -6330,6 +6412,7 @@ def test_database_role_setting_declarations_are_exactly_target_scoped() -> None:
     """Only protected-role SET declarations for the final target are replayed."""
     declared = restore._protected_database_role_setting_declarations(
         "ALTER ROLE app_tenant IN DATABASE appdb SET statement_timeout TO '2min';\n"
+        "ALTER ROLE app_tenant IN DATABASE appdb SET ums.audit.mode TO 'strict';\n"
         'ALTER ROLE app_platform IN DATABASE "appdb" SET work_mem TO \'64MB\';\n'
         "ALTER ROLE app_tenant IN DATABASE other SET work_mem TO '1MB';\n"
         "ALTER ROLE app_tenant IN DATABASE appdb RESET search_path;\n"
@@ -6338,9 +6421,18 @@ def test_database_role_setting_declarations_are_exactly_target_scoped() -> None:
         "appdb",
     )
     assert declared == {
-        "app_tenant": {"statement_timeout"},
+        "app_tenant": {"statement_timeout", "ums.audit.mode"},
         "app_platform": {"work_mem"},
     }
+
+
+def test_role_setting_name_keeps_every_dotted_custom_guc_component() -> None:
+    """The shared scanner must not truncate custom GUCs at the first dot."""
+    for module in (backup, restore):
+        tokens = module._role_sql_tokens(
+            "ALTER ROLE app_tenant IN DATABASE appdb SET ums.audit.mode TO 'strict'"
+        )
+        assert module._role_sql_setting_name(tokens) == "ums.audit.mode"
 
 
 def test_database_role_finalizer_reconciles_commit_then_timeout(
@@ -6349,7 +6441,10 @@ def test_database_role_finalizer_reconciles_commit_then_timeout(
     """A lost COMMIT response is success only when a fresh catalog proves all effects."""
     before = {"app_tenant": {"search_path": "legacy"}}
     desired = {
-        "app_tenant": {"statement_timeout": "2min"},
+        "app_tenant": {
+            "statement_timeout": "2min",
+            "ums.audit.mode": "strict",
+        },
         "app_platform": {"work_mem": "64MB"},
     }
     current = {role: dict(settings) for role, settings in before.items()}
@@ -6360,11 +6455,18 @@ def test_database_role_finalizer_reconciles_commit_then_timeout(
         return {role: dict(settings) for role, settings in current.items()}
 
     def committed_timeout(
-        _container: str, sql: str, *, timeout: int, dbname: str | None = None
+        _container: str,
+        sql: str,
+        *,
+        timeout: int,
+        dbname: str,
+        label: str,
+        failure_code: int,
     ) -> str:
         """Model PostgreSQL committing the whole transaction before transport loss."""
-        _ = timeout
+        _ = (timeout, label)
         assert dbname == "postgres"
+        assert failure_code == restore.EXIT_ROLES_FAILED
         issued.append(sql)
         current.clear()
         current.update({role: dict(settings) for role, settings in desired.items()})
@@ -6373,7 +6475,7 @@ def test_database_role_finalizer_reconciles_commit_then_timeout(
         )
 
     monkeypatch.setattr(restore, "_database_role_settings", catalog)
-    monkeypatch.setattr(restore, "_psql", committed_timeout)
+    monkeypatch.setattr(restore, "_psql_mutation", committed_timeout)
     restore._apply_database_role_settings_transactionally(
         "container", "appdb", desired, timeout=5
     )
@@ -6386,6 +6488,7 @@ def test_database_role_finalizer_reconciles_commit_then_timeout(
         for statement in issued[0].splitlines()
         if statement.startswith("ALTER ROLE")
     )
+    assert 'SET "ums.audit.mode" TO \'strict\';' in issued[0]
     assert "proves the complete transaction committed" in capsys.readouterr().err
 
 
@@ -6409,7 +6512,7 @@ def test_database_role_finalizer_timeout_before_commit_preserves_prior_state(
         """Model loss before the server commits the all-or-nothing transaction."""
         raise restore.RestoreError(restore.EXIT_ROLES_FAILED, "connection lost")
 
-    monkeypatch.setattr(restore, "_psql", timeout_before_commit)
+    monkeypatch.setattr(restore, "_psql_mutation", timeout_before_commit)
     with pytest.raises(restore.RestoreError) as caught:
         restore._apply_database_role_settings_transactionally(
             "container", "appdb", desired, timeout=5
@@ -6417,6 +6520,73 @@ def test_database_role_finalizer_timeout_before_commit_preserves_prior_state(
 
     assert "prior state was preserved" in str(caught.value)
     assert current == before
+
+
+def test_database_role_finalizer_quiesces_late_backend_before_catalog_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A host timeout cannot race a late role COMMIT against reconciliation."""
+    before = {"app_tenant": {"search_path": "legacy"}}
+    desired = {"app_tenant": {"statement_timeout": "2min"}}
+    current = {role: dict(settings) for role, settings in before.items()}
+    pending_commit = False
+    events: list[str] = []
+
+    def catalog(*_args: object, **_kwargs: object) -> dict[str, dict[str, str]]:
+        """Apply a modeled late COMMIT if code snapshots before termination."""
+        nonlocal pending_commit
+        if pending_commit:
+            events.append("LATE-COMMIT")
+            current.clear()
+            current.update({role: dict(settings) for role, settings in desired.items()})
+            pending_commit = False
+        events.append("catalog")
+        return {role: dict(settings) for role, settings in current.items()}
+
+    def host_timeout(
+        argv: list[str], *, timeout: int, stdin_text: str
+    ) -> subprocess.CompletedProcess[str]:
+        """Leave the tagged PostgreSQL backend active after docker.exe times out."""
+        nonlocal pending_commit
+        assert stdin_text.startswith("BEGIN;\n")
+        command = " ".join(argv)
+        assert "PGAPPNAME=ums_restore_mut_" in command
+        assert "statement_timeout=" in command and "lock_timeout=" in command
+        pending_commit = True
+        events.append("client-timeout")
+        raise subprocess.TimeoutExpired(argv, timeout)
+
+    def backend_pids(*_args: object, **_kwargs: object) -> list[int]:
+        """Expose the modeled backend until the control connection terminates it."""
+        events.append("pid-active" if pending_commit else "pid-absent")
+        return [9123] if pending_commit else []
+
+    def terminate_backend(
+        _container: str, sql: str, *, timeout: int, dbname: str | None = None
+    ) -> str:
+        """Cancel the pending transaction before any catalog reconciliation."""
+        nonlocal pending_commit
+        _ = timeout
+        assert dbname == "postgres" and "pg_terminate_backend" in sql
+        events.append("terminate")
+        pending_commit = False
+        return ""
+
+    monkeypatch.setattr(restore, "_database_role_settings", catalog)
+    monkeypatch.setattr(restore, "_run_with_input", host_timeout)
+    monkeypatch.setattr(restore, "_mutation_backend_pids", backend_pids)
+    monkeypatch.setattr(restore, "_psql", terminate_backend)
+    monkeypatch.setattr(restore.time, "sleep", lambda _seconds: None)
+
+    with pytest.raises(restore.RestoreError) as caught:
+        restore._apply_database_role_settings_transactionally(
+            "container", "appdb", desired, timeout=5
+        )
+
+    assert "prior state was preserved" in str(caught.value)
+    assert current == before and "LATE-COMMIT" not in events
+    assert events.index("terminate") < len(events) - 1
+    assert events[-1] == "catalog"
 
 
 def test_owner_roles_sql_covers_every_dumped_owner_catalog() -> None:
@@ -6679,15 +6849,37 @@ def _patched_execute_restore(monkeypatch: pytest.MonkeyPatch, order: list[str]):
         "_restore_roles",
         lambda container, path, timeout: order.append("roles") or set(),
     )
+    original_role_settings = {"app_tenant": {"search_path": "legacy"}}
+    desired_role_settings = {"app_tenant": {"statement_timeout": "2min"}}
     monkeypatch.setattr(
         restore,
-        "_desired_database_role_settings",
-        lambda *a, **k: order.append("capture-db-role-settings") or {},
+        "_database_role_settings",
+        lambda *a, **k: order.append("capture-original-db-role-settings")
+        or original_role_settings,
     )
     monkeypatch.setattr(
         restore,
+        "_desired_database_role_settings",
+        lambda *a, **k: order.append("capture-db-role-settings")
+        or desired_role_settings,
+    )
+
+    def fake_apply_role_settings(
+        _container: str,
+        _database: str,
+        settings: dict[str, dict[str, str]],
+        *,
+        timeout: int,
+    ) -> None:
+        """Record whether cutover desired state or rollback original state lands."""
+        _ = timeout
+        label = "desired" if settings == desired_role_settings else "original"
+        order.append(f"apply-{label}-db-role-settings")
+
+    monkeypatch.setattr(
+        restore,
         "_apply_database_role_settings_transactionally",
-        lambda *a, **k: order.append("finalize-db-role-settings"),
+        fake_apply_role_settings,
     )
     monkeypatch.setattr(restore, "_restore_data", lambda *a, **k: order.append("data"))
     monkeypatch.setattr(restore, "_verify", lambda *a, **k: True)
@@ -6704,9 +6896,10 @@ def _patched_execute_restore(monkeypatch: pytest.MonkeyPatch, order: list[str]):
         *,
         timeout: int,
         finalize: Callable[[], None] | None = None,
+        rollback_finalize: Callable[[], None] | None = None,
     ) -> str:
         """Model a successful cutover including the database-scoped finalizer."""
-        _ = timeout
+        _ = (timeout, rollback_finalize)
         order.append(f"cutover:{target_db}<-{replacement}")
         if finalize is not None:
             finalize()
@@ -6799,8 +6992,53 @@ def test_execute_restore_never_cuts_over_a_failed_replacement_verification(
 
     assert ok is False
     assert "verify-failed" in order
+    assert "apply-original-db-role-settings" in order
+    assert order.index("verify-failed") < order.index(
+        "apply-original-db-role-settings"
+    ) < order.index("cleanup:staging-db")
     assert "cleanup:staging-db" in order
     assert not any(item.startswith("cutover:") for item in order)
+
+
+def test_execute_restore_does_not_mutate_after_unquiesced_roles_replay(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Unsettled roles replay forbids rollback and staging catalog mutations."""
+    order: list[str] = []
+    args_ns = _patched_execute_restore(monkeypatch, order)
+    monkeypatch.setattr(restore, "_psql", _restore_psql())
+
+    def unquiesced_roles(*_args: object, **_kwargs: object) -> set[str]:
+        """Model a docker timeout whose tagged server backend remains ambiguous."""
+        order.append("roles-unquiesced")
+        raise restore._MutationNotQuiescentError(
+            restore.EXIT_ROLES_FAILED,
+            "application_name='ums_restore_mut_proof' could not be proven stopped",
+        )
+
+    monkeypatch.setattr(restore, "_restore_roles", unquiesced_roles)
+
+    with pytest.raises(restore.RestoreError) as caught:
+        restore._execute_restore(
+            "container",
+            tmp_path,
+            args_ns(
+                timeout=5,
+                allow_nonempty=True,
+                wait_for_postgres=60,
+                docker_timeout=5,
+            ),
+            {"source": {"database": "appdb"}},
+        )
+
+    assert caught.value.code == restore.EXIT_ROLES_FAILED
+    assert "ums_restore_mut_proof" in str(caught.value)
+    assert "roles-unquiesced" in order
+    assert "apply-original-db-role-settings" not in order
+    assert "cleanup:staging-db" not in order
+    assert "were skipped" in capsys.readouterr().err
 
 
 def test_restore_roles_rejects_privileged_attributes(
@@ -7694,6 +7932,158 @@ def _assert_catalog_rolled_back(model: _CutoverCatalogModel) -> None:
     assert model.allow == {model.OLD_OID: True, model.REPLACEMENT_OID: False}
 
 
+@pytest.mark.parametrize("timed_out_operation", ["rename", "allow_connections"])
+def test_cutover_quiesces_late_backend_before_catalog_reconciliation(
+    monkeypatch: pytest.MonkeyPatch, timed_out_operation: str
+) -> None:
+    """Rename/admission timeouts cannot mutate after the rollback snapshot."""
+    model = _CutoverCatalogModel()
+    real_set_allow = restore._set_database_allow_connections
+    real_rename = restore._rename_database
+    model.install(monkeypatch)
+    monkeypatch.setattr(restore, "_set_database_allow_connections", real_set_allow)
+    monkeypatch.setattr(restore, "_rename_database", real_rename)
+
+    pending: Callable[[], None] | None = None
+    selected_timed_out = False
+    selected_command = ""
+    events: list[str] = []
+
+    def mutation_for(sql: str) -> tuple[str, Callable[[], None]]:
+        """Translate the two ALTER DATABASE shapes into model mutations."""
+        allow_match = re.fullmatch(
+            r'ALTER DATABASE "([^"]+)" WITH ALLOW_CONNECTIONS (true|false);',
+            sql.strip(),
+        )
+        if allow_match is not None:
+            database, raw_allow = allow_match.groups()
+            return (
+                "allow_connections",
+                lambda: model.set_allow(
+                    "container",
+                    database,
+                    allow=raw_allow == "true",
+                    timeout=5,
+                ),
+            )
+        rename_match = re.fullmatch(
+            r'ALTER DATABASE "([^"]+)" RENAME TO "([^"]+)";', sql.strip()
+        )
+        assert rename_match is not None, sql
+        source, destination = rename_match.groups()
+        return (
+            "rename",
+            lambda: model.rename(
+                "container", source, destination, timeout=5
+            ),
+        )
+
+    def fake_run_with_input(
+        argv: list[str], *, timeout: int, stdin_text: str
+    ) -> subprocess.CompletedProcess[str]:
+        """Leave only the selected server mutation pending after host timeout."""
+        nonlocal pending, selected_timed_out, selected_command
+        operation, mutation = mutation_for(stdin_text)
+        if operation == timed_out_operation and not selected_timed_out:
+            selected_timed_out = True
+            selected_command = " ".join(argv)
+            pending = mutation
+            events.append("client-timeout")
+            raise subprocess.TimeoutExpired(argv, timeout)
+        mutation()
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    def backend_pids(*_args: object, **_kwargs: object) -> list[int]:
+        """Expose the timed-out backend until termination settles it."""
+        events.append("pid-active" if pending is not None else "pid-absent")
+        return [9234] if pending is not None else []
+
+    def terminate_backend(
+        _container: str, sql: str, *, timeout: int, dbname: str | None = None
+    ) -> str:
+        """Cancel the pending late mutation rather than applying it."""
+        nonlocal pending
+        _ = timeout
+        assert dbname == "postgres" and "pg_terminate_backend" in sql
+        events.append("terminate")
+        pending = None
+        return ""
+
+    def observe(*args: object, **kwargs: object) -> dict[int, object]:
+        """A premature snapshot would permit the modeled late mutation to land."""
+        nonlocal pending
+        if pending is not None:
+            events.append("LATE-MUTATION")
+            mutation = pending
+            pending = None
+            mutation()
+        events.append("snapshot")
+        return model.observe(*args, **kwargs)
+
+    monkeypatch.setattr(restore, "_run_with_input", fake_run_with_input)
+    monkeypatch.setattr(restore, "_mutation_backend_pids", backend_pids)
+    monkeypatch.setattr(restore, "_psql", terminate_backend)
+    monkeypatch.setattr(restore, "_observe_cutover_database_state", observe)
+    monkeypatch.setattr(restore.time, "sleep", lambda _seconds: None)
+
+    with pytest.raises(restore.RestoreError) as caught:
+        restore._cutover_verified_database(
+            "container", "appdb", "staging-db", timeout=5
+        )
+
+    assert "was cancelled/terminated and is quiescent" in str(caught.value)
+    assert "automatic catalog-reconciled rollback completed" in str(caught.value)
+    assert selected_timed_out and "LATE-MUTATION" not in events
+    assert events.index("terminate") < events.index("snapshot")
+    assert "PGAPPNAME=ums_restore_mut_" in selected_command
+    assert "statement_timeout=" in selected_command and "lock_timeout=" in selected_command
+    assert "psql -X" in selected_command
+    _assert_catalog_rolled_back(model)
+
+
+def test_cutover_refuses_to_snapshot_when_timed_out_backend_is_not_quiescent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No catalog state or rollback claim is valid while a mutation may still run."""
+    model = _CutoverCatalogModel()
+    real_set_allow = restore._set_database_allow_connections
+    model.install(monkeypatch)
+    monkeypatch.setattr(restore, "_set_database_allow_connections", real_set_allow)
+    monkeypatch.setattr(
+        restore,
+        "_run_with_input",
+        lambda argv, *, timeout, stdin_text: (_ for _ in ()).throw(
+            subprocess.TimeoutExpired(argv, timeout)
+        ),
+    )
+    monkeypatch.setattr(
+        restore,
+        "_quiesce_mutation_backend",
+        lambda *a, **k: (_ for _ in ()).throw(
+            restore.RestoreError(
+                restore.EXIT_RESTORE_FAILED, "backend still active"
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        restore,
+        "_observe_cutover_database_state",
+        lambda *a, **k: pytest.fail("catalog snapshot raced an active backend"),
+    )
+
+    with pytest.raises(restore.RestoreError) as caught:
+        restore._cutover_verified_database(
+            "container", "appdb", "staging-db", timeout=5
+        )
+
+    message = str(caught.value)
+    assert "could not be proven stopped" in message
+    assert "catalog reconciliation was not started" in message
+    assert "automatic catalog-reconciled rollback is INCOMPLETE" in message
+    assert "observed UNAVAILABLE" in message
+    assert model.rename_attempts == []
+
+
 def test_cutover_failure_between_renames_restores_the_previous_target(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -7852,7 +8242,14 @@ def test_role_finalization_failure_rolls_both_database_names_back(
 
     with pytest.raises(restore.RestoreError) as caught:
         restore._cutover_verified_database(
-            "container", "appdb", "staging-db", timeout=5, finalize=fail_roles
+            "container",
+            "appdb",
+            "staging-db",
+            timeout=5,
+            finalize=fail_roles,
+            rollback_finalize=lambda: model.events.append(
+                "restore-original-role-settings"
+            ),
         )
     assert caught.value.code == restore.EXIT_INTERNAL
     assert "automatic catalog-reconciled rollback completed" in str(caught.value)
@@ -7864,6 +8261,47 @@ def test_role_finalization_failure_rolls_both_database_names_back(
         (model.previous, "appdb"),
     ]
     _assert_catalog_rolled_back(model)
+    assert model.events.index("restore-original-role-settings") < len(model.events) - 1
+    assert model.events[-2:] == ["allow:appdb:True", "observe"]
+
+
+def test_original_role_setting_rollback_failure_keeps_live_database_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The old name is never admitted when its pre-replay GUCs cannot be restored."""
+    model = _CutoverCatalogModel()
+    model.install(monkeypatch)
+
+    def fail_promotion() -> None:
+        """Enter rollback after both forward renames."""
+        raise RuntimeError("promotion role settings failed")
+
+    def fail_original() -> None:
+        """Refuse the database-role rollback before connection admission."""
+        raise restore.RestoreError(
+            restore.EXIT_ROLES_FAILED, "original role settings unavailable"
+        )
+
+    with pytest.raises(restore.RestoreError) as caught:
+        restore._cutover_verified_database(
+            "container",
+            "appdb",
+            "staging-db",
+            timeout=5,
+            finalize=fail_promotion,
+            rollback_finalize=fail_original,
+        )
+
+    message = str(caught.value)
+    assert "automatic catalog-reconciled rollback is INCOMPLETE" in message
+    assert "original role settings unavailable" in message
+    assert "keep the restored target closed" in message
+    assert 'ALLOW_CONNECTIONS true;' not in message
+    assert model.names == {
+        model.OLD_OID: "appdb",
+        model.REPLACEMENT_OID: "staging-db",
+    }
+    assert model.allow == {model.OLD_OID: False, model.REPLACEMENT_OID: False}
 
 
 def test_strict_backup_permissions_fail_closed_on_chmod_error(

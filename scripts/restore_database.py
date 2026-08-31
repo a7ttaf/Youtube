@@ -331,6 +331,10 @@ class RestoreError(Exception):
         self.code = code
 
 
+class _MutationNotQuiescentError(RestoreError):
+    """A timed-out control mutation whose backend could not be proven stopped."""
+
+
 def _quote_identifier(name: str) -> str:
     """Double-quote a SQL identifier, escaping embedded quotes."""
     return '"' + name.replace('"', '""') + '"'
@@ -432,6 +436,184 @@ def _psql(
             f"psql failed inside {container}: {completed.stderr.strip()}",
         )
     return completed.stdout
+
+
+def _mutation_backend_pids(
+    container: str, application_name: str, *, timeout: int
+) -> list[int]:
+    """Return exact backend PIDs carrying one generated mutation identity."""
+    raw = _psql(
+        container,
+        "SELECT pid::text FROM pg_catalog.pg_stat_activity WHERE application_name = "
+        f"{_quote_literal(application_name)} AND pid <> pg_catalog.pg_backend_pid() "
+        "ORDER BY pid;",
+        timeout=max(1, min(timeout, 5)),
+        dbname="postgres",
+    )
+    pids: list[int] = []
+    for line in raw.splitlines():
+        value = line.strip()
+        if not value:
+            continue
+        try:
+            pid = int(value)
+        except ValueError as exc:
+            raise RestoreError(
+                EXIT_RESTORE_FAILED,
+                f"mutation backend query returned an invalid PID {value!r}",
+            ) from exc
+        if pid <= 0 or pid in pids:
+            raise RestoreError(
+                EXIT_RESTORE_FAILED,
+                "mutation backend query returned a nonpositive or duplicate PID",
+            )
+        pids.append(pid)
+    return pids
+
+
+# ============================================================================
+# Purpose: Bound restore mutations inside PostgreSQL and prove each uniquely
+#          tagged backend has stopped before callers inspect or change state.
+# Database/ORM: pg_stat_activity, pg_cancel_backend, and pg_terminate_backend.
+# Standards: PGAPPNAME identity from connection start; server statement/lock
+#            timeouts shorter than the host timeout; two absent catalog samples.
+# Blast Radius: Cluster role replay, database names/admission, and scoped role
+#               settings.
+# Connections:
+#   - File: scripts/restore_database.py -> initial roles.sql replay, database
+#     rename, ALLOW_CONNECTIONS, and transactional role-setting finalization.
+#   - File: Docs/22_BACKUP_RESTORE_AND_REHEARSAL.md -> timeout recovery contract.
+# ============================================================================
+def _quiesce_mutation_backend(
+    container: str, application_name: str, *, timeout: int
+) -> None:
+    """Cancel/terminate a tagged backend and wait for two absent observations."""
+    deadline = time.monotonic() + max(1, min(timeout, 10))
+    absent_samples = 0
+    while time.monotonic() < deadline:
+        pids = _mutation_backend_pids(container, application_name, timeout=timeout)
+        if pids:
+            absent_samples = 0
+            pid_list = ", ".join(str(pid) for pid in pids)
+            identity = _quote_literal(application_name)
+            _psql(
+                container,
+                "SELECT pg_catalog.pg_cancel_backend(pid) FROM "
+                "pg_catalog.pg_stat_activity WHERE application_name = "
+                f"{identity} AND pid IN ({pid_list});\n"
+                "SELECT pg_catalog.pg_terminate_backend(pid) FROM "
+                "pg_catalog.pg_stat_activity WHERE application_name = "
+                f"{identity} AND pid IN ({pid_list});\n",
+                timeout=max(1, min(timeout, 5)),
+                dbname="postgres",
+            )
+        else:
+            absent_samples += 1
+            if absent_samples >= 2:
+                return
+        time.sleep(0.05)
+    raise RestoreError(
+        EXIT_RESTORE_FAILED,
+        "timed out waiting for the tagged PostgreSQL mutation backend to stop",
+    )
+
+
+def _psql_mutation(
+    container: str,
+    sql: str,
+    *,
+    timeout: int,
+    dbname: str,
+    label: str,
+    failure_code: int = EXIT_RESTORE_FAILED,
+) -> str:
+    """Run one tagged bounded mutation; never return from ambiguity while active."""
+    application_name = "ums_restore_mut_" + uuid.uuid4().hex
+    host_seconds = max(1, timeout)
+    statement_ms = max(250, min(host_seconds * 750, 30_000))
+    lock_ms = max(100, statement_ms // 2)
+    pg_options = f"-c statement_timeout={statement_ms} -c lock_timeout={lock_ms}"
+    target = f"-d {shlex.quote(dbname)} "
+    body = (
+        f"export PGAPPNAME={shlex.quote(application_name)}; "
+        f"export PGOPTIONS={shlex.quote(pg_options)}; "
+        f'exec psql -X -U "$POSTGRES_USER" {target}'
+        "--no-password -v ON_ERROR_STOP=1 -Atq -f -"
+    )
+    argv = _container_sh(container, body)
+    try:
+        completed = _run_with_input(argv, timeout=timeout, stdin_text=sql)
+    except Exception as exc:
+        try:
+            _quiesce_mutation_backend(
+                container, application_name, timeout=timeout
+            )
+        except Exception as quiesce_exc:
+            raise _MutationNotQuiescentError(
+                failure_code,
+                f"{label} lost its client connection and the tagged PostgreSQL "
+                f"backend application_name={application_name!r} could not be "
+                f"proven stopped: {quiesce_exc}",
+            ) from exc
+        raise RestoreError(
+            failure_code,
+            f"{label} lost its client connection; the tagged PostgreSQL backend "
+            f"application_name={application_name!r} was cancelled/terminated and "
+            f"is quiescent: {exc}",
+        ) from exc
+    if completed.returncode != 0:
+        raise RestoreError(
+            failure_code,
+            f"{label} failed inside {container}: "
+            f"{completed.stderr.strip() or f'psql exited {completed.returncode}'}",
+        )
+    return completed.stdout
+
+
+def _psql_file_mutation(
+    container: str,
+    source: Path,
+    *,
+    timeout: int,
+    dbname: str,
+    stop_on_error: bool,
+    label: str,
+    failure_code: int = EXIT_RESTORE_FAILED,
+) -> subprocess.CompletedProcess[str]:
+    """Replay one file through a tagged backend that is quiescent on return."""
+    application_name = "ums_restore_mut_" + uuid.uuid4().hex
+    host_seconds = max(1, timeout)
+    statement_ms = max(250, min(host_seconds * 750, 30_000))
+    lock_ms = max(100, statement_ms // 2)
+    pg_options = f"-c statement_timeout={statement_ms} -c lock_timeout={lock_ms}"
+    stop = "1" if stop_on_error else "0"
+    body = (
+        f"export PGAPPNAME={shlex.quote(application_name)}; "
+        f"export PGOPTIONS={shlex.quote(pg_options)}; "
+        f'exec psql -X -U "$POSTGRES_USER" -d {shlex.quote(dbname)} '
+        f"--no-password -v ON_ERROR_STOP={stop} -q -f -"
+    )
+    argv = _container_sh(container, body)
+    try:
+        return _run_with_file(argv, timeout=timeout, source=source)
+    except Exception as exc:
+        try:
+            _quiesce_mutation_backend(
+                container, application_name, timeout=timeout
+            )
+        except Exception as quiesce_exc:
+            raise _MutationNotQuiescentError(
+                failure_code,
+                f"{label} lost its client connection and the tagged PostgreSQL "
+                f"backend application_name={application_name!r} could not be "
+                f"proven stopped: {quiesce_exc}",
+            ) from exc
+        raise RestoreError(
+            failure_code,
+            f"{label} lost its client connection; the tagged PostgreSQL backend "
+            f"application_name={application_name!r} was cancelled/terminated and "
+            f"is quiescent: {exc}",
+        ) from exc
 
 
 def _sha256(path: Path) -> str:
@@ -1925,9 +2107,24 @@ def _role_sql_setting_name(tokens: list[tuple[str, str]]) -> str:
     """Return the GUC an ``ALTER ROLE ... SET/RESET`` statement targets."""
     for position, token in enumerate(tokens):
         if token[0] == "word" and token[1].upper() in {"SET", "RESET"}:
-            if position + 1 < len(tokens):
-                return _role_sql_identifier(tokens[position + 1])
-            return ""
+            cursor = position + 1
+            if cursor >= len(tokens):
+                return ""
+            first = _role_sql_identifier(tokens[cursor])
+            if not first:
+                return ""
+            parts = [first]
+            cursor += 1
+            while cursor + 1 < len(tokens):
+                separator, component = tokens[cursor], tokens[cursor + 1]
+                if separator != ("other", "."):
+                    break
+                parsed = _role_sql_identifier(component)
+                if not parsed:
+                    return ""
+                parts.append(parsed)
+                cursor += 2
+            return ".".join(parts)
     return ""
 
 
@@ -2570,7 +2767,16 @@ def _apply_database_role_settings_transactionally(
         return
     sql = _database_role_settings_transaction_sql(database, desired)
     try:
-        _psql(container, sql, timeout=timeout, dbname="postgres")
+        _psql_mutation(
+            container,
+            sql,
+            timeout=timeout,
+            dbname="postgres",
+            label=f"database role-setting transaction for {database!r}",
+            failure_code=EXIT_ROLES_FAILED,
+        )
+    except _MutationNotQuiescentError:
+        raise
     except Exception as exc:
         try:
             observed = _database_role_settings(container, database, timeout=timeout)
@@ -3071,12 +3277,15 @@ def _restore_roles(container: str, roles_path: Path, *, timeout: int) -> list[st
     # memberships do, and a clean roles.sql carries no ALTER ROLE app_* SET
     # line to overwrite a target-only leftover -- normalize before replay.
     _reset_existing_protected_role_settings(container, timeout=timeout)
-    argv = _container_sh(
+    completed = _psql_file_mutation(
         container,
-        'exec psql -X -U "$POSTGRES_USER" -d postgres '
-        "--no-password -v ON_ERROR_STOP=0 -q -f -",
+        roles_path,
+        timeout=timeout,
+        dbname="postgres",
+        stop_on_error=False,
+        label="roles.sql replay",
+        failure_code=EXIT_ROLES_FAILED,
     )
-    completed = _run_with_file(argv, timeout=timeout, source=roles_path)
     unexpected = _unexpected_roles_errors(completed.stderr)
     if unexpected:
         raise RestoreError(
@@ -3673,11 +3882,12 @@ def _set_database_allow_connections(
 ) -> None:
     """Enable or disable all new connections to one database."""
     keyword = "true" if allow else "false"
-    _psql(
+    _psql_mutation(
         container,
         f"ALTER DATABASE {_quote_identifier(database)} WITH ALLOW_CONNECTIONS {keyword};",
         timeout=timeout,
         dbname="postgres",
+        label=f"ALTER DATABASE ALLOW_CONNECTIONS on {database!r}",
     )
 
 
@@ -3709,12 +3919,13 @@ def _rename_database(
     container: str, source: str, destination: str, *, timeout: int
 ) -> None:
     """Rename one disconnected database through the maintenance database."""
-    _psql(
+    _psql_mutation(
         container,
         f"ALTER DATABASE {_quote_identifier(source)} RENAME TO "
         f"{_quote_identifier(destination)};",
         timeout=timeout,
         dbname="postgres",
+        label=f"ALTER DATABASE rename {source!r} to {destination!r}",
     )
 
 
@@ -3916,6 +4127,8 @@ def _cutover_recovery_commands(
     previous: str,
     target_oid: int,
     replacement_oid: int,
+    *,
+    permit_admission: bool = True,
 ) -> str:
     """Build commands valid for the last independently observed catalog state."""
     query = (
@@ -3972,9 +4185,14 @@ def _cutover_recovery_commands(
         )
         by_name[target_db] = old
         old_will_be_target = True
-    if old_will_be_target:
+    if old_will_be_target and permit_admission:
         steps.append(
             f"ALTER DATABASE {_quote_identifier(target_db)} WITH ALLOW_CONNECTIONS true;"
+        )
+    elif old_will_be_target:
+        steps.append(
+            "-- keep the restored target closed until original database-role "
+            "settings and both captured OIDs are verified"
         )
     if new is not None and new.name == replacement:
         steps.append(
@@ -3997,10 +4215,12 @@ def _reconcile_cutover_rollback(
     replacement_oid: int,
     *,
     timeout: int,
+    finalize: Callable[[], None] | None = None,
 ) -> tuple[bool, dict[int, _DatabaseCatalogRow] | None, list[str]]:
     """Restore canonical names/admission using catalog observations, not flags."""
     notes: list[str] = []
     attempts: dict[tuple[str, str], int] = {}
+    rollback_finalized = finalize is None
 
     def observe() -> dict[int, _DatabaseCatalogRow] | None:
         try:
@@ -4042,6 +4262,9 @@ def _reconcile_cutover_rollback(
                     _set_database_allow_connections(
                         container, target_db, allow=False, timeout=timeout
                     )
+                except _MutationNotQuiescentError as exc:
+                    notes.append(str(exc))
+                    return False, None, notes
                 except Exception as exc:
                     notes.append(
                         f"ALLOW_CONNECTIONS=False on {target_db!r} reported failure: {exc}"
@@ -4107,6 +4330,9 @@ def _reconcile_cutover_rollback(
                 _rename_database(
                     container, action[0], action[1], timeout=timeout
                 )
+            except _MutationNotQuiescentError as exc:
+                notes.append(str(exc))
+                return False, None, notes
             except Exception as exc:
                 notes.append(
                     f"rename {action[0]!r} -> {action[1]!r} reported failure: {exc}"
@@ -4117,9 +4343,12 @@ def _reconcile_cutover_rollback(
             rows = refreshed
             continue
 
-        # Canonical names are restored. Reconcile both admission flags even if
-        # the ALTER DATABASE client previously timed out after server commit.
-        desired_allow = ((replacement, replacement_oid, False), (target_db, target_oid, True))
+        # Canonical names are restored. Keep both identities closed until the
+        # caller has transactionally restored pre-replay role settings.
+        desired_allow = (
+            (replacement, replacement_oid, False),
+            (target_db, target_oid, rollback_finalized),
+        )
         changed = False
         for name, oid, desired in desired_allow:
             row = rows.get(oid)
@@ -4137,6 +4366,9 @@ def _reconcile_cutover_rollback(
                 _set_database_allow_connections(
                     container, name, allow=desired, timeout=timeout
                 )
+            except _MutationNotQuiescentError as exc:
+                notes.append(str(exc))
+                return False, None, notes
             except Exception as exc:
                 notes.append(
                     f"ALLOW_CONNECTIONS={desired} on {name!r} reported failure: {exc}"
@@ -4148,6 +4380,24 @@ def _reconcile_cutover_rollback(
             changed = True
             break
         if changed:
+            continue
+        if not rollback_finalized and finalize is not None:
+            try:
+                finalize()
+            except _MutationNotQuiescentError as exc:
+                notes.append(str(exc))
+                return False, None, notes
+            except Exception as exc:
+                notes.append(
+                    "could not restore the previous live database's original "
+                    f"role settings before admission: {exc}"
+                )
+                return False, rows, notes
+            rollback_finalized = True
+            refreshed = observe()
+            if refreshed is None:
+                return False, None, notes
+            rows = refreshed
             continue
         old = rows.get(target_oid)
         new = rows.get(replacement_oid)
@@ -4187,16 +4437,35 @@ def _cutover_verified_database(
     *,
     timeout: int,
     finalize: Callable[[], None] | None = None,
+    rollback_finalize: Callable[[], None] | None = None,
 ) -> str:
     """Swap verified ``replacement`` into ``target_db`` and retain the old DB."""
     previous = f"ums_previous_{uuid.uuid4().hex[:24]}"
-    target_oid, replacement_oid = _capture_cutover_database_identities(
-        container,
-        target_db,
-        replacement,
-        previous,
-        timeout=timeout,
-    )
+    try:
+        target_oid, replacement_oid = _capture_cutover_database_identities(
+            container,
+            target_db,
+            replacement,
+            previous,
+            timeout=timeout,
+        )
+    except Exception as capture_exc:
+        if rollback_finalize is not None:
+            try:
+                rollback_finalize()
+            except Exception as role_exc:
+                code = (
+                    role_exc.code
+                    if isinstance(role_exc, RestoreError)
+                    else EXIT_ROLES_FAILED
+                )
+                raise RestoreError(
+                    code,
+                    f"cutover identity capture failed before database mutation: "
+                    f"{capture_exc}; restoring the original database-scoped role "
+                    f"settings also failed: {role_exc}",
+                ) from capture_exc
+        raise
     stage = "disable target connections"
     try:
         _set_database_allow_connections(
@@ -4261,17 +4530,26 @@ def _cutover_verified_database(
     # once the first rename succeeds, even an internal bug must attempt the
     # same reverse-name recovery before main maps it to exit 9.
     except Exception as exc:
-        rollback_complete, rollback_observed, rollback_notes = (
-            _reconcile_cutover_rollback(
-                container,
-                target_db,
-                replacement,
-                previous,
-                target_oid,
-                replacement_oid,
-                timeout=timeout,
+        if isinstance(exc, _MutationNotQuiescentError):
+            rollback_complete = False
+            rollback_observed = None
+            rollback_notes = [
+                "catalog reconciliation was not started because the timed-out "
+                "mutation backend is not proven quiescent"
+            ]
+        else:
+            rollback_complete, rollback_observed, rollback_notes = (
+                _reconcile_cutover_rollback(
+                    container,
+                    target_db,
+                    replacement,
+                    previous,
+                    target_oid,
+                    replacement_oid,
+                    timeout=timeout,
+                    finalize=rollback_finalize,
+                )
             )
-        )
         code = exc.code if isinstance(exc, RestoreError) else EXIT_INTERNAL
         state = _cutover_state_summary(
             rollback_observed, target_oid, replacement_oid
@@ -4283,6 +4561,7 @@ def _cutover_verified_database(
             previous,
             target_oid,
             replacement_oid,
+            permit_admission=rollback_complete,
         )
         notes = "; ".join(rollback_notes)
         outcome = (
@@ -4421,8 +4700,28 @@ def _execute_restore(
                 "clears: " + "; ".join(live_problems) + ". Refusing before "
                 "the target is changed; clear the state and re-run.",
             )
+        original_database_role_settings = _database_role_settings(
+            container, target_db, timeout=args.timeout
+        )
         replacement: str | None = None
         preserve_replacement = False
+        role_replay_started = False
+        role_settings_restored = False
+        cutover_started = False
+        restore_succeeded = False
+        mutation_backend_unquiescent = False
+
+        def _restore_original_database_role_settings() -> None:
+            """Restore the live target's exact pre-roles database GUC state."""
+            nonlocal role_settings_restored
+            _apply_database_role_settings_transactionally(
+                container,
+                target_db,
+                original_database_role_settings,
+                timeout=args.timeout,
+            )
+            role_settings_restored = True
+
         try:
             replacement = _create_replacement_database(
                 container,
@@ -4442,6 +4741,7 @@ def _execute_restore(
             # source can no longer swap bytes between admission and replay.
             _verify_backup_artifact_digests(backup_dir, manifest)
             try:
+                role_replay_started = True
                 roles = _restore_roles(
                     container, backup_dir / ROLES_NAME, timeout=args.timeout
                 )
@@ -4452,6 +4752,8 @@ def _execute_restore(
                     timeout=args.timeout,
                 )
             except (RestoreError, OSError, subprocess.SubprocessError) as exc:
+                if isinstance(exc, _MutationNotQuiescentError):
+                    mutation_backend_unquiescent = True
                 code = exc.code if isinstance(exc, RestoreError) else EXIT_ROLES_FAILED
                 raise RestoreError(
                     code,
@@ -4519,13 +4821,16 @@ def _execute_restore(
                     timeout=args.timeout,
                 )
 
+            cutover_started = True
             previous = _cutover_verified_database(
                 container,
                 target_db,
                 replacement,
                 timeout=args.timeout,
                 finalize=_finalize_database_role_settings,
+                rollback_finalize=_restore_original_database_role_settings,
             )
+            restore_succeeded = True
             print(
                 f"cutover complete: previous database preserved as {previous!r} "
                 "with connections disabled"
@@ -4539,8 +4844,36 @@ def _execute_restore(
             )
             return True
         finally:
-            if replacement is not None and not preserve_replacement:
-                active_error = sys.exc_info()[1]
+            active_error = sys.exc_info()[1]
+            role_restore_error: BaseException | None = None
+            if (
+                role_replay_started
+                and not restore_succeeded
+                and not role_settings_restored
+                and not cutover_started
+                and not mutation_backend_unquiescent
+            ):
+                try:
+                    _restore_original_database_role_settings()
+                except (RestoreError, OSError, subprocess.SubprocessError) as role_exc:
+                    if isinstance(role_exc, _MutationNotQuiescentError):
+                        mutation_backend_unquiescent = True
+                    message = (
+                        "could not restore the live database's pre-replay role "
+                        f"settings: {role_exc}"
+                    )
+                    if active_error is None:
+                        role_restore_error = role_exc
+                    else:
+                        print(
+                            f"WARNING: {message}; the original restore error is preserved",
+                            file=sys.stderr,
+                        )
+            if (
+                replacement is not None
+                and not preserve_replacement
+                and not mutation_backend_unquiescent
+            ):
                 try:
                     _drop_generated_database(container, replacement, timeout=args.timeout)
                 except (RestoreError, OSError, subprocess.SubprocessError) as cleanup_exc:
@@ -4548,12 +4881,28 @@ def _execute_restore(
                         f"could not remove failed staging database {replacement!r}: "
                         f"{cleanup_exc}"
                     )
-                    if active_error is None:
+                    if active_error is None and role_restore_error is None:
                         raise RestoreError(EXIT_RESTORE_FAILED, message) from cleanup_exc
                     print(
                         f"WARNING: {message}; the original restore error is preserved",
                         file=sys.stderr,
                     )
+            if mutation_backend_unquiescent:
+                print(
+                    "WARNING: automatic database-role rollback and staging cleanup "
+                    "were skipped because a tagged PostgreSQL mutation backend is "
+                    "not proven stopped; quiesce the application_name printed above "
+                    "before inspecting or changing catalog state",
+                    file=sys.stderr,
+                )
+            if active_error is None and role_restore_error is not None:
+                if isinstance(role_restore_error, _MutationNotQuiescentError):
+                    raise role_restore_error
+                raise RestoreError(
+                    EXIT_ROLES_FAILED,
+                    "could not restore the live database's pre-replay role settings: "
+                    f"{role_restore_error}",
+                ) from role_restore_error
 
 
 def _cleanup_rehearsal_throwaway(

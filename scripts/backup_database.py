@@ -2089,9 +2089,24 @@ def _role_sql_setting_name(tokens: list[tuple[str, str]]) -> str:
     """Return the GUC an ``ALTER ROLE ... SET/RESET`` statement targets."""
     for position, token in enumerate(tokens):
         if token[0] == "word" and token[1].upper() in {"SET", "RESET"}:
-            if position + 1 < len(tokens):
-                return _role_sql_identifier(tokens[position + 1])
-            return ""
+            cursor = position + 1
+            if cursor >= len(tokens):
+                return ""
+            first = _role_sql_identifier(tokens[cursor])
+            if not first:
+                return ""
+            parts = [first]
+            cursor += 1
+            while cursor + 1 < len(tokens):
+                separator, component = tokens[cursor], tokens[cursor + 1]
+                if separator != ("other", "."):
+                    break
+                parsed = _role_sql_identifier(component)
+                if not parsed:
+                    return ""
+                parts.append(parsed)
+                cursor += 2
+            return ".".join(parts)
     return ""
 
 

@@ -1074,13 +1074,22 @@ non-atomic cutover window. Failure at or after either rename triggers automatic 
 renames while connections remain disabled. Before changing admission, the script records
 the target and replacement databases' immutable `pg_database.oid` values. After **every**
 rename exception — including a client timeout after the server already committed — and
-after every rollback attempt, it opens a fresh `psql -X` maintenance connection and
-re-reads each OID's current name and `datallowconn`. Recovery decisions come from that
-observed state, not from whether the client call returned. The error prints both captured
-OIDs, their exact last-observed names/admission flags, any unexpected occupant of a
-reserved name, and whether catalog-reconciled rollback completed. If the independent
-query itself fails, state is explicitly `UNAVAILABLE` and no speculative rename command
-is printed; neither database is dropped.
+after every rollback attempt, it first proves the mutating PostgreSQL backend has stopped,
+then opens a fresh `psql -X` maintenance connection and re-reads each OID's current name
+and `datallowconn`. Rename, `ALLOW_CONNECTIONS`, and final database-role transactions run
+with a unique `PGAPPNAME` plus server-side `statement_timeout` and `lock_timeout` values
+shorter than the host timeout. If `docker exec` times out, the script finds that exact
+`pg_stat_activity` backend, cancels and terminates it, and requires two absent observations
+before taking a catalog snapshot. Recovery decisions therefore come from settled server
+state, not from whether the Docker client returned. The initial `roles.sql` replay uses
+the same tagged, bounded backend. Outer role rollback and staging cleanup proceed only
+after that backend is proven stopped; otherwise the error identifies its exact
+`application_name` and leaves state untouched for operator quiescence. The file replay
+itself remains non-transactional. The error prints both captured OIDs, their exact
+last-observed names/admission flags, any unexpected occupant of a reserved
+name, and whether catalog-reconciled rollback completed. If backend quiescence or the
+independent query fails, state is explicitly `UNAVAILABLE` and no speculative rename
+command is printed; neither database is dropped.
 
 If automatic rollback also fails, connect to the maintenance database with `psql -X`,
 inspect `pg_database` first, keep application traffic stopped, and recover according to
@@ -1104,9 +1113,12 @@ ALTER DATABASE "<target>" WITH ALLOW_CONNECTIONS true;
 If the second rename never succeeded, `<target>` is absent and the verified replacement
 still has its `ums_restore_<id>` name; skip the first rename and rename only
 `ums_previous_<id>` back to `<target>`. A timeout is not proof that a rename failed: run
-the OID query first, then use only the observed-state recovery commands printed by the
-error. If an expected OID is missing or a reserved name has an unexpected occupant, do
-not rename anything until that discrepancy is understood.
+the OID query first **only after** the error confirms the printed mutation
+`application_name` is quiescent, then use only the observed-state recovery commands
+printed by the error. If automatic quiescence failed, find that exact application name in
+`pg_stat_activity`, cancel/terminate it, and wait until it is absent before the OID query.
+If an expected OID is missing or a reserved name has an unexpected occupant, do not rename
+anything until that discrepancy is understood.
 
 On success, the previous database remains under `ums_previous_<id>` with connections
 disabled. Keep it until the promoted database has passed application acceptance and a
@@ -1121,15 +1133,20 @@ inspection and cleanup of partially applied cluster role state before retrying. 
 describe the database-plus-roles operation as atomic.
 
 The finalizer deliberately does **not** replay the full `roles.sql` a second time. After
-the initial replay, the script records only the protected-role settings explicitly scoped
-to the target database. Once the verified replacement has the target name, it replaces
+capturing the live target's exact protected-role database settings, the script performs
+the initial replay and records only settings explicitly scoped to the target database.
+Once the verified replacement has the target name, it replaces
 those database-scoped settings with `RESET ALL` plus the recorded `SET` statements inside
 one transaction. A fresh catalog read follows both success and failure: a lost COMMIT
 response is accepted only when the complete desired state is observed; the unchanged
 prior state proves a pre-commit failure; any other state refuses connection admission and
-triggers the OID-based database rollback. Thus a cutover finalizer cannot leave a bare
-cluster-global `RESET ALL` side effect, but this does not make the earlier full role replay
-atomic.
+triggers the OID-based database rollback. On a staging failure before cutover, the script
+transactionally restores the captured original database settings before cleanup. On a
+cutover failure, rollback keeps both databases closed, restores those original settings
+only after the previous live OID is back under the target name, and enables it afterward.
+Dotted custom GUC names are preserved as one complete setting name rather than truncated
+at the first dot. Thus a cutover finalizer cannot leave a bare cluster-global `RESET ALL`
+side effect, but this does not make the earlier full role replay atomic.
 
 The two host artifacts are copied into an owner-only temporary directory and re-hashed
 there before Docker is contacted and again at each point of use. All `psql` calls use
@@ -1170,7 +1187,7 @@ that a live two-rename cutover was rehearsed on this final snapshot.
 | `uv sync --extra dev --extra test --extra lint` | success — 89 packages resolved, 86 checked |
 | `uv run ruff check backend tests scripts` | `All checks passed!` |
 | `uv run mypy scripts/backup_database.py scripts/restore_database.py` | `Success: no issues found in 2 source files` |
-| `uv run pytest -q tests/scripts/test_backup_content_gate.py` | **307 passed** — includes missing/empty stacked-seed refusal, rejected-run retention isolation, private restore staging, replacement-before-cutover ordering, first- and second-rename commit-then-timeout reconciliation by database OID, query-only guidance when identity cannot be observed, ambiguous rollback after a finalizer failure, transactional role-setting COMMIT reconciliation, ACL/locale/roles and large-object gates |
+| `uv run pytest -q tests/scripts/test_backup_content_gate.py` | **315 passed** — includes missing/empty stacked-seed refusal, rejected-run retention isolation, private restore staging, replacement-before-cutover ordering, late-backend quiescence for `roles.sql`, rename, `ALLOW_CONNECTIONS`, and role COMMIT timeouts, no cleanup mutation when quiescence is unavailable, OID-based commit-then-timeout reconciliation, query-only guidance when state cannot be observed, rollback of original database-scoped role settings before admission, dotted custom GUC preservation, ACL/locale/roles and large-object gates |
 | `git diff --check` | success |
 | `uv run pytest -q` | **not a pass** — `UMS_TEST_DATABASE_URL` was unset, the suite reached its explicit real-Postgres setup errors, and the non-actionable run was stopped at 65% when the repair owner requested immediate closeout |
 
