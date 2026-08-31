@@ -504,8 +504,9 @@ def _confidence(
     # ========================================================================
     # Purpose: Band the primary fact's confidence_score into the explain
     #   {label, score} wire shape. Invariant: warnings => label != HIGH. A
-    #   warned fact is capped at MEDIUM regardless of its score, so an operator
-    #   can tell a flagged channel-month from a clean one by the badge alone.
+    #   warned fact is capped at MEDIUM regardless of its score. The returned
+    #   label is authoritative for display; warning presence remains explicit
+    #   in the warnings array because clean and warned facts can share a band.
     # Database/ORM: None (operates on the loaded RevenueFactEntry read model).
     # Standards: Pure; total function (no facts -> LOW/0); Decimal comparisons
     #   only -- no float, no currency conversion.
@@ -518,8 +519,8 @@ def _confidence(
     # ========================================================================
     # FIX: The score clamp alone was a no-op badge-wise -- it pinned a warned
     # fact to exactly 0.9000, which the old `score >= 0.9000` label rule still
-    # called HIGH, making a flagged fact indistinguishable from a clean one.
-    # The label rule is now warnings-aware; the score clamp is unchanged.
+    # called HIGH. The label rule is now warnings-aware; the score clamp is
+    # unchanged, and consumers must not re-band that score independently.
     score = primary_fact.confidence_score if primary_fact else Decimal("0")
     if warnings and score > _HIGH_CONFIDENCE_SCORE:
         score = _HIGH_CONFIDENCE_SCORE
@@ -529,8 +530,20 @@ def _confidence(
     }
 
 
+# ============================================================================
+# Purpose: Classify adjusted-gross confidence from Decimal band floors while
+#   enforcing the warning invariant that a warned explanation is never HIGH.
+# Database/ORM: None.
+# Standards: Pure typed helper; Decimal comparisons only; returned label is
+#   authoritative when warning state makes it differ from a score-only band.
+# Blast Radius: Finance confidence labels for adjusted-gross explanations.
+# Connections:
+#   - File: backend/ums_smart_revenue/finance/explanations.py -> _confidence
+#     supplies the persisted score and warning state.
+#   - File: Docs/08_CONFIDENCE_EXPLAINABILITY.md -> Defines the display contract.
+# ============================================================================
 def _confidence_label(score: Decimal, *, has_warnings: bool) -> str:
-    """Band a confidence score into HIGH/MEDIUM/LOW; a warned fact never reaches HIGH."""
+    """Return the authoritative label; a warned fact never reaches HIGH."""
     if score >= _HIGH_CONFIDENCE_SCORE and not has_warnings:
         return "HIGH"
     if score >= _MEDIUM_CONFIDENCE_SCORE:

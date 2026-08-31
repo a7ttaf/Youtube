@@ -695,9 +695,9 @@ def test_build_explanation_never_labels_a_warned_fact_high():
 
     Regression guard for the no-op confidence cap: the score clamp pinned a
     warned fact to exactly 0.9000, which the old ``score >= 0.9000`` label rule
-    still called HIGH -- badge-identical to a clean fact. The manual-import beta
-    stores ``confidence_score=Decimal("1")`` on every fact, so this badge is the
-    only signal that anything was flagged.
+    still called HIGH. The manual-import beta stores
+    ``confidence_score=Decimal("1")`` on every fact, so the warning-aware label
+    rule must keep a warning-bearing default fact out of the HIGH band.
     """
     entry = build_channel_month_revenue_explanation(
         facts=[
@@ -784,6 +784,41 @@ def test_build_explanation_labels_a_clean_fact_at_the_high_floor_high():
 
     assert entry.warnings == []
     assert entry.confidence == {"label": "HIGH", "score": "0.9"}
+
+
+def test_build_explanation_badge_alone_does_not_encode_warning_presence():
+    """Clean and warned facts can share MEDIUM; warnings remain separate state."""
+    clean_entry = build_channel_month_revenue_explanation(
+        facts=[
+            revenue_fact(
+                source_kind="YOUTUBE_CMS",
+                gross_revenue_usd="1000.00",
+                confidence_score="0.8500",
+            )
+        ],
+        manual_overrides=[],
+        month="2026-03",
+        youtube_channel_id="channel-tv-a",
+        metric=ADJUSTED_GROSS_REVENUE_METRIC,
+    )
+    warned_entry = build_channel_month_revenue_explanation(
+        facts=[
+            revenue_fact(
+                source_kind="YOUTUBE_CMS",
+                gross_revenue_usd="1000.00",
+                confidence_score="0.9500",
+            )
+        ],
+        manual_overrides=[manual_override(status="PENDING", adjustment_revenue_usd="50.00")],
+        month="2026-03",
+        youtube_channel_id="channel-tv-a",
+        metric=ADJUSTED_GROSS_REVENUE_METRIC,
+    )
+
+    assert clean_entry.confidence == {"label": "MEDIUM", "score": "0.85"}
+    assert clean_entry.warnings == []
+    assert warned_entry.confidence == {"label": "MEDIUM", "score": "0.9"}
+    assert [warning["code"] for warning in warned_entry.warnings] == ["PENDING_MANUAL_OVERRIDES"]
 
 
 @pytest.mark.parametrize(
