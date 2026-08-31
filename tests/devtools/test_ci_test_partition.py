@@ -199,7 +199,17 @@ def test_run_lane_uses_project_cwd_absolute_paths_and_sanitized_env(tmp_path, mo
     _write_test(tmp_path, "tests/db/test_schema.py")
     captured: dict[str, object] = {}
 
-    def fake_run(command, *, cwd, env, check):
+    def fake_run(command, *, cwd, env, check, **kwargs):
+        if "--collect-only" in command:
+            return SimpleNamespace(
+                returncode=0,
+                stdout=(
+                    "tests/db/test_schema.py::test_schema\n"
+                    "tests/unit/test_regular.py::test_regular\n\n"
+                    "2 tests collected\n"
+                ),
+                stderr="",
+            )
         captured.update(command=command, cwd=cwd, env=env, check=check)
         return SimpleNamespace(returncode=0)
 
@@ -213,3 +223,46 @@ def test_run_lane_uses_project_cwd_absolute_paths_and_sanitized_env(tmp_path, mo
     assert "PYTEST_ADDOPTS" not in captured["env"]
     assert command[-1] == str((tmp_path / "tests/unit/test_regular.py").resolve())
     assert Path(command[-1]).is_absolute()
+
+
+def test_collection_gate_rejects_assigned_module_with_no_items(tmp_path, monkeypatch):
+    _write_test(tmp_path, "tests/unit/test_regular.py")
+    _write_test(tmp_path, "tests/db/test_schema.py")
+    partition = build_test_partition(tmp_path)
+
+    def fake_run(*args, **kwargs):
+        return SimpleNamespace(
+            returncode=0,
+            stdout="tests/unit/test_regular.py::test_regular\n\n1 test collected\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr(ci_test_partition.subprocess, "run", fake_run)
+
+    with pytest.raises(PartitionError, match="test_schema.py"):
+        ci_test_partition._validate_collected_items(partition, tmp_path.resolve())
+
+
+def test_collection_gate_rejects_changed_canonical_node_manifest(tmp_path, monkeypatch):
+    _write_test(tmp_path, "tests/unit/test_regular.py")
+    _write_test(tmp_path, "tests/db/test_schema.py")
+    partition = build_test_partition(tmp_path)
+
+    def fake_run(*args, **kwargs):
+        return SimpleNamespace(
+            returncode=0,
+            stdout=(
+                "tests/db/test_schema.py::test_schema\n"
+                "tests/unit/test_regular.py::test_regular\n\n"
+                "2 tests collected\n"
+            ),
+            stderr="",
+        )
+
+    monkeypatch.setattr(ci_test_partition.subprocess, "run", fake_run)
+    monkeypatch.setattr(ci_test_partition, "PROJECT_ROOT", tmp_path.resolve())
+    monkeypatch.setattr(ci_test_partition, "EXPECTED_COLLECTED_ITEM_COUNT", 3)
+    monkeypatch.setattr(ci_test_partition, "EXPECTED_COLLECTED_NODEID_SHA256", "stale")
+
+    with pytest.raises(PartitionError, match="collected pytest item manifest changed"):
+        ci_test_partition._validate_collected_items(partition, tmp_path.resolve())

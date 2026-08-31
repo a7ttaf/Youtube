@@ -6,7 +6,7 @@ status checks before merge:
 | Required check | Workflow | Contract |
 | --- | --- | --- |
 | `Lint and unit tests` | `ci-fast` | Locked Python toolchain, lint/type checks, no-skip policy, no-database pytest lane, frontend test-layout guard, and committed-range whitespace hygiene. |
-| `Postgres migrations and authz` | `ci-database` | Alembic head, the complete database/real-Postgres lane, canonical `make verify`, full formatting, supply-chain integrity, and the pinned Bats shell self-tests. |
+| `Postgres migrations and authz` | `ci-database` | Alembic head, the complete database/real-Postgres lane, digest-pinned actionlint over every hosted workflow, canonical `make verify`, full formatting, supply-chain integrity, and the pinned Bats shell self-tests. |
 | `Build and Vitest` | `ci-frontend` | Locked Bun install, production build, and the complete Vitest suite. |
 
 All three workflows intentionally run for every pull request targeting `main`
@@ -32,5 +32,6 @@ the narrower Alembic/pytest subset or a green merge could carry a broken local
 ship hook, expired debt, secret-pattern regression, malformed shell, or an
 unverified lockfile.
 
-No repository setting is changed by these files; an administrator must apply
-and verify the rule in GitHub after the workflows exist on the default branch.
+No repository setting is changed by these files. Until an administrator applies
+and verifies the required contexts and administrator-bypass policy in GitHub,
+the repository is not merge-policy ready even when all workflow code is green.

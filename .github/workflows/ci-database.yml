@@ -82,6 +82,14 @@ jobs:
           FORCE=1 bash ci/scripts/install-bats.sh
           echo "$GITHUB_WORKSPACE/.ci-gate/bats/bin" >> "$GITHUB_PATH"
 
+      - name: Validate every GitHub Actions workflow
+        # rhysd/actionlint@v1.7.7, pinned by container digest.
+        run: >-
+          docker run --rm
+          -v "$GITHUB_WORKSPACE:/repo"
+          -w /repo
+          rhysd/actionlint@sha256:887a259a5a534f3c4f36cb02dca341673c6089431057242cdc931e9f133147e9
+
       - name: Canonical blocking repository gate
         run: make verify
 

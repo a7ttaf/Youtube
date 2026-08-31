@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import hashlib
 import os
 import subprocess
 import sys
@@ -22,6 +23,10 @@ from pathlib import Path
 from typing import Final
 
 PROJECT_ROOT: Final = Path(__file__).resolve().parents[1]
+EXPECTED_COLLECTED_ITEM_COUNT: Final = 2919
+EXPECTED_COLLECTED_NODEID_SHA256: Final = (
+    "9fd700d17551ea30175e9ff4466bd3d5266763c92f50627de242d714f78c9687"
+)
 
 DATABASE_DIRECTORIES: Final = (
     Path("tests/db"),
@@ -378,9 +383,11 @@ def build_test_partition(project_root: Path = PROJECT_ROOT) -> TestPartition:
 
 
 def check_partition(project_root: Path = PROJECT_ROOT) -> int:
-    """Validate and summarize the current partition without running pytest."""
+    """Validate assignment and collection, then summarize the partition."""
 
-    partition = build_test_partition(project_root)
+    resolved_root = project_root.resolve()
+    partition = build_test_partition(resolved_root)
+    _validate_collected_items(partition, resolved_root)
     print(
         "pytest partition OK: "
         f"{len(partition.fast)} no-database module(s), "
@@ -389,11 +396,85 @@ def check_partition(project_root: Path = PROJECT_ROOT) -> int:
     return 0
 
 
+def _validate_collected_items(partition: TestPartition, project_root: Path) -> None:
+    """Prove every assigned module collects tests and ratchet canonical node IDs."""
+
+    assigned = tuple(
+        sorted((*partition.fast, *partition.database), key=lambda path: path.as_posix())
+    )
+    environment = os.environ.copy()
+    environment.pop("PYTEST_ADDOPTS", None)
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            "--collect-only",
+            "-q",
+            *(str(project_root / path) for path in assigned),
+        ],
+        cwd=project_root,
+        env=environment,
+        check=False,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    if completed.returncode != 0:
+        details = "\n".join(part for part in (completed.stdout, completed.stderr) if part).strip()
+        raise PartitionError(
+            "pytest collection failed while validating the authoritative partition"
+            + (f":\n{details}" if details else "")
+        )
+
+    expected_modules = {path.as_posix() for path in assigned}
+    nodeids: list[str] = []
+    collected_modules: set[str] = set()
+    for raw_line in completed.stdout.splitlines():
+        if "::" not in raw_line:
+            continue
+        nodeid = raw_line.strip().replace("\\", "/")
+        raw_module, _, suffix = nodeid.partition("::")
+        module = raw_module
+        module_path = Path(raw_module)
+        if module_path.is_absolute():
+            try:
+                module = module_path.resolve().relative_to(project_root).as_posix()
+            except ValueError:
+                continue
+            nodeid = f"{module}::{suffix}"
+        if module not in expected_modules:
+            continue
+        nodeids.append(nodeid)
+        collected_modules.add(module)
+
+    missing = sorted(expected_modules - collected_modules)
+    if missing:
+        rendered = "\n".join(f"  - {module}" for module in missing)
+        raise PartitionError(f"assigned pytest module(s) collected no test items:\n{rendered}")
+
+    if project_root == PROJECT_ROOT.resolve():
+        digest = hashlib.sha256("\n".join(sorted(nodeids)).encode("utf-8")).hexdigest()
+        if (
+            len(nodeids) != EXPECTED_COLLECTED_ITEM_COUNT
+            or digest != EXPECTED_COLLECTED_NODEID_SHA256
+        ):
+            raise PartitionError(
+                "collected pytest item manifest changed: "
+                f"count={len(nodeids)} sha256={digest}; expected "
+                f"count={EXPECTED_COLLECTED_ITEM_COUNT} "
+                f"sha256={EXPECTED_COLLECTED_NODEID_SHA256}. Review the node-ID change "
+                "and update the ratchet deliberately."
+            )
+
+
 def run_lane(lane: str, project_root: Path = PROJECT_ROOT) -> int:
     """Run exactly one validated lane through the locked pytest installation."""
 
     resolved_root = project_root.resolve()
     partition = build_test_partition(resolved_root)
+    _validate_collected_items(partition, resolved_root)
     selected: Sequence[Path] = getattr(partition, lane)
     environment = os.environ.copy()
     environment.pop("PYTEST_ADDOPTS", None)
