@@ -140,6 +140,46 @@ def test_partition_follows_fixture_imported_into_conftest(tmp_path):
     assert Path("tests/api/test_uses_fixture.py") in partition.database
 
 
+def test_partition_follows_project_root_fixture_imported_into_conftest(tmp_path):
+    _write_test(tmp_path, "tests/unit/test_regular.py")
+    _write_test(tmp_path, "tests/db/test_schema.py")
+    _write_test(tmp_path, "tests/api/test_uses_fixture.py")
+    _write_test(
+        tmp_path,
+        "tests/api/conftest.py",
+        "from ci_fixtures import postgres_fixture\n",
+    )
+    fixture_sentinel = "UMS_TEST_" + "DATABASE_URL"
+    _write_test(
+        tmp_path,
+        "ci_fixtures.py",
+        "import pytest\n\n"
+        f'DATABASE_URL = "{fixture_sentinel}"\n\n'
+        "@pytest.fixture\n"
+        "def postgres_fixture():\n"
+        "    return DATABASE_URL\n",
+    )
+
+    partition = build_test_partition(tmp_path)
+
+    assert partition.fast == (Path("tests/unit/test_regular.py"),)
+    assert Path("tests/api/test_uses_fixture.py") in partition.database
+
+
+def test_partition_fails_closed_for_pytest_plugins_subscript_mutation(tmp_path):
+    _write_test(tmp_path, "tests/unit/test_regular.py")
+    _write_test(tmp_path, "tests/db/test_schema.py")
+    _write_test(tmp_path, "tests/api/test_uses_fixture.py")
+    _write_test(
+        tmp_path,
+        "tests/api/conftest.py",
+        'pytest_plugins = ["tests.fixtures.fast"]\npytest_plugins[0] = "tests.fixtures.postgres"\n',
+    )
+
+    with pytest.raises(PartitionError, match="mutates pytest_plugins dynamically"):
+        build_test_partition(tmp_path)
+
+
 def test_partition_fails_closed_for_dynamic_pytest_plugins(tmp_path):
     _write_test(tmp_path, "tests/unit/test_regular.py")
     _write_test(tmp_path, "tests/db/test_schema.py")

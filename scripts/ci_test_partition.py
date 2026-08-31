@@ -170,9 +170,23 @@ def _pytest_plugin_modules(source_path: Path) -> tuple[str, ...]:
         elif isinstance(statement, ast.AugAssign):
             value = statement.value
             targets = (statement.target,)
-        if value is None or not any(
+        targets_plugins = any(
             isinstance(target, ast.Name) and target.id == "pytest_plugins" for target in targets
-        ):
+        )
+        mutates_plugin_member = any(
+            not isinstance(target, ast.Name)
+            and any(
+                isinstance(node, ast.Name) and node.id == "pytest_plugins"
+                for node in ast.walk(target)
+            )
+            for target in targets
+        )
+        if mutates_plugin_member:
+            raise PartitionError(
+                f"{source_path} mutates pytest_plugins dynamically; "
+                "CI cannot prove its fixture database requirements"
+            )
+        if value is None or not targets_plugins:
             continue
         modules.extend(_plugin_literals(value, source_path))
     return tuple(dict.fromkeys(modules))
@@ -202,12 +216,12 @@ def _absolute_import_name(
     return ".".join(parts) or None
 
 
-def _resolve_test_support_import(
+def _resolve_project_support_import(
     project_root: Path,
     source_path: Path,
     module: str,
 ) -> Path | None:
-    """Resolve a test-local imported module, ignoring runtime/application imports."""
+    """Resolve an imported project module without allowing path escape."""
 
     relative = Path(*module.split("."))
     candidates = [
@@ -221,16 +235,18 @@ def _resolve_test_support_import(
                 source_path.parent / relative / "__init__.py",
             )
         )
-    tests_root = (project_root / "tests").resolve()
+    resolved_root = project_root.resolve()
     for candidate in candidates:
         resolved = candidate.resolve()
-        if resolved.is_file() and (resolved == tests_root or resolved.is_relative_to(tests_root)):
+        if resolved.is_file() and (
+            resolved == resolved_root or resolved.is_relative_to(resolved_root)
+        ):
             return resolved
     return None
 
 
-def _test_support_imports(source_path: Path, project_root: Path) -> tuple[Path, ...]:
-    """Return test-local modules imported at module scope by pytest support."""
+def _project_support_imports(source_path: Path, project_root: Path) -> tuple[Path, ...]:
+    """Return project modules imported at module scope by pytest support."""
 
     try:
         source = source_path.read_text(encoding="utf-8")
@@ -253,7 +269,7 @@ def _test_support_imports(source_path: Path, project_root: Path) -> tuple[Path, 
                     f"{base}.{alias.name}" for alias in statement.names if alias.name != "*"
                 )
         for module_name in module_names:
-            resolved = _resolve_test_support_import(project_root, source_path, module_name)
+            resolved = _resolve_project_support_import(project_root, source_path, module_name)
             if resolved is not None:
                 imported.append(resolved)
     return tuple(dict.fromkeys(imported))
@@ -310,7 +326,7 @@ def _pytest_support_files(test_path: Path, project_root: Path) -> tuple[Path, ..
             _resolve_project_plugin(project_root, module)
             for module in _pytest_plugin_modules(source_path)
         )
-        pending.extend(_test_support_imports(source_path, project_root))
+        pending.extend(_project_support_imports(source_path, project_root))
     return tuple(support_files)
 
 
