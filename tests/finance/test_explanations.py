@@ -695,9 +695,10 @@ def test_build_explanation_never_labels_a_warned_fact_high():
 
     Regression guard for the no-op confidence cap: the score clamp pinned a
     warned fact to exactly 0.9000, which the old ``score >= 0.9000`` label rule
-    still called HIGH. The manual-import beta stores
-    ``confidence_score=Decimal("1")`` on every fact, so the warning-aware label
-    rule must keep a warning-bearing default fact out of the HIGH band.
+    still called HIGH. The manual-import beta defaults an omitted
+    ``confidence_score`` to ``Decimal("1")`` while preserving caller-supplied
+    0..1 scores, so the warning-aware label rule must keep a warning-bearing
+    default fact out of the HIGH band.
     """
     entry = build_channel_month_revenue_explanation(
         facts=[
