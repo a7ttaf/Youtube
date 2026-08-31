@@ -26,9 +26,21 @@ must change before that feature ships.
   repository, `.`, `..`, or a directory containing unrelated files.
 - Compose uses `create_host_path: false`; a missing or misspelled bind source
   fails instead of being auto-created by Docker.
-- `app-data-init` refuses an unmarked bind before any root ownership or mode
-  operation. The marker binds the canonical target and configured path spelling
-  to an approved safe root; copying a marker to another existing path fails.
+- The marker alone cannot prove which host directory Docker mounted. Run every
+  `up` or `run` that can invoke `app-data-init` through the host-side
+  `compose_storage.py compose` wrapper. It resolves and validates the actual
+  host path, mounts that resolved source, then passes configured and canonical
+  receipts. Accidental direct init without those receipts, a copied marker used
+  through the wrapper, or a mismatched receipt fails before any root ownership
+  or mode operation. The image entrypoint also refuses an ordinary no-dependency
+  `app`/`app-dev` start until init has published its readiness marker.
+  Never set `UMS_APP_DATA_HOST_CANONICAL` or `UMS_APP_DATA_HOST_CONFIGURED`
+  manually.
+- These receipts are an operator safety contract, not a security boundary
+  against a Docker-capable local administrator. Such an administrator can forge
+  environment values, reuse an existing container configuration, or override
+  the image entrypoint. Those actions are unsupported; no in-container process
+  can independently prove the host bind's identity.
 - POSIX `chmod` inside Docker Desktop does not prove a restrictive NTFS ACL.
   The path marker is a destructive-target contract, not a Windows privacy
   claim. Use the owner-only ACL block below for backup bundles. A multi-user
@@ -74,10 +86,11 @@ The target must be a direct child of the approved safe root. An existing
 non-empty unmarked directory is refused; move or inspect it rather than planting
 a marker manually.
 
-Render Compose before the first start:
+Render Compose through the same host preflight before the first start:
 
 ```powershell
-docker compose config --quiet
+uv run python scripts/compose_storage.py compose `
+  --path $env:UMS_APP_DATA_HOST -- config --quiet
 ```
 
 ## 2. Create one coordinated backup bundle
@@ -196,6 +209,7 @@ Get-ChildItem -LiteralPath $bundle -File | ForEach-Object {
 
 uv run python scripts/compose_storage.py manifest `
   --output (Join-Path $bundle 'SHA256SUMS.json') `
+  --profile compose-recovery `
   (Join-Path $bundle 'ums-roles.sql') `
   (Join-Path $bundle 'ums-database.dump') `
   (Join-Path $bundle 'ums-app-data.tgz') `
@@ -245,7 +259,9 @@ Assert-NativeSuccess 'verify complete backup bundle'
 
 The live bind is owned by the image's numeric app uid and may be unreadable to
 the host operator. Archive it from the root init image, then return only the
-archive's ownership to the invoking host uid/gid:
+archive's ownership to the invoking host uid/gid. Numeric `0:0` is explicitly
+supported when the host operator is root; the resulting archive remains mode
+`0600` and root-owned:
 
 ```bash
 set -eu
@@ -275,7 +291,8 @@ docker compose exec -T postgres rm -f \
 
 host_uid="$(id -u)"
 host_gid="$(id -g)"
-docker compose run --rm --no-deps --user 0:0 \
+uv run python scripts/compose_storage.py compose \
+  --path "$UMS_APP_DATA_HOST" -- run --rm --no-deps --user 0:0 \
   --volume "$bundle:/backup" \
   app-data-init \
   python /srv/app/scripts/compose_storage.py archive-mounted \
@@ -288,6 +305,7 @@ docker compose run --rm --no-deps --user 0:0 \
 chmod 600 "$bundle"/*
 uv run python scripts/compose_storage.py manifest \
   --output "$bundle/SHA256SUMS.json" \
+  --profile compose-recovery \
   "$bundle/ums-roles.sql" \
   "$bundle/ums-database.dump" \
   "$bundle/ums-app-data.tgz" \
@@ -300,8 +318,54 @@ uv run python scripts/compose_storage.py verify \
 ```
 
 If `UMS_BLOB_BACKEND=gcs`, the artifact archive contains local exports but not
-GCS connector evidence. Record and verify a generation-pinned GCS bucket
-snapshot in the same recovery record; otherwise the bundle is incomplete.
+GCS connector evidence. Export the provider inventory for the exact backup
+point to `gcs-snapshot.json`. The file must use this validated schema with one
+record per protected object (never invent generations or checksums):
+
+```json
+{
+  "bucket": "ums-raw",
+  "objects": [
+    {
+      "crc32c": "ImIEBA==",
+      "generation": "123456789",
+      "name": "connector/path/object.json"
+    }
+  ],
+  "schema": "ums-gcs-snapshot-v1"
+}
+```
+
+Include it in the manifest command and declare the backend on both gates:
+
+```bash
+export UMS_GCS_BUCKET=ums-raw
+test -s "$bundle/gcs-snapshot.json"
+uv run python scripts/compose_storage.py manifest \
+  --output "$bundle/SHA256SUMS.json" \
+  --profile compose-recovery \
+  --blob-backend gcs \
+  --gcs-bucket "$UMS_GCS_BUCKET" \
+  "$bundle/ums-roles.sql" \
+  "$bundle/ums-database.dump" \
+  "$bundle/ums-app-data.tgz" \
+  "$bundle/running-services.txt" \
+  "$bundle/git-revision.txt" \
+  "$bundle/gcs-snapshot.json"
+uv run python scripts/compose_storage.py verify \
+  --manifest "$bundle/SHA256SUMS.json" \
+  --artifact-archive "$bundle/ums-app-data.tgz" \
+  --blob-backend gcs \
+  --gcs-bucket "$UMS_GCS_BUCKET"
+```
+
+The command rejects a GCS manifest without a non-empty, generation-pinned
+snapshot record, a canonical base64 CRC32C that decodes to four bytes, or an
+exact match between the snapshot bucket and `--gcs-bucket`. The flag defaults
+to `UMS_GCS_BUCKET` (then the runtime default `ums-smart-revenue-raw`), but the
+explicit form above makes the recovery boundary auditable. Recovery must
+restore or prove those exact object generations; otherwise the coordinated
+bundle is incomplete.
 
 ## 3. Rehearse coordinated recovery
 
@@ -317,7 +381,19 @@ target. Never reuse the default project name or live bind.
 5. Restore the custom-format database with `--exit-on-error`.
 6. Restore the artifact archive into the empty marked bind.
 7. Run `app-data-init` so restored POSIX ownership is adopted by the image's
-   actual app uid, then start and validate the recovery app.
+   actual app uid, then start and validate the recovery app. Initialization
+   retains `.ums-restore-pending` unless that uid can traverse every restored
+   directory, read every restored file, and create files in both storage roots.
+
+Artifact publication is journaled inside the marked target. An ordinary
+publication error rolls both roots back to the empty state while retaining the
+verified stage and journal for retry. After an abrupt process or host
+interruption, rerun the exact same `restore-artifacts` command with the same
+verified archive; it revalidates every staged or published byte against the
+archive, infers the publication state, and resumes. The completed journal and
+pending marker remain until `app-data-init` proves runtime access and publishes
+the application-readiness marker. Do not edit `.ums-restore-journal.json`,
+`.ums-restore-pending`, readiness markers, or stage paths.
 
 PowerShell skeleton:
 
@@ -363,9 +439,13 @@ uv run python scripts/compose_storage.py restore-artifacts `
   --archive (Join-Path $bundle 'ums-app-data.tgz') `
   --manifest (Join-Path $bundle 'SHA256SUMS.json')
 Assert-NativeSuccess 'restore artifact and blob bytes'
-docker compose -p $project run --rm --no-deps app-data-init
+uv run python scripts/compose_storage.py compose `
+  --path $env:UMS_APP_DATA_HOST -- `
+  -p $project run --rm --no-deps app-data-init
 Assert-NativeSuccess 'adopt restored storage ownership'
-docker compose -p $project up -d --wait --wait-timeout 180 app
+uv run python scripts/compose_storage.py compose `
+  --path $env:UMS_APP_DATA_HOST -- `
+  -p $project up -d --wait --wait-timeout 180 app
 Assert-NativeSuccess 'start recovery application'
 ```
 
@@ -396,8 +476,12 @@ uv run python scripts/compose_storage.py restore-artifacts \
   --path "$UMS_APP_DATA_HOST" \
   --archive "$bundle/ums-app-data.tgz" \
   --manifest "$bundle/SHA256SUMS.json"
-docker compose -p "$project" run --rm --no-deps app-data-init
-docker compose -p "$project" up -d --wait --wait-timeout 180 app
+uv run python scripts/compose_storage.py compose \
+  --path "$UMS_APP_DATA_HOST" -- \
+  -p "$project" run --rm --no-deps app-data-init
+uv run python scripts/compose_storage.py compose \
+  --path "$UMS_APP_DATA_HOST" -- \
+  -p "$project" up -d --wait --wait-timeout 180 app
 ```
 
 Validate at minimum:

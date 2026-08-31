@@ -152,8 +152,10 @@ EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
     CMD curl --fail --silent --max-time 4 http://localhost:8000/livez || exit 1
 
-# tini reaps zombies + forwards signals cleanly.
-ENTRYPOINT ["/usr/bin/tini", "--"]
+# tini reaps zombies + forwards signals cleanly. The storage gate also applies
+# to explicit `--no-deps app` starts; it execs CMD only after init readiness.
+ENTRYPOINT ["/usr/bin/tini", "--", "python", "/srv/app/scripts/compose_storage.py", \
+            "container-exec", "--path", "/var/lib/ums", "--"]
 CMD ["python", "-m", "uvicorn", "ums_smart_revenue.app:app", \
      "--host", "0.0.0.0", "--port", "8000", \
      "--proxy-headers"]

@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 import importlib.util
+import io
 import json
 import os
 import stat
+import subprocess
+import sys
 import tarfile
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -189,6 +193,248 @@ def test_mounted_marker_is_bound_to_configured_host_path(tmp_path):
         )
 
 
+def test_direct_container_init_without_host_receipt_fails_before_mutation(tmp_path, monkeypatch):
+    """A direct Compose init cannot skip the invocation-bound host preflight."""
+    repository, safe_root = _layout(tmp_path)
+    target = storage.prepare_storage(
+        str(safe_root / "ums"),
+        safe_root=safe_root,
+        repository_root=repository,
+    )
+    mutations: list[tuple[str, object]] = []
+    monkeypatch.delenv(storage.HOST_CANONICAL_ENV, raising=False)
+    monkeypatch.setattr(
+        os,
+        "chown",
+        lambda *args: mutations.append(("chown", args)),
+        raising=False,
+    )
+    monkeypatch.setattr(os, "chmod", lambda *args: mutations.append(("chmod", args)))
+
+    with pytest.raises(storage.StorageContractError, match="compose wrapper"):
+        storage.initialize_container_storage(
+            target,
+            app_user="app",
+            configured_host_path=str(target),
+        )
+
+    monkeypatch.setenv(storage.HOST_CANONICAL_ENV, str(safe_root / "other"))
+    with pytest.raises(storage.StorageContractError, match="does not match the marker"):
+        storage.initialize_container_storage(
+            target,
+            app_user="app",
+            configured_host_path=str(target),
+        )
+
+    assert mutations == []
+    assert {path.name for path in target.iterdir()} == {storage.MARKER_FILENAME}
+
+
+def test_compose_wrapper_validates_host_before_spawning(tmp_path):
+    """Only a successful host canonical check may start the Compose subprocess."""
+    repository, safe_root = _layout(tmp_path)
+    raw_path = str(Path("data") / "ums")
+    target = storage.prepare_storage(
+        raw_path,
+        safe_root=safe_root,
+        repository_root=repository,
+    )
+    invocations: list[tuple[list[str], dict[str, object]]] = []
+
+    class Result:
+        returncode = 17
+
+    def runner(command, **kwargs):
+        invocations.append((command, kwargs))
+        return Result()
+
+    assert (
+        storage.run_compose_with_preflight(
+            raw_path,
+            ["-p", "isolated", "up", "app"],
+            repository_root=repository,
+            runner=runner,
+        )
+        == 17
+    )
+    command, kwargs = invocations.pop()
+    assert command == ["docker", "compose", "-p", "isolated", "up", "app"]
+    assert kwargs["cwd"] == repository.resolve()
+    assert kwargs["env"]["UMS_APP_DATA_HOST"] == str(target.resolve())
+    assert kwargs["env"]["UMS_APP_DATA_HOST_CANONICAL"] == str(target.resolve())
+    assert kwargs["env"][storage.HOST_CONFIGURED_ENV] == raw_path
+
+    copied = safe_root / "copied"
+    copied.mkdir()
+    (copied / storage.MARKER_FILENAME).write_bytes((target / storage.MARKER_FILENAME).read_bytes())
+    with pytest.raises(storage.StorageContractError, match="different host path"):
+        storage.run_compose_with_preflight(
+            str(copied),
+            ["up", "app"],
+            repository_root=repository,
+            runner=runner,
+        )
+    assert invocations == []
+
+
+def test_application_storage_gate_blocks_no_deps_start_without_readiness(tmp_path, monkeypatch):
+    """Skipping Compose dependencies cannot skip the non-root application gate."""
+    mount = tmp_path / "mount"
+    mount.mkdir()
+    for name in storage.STORAGE_DIRECTORIES:
+        (mount / name).mkdir()
+    monkeypatch.setenv(storage.HOST_PATH_ENV, "./data/ums")
+    monkeypatch.setenv(storage.HOST_CANONICAL_ENV, str(tmp_path / "host"))
+
+    with pytest.raises(storage.StorageContractError, match="contract is missing"):
+        storage._validate_ready_storage(mount)
+
+    ready = {
+        "canonical_path": str(tmp_path / "host"),
+        "configured_path_key": storage._configured_path_key("./data/ums"),
+        "contract": storage.CONTRACT_NAME,
+        "state": "initialized",
+    }
+    (mount / storage.READY_FILENAME).write_text(json.dumps(ready), encoding="utf-8")
+    storage._validate_ready_storage(mount)
+
+    (mount / storage.RESTORE_PENDING_FILENAME).write_text("{}", encoding="utf-8")
+    with pytest.raises(storage.StorageContractError, match="not fully initialized"):
+        storage._validate_ready_storage(mount)
+    (mount / storage.RESTORE_PENDING_FILENAME).unlink()
+
+    monkeypatch.delenv(storage.HOST_CANONICAL_ENV)
+    with pytest.raises(storage.StorageContractError, match="canonical receipt"):
+        storage._validate_ready_storage(mount)
+
+
+def test_restore_journal_without_pending_blocks_init_before_mutation(tmp_path, monkeypatch):
+    """A power-loss-shaped missing pending link cannot bypass restore adoption."""
+    repository, safe_root = _layout(tmp_path)
+    target = storage.prepare_storage(
+        str(safe_root / "ums"),
+        safe_root=safe_root,
+        repository_root=repository,
+    )
+    (target / storage.RESTORE_JOURNAL_FILENAME).write_text("{}", encoding="utf-8")
+    monkeypatch.setenv(storage.HOST_CANONICAL_ENV, str(target.resolve()))
+    monkeypatch.setattr(os, "geteuid", lambda: 0, raising=False)
+    monkeypatch.setattr(storage, "_runtime_identity", lambda _user: (10001, 10001))
+    mutations: list[tuple[str, object]] = []
+    monkeypatch.setattr(
+        os,
+        "chown",
+        lambda *args: mutations.append(("chown", args)),
+        raising=False,
+    )
+    monkeypatch.setattr(os, "chmod", lambda *args: mutations.append(("chmod", args)))
+
+    with pytest.raises(storage.StorageContractError, match="disagree"):
+        storage.initialize_container_storage(
+            target,
+            app_user="app",
+            configured_host_path=str(target),
+        )
+
+    assert mutations == []
+    assert not (target / "artifacts").exists()
+    assert not (target / "blobs").exists()
+
+
+def test_failed_reinitialization_invalidates_stale_readiness(tmp_path, monkeypatch):
+    """A prior readiness marker cannot survive a later failed init attempt."""
+    repository, safe_root = _layout(tmp_path)
+    target = _seed_storage(repository, safe_root)
+    marker = json.loads((target / storage.MARKER_FILENAME).read_text(encoding="utf-8"))
+    ready = target / storage.READY_FILENAME
+    ready.write_text(json.dumps(storage._ready_payload(marker)), encoding="utf-8")
+    monkeypatch.setenv(storage.HOST_CANONICAL_ENV, str(target.resolve()))
+    monkeypatch.setattr(os, "geteuid", lambda: 0, raising=False)
+    monkeypatch.setattr(storage, "_runtime_identity", lambda _user: (10001, 10001))
+    monkeypatch.setattr(os, "chown", lambda *_args: None, raising=False)
+    monkeypatch.setattr(
+        os,
+        "chmod",
+        lambda *_args: (_ for _ in ()).throw(OSError("injected chmod failure")),
+    )
+
+    with pytest.raises(OSError, match="injected chmod failure"):
+        storage.initialize_container_storage(
+            target,
+            app_user="app",
+            configured_host_path=str(target),
+        )
+
+    assert not ready.exists()
+
+
+def test_completed_restore_cleanup_retries_after_each_removal_boundary(tmp_path, monkeypatch):
+    """Ready-first cleanup tolerates interruption after stage or journal removal."""
+
+    def completed_state(root: Path) -> tuple[Path, Path, Path]:
+        root.mkdir()
+        for name in storage.STORAGE_DIRECTORIES:
+            (root / name).mkdir()
+        stage = root / f"{storage.RESTORE_STAGE_PREFIX}cleanup"
+        stage.mkdir()
+        digest = "a" * 64
+        pending = root / storage.RESTORE_PENDING_FILENAME
+        pending.write_text(
+            json.dumps(storage._pending_restore_payload(digest)),
+            encoding="utf-8",
+        )
+        journal = storage._restore_journal_payload(digest, stage.name)
+        journal["published"] = list(storage.STORAGE_DIRECTORIES)
+        journal["state"] = "complete"
+        journal_path = root / storage.RESTORE_JOURNAL_FILENAME
+        journal_path.write_text(json.dumps(journal), encoding="utf-8")
+        return stage, journal_path, pending
+
+    first = tmp_path / "after-stage"
+    stage, journal_path, pending = completed_state(first)
+    real_unlink = storage._unlink_and_sync
+    interrupted = False
+
+    def interrupt_journal(path):
+        nonlocal interrupted
+        if Path(path) == journal_path and not interrupted:
+            interrupted = True
+            raise KeyboardInterrupt
+        return real_unlink(Path(path))
+
+    monkeypatch.setattr(storage, "_unlink_and_sync", interrupt_journal)
+    with pytest.raises(KeyboardInterrupt):
+        storage._finish_pending_restore_initialization(first)
+    assert not stage.exists()
+    assert journal_path.exists()
+    assert pending.exists()
+    monkeypatch.setattr(storage, "_unlink_and_sync", real_unlink)
+    storage._finish_pending_restore_initialization(first)
+    assert not journal_path.exists()
+    assert not pending.exists()
+
+    second = tmp_path / "after-journal"
+    stage, journal_path, pending = completed_state(second)
+    interrupted = False
+
+    def interrupt_pending(path):
+        nonlocal interrupted
+        if Path(path) == pending and not interrupted:
+            interrupted = True
+            raise KeyboardInterrupt
+        return real_unlink(Path(path))
+
+    monkeypatch.setattr(storage, "_unlink_and_sync", interrupt_pending)
+    with pytest.raises(KeyboardInterrupt):
+        storage._finish_pending_restore_initialization(second)
+    assert not stage.exists()
+    assert not journal_path.exists()
+    assert pending.exists()
+    monkeypatch.setattr(storage, "_unlink_and_sync", real_unlink)
+    storage._finish_pending_restore_initialization(second)
+    assert not pending.exists()
+
+
 def test_prepare_rejects_symlink_or_junction_target(tmp_path):
     """A redirected target cannot escape after lexical containment validation."""
     repository, safe_root = _layout(tmp_path)
@@ -220,6 +466,21 @@ def _seed_storage(repository: Path, safe_root: Path, name: str = "ums") -> Path:
     (target / "artifacts" / "finance.xlsx").write_bytes(b"finance")
     (target / "blobs" / "raw.json").write_bytes(b'{"source": true}')
     return target
+
+
+def _recovery_members(bundle: Path, archive: Path) -> list[Path]:
+    database_dump = bundle / "ums-database.dump"
+    roles_dump = bundle / "ums-roles.sql"
+    git_revision = bundle / "git-revision.txt"
+    service_record = bundle / "running-services.txt"
+    database_dump.write_bytes(b"postgres-custom-format")
+    roles_dump.write_text(
+        "CREATE ROLE app_tenant;\nCREATE ROLE app_platform;\n",
+        encoding="utf-8",
+    )
+    git_revision.write_text("26bf0256c64389a77d1b1053ea6aeb1e7c0bc994\n", encoding="utf-8")
+    service_record.write_text("postgres\nredis\n", encoding="utf-8")
+    return [archive, database_dump, roles_dump, git_revision, service_record]
 
 
 def test_archive_requires_stopped_writers_and_external_destination(tmp_path):
@@ -254,18 +515,14 @@ def test_archive_manifest_verify_and_empty_target_restore_round_trip(tmp_path):
         writers_stopped=True,
         repository_root=repository,
     )
-    database_dump = bundle / "ums-database.dump"
-    roles_dump = bundle / "ums-roles.sql"
-    database_dump.write_bytes(b"postgres-custom-format")
-    roles_dump.write_text("CREATE ROLE app_tenant;\nCREATE ROLE app_platform;\n", encoding="utf-8")
     manifest = storage.create_bundle_manifest(
         bundle / "SHA256SUMS.json",
-        [archive, database_dump, roles_dump],
+        _recovery_members(bundle, archive),
         repository_root=repository,
     )
 
     verified = storage.verify_bundle_manifest(manifest)
-    assert set(verified) == {"ums-app-data.tgz", "ums-database.dump", "ums-roles.sql"}
+    assert set(verified) == storage.REQUIRED_RECOVERY_MEMBERS
     storage.verify_artifact_archive(archive)
 
     restore_target = storage.prepare_storage(
@@ -298,6 +555,7 @@ def test_manifest_detects_tampering(tmp_path):
     manifest = storage.create_bundle_manifest(
         bundle / "SHA256SUMS.json",
         [dump],
+        profile=storage.GENERIC_BACKUP_PROFILE,
         repository_root=repository,
     )
     dump.write_bytes(b"after")
@@ -318,6 +576,498 @@ def test_archive_verifier_rejects_path_traversal(tmp_path):
         storage.verify_artifact_archive(archive)
 
 
+def test_archive_verifier_requires_directory_typed_storage_roots(tmp_path):
+    """Regular files named artifacts/blobs cannot satisfy the archive contract."""
+    archive = tmp_path / "fake-roots.tgz"
+    with tarfile.open(archive, mode="w:gz") as handle:
+        for name in storage.STORAGE_DIRECTORIES:
+            member = tarfile.TarInfo(name)
+            member.size = 0
+            handle.addfile(member, io.BytesIO())
+
+    with pytest.raises(storage.StorageContractError, match="root must be a directory"):
+        storage.verify_artifact_archive(archive)
+
+    implicit = tmp_path / "implicit-roots.tgz"
+    with tarfile.open(implicit, mode="w:gz") as handle:
+        for name in storage.STORAGE_DIRECTORIES:
+            member = tarfile.TarInfo(f"{name}/file.txt")
+            member.size = 1
+            handle.addfile(member, io.BytesIO(b"x"))
+    with pytest.raises(storage.StorageContractError, match="explicit artifacts and blobs"):
+        storage.verify_artifact_archive(implicit)
+
+
+def test_compose_recovery_manifest_rejects_incomplete_bundle(tmp_path):
+    """Recovery cannot be declared complete without all five coordinated records."""
+    repository, _ = _layout(tmp_path)
+    bundle = tmp_path / "bundle"
+    bundle.mkdir()
+    for name in ("ums-database.dump", "ums-roles.sql", "ums-app-data.tgz"):
+        (bundle / name).write_bytes(name.encode())
+
+    with pytest.raises(storage.StorageContractError, match="git-revision.txt"):
+        storage.create_bundle_manifest(
+            bundle / "SHA256SUMS.json",
+            [
+                bundle / "ums-database.dump",
+                bundle / "ums-roles.sql",
+                bundle / "ums-app-data.tgz",
+            ],
+            repository_root=repository,
+        )
+
+    generic = storage.create_bundle_manifest(
+        bundle / "generic.json",
+        [bundle / "ums-database.dump"],
+        profile=storage.GENERIC_BACKUP_PROFILE,
+        repository_root=repository,
+    )
+    payload = json.loads(generic.read_text(encoding="utf-8"))
+    payload["profile"] = storage.COMPOSE_RECOVERY_PROFILE
+    generic.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(storage.StorageContractError, match="incomplete"):
+        storage.verify_bundle_manifest(
+            generic,
+            required_profile=storage.COMPOSE_RECOVERY_PROFILE,
+        )
+
+    recovery_members = _recovery_members(bundle, bundle / "ums-app-data.tgz")
+    with pytest.raises(storage.StorageContractError, match="gcs-snapshot.json"):
+        storage.create_bundle_manifest(
+            bundle / "gcs-missing-snapshot.json",
+            recovery_members,
+            blob_backend="gcs",
+            repository_root=repository,
+        )
+    snapshot = bundle / storage.GCS_SNAPSHOT_MEMBER
+    snapshot.write_text(
+        json.dumps(
+            {
+                "bucket": "ums-raw",
+                "objects": [
+                    {
+                        "crc32c": "not-a-checksum",
+                        "generation": "123456",
+                        "name": "connector/raw.json",
+                    }
+                ],
+                "schema": "ums-gcs-snapshot-v1",
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(storage.StorageContractError, match="canonical base64"):
+        storage.create_bundle_manifest(
+            bundle / "gcs-malformed-checksum.json",
+            [*recovery_members, snapshot],
+            blob_backend="gcs",
+            expected_gcs_bucket="ums-raw",
+            repository_root=repository,
+        )
+
+    payload = json.loads(snapshot.read_text(encoding="utf-8"))
+    payload["objects"][0]["crc32c"] = "AQ=="
+    snapshot.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(storage.StorageContractError, match="exactly four bytes"):
+        storage.create_bundle_manifest(
+            bundle / "gcs-short-checksum.json",
+            [*recovery_members, snapshot],
+            blob_backend="gcs",
+            expected_gcs_bucket="ums-raw",
+            repository_root=repository,
+        )
+
+    snapshot.write_text(
+        json.dumps(
+            {
+                "bucket": "ums-raw",
+                "objects": [
+                    {
+                        "crc32c": "ImIEBA==",
+                        "generation": "123456",
+                        "name": "connector/raw.json",
+                    }
+                ],
+                "schema": "ums-gcs-snapshot-v1",
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(storage.StorageContractError, match="configured bucket"):
+        storage.create_bundle_manifest(
+            bundle / "gcs-wrong-bucket.json",
+            [*recovery_members, snapshot],
+            blob_backend="gcs",
+            expected_gcs_bucket="different-bucket",
+            repository_root=repository,
+        )
+    gcs_manifest = storage.create_bundle_manifest(
+        bundle / "gcs.json",
+        [*recovery_members, snapshot],
+        blob_backend="gcs",
+        expected_gcs_bucket="ums-raw",
+        repository_root=repository,
+    )
+    with pytest.raises(storage.StorageContractError, match="configured bucket"):
+        storage.verify_bundle_manifest(
+            gcs_manifest,
+            required_profile=storage.COMPOSE_RECOVERY_PROFILE,
+            required_blob_backend="gcs",
+            expected_gcs_bucket="different-bucket",
+        )
+    assert storage.GCS_SNAPSHOT_MEMBER in storage.verify_bundle_manifest(
+        gcs_manifest,
+        required_profile=storage.COMPOSE_RECOVERY_PROFILE,
+        required_blob_backend="gcs",
+        expected_gcs_bucket="ums-raw",
+    )
+
+
+def test_restore_publication_rolls_back_and_retries_after_replace_error(tmp_path, monkeypatch):
+    """An ordinary second-root replace error leaves no half-published target."""
+    repository, safe_root = _layout(tmp_path)
+    source = _seed_storage(repository, safe_root, "source")
+    bundle = tmp_path / "bundle"
+    archive = storage.create_artifact_archive(
+        str(source),
+        output=bundle / "ums-app-data.tgz",
+        writers_stopped=True,
+        repository_root=repository,
+    )
+    manifest = storage.create_bundle_manifest(
+        bundle / "SHA256SUMS.json",
+        _recovery_members(bundle, archive),
+        repository_root=repository,
+    )
+    target = storage.prepare_storage(
+        str(safe_root / "target"),
+        safe_root=safe_root,
+        repository_root=repository,
+    )
+    real_replace = storage._durable_replace
+    failed = False
+
+    def fail_second_publication(source_path, destination_path):
+        nonlocal failed
+        if (
+            not failed
+            and Path(source_path).name == "blobs"
+            and Path(destination_path) == target / "blobs"
+        ):
+            failed = True
+            raise OSError("injected publication failure")
+        return real_replace(Path(source_path), Path(destination_path))
+
+    monkeypatch.setattr(storage, "_durable_replace", fail_second_publication)
+    with pytest.raises(storage.StorageContractError, match="rolled back"):
+        storage.restore_artifact_archive(
+            str(target),
+            archive=archive,
+            manifest=manifest,
+            repository_root=repository,
+        )
+
+    assert not (target / "artifacts").exists()
+    assert not (target / "blobs").exists()
+    journal = json.loads((target / storage.RESTORE_JOURNAL_FILENAME).read_text(encoding="utf-8"))
+    assert journal["state"] == "rolled-back"
+    assert len(list(target.glob(f"{storage.RESTORE_STAGE_PREFIX}*"))) == 1
+
+    monkeypatch.setattr(storage, "_durable_replace", real_replace)
+    storage.restore_artifact_archive(
+        str(target),
+        archive=archive,
+        manifest=manifest,
+        repository_root=repository,
+    )
+    assert (target / "artifacts" / "finance.xlsx").read_bytes() == b"finance"
+    assert (target / "blobs" / "raw.json").is_file()
+
+
+def test_restore_publication_resumes_after_abrupt_second_replace(tmp_path, monkeypatch):
+    """A crash-shaped interruption is inferred from journaled filesystem state."""
+    repository, safe_root = _layout(tmp_path)
+    source = _seed_storage(repository, safe_root, "source")
+    bundle = tmp_path / "bundle"
+    archive = storage.create_artifact_archive(
+        str(source),
+        output=bundle / "ums-app-data.tgz",
+        writers_stopped=True,
+        repository_root=repository,
+    )
+    manifest = storage.create_bundle_manifest(
+        bundle / "SHA256SUMS.json",
+        _recovery_members(bundle, archive),
+        repository_root=repository,
+    )
+    target = storage.prepare_storage(
+        str(safe_root / "target"),
+        safe_root=safe_root,
+        repository_root=repository,
+    )
+    real_replace = storage._durable_replace
+    interrupted = False
+
+    def interrupt_second_publication(source_path, destination_path):
+        nonlocal interrupted
+        if (
+            not interrupted
+            and Path(source_path).name == "blobs"
+            and Path(destination_path) == target / "blobs"
+        ):
+            interrupted = True
+            raise KeyboardInterrupt
+        return real_replace(Path(source_path), Path(destination_path))
+
+    monkeypatch.setattr(storage, "_durable_replace", interrupt_second_publication)
+    with pytest.raises(KeyboardInterrupt):
+        storage.restore_artifact_archive(
+            str(target),
+            archive=archive,
+            manifest=manifest,
+            repository_root=repository,
+        )
+    assert (target / "artifacts").is_dir()
+    assert not (target / "blobs").exists()
+    assert (target / storage.RESTORE_JOURNAL_FILENAME).is_file()
+
+    monkeypatch.setattr(storage, "_durable_replace", real_replace)
+    storage.restore_artifact_archive(
+        str(target),
+        archive=archive,
+        manifest=manifest,
+        repository_root=repository,
+    )
+    assert (target / "artifacts" / "finance.xlsx").is_file()
+    assert (target / "blobs" / "raw.json").is_file()
+    journal = json.loads((target / storage.RESTORE_JOURNAL_FILENAME).read_text(encoding="utf-8"))
+    assert journal["state"] == "complete"
+    assert (target / storage.RESTORE_PENDING_FILENAME).is_file()
+
+
+def test_restore_retry_rejects_truncated_journaled_stage(tmp_path, monkeypatch):
+    """A crash-surviving journal cannot publish damaged staged bytes."""
+    repository, safe_root = _layout(tmp_path)
+    source = _seed_storage(repository, safe_root, "source")
+    bundle = tmp_path / "bundle"
+    archive = storage.create_artifact_archive(
+        str(source),
+        output=bundle / "ums-app-data.tgz",
+        writers_stopped=True,
+        repository_root=repository,
+    )
+    manifest = storage.create_bundle_manifest(
+        bundle / "SHA256SUMS.json",
+        _recovery_members(bundle, archive),
+        repository_root=repository,
+    )
+    target = storage.prepare_storage(
+        str(safe_root / "target"),
+        safe_root=safe_root,
+        repository_root=repository,
+    )
+    real_replace = storage._durable_replace
+
+    def interrupt_first_publication(source_path, destination_path):
+        if Path(destination_path) == target / "artifacts":
+            raise KeyboardInterrupt
+        return real_replace(Path(source_path), Path(destination_path))
+
+    monkeypatch.setattr(storage, "_durable_replace", interrupt_first_publication)
+    with pytest.raises(KeyboardInterrupt):
+        storage.restore_artifact_archive(
+            str(target),
+            archive=archive,
+            manifest=manifest,
+            repository_root=repository,
+        )
+    stage = next(target.glob(f"{storage.RESTORE_STAGE_PREFIX}*"))
+    (stage / "artifacts" / "finance.xlsx").write_bytes(b"truncated")
+
+    monkeypatch.setattr(storage, "_durable_replace", real_replace)
+    with pytest.raises(storage.StorageContractError, match="file (size|content) mismatch"):
+        storage.restore_artifact_archive(
+            str(target),
+            archive=archive,
+            manifest=manifest,
+            repository_root=repository,
+        )
+    assert not (target / "artifacts").exists()
+    assert not (target / "blobs").exists()
+
+
+def test_restore_retry_rejects_directory_replaced_by_regular_file(tmp_path, monkeypatch):
+    """Retry validates archive entry types, including empty nested directories."""
+    repository, safe_root = _layout(tmp_path)
+    source = _seed_storage(repository, safe_root, "source")
+    (source / "artifacts" / "empty-dir").mkdir()
+    bundle = tmp_path / "bundle"
+    archive = storage.create_artifact_archive(
+        str(source),
+        output=bundle / "ums-app-data.tgz",
+        writers_stopped=True,
+        repository_root=repository,
+    )
+    manifest = storage.create_bundle_manifest(
+        bundle / "SHA256SUMS.json",
+        _recovery_members(bundle, archive),
+        repository_root=repository,
+    )
+    target = storage.prepare_storage(
+        str(safe_root / "target"),
+        safe_root=safe_root,
+        repository_root=repository,
+    )
+    real_replace = storage._durable_replace
+
+    def interrupt_first_publication(source_path, destination_path):
+        if Path(destination_path) == target / "artifacts":
+            raise KeyboardInterrupt
+        return real_replace(Path(source_path), Path(destination_path))
+
+    monkeypatch.setattr(storage, "_durable_replace", interrupt_first_publication)
+    with pytest.raises(KeyboardInterrupt):
+        storage.restore_artifact_archive(
+            str(target),
+            archive=archive,
+            manifest=manifest,
+            repository_root=repository,
+        )
+    stage = next(target.glob(f"{storage.RESTORE_STAGE_PREFIX}*"))
+    empty_directory = stage / "artifacts" / "empty-dir"
+    empty_directory.rmdir()
+    empty_directory.write_bytes(b"not-a-directory")
+
+    monkeypatch.setattr(storage, "_durable_replace", real_replace)
+    with pytest.raises(storage.StorageContractError, match="directory type mismatch"):
+        storage.restore_artifact_archive(
+            str(target),
+            archive=archive,
+            manifest=manifest,
+            repository_root=repository,
+        )
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX execute-bit contract")
+def test_empty_nested_directory_without_search_permission_is_rejected():
+    """Listing an empty directory is insufficient without execute/search access."""
+    code = """
+import importlib.util
+import os
+import pathlib
+import sys
+spec = importlib.util.spec_from_file_location('storage_probe', pathlib.Path(sys.argv[1]))
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+if os.geteuid() == 0:
+    os.setgroups([])
+    os.setgid(65534)
+    os.setuid(65534)
+try:
+    module._require_search_access(pathlib.Path(sys.argv[2]))
+except PermissionError:
+    raise SystemExit(0)
+raise SystemExit(1)
+"""
+    with tempfile.TemporaryDirectory(prefix="ums-search-contract-") as temporary:
+        root = Path(temporary)
+        root.chmod(0o755)
+        nested = root / "no-search"
+        nested.mkdir(mode=0o444)
+        result = subprocess.run(
+            [sys.executable, "-c", code, str(SCRIPT_PATH), str(nested)],
+            check=False,
+        )
+        assert result.returncode == 0
+
+
+def test_pending_restore_kept_when_runtime_cannot_read_descendants(tmp_path, monkeypatch):
+    """A tolerated chown failure is safe only after every restored entry is readable."""
+    repository, safe_root = _layout(tmp_path)
+    target = _seed_storage(repository, safe_root)
+    pending = target / storage.RESTORE_PENDING_FILENAME
+    digest = "0" * 64
+    pending.write_text(
+        json.dumps(storage._pending_restore_payload(digest)),
+        encoding="utf-8",
+    )
+    stage = target / f"{storage.RESTORE_STAGE_PREFIX}pending-test"
+    stage.mkdir()
+    journal = storage._restore_journal_payload(digest, stage.name)
+    journal["published"] = list(storage.STORAGE_DIRECTORIES)
+    journal["state"] = "complete"
+    (target / storage.RESTORE_JOURNAL_FILENAME).write_text(
+        json.dumps(journal),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv(storage.HOST_CANONICAL_ENV, str(target.resolve()))
+    monkeypatch.setattr(os, "geteuid", lambda: 0, raising=False)
+    monkeypatch.setattr(storage, "_runtime_identity", lambda _user: (10001, 10001))
+    monkeypatch.setattr(
+        os,
+        "chown",
+        lambda *_args: (_ for _ in ()).throw(OSError("host mapping rejected chown")),
+        raising=False,
+    )
+    monkeypatch.setattr(os, "chmod", lambda *_args: None)
+    monkeypatch.setattr(
+        storage,
+        "_verify_tree_readable_as_identity",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(PermissionError("unreadable child")),
+    )
+    probes: list[bool] = []
+    monkeypatch.setattr(
+        storage,
+        "_probe_as_identity",
+        lambda *_args, **_kwargs: probes.append(True),
+    )
+
+    with pytest.raises(PermissionError, match="unreadable child"):
+        storage.initialize_container_storage(
+            target,
+            app_user="app",
+            configured_host_path=str(target),
+        )
+
+    assert pending.is_file()
+    assert probes == []
+
+
+def test_root_operator_can_publish_root_owned_backup(tmp_path, monkeypatch):
+    """The documented 0:0 operator path is executable, not rejected by validation."""
+    mount = tmp_path / "mount"
+    mount.mkdir()
+    output = tmp_path / "bundle" / "ums-app-data.tgz"
+    ownership: list[tuple[Path, int, int]] = []
+    monkeypatch.setattr(storage, "_validate_mounted_marker", lambda _path: {})
+    monkeypatch.setattr(storage, "_assert_sensitive_output", lambda path, **_kwargs: path)
+    monkeypatch.setattr(os, "geteuid", lambda: 0, raising=False)
+    monkeypatch.setattr(
+        os,
+        "chown",
+        lambda path, uid, gid: ownership.append((path, uid, gid)),
+        raising=False,
+    )
+
+    def fake_archive(_mount, archive):
+        archive.parent.mkdir()
+        archive.write_bytes(b"archive")
+        return archive
+
+    monkeypatch.setattr(storage, "_archive_storage_tree", fake_archive)
+    result = storage.create_mounted_artifact_archive(
+        mount,
+        output=output,
+        writers_stopped=True,
+        output_uid=0,
+        output_gid=0,
+    )
+
+    assert result == output
+    assert ownership == [(output, 0, 0)]
+
+
 def test_restore_refuses_nonempty_target(tmp_path):
     """Recovery cannot overwrite live or partially recovered storage."""
     repository, safe_root = _layout(tmp_path)
@@ -331,7 +1081,7 @@ def test_restore_refuses_nonempty_target(tmp_path):
     )
     manifest = storage.create_bundle_manifest(
         bundle / "SHA256SUMS.json",
-        [archive],
+        _recovery_members(bundle, archive),
         repository_root=repository,
     )
     target = _seed_storage(repository, safe_root, "target")
@@ -354,8 +1104,10 @@ def test_compose_contract_requires_precreated_bind_and_actual_image_identity():
     assert compose.count("create_host_path: false") == 3
     assert compose.count("source: ${UMS_APP_DATA_HOST:?") == 3
     assert "APP_UID: ${APP_UID:-10001}" in compose
-    assert "UMS_APP_DATA_HOST_CONTRACT: ${UMS_APP_DATA_HOST:?" in init_block
+    assert "UMS_APP_DATA_HOST_CONTRACT: ${UMS_APP_DATA_HOST_CONFIGURED-}" in init_block
+    assert "UMS_APP_DATA_HOST_CANONICAL_CONTRACT: ${UMS_APP_DATA_HOST_CANONICAL-}" in init_block
     assert 'scripts/compose_storage.py", "container-init' in init_block
+    assert 'entrypoint: ["/usr/bin/tini", "--"]' in init_block
     assert "chown 10001" not in init_block
     assert "setpriv" not in init_block
     assert "ARG APP_UID=10001" in dockerfile
@@ -363,6 +1115,7 @@ def test_compose_contract_requires_precreated_bind_and_actual_image_identity():
     assert "case \"${APP_UID}\" in ''|*[!0-9]*" in dockerfile
     assert '[ "${APP_UID}" -ge 1 ]' in dockerfile
     assert "scripts/compose_storage.py ${APP_HOME}/scripts/compose_storage.py" in dockerfile
+    assert '"container-exec", "--path", "/var/lib/ums", "--"' in dockerfile
 
 
 def test_runbook_seals_roles_database_and_bind_as_one_recovery_set():
@@ -376,6 +1129,8 @@ def test_runbook_seals_roles_database_and_bind_as_one_recovery_set():
     assert "SHA256SUMS.json" in runbook
     assert "does **not**\n  delete or empty `UMS_APP_DATA_HOST`" in runbook
     assert "restore-artifacts" in runbook
+    assert "compose_storage.py compose" in runbook
+    assert '--path "$UMS_APP_DATA_HOST"' in runbook
     assert "CREATE ROLE %I NOLOGIN NOSUPERUSER" in roles_sql
     assert "rolcanlogin OR rolsuper" in roles_sql
     assert "rolbypassrls" in roles_sql
@@ -387,7 +1142,9 @@ def test_manifest_rejects_unsafe_relative_record(tmp_path):
     manifest.write_text(
         json.dumps(
             {
+                "blob_backend": "file-store",
                 "files": [{"path": "../escape", "sha256": "0" * 64, "size": 0}],
+                "profile": storage.GENERIC_BACKUP_PROFILE,
                 "schema": storage.MANIFEST_NAME,
             }
         ),

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import argparse
+import base64
+import binascii
 import hashlib
 import json
 import logging
@@ -11,21 +13,39 @@ import posixpath
 import secrets
 import shutil
 import stat
+import subprocess
 import sys
 import tarfile
-import tempfile
 from pathlib import Path, PurePosixPath
 from typing import Any
 
 LOGGER = logging.getLogger("ums.compose_storage")
 CONTRACT_NAME = "ums-compose-storage-v1"
 MANIFEST_NAME = "ums-compose-backup-v1"
+COMPOSE_RECOVERY_PROFILE = "ums-compose-recovery-v1"
+GENERIC_BACKUP_PROFILE = "ums-backup-files-v1"
 MARKER_FILENAME = ".ums-storage-root.json"
 RESTORE_PENDING_FILENAME = ".ums-restore-pending"
+RESTORE_JOURNAL_FILENAME = ".ums-restore-journal.json"
+RESTORE_STAGE_PREFIX = ".ums-restore-stage-"
+READY_FILENAME = ".ums-storage-ready.json"
 STORAGE_DIRECTORIES = ("artifacts", "blobs")
+REQUIRED_RECOVERY_MEMBERS = frozenset(
+    {
+        "git-revision.txt",
+        "running-services.txt",
+        "ums-app-data.tgz",
+        "ums-database.dump",
+        "ums-roles.sql",
+    }
+)
+GCS_SNAPSHOT_MEMBER = "gcs-snapshot.json"
+DEFAULT_GCS_BUCKET = "ums-smart-revenue-raw"
 CHUNK_SIZE = 1024 * 1024
 MAX_POSIX_ID = 2_147_483_647
 HOST_PATH_ENV = "UMS_APP_DATA_HOST_CONTRACT"
+HOST_CANONICAL_ENV = "UMS_APP_DATA_HOST_CANONICAL_CONTRACT"
+HOST_CONFIGURED_ENV = "UMS_APP_DATA_HOST_CONFIGURED"
 
 
 class StorageContractError(RuntimeError):
@@ -151,6 +171,50 @@ def _read_json(path: Path) -> dict[str, Any]:
     return payload
 
 
+def _sync_file(path: Path) -> None:
+    flags = os.O_RDWR if os.name == "nt" else os.O_RDONLY
+    descriptor = os.open(path, flags)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _sync_directory(path: Path) -> None:
+    if os.name == "nt":
+        # Windows directory handles do not support FlushFileBuffers. File
+        # creation is flushed through the final file; renames use WRITE_THROUGH.
+        return
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    descriptor = os.open(path, flags)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _durable_replace(source: Path, destination: Path) -> None:
+    if os.name == "nt":
+        import ctypes
+
+        move_file = ctypes.WinDLL("kernel32", use_last_error=True).MoveFileExW
+        move_file.argtypes = [ctypes.c_wchar_p, ctypes.c_wchar_p, ctypes.c_uint32]
+        move_file.restype = ctypes.c_int
+        movefile_replace_existing = 0x1
+        movefile_write_through = 0x8
+        if not move_file(
+            str(source),
+            str(destination),
+            movefile_replace_existing | movefile_write_through,
+        ):
+            raise ctypes.WinError(ctypes.get_last_error())
+        return
+    os.replace(source, destination)
+    _sync_directory(destination.parent)
+    if source.parent != destination.parent:
+        _sync_directory(source.parent)
+
+
 def _write_json_exclusive(path: Path, payload: dict[str, Any]) -> None:
     encoded = (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode()
     temporary = path.with_name(f".{path.name}.partial-{os.getpid()}-{secrets.token_hex(4)}")
@@ -163,8 +227,26 @@ def _write_json_exclusive(path: Path, payload: dict[str, Any]) -> None:
             os.fsync(handle.fileno())
         os.chmod(temporary, 0o600)
         os.link(temporary, path)
+        _sync_file(path)
+        _sync_directory(path.parent)
     except BaseException:
         raise
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
+    encoded = (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode()
+    temporary = path.with_name(f".{path.name}.partial-{os.getpid()}-{secrets.token_hex(4)}")
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    descriptor = os.open(temporary, flags, 0o600)
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(encoded)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(temporary, 0o600)
+        _durable_replace(temporary, path)
     finally:
         temporary.unlink(missing_ok=True)
 
@@ -258,6 +340,42 @@ def check_host_storage(raw_path: str, *, repository_root: Path | None = None) ->
     return validated
 
 
+# ============================================================================
+# Purpose: Bind host canonical-path validation to the Compose process invocation.
+# Database/ORM: None.
+# Standards: Resolve the marked path on the host and pass an ephemeral receipt.
+# Blast Radius: Compose lifecycle commands; no mutation occurs before validation.
+# Connections:
+#   - File: docker-compose.yml -> app-data-init consumes the canonical receipt.
+#   - File: Docs/20_COMPOSE_STORAGE_RUNBOOK.md -> required lifecycle wrapper.
+# ============================================================================
+def run_compose_with_preflight(
+    raw_path: str,
+    compose_args: list[str],
+    *,
+    repository_root: Path | None = None,
+    runner: Any = subprocess.run,
+) -> int:
+    """Run Docker Compose only after host-side canonical marker validation."""
+    if not compose_args:
+        raise StorageContractError("compose wrapper requires arguments after --")
+    repository = (repository_root or _repository_root()).resolve(strict=False)
+    canonical = check_host_storage(raw_path, repository_root=repository)
+    environment = dict(os.environ)
+    # FIX: Compose now receives the already-resolved source, not the spelling
+    # that was checked before a host redirect could be substituted.
+    environment["UMS_APP_DATA_HOST"] = str(canonical)
+    environment["UMS_APP_DATA_HOST_CANONICAL"] = str(canonical)
+    environment[HOST_CONFIGURED_ENV] = raw_path
+    completed = runner(
+        ["docker", "compose", *compose_args],
+        cwd=repository,
+        env=environment,
+        check=False,
+    )
+    return int(completed.returncode)
+
+
 def _validate_mounted_marker(
     mount_root: Path,
     *,
@@ -273,7 +391,62 @@ def _validate_mounted_marker(
         raise StorageContractError(f"{HOST_PATH_ENV} is required for mounted-path validation")
     if payload["configured_path_key"] != _configured_path_key(configured):
         raise StorageContractError("mounted marker does not match UMS_APP_DATA_HOST")
+    canonical = os.environ.get(HOST_CANONICAL_ENV)
+    if canonical is None or not canonical.strip():
+        raise StorageContractError(
+            "host canonical-path receipt is missing; use the compose wrapper"
+        )
+    marker_canonical = payload["canonical_path"].replace("\\", "/").rstrip("/").casefold()
+    receipt_canonical = canonical.strip().replace("\\", "/").rstrip("/").casefold()
+    if marker_canonical != receipt_canonical:
+        raise StorageContractError("host canonical-path receipt does not match the marker")
     return payload
+
+
+def _ready_payload(marker: dict[str, Any]) -> dict[str, str]:
+    return {
+        "canonical_path": marker["canonical_path"],
+        "configured_path_key": marker["configured_path_key"],
+        "contract": CONTRACT_NAME,
+        "state": "initialized",
+    }
+
+
+def _validate_ready_storage(mount_root: Path) -> None:
+    if not mount_root.is_dir() or _is_redirect(mount_root):
+        raise StorageContractError(f"mounted storage root is not a real directory: {mount_root}")
+    ready_path = mount_root / READY_FILENAME
+    if (mount_root / RESTORE_PENDING_FILENAME).exists() or (
+        mount_root / RESTORE_JOURNAL_FILENAME
+    ).exists():
+        raise StorageContractError("storage restore is not fully initialized")
+    payload = _read_json(ready_path)
+    if set(payload) != {"canonical_path", "configured_path_key", "contract", "state"}:
+        raise StorageContractError("storage readiness marker has unexpected fields")
+    if payload.get("contract") != CONTRACT_NAME or payload.get("state") != "initialized":
+        raise StorageContractError("storage readiness marker has an unknown contract or state")
+    configured = os.environ.get(HOST_PATH_ENV)
+    canonical = os.environ.get(HOST_CANONICAL_ENV)
+    if not configured or payload.get("configured_path_key") != _configured_path_key(configured):
+        raise StorageContractError("storage readiness marker lacks the wrapper configured receipt")
+    if not canonical:
+        raise StorageContractError("storage readiness marker lacks the wrapper canonical receipt")
+    ready_canonical = str(payload.get("canonical_path", "")).replace("\\", "/").rstrip("/")
+    receipt_canonical = canonical.strip().replace("\\", "/").rstrip("/")
+    if ready_canonical.casefold() != receipt_canonical.casefold():
+        raise StorageContractError("storage readiness marker does not match the canonical receipt")
+    for name in STORAGE_DIRECTORIES:
+        root = mount_root / name
+        if not root.is_dir() or _is_redirect(root):
+            raise StorageContractError(f"initialized storage root is missing: {root}")
+
+
+def exec_with_ready_storage(mount_root: Path, command: list[str]) -> None:
+    """Fail closed before the application process starts, even with --no-deps."""
+    if not command:
+        raise StorageContractError("storage-gated exec requires a command after --")
+    _validate_ready_storage(mount_root)
+    os.execvp(command[0], command)
 
 
 def _walk_without_redirects(root: Path) -> list[Path]:
@@ -310,6 +483,62 @@ def _probe_as_identity(roots: tuple[Path, ...], *, uid: int, gid: int) -> None:
 
 
 # ============================================================================
+# Purpose: Prove the runtime uid can traverse and read every restored entry.
+# Database/ORM: None.
+# Standards: Drop effective identity and reject redirects or special files.
+# Blast Radius: Restore readiness only; restored bytes remain unchanged.
+# Connections:
+#   - File: docker-compose.yml -> app-data-init gates application startup.
+#   - File: Docs/20_COMPOSE_STORAGE_RUNBOOK.md -> pending-restore contract.
+# ============================================================================
+def _verify_tree_readable_as_identity(roots: tuple[Path, ...], *, uid: int, gid: int) -> None:
+    paths: list[Path] = []
+    for root in roots:
+        paths.extend(_walk_without_redirects(root))
+    original_euid = os.geteuid()
+    original_egid = os.getegid()
+    original_groups = os.getgroups()
+    try:
+        os.setgroups([])
+        os.setegid(gid)
+        os.seteuid(uid)
+        for path in paths:
+            if path.is_dir():
+                _require_search_access(path)
+                with os.scandir(path) as entries:
+                    list(entries)
+            elif path.is_file():
+                descriptor = os.open(path, os.O_RDONLY)
+                try:
+                    os.read(descriptor, 1)
+                finally:
+                    os.close(descriptor)
+            else:
+                raise StorageContractError(f"restored entry is not a regular file: {path}")
+    finally:
+        os.seteuid(original_euid)
+        os.setegid(original_egid)
+        os.setgroups(original_groups)
+
+
+def _require_search_access(path: Path) -> None:
+    if not os.access(path, os.X_OK, effective_ids=True):
+        raise PermissionError(f"runtime identity cannot search directory: {path}")
+
+
+def _runtime_identity(app_user: str) -> tuple[int, int]:
+    try:
+        import pwd
+    except ModuleNotFoundError as exc:  # pragma: no cover - container is Linux.
+        raise StorageContractError("container initialization requires a POSIX image") from exc
+    try:
+        account = pwd.getpwnam(app_user)
+    except KeyError as exc:
+        raise StorageContractError(f"runtime account does not exist: {app_user}") from exc
+    return account.pw_uid, account.pw_gid
+
+
+# ============================================================================
 # Purpose: Provision the marked bind only after its host contract is proven.
 # Database/ORM: None.
 # Standards: Derive the runtime identity from the image and probe as that user.
@@ -325,27 +554,41 @@ def initialize_container_storage(
     configured_host_path: str | None = None,
 ) -> None:
     """Initialize and prove mounted storage as the image's actual app identity."""
-    _validate_mounted_marker(mount_root, configured_host_path=configured_host_path)
+    marker_payload = _validate_mounted_marker(
+        mount_root,
+        configured_host_path=configured_host_path,
+    )
     if os.geteuid() != 0:
         raise StorageContractError("container initialization must run as root")
-    try:
-        import pwd
-    except ModuleNotFoundError as exc:  # pragma: no cover - container is Linux.
-        raise StorageContractError("container initialization requires a POSIX image") from exc
-    try:
-        account = pwd.getpwnam(app_user)
-    except KeyError as exc:
-        raise StorageContractError(f"runtime account does not exist: {app_user}") from exc
+    app_uid, app_gid = _runtime_identity(app_user)
 
+    pending_restore = mount_root / RESTORE_PENDING_FILENAME
+    restore_journal = mount_root / RESTORE_JOURNAL_FILENAME
+    ready_path = mount_root / READY_FILENAME
+    expected_ready = _ready_payload(marker_payload)
+    ready_matches = False
+    if ready_path.exists():
+        if _read_json(ready_path) != expected_ready:
+            raise StorageContractError("storage readiness marker does not match the host marker")
+        ready_matches = True
+    if restore_journal.exists() != pending_restore.exists() and not ready_matches:
+        raise StorageContractError(
+            "restore journal and pending marker disagree; rerun restore-artifacts"
+        )
+    if ready_matches and not (restore_journal.exists() or pending_restore.exists()):
+        _unlink_and_sync(ready_path)
+        ready_matches = False
     roots = tuple(mount_root / name for name in STORAGE_DIRECTORIES)
     for root in roots:
         root.mkdir(mode=0o750, exist_ok=True)
 
-    pending_restore = mount_root / RESTORE_PENDING_FILENAME
+    pending_payload: dict[str, Any] | None = None
     ownership_targets: list[Path] = [mount_root, *roots]
     if pending_restore.exists():
         if _is_redirect(pending_restore) or not pending_restore.is_file():
             raise StorageContractError("restore-pending marker is not a regular file")
+        pending_payload = _read_json(pending_restore)
+        _validate_pending_restore_payload(pending_payload)
         ownership_targets = [mount_root]
         for root in roots:
             ownership_targets.extend(_walk_without_redirects(root))
@@ -353,16 +596,29 @@ def initialize_container_storage(
     chown_failures: list[str] = []
     for path in ownership_targets:
         try:
-            os.chown(path, account.pw_uid, account.pw_gid)
+            os.chown(path, app_uid, app_gid)
         except OSError as exc:
             chown_failures.append(f"{path}: {exc}")
 
     for root in (mount_root, *roots):
         os.chmod(root, 0o750)
 
-    _probe_as_identity(roots, uid=account.pw_uid, gid=account.pw_gid)
+    # FIX: A root-directory write probe did not prove that the runtime identity
+    # could traverse and read restored descendants after a host chown failure.
     if pending_restore.exists():
-        pending_restore.unlink()
+        _verify_tree_readable_as_identity(
+            roots,
+            uid=app_uid,
+            gid=app_gid,
+        )
+    _probe_as_identity(roots, uid=app_uid, gid=app_gid)
+    if not ready_matches:
+        _write_json_exclusive(ready_path, expected_ready)
+    os.chmod(ready_path, 0o444)
+    if os.name != "nt":
+        _sync_file(ready_path)
+    if pending_restore.exists() or restore_journal.exists():
+        _finish_pending_restore_initialization(mount_root)
     if chown_failures:
         LOGGER.warning(
             "host bind did not accept chown; runtime-identity write probe passed: %s",
@@ -395,7 +651,10 @@ def _archive_storage_tree(storage: Path, archive: Path) -> Path:
             for entry in entries:
                 handle.add(entry, arcname=entry.relative_to(storage).as_posix(), recursive=False)
         os.chmod(temporary, 0o600)
+        _sync_file(temporary)
         os.link(temporary, archive)
+        _sync_file(archive)
+        _sync_directory(archive.parent)
     finally:
         temporary.unlink(missing_ok=True)
     return archive
@@ -448,10 +707,12 @@ def create_mounted_artifact_archive(
         raise StorageContractError("stop app and app-dev, then pass --writers-stopped")
     if (output_uid is None) != (output_gid is None):
         raise StorageContractError("output uid and gid must be provided together")
-    if output_uid is not None and not 1 <= output_uid <= MAX_POSIX_ID:
-        raise StorageContractError("output uid is outside the supported positive range")
-    if output_gid is not None and not 1 <= output_gid <= MAX_POSIX_ID:
-        raise StorageContractError("output gid is outside the supported positive range")
+    # FIX: The documented root-operator path supplied 0:0 but validation
+    # rejected zero before the archive command could run.
+    if output_uid is not None and not 0 <= output_uid <= MAX_POSIX_ID:
+        raise StorageContractError("output uid is outside the supported non-negative range")
+    if output_gid is not None and not 0 <= output_gid <= MAX_POSIX_ID:
+        raise StorageContractError("output gid is outside the supported non-negative range")
     if output_uid is not None and output_gid is not None and os.geteuid() != 0:
         raise StorageContractError("changing backup output ownership requires root")
     _validate_mounted_marker(mount_root)
@@ -466,6 +727,7 @@ def _validated_archive_members(handle: tarfile.TarFile) -> list[tarfile.TarInfo]
     members = handle.getmembers()
     seen: set[str] = set()
     top_levels: set[str] = set()
+    directory_roots: set[str] = set()
     for member in members:
         path = PurePosixPath(member.name)
         if (
@@ -485,8 +747,20 @@ def _validated_archive_members(handle: tarfile.TarFile) -> list[tarfile.TarInfo]
             raise StorageContractError(f"archive links/devices are forbidden: {member.name}")
         seen.add(normalized_name)
         top_levels.add(path.parts[0])
+        # FIX: A regular file named artifacts or blobs previously counted as
+        # the required root even though extraction needs actual directories.
+        if len(path.parts) == 1:
+            if not member.isdir():
+                raise StorageContractError(
+                    f"archive storage root must be a directory: {member.name}"
+                )
+            directory_roots.add(path.parts[0])
     if top_levels != set(STORAGE_DIRECTORIES):
         raise StorageContractError("archive must contain both artifacts and blobs roots")
+    if directory_roots != set(STORAGE_DIRECTORIES):
+        raise StorageContractError(
+            "archive must contain explicit artifacts and blobs directory roots"
+        )
     return members
 
 
@@ -507,6 +781,58 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _configured_gcs_bucket(value: str | None) -> str:
+    bucket = value if value is not None else os.environ.get("UMS_GCS_BUCKET", DEFAULT_GCS_BUCKET)
+    if not isinstance(bucket, str) or not bucket or bucket != bucket.strip():
+        raise StorageContractError("configured GCS bucket must be explicit and non-empty")
+    return bucket
+
+
+def _validate_gcs_snapshot(path: Path, *, expected_bucket: str) -> None:
+    payload = _read_json(path)
+    if (
+        set(payload) != {"bucket", "objects", "schema"}
+        or payload.get("schema") != "ums-gcs-snapshot-v1"
+    ):
+        raise StorageContractError("GCS snapshot has an unknown schema")
+    bucket = payload.get("bucket")
+    objects = payload.get("objects")
+    if not isinstance(bucket, str) or not bucket.strip():
+        raise StorageContractError("GCS snapshot bucket is missing")
+    if bucket != expected_bucket:
+        raise StorageContractError(
+            f"GCS snapshot bucket must match configured bucket {expected_bucket!r}"
+        )
+    if not isinstance(objects, list) or not objects:
+        raise StorageContractError("GCS snapshot must contain generation-pinned objects")
+    names: set[str] = set()
+    for record in objects:
+        if not isinstance(record, dict) or set(record) != {"crc32c", "generation", "name"}:
+            raise StorageContractError("GCS snapshot object record is malformed")
+        name = record.get("name")
+        generation = record.get("generation")
+        crc32c = record.get("crc32c")
+        if (
+            not isinstance(name, str)
+            or not name
+            or name in names
+            or not isinstance(generation, str)
+            or not generation.isdecimal()
+            or int(generation) <= 0
+            or not isinstance(crc32c, str)
+        ):
+            raise StorageContractError("GCS snapshot object record is invalid")
+        try:
+            decoded_crc32c = base64.b64decode(crc32c, validate=True)
+        except (binascii.Error, ValueError) as exc:
+            raise StorageContractError("GCS snapshot CRC32C is not canonical base64") from exc
+        # FIX: A non-empty arbitrary string previously passed as a checksum and
+        # could make an unrelated provider inventory look recovery-complete.
+        if len(decoded_crc32c) != 4 or base64.b64encode(decoded_crc32c).decode("ascii") != crc32c:
+            raise StorageContractError("GCS snapshot CRC32C must encode exactly four bytes")
+        names.add(name)
+
+
 # ============================================================================
 # Purpose: Seal database, role, and artifact backups into one checksum manifest.
 # Database/ORM: PostgreSQL dumps are opaque files; no live database is accessed.
@@ -520,9 +846,16 @@ def create_bundle_manifest(
     output: Path,
     files: list[Path],
     *,
+    profile: str = COMPOSE_RECOVERY_PROFILE,
+    blob_backend: str = "file-store",
+    expected_gcs_bucket: str | None = None,
     repository_root: Path | None = None,
 ) -> Path:
     """Write a SHA-256 manifest for all members of one external backup bundle."""
+    if profile not in {COMPOSE_RECOVERY_PROFILE, GENERIC_BACKUP_PROFILE}:
+        raise StorageContractError(f"unknown backup manifest profile: {profile}")
+    if blob_backend not in {"file-store", "gcs"}:
+        raise StorageContractError(f"unknown backup blob backend: {blob_backend}")
     repository = (repository_root or _repository_root()).resolve(strict=False)
     manifest = _assert_sensitive_output(output, repository_root=repository)
     bundle_root = manifest.parent
@@ -551,18 +884,77 @@ def create_bundle_manifest(
         )
     if not records:
         raise StorageContractError("backup manifest needs at least one file")
+    record_names = {record["path"] for record in records}
+    if len(record_names) != len(records):
+        raise StorageContractError("backup manifest contains duplicate members")
+    if profile == COMPOSE_RECOVERY_PROFILE:
+        # FIX: A partial set could previously be sealed and described as a
+        # complete coordinated recovery bundle.
+        missing = sorted(REQUIRED_RECOVERY_MEMBERS - record_names)
+        if missing:
+            raise StorageContractError(
+                "compose recovery manifest is incomplete; missing: " + ", ".join(missing)
+            )
+        empty = sorted(
+            record["path"]
+            for record in records
+            if record["path"] in REQUIRED_RECOVERY_MEMBERS and not record["size"]
+        )
+        if empty:
+            raise StorageContractError(
+                "compose recovery manifest has empty required members: " + ", ".join(empty)
+            )
+        if blob_backend == "gcs" and GCS_SNAPSHOT_MEMBER not in record_names:
+            raise StorageContractError(f"GCS recovery manifest requires {GCS_SNAPSHOT_MEMBER}")
+        if blob_backend == "gcs" and not next(
+            record["size"] for record in records if record["path"] == GCS_SNAPSHOT_MEMBER
+        ):
+            raise StorageContractError("GCS snapshot record must not be empty")
+        if blob_backend == "gcs":
+            _validate_gcs_snapshot(
+                bundle_root / GCS_SNAPSHOT_MEMBER,
+                expected_bucket=_configured_gcs_bucket(expected_gcs_bucket),
+            )
     _write_json_exclusive(
         manifest,
-        {"files": sorted(records, key=lambda record: record["path"]), "schema": MANIFEST_NAME},
+        {
+            "blob_backend": blob_backend,
+            "files": sorted(records, key=lambda record: record["path"]),
+            "profile": profile,
+            "schema": MANIFEST_NAME,
+        },
     )
     return manifest
 
 
-def verify_bundle_manifest(manifest: Path) -> dict[str, Path]:
+def verify_bundle_manifest(
+    manifest: Path,
+    *,
+    required_profile: str | None = None,
+    required_blob_backend: str | None = None,
+    expected_gcs_bucket: str | None = None,
+) -> dict[str, Path]:
     """Verify every size and SHA-256 recorded in a backup bundle manifest."""
     payload = _read_json(manifest)
-    if set(payload) != {"files", "schema"} or payload.get("schema") != MANIFEST_NAME:
+    if (
+        set(payload) != {"blob_backend", "files", "profile", "schema"}
+        or payload.get("schema") != MANIFEST_NAME
+    ):
         raise StorageContractError(f"unknown backup manifest schema: {manifest}")
+    blob_backend = payload.get("blob_backend")
+    if blob_backend not in {"file-store", "gcs"}:
+        raise StorageContractError(f"unknown backup blob backend: {blob_backend}")
+    if required_blob_backend is not None and blob_backend != required_blob_backend:
+        raise StorageContractError(
+            f"backup manifest blob backend must be {required_blob_backend}, not {blob_backend}"
+        )
+    profile = payload.get("profile")
+    if profile not in {COMPOSE_RECOVERY_PROFILE, GENERIC_BACKUP_PROFILE}:
+        raise StorageContractError(f"unknown backup manifest profile: {profile}")
+    if required_profile is not None and profile != required_profile:
+        raise StorageContractError(
+            f"backup manifest profile must be {required_profile}, not {profile}"
+        )
     records = payload.get("files")
     if not isinstance(records, list) or not records:
         raise StorageContractError("backup manifest has no file records")
@@ -597,6 +989,28 @@ def verify_bundle_manifest(manifest: Path) -> dict[str, Path]:
         if name in verified:
             raise StorageContractError(f"duplicate backup manifest path: {name}")
         verified[name] = candidate
+    if profile == COMPOSE_RECOVERY_PROFILE:
+        missing = sorted(REQUIRED_RECOVERY_MEMBERS - verified.keys())
+        if missing:
+            raise StorageContractError(
+                "compose recovery manifest is incomplete; missing: " + ", ".join(missing)
+            )
+        empty = sorted(
+            name for name in REQUIRED_RECOVERY_MEMBERS if verified[name].stat().st_size == 0
+        )
+        if empty:
+            raise StorageContractError(
+                "compose recovery manifest has empty required members: " + ", ".join(empty)
+            )
+        if blob_backend == "gcs" and GCS_SNAPSHOT_MEMBER not in verified:
+            raise StorageContractError(f"GCS recovery manifest requires {GCS_SNAPSHOT_MEMBER}")
+        if blob_backend == "gcs" and verified[GCS_SNAPSHOT_MEMBER].stat().st_size == 0:
+            raise StorageContractError("GCS snapshot record must not be empty")
+        if blob_backend == "gcs":
+            _validate_gcs_snapshot(
+                verified[GCS_SNAPSHOT_MEMBER],
+                expected_bucket=_configured_gcs_bucket(expected_gcs_bucket),
+            )
     return verified
 
 
@@ -604,6 +1018,13 @@ def _ensure_empty_restore_target(storage: Path) -> None:
     pending = storage / RESTORE_PENDING_FILENAME
     if pending.exists():
         raise StorageContractError("an earlier restore is still pending container initialization")
+    if (storage / READY_FILENAME).exists():
+        raise StorageContractError("restore target was already initialized; prepare a new target")
+    journal = storage / RESTORE_JOURNAL_FILENAME
+    if journal.exists():
+        raise StorageContractError("an earlier restore publication has not been reconciled")
+    if any(storage.glob(f"{RESTORE_STAGE_PREFIX}*")):
+        raise StorageContractError("an unjournaled restore stage requires operator review")
     for name in STORAGE_DIRECTORIES:
         root = storage / name
         if root.exists() and (not root.is_dir() or any(root.iterdir())):
@@ -611,9 +1032,209 @@ def _ensure_empty_restore_target(storage: Path) -> None:
 
 
 # ============================================================================
+# Purpose: Journal two-root restore publication for rollback and crash retry.
+# Database/ORM: None; the verified database restore remains a prior step.
+# Standards: Exact state schema, same-filesystem renames, fail-closed recovery.
+# Blast Radius: Marked empty artifact/blob recovery targets only.
+# Connections:
+#   - File: Docs/20_COMPOSE_STORAGE_RUNBOOK.md -> operator retry procedure.
+#   - File: docker-compose.yml -> app-data-init consumes the pending marker.
+# ============================================================================
+def _restore_journal_payload(archive_digest: str, stage_name: str) -> dict[str, Any]:
+    return {
+        "archive_sha256": archive_digest,
+        "contract": CONTRACT_NAME,
+        "published": [],
+        "stage": stage_name,
+        "state": "publishing",
+    }
+
+
+def _validate_restore_journal(
+    storage: Path,
+    payload: dict[str, Any],
+    archive_digest: str,
+    *,
+    allow_missing_stage: bool = False,
+) -> Path:
+    if set(payload) != {"archive_sha256", "contract", "published", "stage", "state"}:
+        raise StorageContractError("restore journal has unexpected fields")
+    if payload.get("contract") != CONTRACT_NAME or payload.get("state") not in {
+        "complete",
+        "initialized",
+        "publishing",
+        "rolled-back",
+        "rolling-back",
+    }:
+        raise StorageContractError("restore journal has an unknown contract or state")
+    if payload.get("archive_sha256") != archive_digest:
+        raise StorageContractError("restore journal belongs to a different artifact archive")
+    stage_name = payload.get("stage")
+    published = payload.get("published")
+    if (
+        not isinstance(stage_name, str)
+        or not stage_name.startswith(RESTORE_STAGE_PREFIX)
+        or Path(stage_name).name != stage_name
+        or not isinstance(published, list)
+        or any(not isinstance(name, str) for name in published)
+        or len(published) != len(set(published))
+        or any(name not in STORAGE_DIRECTORIES for name in published)
+    ):
+        raise StorageContractError("restore journal is malformed")
+    stage = storage / stage_name
+    if stage.exists() and (not stage.is_dir() or _is_redirect(stage)):
+        raise StorageContractError("restore journal stage is missing or redirected")
+    if not stage.exists() and not allow_missing_stage:
+        raise StorageContractError("restore journal stage is missing or redirected")
+    return stage
+
+
+def _pending_restore_payload(archive_digest: str) -> dict[str, str]:
+    return {
+        "archive_sha256": archive_digest,
+        "contract": CONTRACT_NAME,
+        "state": "ownership-pending",
+    }
+
+
+def _validate_pending_restore_payload(payload: dict[str, Any]) -> None:
+    digest = payload.get("archive_sha256")
+    if (
+        set(payload) != {"archive_sha256", "contract", "state"}
+        or payload.get("contract") != CONTRACT_NAME
+        or payload.get("state") != "ownership-pending"
+        or not isinstance(digest, str)
+        or len(digest) != 64
+        or any(character not in "0123456789abcdef" for character in digest)
+    ):
+        raise StorageContractError("restore-pending marker is malformed")
+
+
+def _rollback_restore_publication(
+    storage: Path,
+    stage: Path,
+    *,
+    archive_digest: str,
+    journal: dict[str, Any],
+) -> None:
+    journal_path = storage / RESTORE_JOURNAL_FILENAME
+    journal["state"] = "rolling-back"
+    _write_json_atomic(journal_path, journal)
+    pending = storage / RESTORE_PENDING_FILENAME
+    if pending.exists():
+        if _read_json(pending) != _pending_restore_payload(archive_digest):
+            raise StorageContractError("restore-pending marker does not match the journal")
+        pending.unlink()
+        _sync_directory(storage)
+    for name in reversed(STORAGE_DIRECTORIES):
+        source = stage / name
+        destination = storage / name
+        if source.exists() and destination.exists():
+            raise StorageContractError(f"restore rollback found both copies of {name}")
+        if destination.exists():
+            if not destination.is_dir() or _is_redirect(destination):
+                raise StorageContractError(f"restore rollback target is unsafe: {destination}")
+            _durable_replace(destination, source)
+    journal["published"] = []
+    journal["state"] = "rolled-back"
+    _write_json_atomic(journal_path, journal)
+
+
+def _finish_pending_restore_initialization(storage: Path) -> None:
+    for name in STORAGE_DIRECTORIES:
+        root = storage / name
+        if not root.is_dir() or _is_redirect(root):
+            raise StorageContractError(f"completed restore root is missing: {root}")
+    pending_path = storage / RESTORE_PENDING_FILENAME
+    pending_payload: dict[str, Any] | None = None
+    if pending_path.exists():
+        pending_payload = _read_json(pending_path)
+        _validate_pending_restore_payload(pending_payload)
+    journal_path = storage / RESTORE_JOURNAL_FILENAME
+    if journal_path.exists():
+        journal = _read_json(journal_path)
+        digest = (
+            str(pending_payload["archive_sha256"])
+            if pending_payload is not None
+            else str(journal.get("archive_sha256", ""))
+        )
+        stage = _validate_restore_journal(
+            storage,
+            journal,
+            digest,
+            allow_missing_stage=True,
+        )
+        if journal["state"] not in {"complete", "initialized"}:
+            raise StorageContractError("restore journal is not ready for initialization cleanup")
+        if journal["state"] == "complete":
+            journal["state"] = "initialized"
+            _write_json_atomic(journal_path, journal)
+        if stage.exists():
+            if any(stage.iterdir()):
+                raise StorageContractError("completed restore stage is unexpectedly non-empty")
+            _remove_empty_stage(stage, storage)
+        _unlink_and_sync(journal_path)
+    if pending_path.exists():
+        _unlink_and_sync(pending_path)
+
+
+def _remove_empty_stage(stage: Path, storage: Path) -> None:
+    stage.rmdir()
+    _sync_directory(storage)
+
+
+def _unlink_and_sync(path: Path) -> None:
+    path.unlink()
+    _sync_directory(path.parent)
+
+
+def _verify_restore_bytes(storage: Path, stage: Path, archive: Path) -> None:
+    locations: dict[str, Path] = {}
+    actual_names: set[str] = set()
+    for name in STORAGE_DIRECTORIES:
+        staged = stage / name
+        published = storage / name
+        if staged.exists() == published.exists():
+            raise StorageContractError(f"restore verification needs exactly one copy of {name}")
+        root = staged if staged.exists() else published
+        if not root.is_dir() or _is_redirect(root):
+            raise StorageContractError(f"restore verification root is unsafe: {root}")
+        locations[name] = root
+        for path in _walk_without_redirects(root):
+            suffix = path.relative_to(root)
+            actual_names.add(PurePosixPath(name, *suffix.parts).as_posix())
+
+    with tarfile.open(archive, mode="r:gz") as handle:
+        members = _validated_archive_members(handle)
+        expected_names = {PurePosixPath(member.name).as_posix() for member in members}
+        if actual_names != expected_names:
+            raise StorageContractError("restore stage entries do not match the artifact archive")
+        for member in members:
+            relative = PurePosixPath(member.name)
+            candidate = locations[relative.parts[0]].joinpath(*relative.parts[1:])
+            if member.isdir():
+                if not candidate.is_dir() or _is_redirect(candidate):
+                    raise StorageContractError(f"restored directory type mismatch: {member.name}")
+                continue
+            if not candidate.is_file() or candidate.stat().st_size != member.size:
+                raise StorageContractError(f"restored file size mismatch: {member.name}")
+            source = handle.extractfile(member)
+            if source is None:
+                raise StorageContractError(f"archive file has no payload: {member.name}")
+            with source, candidate.open("rb") as restored:
+                while True:
+                    expected_chunk = source.read(CHUNK_SIZE)
+                    restored_chunk = restored.read(CHUNK_SIZE)
+                    if expected_chunk != restored_chunk:
+                        raise StorageContractError(f"restored file content mismatch: {member.name}")
+                    if not expected_chunk:
+                        break
+
+
+# ============================================================================
 # Purpose: Restore verified artifact/blob bytes into an empty prepared target.
 # Database/ORM: None; roles and database restore remain explicit prior steps.
-# Standards: Verify manifest first, reject overwrite/links, and stage extraction.
+# Standards: Verify complete bundle, journal publication, and roll back on error.
 # Blast Radius: Writes only the marked empty storage target selected by operator.
 # Connections:
 #   - File: docker-compose.yml -> app-data-init adopts restored ownership.
@@ -629,42 +1250,132 @@ def restore_artifact_archive(
     """Restore one verified archive without overwriting existing storage bytes."""
     repository = (repository_root or _repository_root()).resolve(strict=False)
     storage = check_host_storage(raw_path, repository_root=repository)
-    verified = verify_bundle_manifest(manifest)
+    verified = verify_bundle_manifest(
+        manifest,
+        required_profile=COMPOSE_RECOVERY_PROFILE,
+        required_blob_backend=os.environ.get("UMS_BLOB_BACKEND", "file-store"),
+    )
     resolved_archive = archive.expanduser().resolve(strict=True)
-    if resolved_archive not in verified.values():
-        raise StorageContractError("artifact archive is not covered by the verified manifest")
-    _ensure_empty_restore_target(storage)
-
-    stage = Path(tempfile.mkdtemp(prefix=".ums-restore-", dir=storage.parent))
-    try:
-        with tarfile.open(resolved_archive, mode="r:gz") as handle:
-            members = _validated_archive_members(handle)
-            for member in members:
-                destination = stage.joinpath(*PurePosixPath(member.name).parts)
-                if member.isdir():
-                    destination.mkdir(mode=0o700, parents=True, exist_ok=True)
-                    continue
-                destination.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-                source = handle.extractfile(member)
-                if source is None:
-                    raise StorageContractError(f"archive file has no payload: {member.name}")
-                descriptor = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-                with source, os.fdopen(descriptor, "wb") as output:
-                    shutil.copyfileobj(source, output, length=CHUNK_SIZE)
-
-        for name in STORAGE_DIRECTORIES:
-            destination = storage / name
-            if destination.exists():
-                destination.rmdir()
-            os.replace(stage / name, destination)
-        _write_json_exclusive(
-            storage / RESTORE_PENDING_FILENAME,
-            {"contract": CONTRACT_NAME, "state": "ownership-pending"},
+    if verified.get("ums-app-data.tgz") != resolved_archive:
+        raise StorageContractError(
+            "artifact archive must be the verified ums-app-data.tgz bundle member"
         )
-    except (OSError, tarfile.TarError) as exc:
-        raise StorageContractError("artifact restore failed before initialization") from exc
-    finally:
-        shutil.rmtree(stage, ignore_errors=True)
+    archive_digest = _sha256(resolved_archive)
+    journal_path = storage / RESTORE_JOURNAL_FILENAME
+    if journal_path.exists():
+        journal = _read_json(journal_path)
+        stage = _validate_restore_journal(
+            storage,
+            journal,
+            archive_digest,
+            allow_missing_stage=journal.get("state") == "initialized",
+        )
+        if journal["state"] == "initialized":
+            marker = _read_json(storage / MARKER_FILENAME)
+            if _read_json(storage / READY_FILENAME) != _ready_payload(marker):
+                raise StorageContractError("initialized restore lacks its readiness marker")
+            return
+        _verify_restore_bytes(storage, stage, resolved_archive)
+        if journal["state"] == "complete":
+            pending = storage / RESTORE_PENDING_FILENAME
+            if _read_json(pending) != _pending_restore_payload(archive_digest):
+                raise StorageContractError("completed restore lacks its matching pending marker")
+            return
+        if journal["state"] == "rolling-back":
+            _rollback_restore_publication(
+                storage,
+                stage,
+                archive_digest=archive_digest,
+                journal=journal,
+            )
+        if journal["state"] == "rolled-back":
+            journal["state"] = "publishing"
+            _write_json_atomic(journal_path, journal)
+    else:
+        _ensure_empty_restore_target(storage)
+        stage = storage / f"{RESTORE_STAGE_PREFIX}{secrets.token_hex(8)}"
+        stage.mkdir(mode=0o700)
+        try:
+            with tarfile.open(resolved_archive, mode="r:gz") as handle:
+                members = _validated_archive_members(handle)
+                for member in members:
+                    destination = stage.joinpath(*PurePosixPath(member.name).parts)
+                    if member.isdir():
+                        destination.mkdir(mode=0o700, parents=True, exist_ok=True)
+                        continue
+                    destination.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+                    source = handle.extractfile(member)
+                    if source is None:
+                        raise StorageContractError(f"archive file has no payload: {member.name}")
+                    descriptor = os.open(
+                        destination,
+                        os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                        0o600,
+                    )
+                    with source, os.fdopen(descriptor, "wb") as output:
+                        shutil.copyfileobj(source, output, length=CHUNK_SIZE)
+                        output.flush()
+                        os.fsync(output.fileno())
+            for path in reversed(_walk_without_redirects(stage)):
+                if path.is_dir():
+                    _sync_directory(path)
+            for name in STORAGE_DIRECTORIES:
+                destination = storage / name
+                if destination.exists():
+                    destination.rmdir()
+                    _sync_directory(storage)
+            _verify_restore_bytes(storage, stage, resolved_archive)
+            journal = _restore_journal_payload(archive_digest, stage.name)
+            _write_json_exclusive(journal_path, journal)
+        except Exception as exc:
+            if not journal_path.exists():
+                shutil.rmtree(stage, ignore_errors=True)
+            if isinstance(exc, StorageContractError):
+                raise
+            raise StorageContractError("artifact restore staging failed") from exc
+
+    try:
+        # FIX: Sequential unjournaled replaces could expose only one storage
+        # root after a crash. Every replace is now inferred and retryable.
+        for name in STORAGE_DIRECTORIES:
+            source = stage / name
+            destination = storage / name
+            if source.exists() and destination.exists():
+                raise StorageContractError(f"restore publication found two copies of {name}")
+            if source.exists():
+                if not source.is_dir() or _is_redirect(source):
+                    raise StorageContractError(f"restore stage root is unsafe: {source}")
+                _durable_replace(source, destination)
+            elif not destination.is_dir() or _is_redirect(destination):
+                raise StorageContractError(f"restore publication lost storage root: {name}")
+            if name not in journal["published"]:
+                journal["published"].append(name)
+                _write_json_atomic(journal_path, journal)
+
+        pending = storage / RESTORE_PENDING_FILENAME
+        pending_payload = _pending_restore_payload(archive_digest)
+        if pending.exists():
+            if _read_json(pending) != pending_payload:
+                raise StorageContractError("restore-pending marker does not match the archive")
+        else:
+            _write_json_exclusive(pending, pending_payload)
+        journal["state"] = "complete"
+        _write_json_atomic(journal_path, journal)
+    except Exception as exc:
+        try:
+            _rollback_restore_publication(
+                storage,
+                stage,
+                archive_digest=archive_digest,
+                journal=journal,
+            )
+        except Exception as rollback_exc:
+            raise StorageContractError(
+                "restore publication and rollback are incomplete; rerun the same restore"
+            ) from rollback_exc
+        raise StorageContractError(
+            "artifact restore publication failed and was rolled back"
+        ) from exc
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -678,9 +1389,21 @@ def _build_parser() -> argparse.ArgumentParser:
     check = subparsers.add_parser("check", help="validate a prepared host storage path")
     check.add_argument("--path", required=True)
 
+    compose = subparsers.add_parser(
+        "compose", help="run Docker Compose through canonical host preflight"
+    )
+    compose.add_argument("--path", required=True)
+    compose.add_argument("compose_args", nargs=argparse.REMAINDER)
+
     container_init = subparsers.add_parser("container-init", help="provision a mounted path")
     container_init.add_argument("--path", required=True, type=Path)
     container_init.add_argument("--app-user", default="app")
+
+    container_exec = subparsers.add_parser(
+        "container-exec", help="exec an application only after storage readiness"
+    )
+    container_exec.add_argument("--path", required=True, type=Path)
+    container_exec.add_argument("container_command", nargs=argparse.REMAINDER)
 
     archive = subparsers.add_parser("archive", help="archive stopped-writer artifact storage")
     archive.add_argument("--path", required=True)
@@ -698,11 +1421,36 @@ def _build_parser() -> argparse.ArgumentParser:
 
     manifest = subparsers.add_parser("manifest", help="create a bundle checksum manifest")
     manifest.add_argument("--output", required=True, type=Path)
+    manifest.add_argument(
+        "--profile",
+        choices=("compose-recovery",),
+        default="compose-recovery",
+    )
+    manifest.add_argument(
+        "--blob-backend",
+        choices=("file-store", "gcs"),
+        default=os.environ.get("UMS_BLOB_BACKEND", "file-store"),
+    )
+    manifest.add_argument(
+        "--gcs-bucket",
+        default=os.environ.get("UMS_GCS_BUCKET", DEFAULT_GCS_BUCKET),
+        help="expected snapshot bucket when --blob-backend=gcs",
+    )
     manifest.add_argument("files", nargs="+", type=Path)
 
     verify = subparsers.add_parser("verify", help="verify a complete bundle manifest")
     verify.add_argument("--manifest", required=True, type=Path)
     verify.add_argument("--artifact-archive", type=Path)
+    verify.add_argument(
+        "--blob-backend",
+        choices=("file-store", "gcs"),
+        default=os.environ.get("UMS_BLOB_BACKEND", "file-store"),
+    )
+    verify.add_argument(
+        "--gcs-bucket",
+        default=os.environ.get("UMS_GCS_BUCKET", DEFAULT_GCS_BUCKET),
+        help="expected snapshot bucket when --blob-backend=gcs",
+    )
 
     restore = subparsers.add_parser("restore-artifacts", help="restore into empty prepared storage")
     restore.add_argument("--path", required=True)
@@ -721,8 +1469,18 @@ def main(argv: list[str] | None = None) -> int:
             print(path)
         elif args.command == "check":
             print(check_host_storage(args.path))
+        elif args.command == "compose":
+            compose_args = args.compose_args
+            if compose_args[:1] == ["--"]:
+                compose_args = compose_args[1:]
+            return run_compose_with_preflight(args.path, compose_args)
         elif args.command == "container-init":
             initialize_container_storage(args.path, app_user=args.app_user)
+        elif args.command == "container-exec":
+            container_command = args.container_command
+            if container_command[:1] == ["--"]:
+                container_command = container_command[1:]
+            exec_with_ready_storage(args.path, container_command)
         elif args.command == "archive":
             print(
                 create_artifact_archive(
@@ -742,14 +1500,30 @@ def main(argv: list[str] | None = None) -> int:
                 )
             )
         elif args.command == "manifest":
-            print(create_bundle_manifest(args.output, args.files))
+            print(
+                create_bundle_manifest(
+                    args.output,
+                    args.files,
+                    profile=COMPOSE_RECOVERY_PROFILE,
+                    blob_backend=args.blob_backend,
+                    expected_gcs_bucket=args.gcs_bucket,
+                )
+            )
         elif args.command == "verify":
-            verified = verify_bundle_manifest(args.manifest)
+            verified = verify_bundle_manifest(
+                args.manifest,
+                required_profile=COMPOSE_RECOVERY_PROFILE,
+                required_blob_backend=args.blob_backend,
+                expected_gcs_bucket=args.gcs_bucket,
+            )
+            archive = verified["ums-app-data.tgz"]
             if args.artifact_archive is not None:
-                archive = args.artifact_archive.expanduser().resolve(strict=True)
-                if archive not in verified.values():
-                    raise StorageContractError("artifact archive is not covered by the manifest")
-                verify_artifact_archive(archive)
+                requested_archive = args.artifact_archive.expanduser().resolve(strict=True)
+                if requested_archive != archive:
+                    raise StorageContractError(
+                        "artifact archive is not the verified ums-app-data.tgz member"
+                    )
+            verify_artifact_archive(archive)
             print(f"verified {len(verified)} backup files")
         elif args.command == "restore-artifacts":
             restore_artifact_archive(

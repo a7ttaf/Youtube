@@ -1,7 +1,8 @@
 # UMS Smart Revenue Control Center — single-box stack (also used for local dev).
 #
 # Usage:
-#   docker compose up -d                # full stack (postgres, redis, app, migrate)
+#   uv run python scripts/compose_storage.py compose --path ./data/ums -- up -d
+#                                       # full stack through host preflight
 #   docker compose run --rm migrate     # apply migrations once
 #   docker compose logs -f app          # follow the app logs
 #   docker compose down                 # stop + remove containers, keep data
@@ -22,13 +23,15 @@
 #     `UMS_APP_DATA_HOST` has no implicit default. Prepare it explicitly before
 #     any `up` so a typo cannot make Docker auto-create a root-owned directory:
 #       uv run python scripts/compose_storage.py prepare --path ./data/ums
-#     Then set UMS_APP_DATA_HOST=./data/ums in the shell or env file. Long bind
-#     syntax sets create_host_path=false, and app-data-init requires the marker
-#     written by that command before any chown/chmod occurs.
+#     Then use the compose_storage.py compose wrapper for every `up` or `run`
+#     that can invoke app-data-init. It resolves the actual host source and
+#     passes a wrapper-owned canonical receipt. Long bind syntax sets
+#     create_host_path=false; direct app-data-init invocation without that
+#     receipt fails before any chown/chmod. Do not set the receipt manually.
 #
 # `app` is the FastAPI service running with --reload disabled by default.
 # For interactive dev with hot reload, use the `dev` override profile:
-#   docker compose --profile dev up app-dev
+#   uv run python scripts/compose_storage.py compose --path ./data/ums -- --profile dev up app-dev
 #
 # Secrets: never bake real credentials into this file. Compose variables come
 # from the invoking shell or from an env file — `.env` is read automatically,
@@ -136,7 +139,7 @@ x-app-env: &app-env
   #   before serving anything; `docker compose logs app` shows the
   #   ValueError naming the placeholder. Recovery: provision a real actor
   #   (or remove the placeholder line / disable scheduling) in `.env`,
-  #   then `docker compose up -d app`.
+  #   then start `app` through the storage Compose wrapper documented above.
   # * Scheduling DISABLED, executor enabled + placeholder: the API boots
   #   and serves normally; only live connector submissions refuse —
   #   synchronously at the route pre-flight with the 503
@@ -183,7 +186,7 @@ x-app-env: &app-env
   #
   #       docker compose logs app        # read the LAST line
   #
-  #     Fix the value in `.env`, then `docker compose up -d app`.
+  #     Fix the value in `.env`, then start `app` through the storage wrapper.
   #
   #     A BLANK value is safe and is NOT what this warns about: `_load_int`
   #     returns its default on an empty string, and `""` is in settings.py's
@@ -265,6 +268,8 @@ x-app-storage-env: &app-storage-env
   UMS_GCS_BUCKET: ${UMS_GCS_BUCKET:-ums-smart-revenue-raw}
   UMS_LOCAL_STORE_ROOT: /var/lib/ums/blobs
   UMS_LOCAL_BLOB_BUCKET: ${UMS_LOCAL_BLOB_BUCKET:-local}
+  UMS_APP_DATA_HOST_CONTRACT: ${UMS_APP_DATA_HOST_CONFIGURED-}
+  UMS_APP_DATA_HOST_CANONICAL_CONTRACT: ${UMS_APP_DATA_HOST_CANONICAL-}
 
 # Keep every service built from the application image on one runtime uid. The
 # init service does not trust this text value at run time; it resolves the
@@ -374,8 +379,12 @@ services:
     image: ums-smart-revenue:dev
     restart: "no"
     user: "0:0"
+    entrypoint: ["/usr/bin/tini", "--"]
     environment:
-      UMS_APP_DATA_HOST_CONTRACT: ${UMS_APP_DATA_HOST:?Set UMS_APP_DATA_HOST after running the storage prepare command}
+      # Both receipts are deliberately absent from env files; only the wrapper
+      # derives them while replacing the mounted source with its resolved path.
+      UMS_APP_DATA_HOST_CONTRACT: ${UMS_APP_DATA_HOST_CONFIGURED-}
+      UMS_APP_DATA_HOST_CANONICAL_CONTRACT: ${UMS_APP_DATA_HOST_CANONICAL-}
     command: ["python", "/srv/app/scripts/compose_storage.py", "container-init", "--path", "/var/lib/ums", "--app-user", "app"]
     volumes:
       - type: bind
@@ -438,8 +447,8 @@ services:
     networks: [ums-net]
 
   # Optional dev variant with source bind-mount + reload. Activate with:
-  #   docker compose --profile dev up app-dev
-  # ⚠️ Use the TARGETED form above, not `docker compose --profile dev up -d`:
+  #   uv run python scripts/compose_storage.py compose --path ./data/ums -- --profile dev up app-dev
+  # ⚠️ Use the TARGETED form above, not an untargeted profile `up`:
   #    an untargeted profile `up` also starts every UNPROFILED service, so
   #    `app` and `app-dev` run side by side. With the executor and schedule
   #    flags enabled that is TWO schedulers against one database —
