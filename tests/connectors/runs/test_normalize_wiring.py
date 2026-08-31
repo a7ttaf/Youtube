@@ -564,6 +564,14 @@ def test_skipped_rows_emit_observability_audit_edge(
             SkippedSourceRow(source_row_id="r1", reason=SkipReason.UNKNOWN_CHANNEL),
             SkippedSourceRow(source_row_id="r2", reason=SkipReason.UNKNOWN_CHANNEL),
             SkippedSourceRow(source_row_id="r3", reason=SkipReason.MISSING_CHANNEL_ID),
+            SkippedSourceRow(
+                source_row_id="r4",
+                reason=SkipReason.NON_PROJECTING_EVIDENCE,
+            ),
+            SkippedSourceRow(
+                source_row_id="r5",
+                reason=SkipReason.MALFORMED_SOURCE_PAYLOAD,
+            ),
         ],
     )
     caplog.set_level(logging.WARNING, logger=normalization.logger.name)
@@ -578,10 +586,12 @@ def test_skipped_rows_emit_observability_audit_edge(
     assert record.event_type == AuditEventType.CONNECTOR_JOB_RUN.value
     assert record.entity_type == "connector_run"
     assert record.details.get("lifecycle") == "ROWS_SKIPPED"
-    assert record.details.get("skipped_count") == 3
+    assert record.details.get("skipped_count") == 5
     assert record.details.get("skipped_by_reason") == {
         "unknown_channel": 2,
         "missing_channel_id": 1,
+        "non_projecting_evidence": 1,
+        "malformed_source_payload": 1,
     }
     assert record.scope_type == ScopeType.FINANCE_MONTH.value
     assert record.scope_id == REPORT_MONTH

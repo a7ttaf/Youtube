@@ -63,11 +63,16 @@ means B2 can land with confidence that its output is consumable end-to-end.
   zero writes; only payload changes cause `UPDATED`.
 - Classify each eligible group as `CREATED`, `UPDATED`, or `UNCHANGED` via
   read-before-write payload comparison.
-- Classify each rejected row with one of six explicit `SkipReason` codes.
+- Keep country-dimensional YouTube Analytics rows as persisted evidence, but
+  exclude them from canonical fact projection and classify them with the
+  explicit `NON_PROJECTING_EVIDENCE` skip reason.
+- Fail closed on malformed YouTube Analytics `raw_payload` or `dimensions`
+  containers with the explicit `MALFORMED_SOURCE_PAYLOAD` skip reason.
+- Classify each rejected row with an explicit `SkipReason` code.
 - Fail loud on closed books: if the month is `LOCKED` for the tenant, raise
   `RevenueFactLockedMonthError` upfront and write nothing.
-- Stay schema-stable: no new tables, no new columns, no new enum values, no
-  new Alembic migration, no new exception classes.
+- Stay database-schema-stable: no new tables, no new columns, no database enum
+  values, no new Alembic migration, no new exception classes.
 - Provide a deterministic reverse lookup so a future explain endpoint can map
   a written fact back to the canonical source row.
 
@@ -123,6 +128,8 @@ class SkipReason(StrEnum):
     MISSING_CHANNEL_ID     = "missing_channel_id"
     UNSUPPORTED_VALUE_KIND = "unsupported_value_kind"
     NON_CANONICAL_METRIC   = "non_canonical_metric"
+    NON_PROJECTING_EVIDENCE = "non_projecting_evidence"
+    MALFORMED_SOURCE_PAYLOAD = "malformed_source_payload"
     UNKNOWN_CHANNEL        = "unknown_channel"
     NO_CANONICAL_ROW       = "no_canonical_row"
 
@@ -284,6 +291,9 @@ Step 3 - Apply channel_ids scope filter
   |     Drop rows where row.youtube_channel_id is None OR not in channel_ids.
   |     Out-of-scope rows are NOT skipped/classified - silently ignored.
   |     The caller restricted scope; "not requested" is not "broken".
+  | This filter runs before Analytics raw_payload/dimensions validation or
+  | country-evidence classification, so out-of-scope malformed rows remain
+  | outside this normalization result.
   | If channel_ids is None:
   |     Keep every row; missing channel ids handled in Step 6(a).
 
@@ -298,6 +308,18 @@ Step 4 - Resolve active channels in one batched query
   | Build active_channel_ids: set[str].
 
 Step 5 - Bucket by (channel_id, source_system)
+  Before bucketing, rows with source_system == "youtube_analytics" are
+  validated as follows:
+      malformed/non-mapping raw_payload or dimensions:
+          append SkippedSourceRow(..., MALFORMED_SOURCE_PAYLOAD)
+          do not add the row to any bucket
+      a casefolded dimensions key in {country, country_code}:
+          append SkippedSourceRow(..., NON_PROJECTING_EVIDENCE)
+          do not add the row to any bucket
+      a valid dimensions mapping with no country alias:
+          keep the row in the normal youtube_analytics bucket
+  The source_system stays allowlisted and is not renamed to an unpersistable
+  evidence-only discriminator.
   | {(row.youtube_channel_id, row.source_system): list[Entry]}
   |   channel_id may be None; handled in Step 6(a).
 
@@ -380,11 +402,15 @@ def select_canonical_row(rows):
 | `channel_id` not in active `youtube_channels` for tenant | `UNKNOWN_CHANNEL` |
 | `value_kind in {tax, deduction, adjustment}` | `UNSUPPORTED_VALUE_KIND` |
 | `currency_code != "USD"` | `NON_USD_CURRENCY` |
+| `youtube_analytics` payload/dimensions is malformed or non-mapping | `MALFORMED_SOURCE_PAYLOAD` |
+| `youtube_analytics` dimensions contains casefolded `country` or `country_code` | `NON_PROJECTING_EVIDENCE` |
 | USD-eligible bucket has no row matching preferred metric_keys | `NO_CANONICAL_ROW` |
 | USD row in same group that lost canonical selection | `NON_CANONICAL_METRIC` |
 
 Rows filtered out by `channel_ids` scope are silently dropped (not present in
-`skipped`).
+`skipped`) before any payload or evidence classification. Country-dimensional
+Analytics evidence and malformed Analytics payloads are present in `skipped`
+and therefore reach the normalizer adapter's `ROWS_SKIPPED` audit summary.
 
 ### Idempotency / replay properties
 
@@ -477,9 +503,7 @@ normalize_month start tenant_id=<uuid> month=YYYY-MM
 ```
 normalize_month complete tenant_id=<uuid> month=YYYY-MM
   created=N updated=N unchanged=N skipped=N
-  skipped_by_reason={missing_channel_id: N, unknown_channel: N,
-                     unsupported_value_kind: N, non_usd_currency: N,
-                     no_canonical_row: N, non_canonical_metric: N}
+  skipped_by_reason={<observed_reason>: N, ...}
 ```
 
 **INFO - expected refusal (locked month, before any write):**
@@ -514,51 +538,58 @@ exceptions**.
 
 ## 7. Testing
 
-26 named tests plus a PostgreSQL companion subset.
+The suites cover pure selection, parser-to-normalizer evidence handling,
+SQLite service flows, audit wiring, logging, and a PostgreSQL companion
+subset.
 
 ### 7.1 Pure-function unit tests
 
 `tests/finance/test_google_source_normalizer_selection.py` (no DB, no
 session):
 
-1. `test_select_canonical_row_youtube_reporting_picks_estimatedRevenue`
-2. `test_select_canonical_row_youtube_analytics_picks_estimatedRevenue`
-3. `test_select_canonical_row_adsense_prefers_PAID_AMOUNT_over_ESTIMATED_EARNINGS`
-4. `test_select_canonical_row_adsense_falls_back_to_ESTIMATED_EARNINGS_when_no_PAID_AMOUNT`
-5. `test_select_canonical_row_returns_none_when_no_preferred_metric_present`
-6. `test_select_canonical_row_tie_break_is_deterministic_by_source_row_key_asc`
-7. `test_select_canonical_row_non_canonical_rest_excludes_canonical`
-8. `test_source_system_to_source_kind_mapping_covers_three_supported_systems`
-9. `test_canonical_metric_rule_mapping_is_frozen`
+- `test_select_canonical_row_youtube_reporting_picks_estimatedRevenue`
+- `test_select_canonical_row_youtube_analytics_picks_estimatedRevenue`
+- `test_select_canonical_row_adsense_prefers_PAID_AMOUNT_over_ESTIMATED_EARNINGS`
+- `test_select_canonical_row_adsense_falls_back_to_ESTIMATED_EARNINGS_when_no_PAID_AMOUNT`
+- `test_select_canonical_row_returns_none_when_no_preferred_metric_present`
+- `test_select_canonical_row_tie_break_is_deterministic_by_source_row_key_asc`
+- `test_select_canonical_row_non_canonical_rest_excludes_canonical`
+- `test_source_system_to_source_kind_mapping_covers_three_supported_systems`
+- `test_canonical_metric_rule_mapping_is_frozen`
+
+The same suite also exercises parser-backed worldwide preservation, country
+alias exclusion, malformed payload exclusion, skip-reason recording, and the
+canonical-result mutation guard.
 
 ### 7.2 Service flow tests
 
 `tests/finance/test_google_source_normalizer_service.py` (SQLite + synthetic
 fixtures via PR #43 parsers):
 
-10. `test_normalize_month_creates_revenue_facts_for_eligible_USD_rows`
-11. `test_normalize_month_classifies_byte_identical_replay_as_unchanged`
-12. `test_normalize_month_classifies_amount_change_as_updated`
-13. `test_normalize_month_replay_by_different_actor_with_identical_payload_is_unchanged`
-14. `test_normalize_month_writes_confidence_score_one_point_zero`
-15. `test_normalize_month_uses_canonical_source_report_id`
-16. `test_normalize_month_skips_non_usd_canonical_with_NON_USD_CURRENCY`
-17. `test_normalize_month_skips_unsupported_value_kind_rows`
-18. `test_normalize_month_skips_missing_channel_id_rows`
-19. `test_normalize_month_skips_unknown_channel_rows` (covers both
+- `test_normalize_month_creates_revenue_facts_for_eligible_USD_rows`
+- `test_normalize_month_classifies_byte_identical_replay_as_unchanged`
+- `test_normalize_month_classifies_amount_change_as_updated`
+- `test_normalize_month_replay_by_different_actor_with_identical_payload_is_unchanged`
+- `test_normalize_month_writes_confidence_score_one_point_zero`
+- `test_normalize_month_uses_canonical_source_report_id`
+- `test_normalize_month_skips_non_usd_canonical_with_NON_USD_CURRENCY`
+- `test_normalize_month_skips_unsupported_value_kind_rows`
+- `test_normalize_month_skips_missing_channel_id_rows`
+- `test_normalize_month_skips_unknown_channel_rows` (covers both
     `active=False` and missing-from-registry in two sub-arranges)
-20. `test_normalize_month_channel_ids_filter_drops_out_of_scope_rows_silently`
-21. `test_normalize_month_reverse_lookup_returns_same_canonical_row`
-22. `test_normalize_month_skips_no_canonical_row_with_NO_CANONICAL_ROW`
-23. `test_normalize_month_marks_unselected_usd_rows_as_NON_CANONICAL_METRIC`
-24. `test_normalize_month_raises_validation_error_for_invalid_month_format`
+- `test_normalize_month_channel_ids_filter_drops_out_of_scope_rows_silently`
+- `test_normalize_month_reverse_lookup_returns_same_canonical_row`
+- `test_normalize_month_skips_no_canonical_row_with_NO_CANONICAL_ROW`
+- `test_normalize_month_marks_unselected_usd_rows_as_NON_CANONICAL_METRIC`
+- `test_normalize_month_raises_validation_error_for_invalid_month_format`
     (expects `RevenueFactValidationError`, not plain `ValueError`)
+- `test_normalize_month_excludes_country_analytics_and_preserves_worldwide_fact`
 
 ### 7.3 Locked-month test
 
 `tests/finance/test_google_source_normalizer_locked_month.py`:
 
-25. `test_normalize_month_raises_locked_month_error_with_zero_source_rows`
+- `test_normalize_month_raises_locked_month_error_with_zero_source_rows`
     (locked-month outranks empty input; verifies Step 1 gate fires before
     Step 2)
 
@@ -566,11 +597,11 @@ fixtures via PR #43 parsers):
 
 `tests/finance/test_google_source_normalizer_logging.py`:
 
-26. `test_normalize_month_logging_redacts_payload_amount_channel_id_source_row_id`
+- `test_normalize_month_logging_redacts_payload_amount_channel_id_source_row_id`
     (`caplog` test asserting that across a complete `normalize_month` call
     producing CREATED / UPDATED / UNCHANGED / SKIPPED outcomes:
     - INFO logs DO contain: `created=N`, `updated=N`, `unchanged=N`,
-      `skipped=N`, and the six-key `skipped_by_reason={...}` distribution.
+      `skipped=N`, and the observed-key `skipped_by_reason={...}` distribution.
     - INFO logs DO NOT contain: any `raw_payload` substring, any
       `amount_native` / `gross_revenue_usd` decimal value, any individual
       `youtube_channel_id` value, any individual `source_row_id` UUID.)
@@ -608,20 +639,21 @@ Reused PR #43 fixtures:
 New synthetic fixtures added alongside PR #43 fixtures (all `.json`):
 
 - One YouTube Reporting fixture with rows in multiple currencies (USD + EGP)
-  for test 16.
+  for non-USD exclusion coverage.
 - One AdSense Management fixture with both `PAID_AMOUNT` and
-  `ESTIMATED_EARNINGS` for the same (channel, month) for test 3.
-- One AdSense Management fixture with only `UNPAID_AMOUNT` for tests 5 and
-  22.
+  `ESTIMATED_EARNINGS` for the same (channel, month) for payment-precedence
+  coverage.
+- One AdSense Management fixture with only `UNPAID_AMOUNT` for missing-paid-
+  amount coverage.
 - One AdSense Management fixture with `tax` / `deduction` / `adjustment`
-  value_kinds for test 17.
+  value_kinds for unsupported-value-kind coverage.
 
 Tenant + registry setup in each service-flow test:
 
 - `TenantORM(id=uuid4(), slug=..., display_name=...)`
 - `YouTubeChannelORM(tenant_id=..., youtube_channel_id="UC_test_*", active=True)`
   for in-scope channels
-- One `active=False` channel for the inactive-channel sub-arrange of test 19
+- One `active=False` channel for inactive-channel coverage
 
 Synthetic-data discipline (PR #43 standard, preserved):
 
@@ -654,8 +686,11 @@ adds:
 - Active-channel pre-filter (additive defence; record_fact() remains the
   secondary guard).
 
-**Database schema impact: none.** No new tables, no new columns, no new enum
-values, no constraint changes, no index changes, no Alembic migration.
+**Database schema impact: none.** No new tables, no new columns, no new
+database enum values, no constraint changes, no index changes, no Alembic
+migration. The existing PostgreSQL `raw_payload` object check remains the
+storage boundary; malformed object contents are classified at normalization
+read time.
 
 **Migration / data-reset impact: none.** Disposable pre-alpha data is
 unaffected. No rollback, reseed, or destructive-change note is required for

@@ -6,6 +6,11 @@ and writes one MonthlyChannelRevenueFactORM entry per eligible
 (youtube_channel_id, source_system) group via
 SqlAlchemyRevenueFactRepository.record_fact().
 
+YouTube Analytics rows with country-dimensional evidence, or malformed
+raw_payload/dimensions containers encountered at normalization time, are
+excluded from fact projection. Each exclusion is recorded in
+NormalizationResult.skipped for audit telemetry.
+
 See: Docs/superpowers/specs/2026-05-25-spec-c1-google-source-normalizer-design.md
 """
 
@@ -53,6 +58,8 @@ class SkipReason(StrEnum):
     MISSING_CHANNEL_ID = "missing_channel_id"
     UNSUPPORTED_VALUE_KIND = "unsupported_value_kind"
     NON_CANONICAL_METRIC = "non_canonical_metric"
+    NON_PROJECTING_EVIDENCE = "non_projecting_evidence"
+    MALFORMED_SOURCE_PAYLOAD = "malformed_source_payload"
     UNKNOWN_CHANNEL = "unknown_channel"
     NO_CANONICAL_ROW = "no_canonical_row"
 
@@ -79,13 +86,6 @@ SOURCE_SYSTEM_TO_SOURCE_KIND: Mapping[str, RevenueFactSourceKind] = MappingProxy
     }
 )
 
-# Country-dimensional Analytics rows are evidence-only. They must never enter
-# canonical fact projection (U2 / Docs/24).
-NON_PROJECTING_SOURCE_SYSTEMS: frozenset[str] = frozenset(
-    {"youtube_analytics_country_evidence"}
-)
-
-
 CANONICAL_METRIC_RULE: Mapping[str, tuple[str, ...]] = MappingProxyType(
     {
         "youtube_reporting": ("estimatedRevenue",),
@@ -96,6 +96,7 @@ CANONICAL_METRIC_RULE: Mapping[str, tuple[str, ...]] = MappingProxyType(
 
 
 _UNSUPPORTED_VALUE_KINDS: frozenset[str] = frozenset({"tax", "deduction", "adjustment"})
+_COUNTRY_DIMENSION_KEYS: frozenset[str] = frozenset({"country", "country_code"})
 
 
 def _payload_matches(
@@ -183,7 +184,7 @@ def _scoped_source_rows(
     rows: list[GoogleRevenueSourceRowEntry],
     channel_ids: set[str] | None,
 ) -> list[GoogleRevenueSourceRowEntry]:
-    """Drop out-of-scope rows without counting them as skipped records."""
+    """Apply caller scope before any source-payload or evidence classification."""
     if channel_ids is None:
         return rows
     return [row for row in rows if row.youtube_channel_id in channel_ids]
@@ -210,13 +211,76 @@ def _active_channel_ids(
     )
 
 
+# ============================================================================
+# Purpose: Classify YouTube Analytics source payloads before they can be
+#          grouped or selected as canonical finance facts.
+# Database/ORM: None. Reads the parser-owned raw_payload dimensions only.
+# Standards: Keep the persisted youtube_analytics source_system allowlisted;
+#            fail closed for malformed containers; casefold canonical country
+#            aliases without mutating the row.
+# Blast Radius: Prevents malformed or country-dimensional payloads from
+#               changing canonical revenue; all exclusions remain auditable.
+# Connections:
+#   - File: backend/ums_smart_revenue/connectors/google_source_parsers/youtube_analytics.py
+#     -> Emits country dimensions inside raw_payload while retaining the
+#        allowlisted youtube_analytics source_system.
+#   - File: backend/ums_smart_revenue/connectors/runs/normalization.py
+#     -> Converts result.skipped into the durable ROWS_SKIPPED audit edge.
+# ============================================================================
+def _analytics_projection_skip_reason(row: GoogleRevenueSourceRowEntry) -> SkipReason | None:
+    """Return a typed exclusion for malformed or country-dimensional Analytics data."""
+    if row.source_system != "youtube_analytics":
+        return None
+    if not isinstance(row.raw_payload, Mapping):
+        return SkipReason.MALFORMED_SOURCE_PAYLOAD
+    if "dimensions" not in row.raw_payload:
+        return SkipReason.MALFORMED_SOURCE_PAYLOAD
+    dimensions = row.raw_payload["dimensions"]
+    if not isinstance(dimensions, Mapping):
+        return SkipReason.MALFORMED_SOURCE_PAYLOAD
+    if not dimensions:
+        return SkipReason.MALFORMED_SOURCE_PAYLOAD
+    if any(not isinstance(key, str) for key in dimensions):
+        return SkipReason.MALFORMED_SOURCE_PAYLOAD
+    if any(key.casefold() in _COUNTRY_DIMENSION_KEYS for key in dimensions):
+        return SkipReason.NON_PROJECTING_EVIDENCE
+    channel = dimensions.get("channel")
+    if not isinstance(channel, str) or not channel.strip():
+        return SkipReason.MALFORMED_SOURCE_PAYLOAD
+    return None
+
+
+# ============================================================================
+# Purpose: Bucket projectable source rows by normalized fact identity while
+#          excluding malformed and country-dimensional Analytics evidence.
+# Database/ORM: None. Operates on persisted GoogleRevenueSourceRowEntry values;
+#               no database writes occur here.
+# Standards: Every excluded row is appended to the caller-owned skipped list
+#            before it leaves the pipeline, so normalize/audit cannot silently
+#            discard accepted evidence. Worldwide rows with a valid dimensions
+#            mapping and no country alias remain projectable.
+# Blast Radius: Canonical revenue facts and ROWS_SKIPPED audit telemetry.
+# Connections:
+#   - File: backend/ums_smart_revenue/finance/google_source_normalizer.py
+#     -> select_canonical_row consumes only the returned buckets.
+#   - File: tests/finance/test_google_source_normalizer_selection.py
+#     -> Parser-to-normalizer tests guard the same-source-system contract.
+# ============================================================================
 def _source_row_buckets(
     rows: list[GoogleRevenueSourceRowEntry],
+    skipped: list[SkippedSourceRow],
 ) -> dict[tuple[str | None, str], list[GoogleRevenueSourceRowEntry]]:
-    """Bucket source rows by normalized fact identity: channel and source system."""
+    """Bucket rows and record malformed/non-projecting exclusions for audit."""
     buckets: dict[tuple[str | None, str], list[GoogleRevenueSourceRowEntry]] = {}
     for row in rows:
-        if row.source_system in NON_PROJECTING_SOURCE_SYSTEMS:
+        skip_reason = _analytics_projection_skip_reason(row)
+        if skip_reason is not None:
+            skipped.append(
+                SkippedSourceRow(
+                    source_row_id=row.id,
+                    reason=skip_reason,
+                )
+            )
             continue
         key = (row.youtube_channel_id, row.source_system)
         buckets.setdefault(key, []).append(row)
@@ -528,13 +592,13 @@ class GoogleSourceNormalizer:
             tenant_id=self._tenant_id,
             rows=in_scope_rows,
         )
-        buckets = _source_row_buckets(in_scope_rows)
         work = _NormalizationWork(
             facts_repo=SqlAlchemyRevenueFactRepository(
                 self._session,
                 tenant_id=self._tenant_id,
             )
         )
+        buckets = _source_row_buckets(in_scope_rows, work.skipped)
 
         for (channel_id, source_system), bucket_rows in buckets.items():
             _process_source_bucket(

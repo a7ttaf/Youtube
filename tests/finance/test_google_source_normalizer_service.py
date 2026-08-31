@@ -1,5 +1,6 @@
 """SQLite-backed service flow tests for GoogleSourceNormalizer."""
 
+from dataclasses import replace
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from uuid import UUID, uuid4
@@ -320,6 +321,76 @@ def test_normalize_month_skips_non_usd_canonical_with_NON_USD_CURRENCY(session):
         actor_user_id=ACTOR_USER_ID,
     )
     assert any(s.reason.value == "non_usd_currency" for s in result.skipped)
+
+
+def test_normalize_month_excludes_country_analytics_and_preserves_worldwide_fact(session):
+    """Country Analytics evidence is skipped while the worldwide row projects."""
+    tenant_id = uuid4()
+    _seed_tenant_and_currencies(session, tenant_id)
+    _seed_active_channel(session, tenant_id, "UC_test_analytics")
+    country = replace(
+        _yt_reporting_row(
+            channel="UC_test_analytics",
+            source_row_key_seed="c",
+            amount="25.000000",
+        ),
+        source_system="youtube_analytics",
+        raw_payload={
+            "dimensions": {"channel": "UC_test_analytics", "country": "US"},
+            "metric": "estimatedRevenue",
+            "value": "25.000000",
+        },
+    )
+    worldwide = replace(
+        _yt_reporting_row(
+            channel="UC_test_analytics",
+            source_row_key_seed="w",
+            amount="100.000000",
+        ),
+        source_system="youtube_analytics",
+        raw_payload={
+            "dimensions": {"channel": "UC_test_analytics", "month": "2026-04"},
+            "metric": "estimatedRevenue",
+            "value": "100.000000",
+        },
+    )
+    malformed = replace(
+        _yt_reporting_row(
+            channel="UC_test_analytics",
+            source_row_key_seed="m",
+            amount="75.000000",
+        ),
+        source_system="youtube_analytics",
+        raw_payload={"metric": "estimatedRevenue", "value": "75.000000"},
+    )
+    source_repo = SqlAlchemyGoogleRevenueSourceRowRepository(session)
+    upsert_result = source_repo.upsert_many(
+        tenant_id,
+        [country, malformed, worldwide],
+        raw_file_id=None,
+        imported_by=None,
+    )
+    session.commit()
+
+    result = GoogleSourceNormalizer(session, tenant_id=tenant_id).normalize_month(
+        month="2026-04",
+        actor_user_id=ACTOR_USER_ID,
+    )
+
+    assert len(result.created) == 1
+    assert result.created[0].source_kind == "YOUTUBE_ANALYTICS"
+    assert result.created[0].gross_revenue_usd == Decimal("100.000000")
+    assert len(result.skipped) == 2
+    source_entry_ids = {
+        entry.source_row_key: entry.id for entry in upsert_result.entries
+    }
+    assert {(skip.source_row_id, skip.reason.value) for skip in result.skipped} == {
+        (source_entry_ids[country.source_row_key], "non_projecting_evidence"),
+        (source_entry_ids[malformed.source_row_key], "malformed_source_payload"),
+    }
+    assert {
+        entry.source_row_key for entry in source_repo.list(tenant_id, report_month="2026-04")
+    } == {country.source_row_key, malformed.source_row_key, worldwide.source_row_key}
 
 
 def _adsense_row(
