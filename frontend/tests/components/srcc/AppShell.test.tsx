@@ -872,19 +872,24 @@ describe("AppShell month ownership", () => {
 });
 
 describe("AppShell fixture-free chrome", () => {
-  it("does not render removed snapshot finance values or static nav counters", async () => {
+  it("hydrates session-backed chrome and the current command route from API data", async () => {
     (globalThis.fetch as ReturnType<typeof vi.fn>).mockImplementation(
       routeFetchWithSession(() => jsonResponse(sessionBody({ canViewRevenue: true }))),
     );
     renderShell();
 
     const sidebar = await screen.findByRole("complementary", { name: "Primary navigation" });
+    expect(within(sidebar).getByRole("button", { name: "Command Center" })).toHaveAttribute(
+      "aria-current",
+      "page",
+    );
+    expect(within(sidebar).getByRole("button", { name: "Channel Registry" })).toBeEnabled();
     await screen.findByText(/money visible/i);
-    expect(within(sidebar).queryByText("318")).not.toBeInTheDocument();
-    expect(screen.queryByText("A Official")).not.toBeInTheDocument();
-    expect(screen.queryByText("$31.4K")).not.toBeInTheDocument();
-    expect(screen.queryByText(/March 2026 close, UMS holding scope, USD reporting currency/i)).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: /create export/i })).not.toBeInTheDocument();
+
+    const filters = await screen.findByLabelText("Net revenue filters");
+    expect(within(filters).getByLabelText("Month")).toHaveValue(DEFAULT_MONTH);
+    const revenueSummary = screen.getByRole("region", { name: "Revenue summary" });
+    expect(within(revenueSummary).getByText("Net revenue")).toBeInTheDocument();
   });
 
   it("clears a Registry Review trace seed across route transitions", async () => {

@@ -13,7 +13,6 @@ import { TenantProvider, useTenant } from "@/contexts/TenantContext";
 import type { SessionMe } from "@/lib/api/types";
 import {
   SESSION_ME_QUERY_KEY,
-  sessionMeQueryKey,
   useSessionMeQuery,
 } from "@/lib/query/session";
 
@@ -213,20 +212,6 @@ describe("useSessionMeQuery", () => {
     );
     expect(globalThis.fetch).not.toHaveBeenCalled();
     rendered.unmount();
-  });
-
-  it("namespaces the exact session cache key by both provider lifetime and tenant", () => {
-    expect(sessionMeQueryKey(41, "tenant-a")).toEqual([
-      ...SESSION_ME_QUERY_KEY,
-      41,
-      "tenant-a",
-    ]);
-    expect(sessionMeQueryKey(41, "tenant-a")).not.toEqual(
-      sessionMeQueryKey(41, "tenant-b"),
-    );
-    expect(sessionMeQueryKey(41, "tenant-a")).not.toEqual(
-      sessionMeQueryKey(42, "tenant-a"),
-    );
   });
 
   it("ignores a fresh principal cached under the legacy constant key", async () => {

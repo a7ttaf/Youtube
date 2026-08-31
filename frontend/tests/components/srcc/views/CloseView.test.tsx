@@ -173,7 +173,7 @@ describe("CloseView wired to finance-close", () => {
     ).toBeInTheDocument();
   });
 
-  it("does not render the deleted static reconciliation notes", async () => {
+  it("renders settled close summary and ready checklist from backend responses", async () => {
     fetchMock().mockImplementation(
       routeFetch({
         status: () => jsonResponse(OPEN_STATUS),
@@ -183,9 +183,14 @@ describe("CloseView wired to finance-close", () => {
     renderCloseView();
 
     await screen.findByText("Month is ready to lock");
-    expect(screen.queryByText("Reconciliation Equation")).not.toBeInTheDocument();
-    expect(screen.queryByText("Gap allocation needs final note")).not.toBeInTheDocument();
-    expect(screen.queryByText("$31.4K")).not.toBeInTheDocument();
+    await waitFor(() =>
+      expect(within(screen.getByLabelText("Month close summary")).getByText("OPEN")).toBeInTheDocument(),
+    );
+    const summary = screen.getByLabelText("Month close summary");
+    expect(within(summary).getByText(OPEN_STATUS.month)).toBeInTheDocument();
+    expect(within(summary).getByText("Ready")).toBeInTheDocument();
+    expect(within(summary).getByText("No blockers")).toBeInTheDocument();
+    expect(screen.getByText("No unresolved close blockers for 2026-03.")).toBeInTheDocument();
   });
 
   it("renders a ready banner and a LOCKED status with timestamps", async () => {

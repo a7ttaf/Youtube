@@ -1,6 +1,7 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { DEFAULT_MONTH } from "@/components/srcc/shared";
 import ExportsView from "@/components/srcc/views/ExportsView";
 import type { ExportJob, ExportListResponse } from "@/lib/api/types";
 import { TenantProvider } from "@/contexts/TenantContext";
@@ -155,14 +156,17 @@ describe("ExportsView wired to the exports endpoint", () => {
     ).not.toBeInTheDocument();
   });
 
-  it("does not render the deleted static export guardrail panel", async () => {
+  it("renders the export request controls and API-backed empty jobs state", async () => {
     fetchMock().mockResolvedValue(jsonResponse(EMPTY_LIST));
     renderExportsView();
 
     await screen.findByText(/No export jobs yet/i);
-    expect(screen.queryByText("Export Guardrails")).not.toBeInTheDocument();
-    expect(screen.queryByText("Confidence notes required")).not.toBeInTheDocument();
-    expect(screen.queryByText("Raw appendix restricted")).not.toBeInTheDocument();
+    const requestForm = screen.getByLabelText("Request export");
+    expect(screen.getByRole("button", { name: "Generate" })).toBeDisabled();
+    expect(within(requestForm).getByLabelText("Report type")).toHaveValue("FINANCE_EXCEL");
+    expect(within(requestForm).getByLabelText("Scope type")).toHaveValue("global");
+    expect(within(requestForm).getByLabelText("Month")).toHaveValue(DEFAULT_MONTH);
+    expect(within(requestForm).getByLabelText("Currency")).toHaveValue("USD");
   });
 
   it("renders a populated list with a COMPLETED job and a download link to the proxied binary path", async () => {

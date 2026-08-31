@@ -257,16 +257,25 @@ describe("CommandView wired to net-revenue", () => {
     expect(screen.getByText("Live compute")).toBeInTheDocument();
   });
 
-  it("does not mount the deleted snapshot issue, close, or export panels", async () => {
+  it("renders the API-backed command workspace and channel revenue grid", async () => {
     routeFetch(() => jsonResponse(NET_REVENUE_BODY));
     renderCommandView(true);
 
-    await screen.findByText("Live compute");
-    expect(screen.queryByText("Issue Queue")).not.toBeInTheDocument();
-    expect(screen.queryByText("Month Close Controls")).not.toBeInTheDocument();
-    expect(screen.queryByText("Export Readiness")).not.toBeInTheDocument();
-    expect(screen.queryByText("$4.82M")).not.toBeInTheDocument();
-    expect(screen.queryByText("A Official")).not.toBeInTheDocument();
+    await waitFor(() =>
+      expect(
+        within(screen.getByRole("region", { name: "Revenue summary" })).getByText("$1,000.00"),
+      ).toBeInTheDocument(),
+    );
+    const summary = screen.getByRole("region", { name: "Revenue summary" });
+    expect(within(summary).getByText("Adjusted gross")).toBeInTheDocument();
+    expect(within(summary).getByText("Net revenue")).toBeInTheDocument();
+    expect(within(summary).getByText("$1,000.00")).toBeInTheDocument();
+
+    const workspace = screen.getByLabelText("Command workspace");
+    const channelGrid = within(workspace).getByRole("grid", { name: "Channel revenue" });
+    expect(channelGrid).toBeInTheDocument();
+    expect(within(channelGrid).getByText("UC-DRAMA-01")).toBeInTheDocument();
+    expect(screen.getByRole("text", { name: "Revenue formula" })).toBeInTheDocument();
   });
 
   it("renders payment reconciliation cards from the backend month summary", async () => {
