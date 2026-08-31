@@ -97,6 +97,7 @@ const browserEntropySource = (): CorrelationEntropySource | undefined => {
   }
 };
 
+/** Return a 128-bit hex fragment only when Web Crypto supplies real entropy. */
 const randomValuesPartOf = (
   source: CorrelationEntropySource | undefined,
 ): string | null => {
@@ -118,6 +119,7 @@ const randomValuesPartOf = (
   }
 };
 
+/** Return a non-throwing final entropy fragment when browser crypto is unavailable. */
 const lastResortEntropyPart = (): string => {
   try {
     const random = Math.random();
@@ -308,6 +310,7 @@ class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundaryState> {
     (this.props.onReload ?? reloadDocumentForRecovery)();
   };
 
+  /** Render healthy children or the sanitized recovery card after a crash. */
   render(): ReactNode {
     const { errorCategory, correlationId } = this.state;
     if (errorCategory === null) {

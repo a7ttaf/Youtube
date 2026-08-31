@@ -36,7 +36,7 @@ const emitSafeRootReport = (
 };
 
 /** ErrorBoundary.componentDidCatch owns safe reporting for caught subtree errors. */
-export const onCaughtError = (_error: unknown, _info: ErrorInfo): void => {};
+export const onCaughtError = (_error: unknown, _info: ErrorInfo): void => undefined;
 
 /** Report an error React could not contain inside an ErrorBoundary. */
 export const onUncaughtError = (error: unknown, _info: ErrorInfo): void => {
