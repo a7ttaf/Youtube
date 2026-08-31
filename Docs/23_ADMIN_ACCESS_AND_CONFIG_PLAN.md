@@ -32,9 +32,12 @@ keep them safe.
 | #229 | Open/conflicting frontend scaffold; must be rewritten/restacked after P1 before A1/A2 UI work consumes it |
 | [`24_US_WITHHOLDING_AND_US_REVENUE_PLAN.md`](24_US_WITHHOLDING_AND_US_REVENUE_PLAN.md) | Sibling finance program; #228 shares only a persistence prerequisite |
 
-**#228 migration gate:** its `20260828_0001` and #223's `20260825_0001` both currently
-revise `20260805_0001`, producing sibling Alembic heads if merged as authored. #228 must
-be restacked after #223 and revise #223's head before it can be treated as a prerequisite.
+**#228 migration gate:** the corrected stack is linear:
+`20260825_0001 → 20260825_0002 → 20260828_0001`. #228 must retain
+`20260825_0002` as its direct parent and pass the single-head PostgreSQL round trip before
+its persistence can be treated as a prerequisite. The corrected `20260825_0002` security
+repair is an irreversible floor; #228 rollback removes only `20260828_0001` and stops
+there.
 
 > ⚠️ **Hard dependency on P0 split PRs.** `scripts/bootstrap_operator.py`, Alembic migration
 > `20260825_0001` (roles/permissions seed), and Vite proxy `/users` (plus `/org-units`)

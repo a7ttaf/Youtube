@@ -20,6 +20,7 @@ from sqlalchemy import (
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
+from ums_smart_revenue.db.org_models import OrgUnitORM
 from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
 
 
@@ -70,6 +71,14 @@ class UserORM(SecurityBase):
 
     __table_args__ = (
         UniqueConstraint("tenant_id", "id", name="uq_users_tenant_id_id"),
+        # FIX: Mirror the migration's composite tenant FK; the earlier ORM
+        # exposed home_org_unit_id without preventing cross-tenant references.
+        ForeignKeyConstraint(
+            ["tenant_id", "home_org_unit_id"],
+            [OrgUnitORM.__table__.c.tenant_id, OrgUnitORM.__table__.c.id],
+            name="fk_users_tenant_home_org_unit",
+            ondelete="RESTRICT",
+        ),
         CheckConstraint("status IN ('active', 'disabled', 'service')", name="ck_users_status"),
         CheckConstraint(
             "(is_service_account = true AND status IN ('service', 'disabled')) "
@@ -457,6 +466,16 @@ class ApiConnectorCredentialORM(SecurityBase):
     )
 
 
+# ============================================================================
+# Purpose: Persist an explicitly tenant-owned external IdP identity mapping.
+# Database/ORM: external_identities -> users composite tenant foreign key.
+# Standards: No implicit tenant default; provider subjects are tenant-unique.
+# Blast Radius: Authorization identity mapping and tenant isolation.
+# Connections:
+#   - File: backend/ums_smart_revenue/auth/external_identities.py -> Repository reads.
+#   - File: backend/ums_smart_revenue/db/alembic/versions/
+#     20260828_0001_external_identity_and_withholding.py -> Schema and RLS mirror.
+# ============================================================================
 class ExternalIdentityORM(SecurityBase):
     """Maps external IdP subjects to internal UMS user UUIDs (A7)."""
 
@@ -465,11 +484,11 @@ class ExternalIdentityORM(SecurityBase):
     id: Mapped[UUID] = mapped_column(
         Uuid(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")
     )
+    # FIX: Identity mappings must name their tenant explicitly; inheriting the
+    # legacy single-tenant default would silently mis-own authorization data.
     tenant_id: Mapped[UUID] = mapped_column(
         Uuid(as_uuid=True),
         nullable=False,
-        default=_TENANT_ID_DEFAULT_VALUE,
-        server_default=_TENANT_ID_DEFAULT,
     )
     provider: Mapped[str] = mapped_column(Text, nullable=False)
     provider_subject: Mapped[str] = mapped_column(Text, nullable=False)
@@ -505,9 +524,54 @@ class ExternalIdentityORM(SecurityBase):
             func.lower(normalized_email),
             unique=True,
         ),
+        # FIX (review P2): a blank provider/subject/email pair could satisfy an
+        # owner-loaded row and let a future adapter bug that defaults missing
+        # claims to empty strings resolve a real user. Claims must be nonblank,
+        # trimmed, and free of ASCII whitespace on both supported dialects.
+        *[
+            CheckConstraint(
+                f"length({column}) > 0 AND {column} = trim({column})",
+                name=f"ck_external_identities_{column}_nonblank",
+            )
+            for column in ("provider", "provider_subject", "normalized_email")
+        ],
+        CheckConstraint(
+            r"provider !~ E'[\t\n\r\f\v]' "
+            r"AND provider_subject !~ E'[\t\n\r\f\v]' "
+            r"AND normalized_email !~ E'[\t\n\r\f\v]'",
+            name="ck_external_identities_claims_ascii_whitespace_pg",
+        ).ddl_if(dialect="postgresql"),
+        CheckConstraint(
+            "instr(provider, char(9)) = 0 AND instr(provider, char(10)) = 0 "
+            "AND instr(provider, char(11)) = 0 AND instr(provider, char(12)) = 0 "
+            "AND instr(provider, char(13)) = 0 "
+            "AND instr(provider_subject, char(9)) = 0 "
+            "AND instr(provider_subject, char(10)) = 0 "
+            "AND instr(provider_subject, char(11)) = 0 "
+            "AND instr(provider_subject, char(12)) = 0 "
+            "AND instr(provider_subject, char(13)) = 0 "
+            "AND instr(normalized_email, char(9)) = 0 "
+            "AND instr(normalized_email, char(10)) = 0 "
+            "AND instr(normalized_email, char(11)) = 0 "
+            "AND instr(normalized_email, char(12)) = 0 "
+            "AND instr(normalized_email, char(13)) = 0",
+            name="ck_external_identities_claims_ascii_whitespace_sqlite",
+        ).ddl_if(dialect="sqlite"),
     )
 
 
+# ============================================================================
+# Purpose: Preserve append-only, explicitly tenant-owned withholding-rate
+#   confirmations with deterministic effective-date ordering.
+# Database/ORM: us_withholding_rate_configs -> users composite tenant foreign key.
+# Standards: Account-scoped Numeric(8,6), DB bounds, explicit tenant/account,
+#   and stable read ordering.
+# Blast Radius: Finance estimate configuration only; official reconciliation unchanged.
+# Connections:
+#   - File: backend/ums_smart_revenue/finance/us_withholding_config.py -> Validation/read path.
+#   - File: backend/ums_smart_revenue/db/alembic/versions/
+#     20260828_0001_external_identity_and_withholding.py -> Schema and RLS mirror.
+# ============================================================================
 class UsWithholdingRateConfigORM(SecurityBase):
     """Operator-confirmed, effective-dated US withholding display rate (U3 / D-U1)."""
 
@@ -516,13 +580,15 @@ class UsWithholdingRateConfigORM(SecurityBase):
     id: Mapped[UUID] = mapped_column(
         Uuid(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")
     )
+    # FIX: Finance configuration must name its tenant explicitly; a silent
+    # default would contaminate the default tenant's effective-rate history.
     tenant_id: Mapped[UUID] = mapped_column(
         Uuid(as_uuid=True),
         nullable=False,
-        default=_TENANT_ID_DEFAULT_VALUE,
-        server_default=_TENANT_ID_DEFAULT,
     )
+    source_account_id: Mapped[str] = mapped_column(Text, nullable=False)
     effective_from: Mapped[date] = mapped_column(nullable=False)
+    revision: Mapped[int] = mapped_column(nullable=False)
     rate: Mapped[Decimal] = mapped_column(Numeric(8, 6), nullable=False)
     account_type: Mapped[str] = mapped_column(Text, nullable=False)
     confirmed_by_user_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
@@ -535,16 +601,50 @@ class UsWithholdingRateConfigORM(SecurityBase):
             "account_type IN ('business', 'individual')",
             name="ck_us_withholding_rate_configs_account_type",
         ),
+        CheckConstraint(
+            "length(source_account_id) > 0 "
+            "AND source_account_id = trim(source_account_id) "
+            "AND source_account_id NOT LIKE '%/%' "
+            "AND source_account_id NOT LIKE '%?%' "
+            "AND source_account_id NOT LIKE '%#%' "
+            "AND replace(source_account_id, '%', '') = source_account_id",
+            name="ck_us_withholding_rate_configs_source_account_id",
+        ),
+        CheckConstraint(
+            r"source_account_id !~ E'[\t\n\r\f\v]'",
+            name="ck_us_withholding_rate_configs_account_ascii_whitespace_pg",
+        ).ddl_if(dialect="postgresql"),
+        CheckConstraint(
+            "instr(source_account_id, char(9)) = 0 "
+            "AND instr(source_account_id, char(10)) = 0 "
+            "AND instr(source_account_id, char(11)) = 0 "
+            "AND instr(source_account_id, char(12)) = 0 "
+            "AND instr(source_account_id, char(13)) = 0",
+            name="ck_us_withholding_rate_configs_account_ascii_whitespace_sqlite",
+        ).ddl_if(dialect="sqlite"),
         CheckConstraint("rate >= 0 AND rate <= 0.30", name="ck_us_withholding_rate_configs_rate"),
+        CheckConstraint(
+            "revision > 0",
+            name="ck_us_withholding_rate_configs_revision_positive",
+        ),
         ForeignKeyConstraint(
             ["tenant_id", "confirmed_by_user_id"],
             ["users.tenant_id", "users.id"],
             name="fk_us_withholding_rate_configs_confirmed_by",
             ondelete="RESTRICT",
         ),
+        UniqueConstraint(
+            "tenant_id",
+            "source_account_id",
+            "effective_from",
+            "revision",
+            name="uq_us_withholding_rate_configs_account_effective_revision",
+        ),
         Index(
             "ix_us_withholding_rate_configs_tenant_effective",
             "tenant_id",
-            "effective_from",
+            "source_account_id",
+            effective_from.desc(),
+            revision.desc(),
         ),
     )

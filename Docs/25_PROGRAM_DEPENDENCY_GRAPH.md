@@ -55,7 +55,7 @@ long-running tab needs reload until a clock/provider follow-up lands.
           │
           ├──────────────► [A5 database-authz cutover runbook — still planned]
           │
-          └──────────────► [#228 persistence scaffold RESTACKED after #223]
+          └──────────────► [#228 persistence scaffold on corrected #223 0002]
                                     │
                                     ├──► [A6 backend ceiling + isolation proof]
                                     ├──► [A7 identity enrollment + Google OIDC gateway]
@@ -89,9 +89,10 @@ long-running tab needs reload until a clock/provider follow-up lands.
 
 The declared P0 letter order is not safe as authored: #222 requires non-empty seed
 tables that #223 creates, but #222 does not contain #223. Merge #223 before #222 or
-restack/land them atomically. Likewise, #228's `20260828_0001` and #223's
-`20260825_0001` both revise `20260805_0001`; #228 must be restacked to revise #223's
-head or the pair creates multiple Alembic heads.
+restack/land them atomically. #228 is now linear on corrected #223:
+`20260825_0001 → 20260825_0002 → 20260828_0001`; changing that parent would
+reintroduce multiple Alembic heads. `20260825_0002` is an irreversible security floor;
+#228 rollback stops at that revision rather than attempting to cross it.
 
 #229 is not a de-mocked frontend. Its production views still import static values from
 `src/fixtures/snapshotPanels`; its session query and design-system package are not
@@ -119,7 +120,7 @@ Admin, U3, or graph work should treat the current #229 head as a completed prere
 | #226 workflows merged **and branch protection actually requires them** | Calling `ci-fast`, `ci-database`, or `ci-frontend` required checks |
 | Docs/23 A2 adds `/security` | Admin access matrix in dev; #225 does not satisfy this |
 | Redesigned #227 successor satisfies typed-fence/source constraint, then is merged and verified | U2 country ingest; current `e174c51f` does not clear this gate |
-| #228 restacked after #223 with one Alembic head | Consuming its persistence scaffold |
+| #228 on corrected #223 `20260825_0002` with one Alembic head | Consuming its persistence scaffold |
 | U2 ingest complete + effective-dated config service complete + D-U1 recorded | U3 estimate surfaces |
 | #229 rewritten/restacked after P1 integration | Treating router/query/design-system work as a frontend prerequisite |
 | A6 read-isolation matrix green | Any sub-company / competitor account |

@@ -675,8 +675,11 @@ closed unmerged and superseded by the consolidated batch in #156.
   residual; A6 delegated admin with `home_org_unit_id` + no-amplification ceiling +
   competitor read-isolation (closes role-family hole); A7 Google-only sign-in +
   `external_identities` mapping; A3–A5. PR #228 is an open persistence/repository
-  scaffold for `home_org_unit_id`, external identities, and withholding config; it does
-  **not** implement A5, A6 policy/isolation, A7 gateway/enrollment, or U3 surfaces.
+  scaffold for `home_org_unit_id`, external identities, and account/effective-dated
+  withholding config. Its finance key is the canonical nonblank `source_account_id`;
+  there is no tenant-wide fallback, and app-role writes stay disabled until the audited
+  writer ships. It does **not** implement A5, A6 policy/isolation, A7 gateway/enrollment,
+  or U3 surfaces.
   PR #229 is an open frontend foundation with fixtures/router/query/design-system work,
   not completed Admin or finance UI. Tripwires: no role editor, no secrets, no
   delegation before A6. Remaining: whole user-facing program.

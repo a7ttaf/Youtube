@@ -38,10 +38,10 @@ TENANT_SCOPED_TABLES: tuple[str, ...] = (
     "org_units",
     "raw_report_files",
     "revenue_manual_overrides",
+    "us_withholding_rate_configs",
     "user_permission_grants",
     "user_role_assignments",
     "users",
-    "us_withholding_rate_configs",
     "youtube_channels",
 )
 

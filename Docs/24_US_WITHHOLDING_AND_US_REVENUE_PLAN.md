@@ -171,12 +171,15 @@ EGP re-key, so evidence rows don't split across two currency generations mid-mon
 
 Per-channel panel/column: **US revenue**, **US share of channel revenue**, and
 **estimated US withholding** — **only when** an effective-dated, operator-confirmed rate
-exists in PostgreSQL for the revenue month (and payment account when multiple accounts
-can differ). **No matching row → suppress estimate fields entirely** (fail-closed; no
-silent treaty-rate default). Rate validated 0 ≤ rate ≤ 0.30 when recorded. PR #228 currently
-provides only an open ORM/repository scaffold and has an Alembic-head collision with
-#223; it must be restacked after #223 and integrated behind an audited service/API before
-U3 can be called implemented.
+exists in PostgreSQL for the exact tenant, canonical nonblank `source_account_id`, and
+revenue date. Lookup is account/effective-date scoped even when one tenant owns multiple
+payment accounts. **No exact matching account row → suppress estimate fields entirely**
+(fail-closed; no tenant-wide fallback and no silent treaty-rate default). Rate is validated
+as finite, exactly representable `Numeric(8,6)` with 0 ≤ rate ≤ 0.30 when recorded. PR #228
+provides only the RLS-protected ORM/migration/repository foundation; app roles remain
+read-only until a permission-gated, reason-required, atomically audited writer ships. It
+is restacked on corrected #223 revision `20260825_0002`, but must still be integrated
+behind that service/API before U3 can be called implemented.
 
 Every figure is labeled "estimated"; the panel links the §0 explanation.
 
@@ -186,9 +189,11 @@ The SPA **renders** those fields — it must **not** compute `US × rate` in the
 Display only: nothing feeds net revenue, allocation, close, or reconciliation (F6 fence).
 
 **Acceptance criteria (U3):**
-- [ ] PostgreSQL stores append-only/effective-dated operator confirmations with actor,
-  source/account context, and month-based lookup; no environment scalar is authoritative
-- [ ] With no confirmed rate row for the month/account, estimate fields absent from API
+- [ ] PostgreSQL stores append-only/effective-dated operator confirmations with actor and
+  explicit nonblank `source_account_id`; lookup uses exact tenant/account/date and no
+  tenant-wide fallback; no environment scalar is authoritative
+- [ ] With no confirmed rate row for the exact account/effective date, estimate fields are
+  absent from the API
 - [ ] With confirmed rate, backend returns labeled estimate fields only
 - [ ] Zero worldwide revenue returns `share=null` with typed reason
   `ZERO_WORLDWIDE_REVENUE`; missing worldwide evidence returns `share=null` with a
@@ -215,9 +220,10 @@ a monthly manual glance at the AdSense report—no durable anchor exists yet.
   enters net finance math, close, allocation, or reconciliation without its own ruling.
   In particular: do **not** wire U2/U3 into `UsViewShareProvider` or change
   `DEFAULT_US_WITHHOLDING_RATE` (0.30) from this program (F6).
-- **T-U2** The display-estimate rate is **effective-dated configuration with no default**.
-  No matching PostgreSQL row → no estimate surfaces. It is **not** an environment scalar
-  or a silent rename of the recon constant (0.30).
+- **T-U2** The display-estimate rate is **account/effective-dated configuration with no
+  default or tenant-wide fallback**. No PostgreSQL row for the exact tenant,
+  `source_account_id`, and effective date → no estimate surfaces. It is **not** an
+  environment scalar or a silent rename of the recon constant (0.30).
 - **T-U3** Country-dimensioned rows never feed the monthly-totals lane (no double count);
   enforced by the U2 non-projecting guard. Distinct source-row keys (F5) prevent upsert
   collisions only; they are not a projection guard.
@@ -230,10 +236,10 @@ a monthly manual glance at the AdSense report—no durable anchor exists yet.
 ## 4. Operator decisions
 
 - **D-U1 (blocking U3):** Read the actual category/rate from AdSense → Payments →
-  "United States tax info"; record account type and confirmed result in effective-dated
-  config. If the page shows a fallback or the classification is unclear, review the tax
-  information with Google and a qualified adviser before enabling estimates. **No
-  estimate UI until D-U1 is recorded.**
+  "United States tax info"; record the canonical `source_account_id`, account type, and
+  confirmed result in effective-dated config for that exact account. If the page shows a
+  fallback or the classification is unclear, review the tax information with Google and a
+  qualified adviser before enabling estimates. **No estimate UI until D-U1 is recorded.**
 - **D-U2:** Where the US panel lives (Rankings view column vs. per-channel detail panel) —
   design is the operator's per the standing rule; the plan only commits the numbers.
 - **D-U3:** Whether U4 (manual actual-withholding anchor) is worth building now or stays a
