@@ -24,11 +24,13 @@ Two modes:
 
 ``--container NAME``
     Restore into a container you name. Refuses a non-empty database unless
-    ``--allow-nonempty`` is passed, which drops and recreates the entire
-    target database (``DROP DATABASE ... WITH (FORCE)``, then
-    ``CREATE DATABASE``) before restoring with ``--clean --if-exists``.
-    Everything the database held is destroyed, including schemas and
-    extensions the archive does not contain.
+    ``--allow-nonempty`` is passed. The archive is restored and fully verified
+    in a fresh locale-matched database while the target stays untouched. The
+    cutover then disables and drains both names, preserves the old target as
+    ``ums_previous_<id>``, and promotes the verified replacement. PostgreSQL
+    cannot make the final two renames atomic; automatic rollback handles a
+    failure between them and the error prints the exact recovery names. No
+    database is dropped during cutover.
 
 Credentials: as with the backup script, the host process never learns a
 database password. Everything runs inside the container and the password is
@@ -67,10 +69,11 @@ Usage::
 #               Postgres container; no SQLAlchemy, no ORM, no repository.
 # Standards: Stdlib only; argv lists, never ``shell=True``; no secret in argv,
 #            the environment or the output; fail-closed between every stage,
-#            and a non-empty target database is refused rather than silently
-#            overwritten.
-# Blast Radius: Disaster recovery, and destructive when --allow-nonempty is
-#               given. The rehearsal path touches nothing that already exists.
+#            and a non-empty target database is refused unless the operator
+#            explicitly authorizes a verified replacement cutover.
+# Blast Radius: Disaster recovery. A successful cutover changes the live
+#               database name binding while preserving the previous database;
+#               the rehearsal path touches nothing that already exists.
 # Connections:
 #   - File: scripts/backup_database.py -> produces the run directory read here.
 #   - File: backend/ums_smart_revenue/db/alembic/versions/20260608_0001_tenant_rls_enforcement.py
@@ -83,14 +86,19 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import re
 import shlex
 import shutil
 import subprocess
 import sys
+import tempfile
+import threading
 import time
 import traceback
 import uuid
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -114,6 +122,10 @@ MANIFEST_NAME = "manifest.json"
 MANIFEST_SCHEMA = "ums-backup/1"
 
 REQUIRED_ROLES = ("app_tenant", "app_platform")
+# Restore independently enforces the seed floor that makes an accepted backup
+# useful.  A newer backup may widen this through content_gate.seed_tables; the
+# three names here are the minimum contract for this PR's actual ancestry.
+CORE_SEED_TABLES = ("alembic_version", "currencies", "tenants")
 # Mirrors scripts/backup_database.py. A run the content gate quarantined keeps
 # its artifacts under this suffix; it is never a restore source.
 REJECTED_SUFFIX = ".rejected"
@@ -146,25 +158,26 @@ ROLES_PRESENT_SQL = (
 #
 # 20260608_0001 creates both roles with NOLOGIN and grants them nothing, and
 # its downgrade enumerates exactly this catalog to revoke memberships, so the
-# invariant is "an application role is a member of nothing". Logins are members
-# of THEM, which is the opposite direction and is not matched here.
+# invariant is "an application role is a member of nothing". The one legitimate
+# edge emitted by pg_dumpall is the connected bootstrap superuser being a member
+# of an app role; the query allows only that current_user direction and catches
+# inverse grants to every other role.
 ROLE_MEMBERSHIPS_SQL = (
     "SELECT m.rolname || ' -> ' || g.rolname "
     "FROM pg_catalog.pg_auth_members am "
     "JOIN pg_catalog.pg_roles m ON m.oid = am.member "
     "JOIN pg_catalog.pg_roles g ON g.oid = am.roleid "
     "WHERE m.rolname IN ('app_tenant', 'app_platform') "
+    "OR (g.rolname IN ('app_tenant', 'app_platform') "
+    "AND m.rolname <> current_user) "
     "ORDER BY 1;"
 )
-# FIX: like memberships, role-level GUC settings are CLUSTER-global -- DROP
-# DATABASE recreates nothing here. A target-only ``ALTER ROLE app_tenant SET
-# statement_timeout`` applied by hand on the target cluster therefore
-# survived every gate: replaying a clean roles.sql installs nothing over it,
-# and neither the presence check nor the membership check reads
-# pg_db_role_setting. The restore then reported success while the stale
-# setting kept breaking application queries. Cluster-level rows only
-# (setdatabase = 0): per-database rows die with the database this restore
-# just replaced, so they cannot be leftovers.
+# FIX: like memberships, role-level GUC settings with ``setdatabase = 0`` are
+# cluster-global. A target-only ``ALTER ROLE app_tenant SET statement_timeout``
+# applied by hand therefore survives database replacement unless restore
+# explicitly clears it. Per-database settings are replayed again after the
+# verified replacement receives the final target name, before connections are
+# enabled, because their catalog key is the database OID/name at apply time.
 ROLE_SETTINGS_KEYS_SQL = (
     "SELECT r.rolname || ' = ' || split_part(setting, '=', 1) "
     "FROM pg_catalog.pg_db_role_setting s "
@@ -186,19 +199,41 @@ ROLE_PRIVILEGED_ATTRIBUTES_SQL = (
     "OR rolcreatedb OR rolreplication) "
     "ORDER BY rolname;"
 )
-# FIX(round-25 P1 x2): a live application pool survives DROP DATABASE ... WITH
-# (FORCE) -- the disconnect is momentary and restart-policies reconnect the
-# moment the recreated database exists, so writers can mutate the target
-# between pg_restore and _verify. Any session on the target database other
-# than the querying backend is such a writer: the standard Compose stack
-# configures the APPLICATION from the same UMS_DB_USER as POSTGRES_USER
-# (docker-compose.yml), so filtering by usename excluded every default app
-# pool from the count. Only the guard query's own backend PID is excluded.
+# FIX(round-25 P1 x2): advisory locks do not stop application writers. Restore
+# therefore refuses any live target session before staging, restores into an
+# unreachable replacement name, then disables connections and drains both
+# names before the two-rename cutover. The standard Compose stack configures
+# the application from the same UMS_DB_USER as POSTGRES_USER, so filtering by
+# usename would exclude every default app pool; only the query backend is
+# excluded when the query runs against the target itself.
 FOREIGN_WRITER_SESSIONS_SQL = (
     "SELECT count(*) FROM pg_catalog.pg_stat_activity "
     "WHERE datname = current_database() "
     "AND pid <> pg_backend_pid();"
 )
+
+DATABASE_LOCALE_SQL = (
+    "SELECT b.encoding::text || '|' || pg_encoding_to_char(b.encoding) "
+    "|| '|' || coalesce(b.datcollate, '') || '|' || coalesce(b.datctype, '') "
+    "|| '|' || coalesce(b.datlocprovider::text, '') "
+    "|| '|' || coalesce(b.datlocale, '') "
+    "FROM pg_catalog.pg_database b WHERE b.datname = current_database();"
+)
+DATABASE_LOCALE_LEGACY_SQL = (
+    "SELECT b.encoding::text || '|' || pg_encoding_to_char(b.encoding) "
+    "|| '|' || coalesce(b.datcollate, '') || '|' || coalesce(b.datctype, '') "
+    "|| '|' || coalesce(b.datlocprovider::text, '') "
+    "|| '|' || coalesce(b.daticulocale, '') "
+    "FROM pg_catalog.pg_database b WHERE b.datname = current_database();"
+)
+
+# The lock is held by one psql session connected to the maintenance database,
+# not by a short-lived query against the target database. It therefore remains
+# alive across isolated replay, verification, connection drain, and both
+# cutover renames; application sessions do not cooperate with it and are
+# separately disabled and drained at the cutover boundary.
+RESTORE_LOCK_PREFIX = "ums-smart-revenue.restore/"
+DATABASE_ACL_PRIVILEGES = frozenset({"CONNECT", "CREATE", "TEMPORARY"})
 # Count user objects across every non-system schema so a database that only
 # has tables/enums/functions/empty custom schemas cannot look empty and
 # bypass --allow-nonempty.
@@ -271,6 +306,7 @@ USER_OBJECT_COUNT_SQL = r"""
          JOIN pg_catalog.pg_namespace n ON n.oid = se.stxnamespace
          WHERE n.nspname NOT IN ('pg_catalog', 'information_schema')
            AND n.nspname NOT LIKE 'pg\_temp\_%' ESCAPE '\')
+      + (SELECT count(*) FROM pg_catalog.pg_largeobject_metadata)
       + (SELECT count(*) FROM pg_catalog.pg_extension ext
          JOIN pg_catalog.pg_namespace n ON n.oid = ext.extnamespace
          WHERE n.nspname NOT IN ('pg_catalog', 'information_schema')
@@ -385,7 +421,7 @@ def _psql(
     target = f"-d {shlex.quote(dbname)} " if dbname else '-d "$POSTGRES_DB" '
     argv = _container_sh(
         container,
-        f'exec psql -U "$POSTGRES_USER" {target}'
+        f'exec psql -X -U "$POSTGRES_USER" {target}'
         f"--no-password -v ON_ERROR_STOP={stop} -Atq -f -",
     )
     completed = _run_with_input(argv, timeout=timeout, stdin_text=sql)
@@ -460,7 +496,7 @@ def _refuse_rejected_content_gate(manifest: dict[str, object], *, backup_name: s
 
 
 def _verify_backup_artifact_digests(backup_dir: Path, manifest: dict[str, object]) -> None:
-    """Require sha256 digests for dump and roles and match on-disk bytes."""
+    """Require artifact metadata and match the bytes currently on disk."""
     artifacts = manifest.get("artifacts")
     if not isinstance(artifacts, dict):
         raise RestoreError(EXIT_USAGE, f"{backup_dir / MANIFEST_NAME} has no artifacts block")
@@ -472,13 +508,132 @@ def _verify_backup_artifact_digests(backup_dir: Path, manifest: dict[str, object
                 EXIT_ARTIFACT_INTEGRITY,
                 f"{name} has no sha256 in the manifest. Do not restore this run.",
             )
-        actual = _sha256(backup_dir / name)
+        artifact = backup_dir / name
+        expected_bytes = entry.get("bytes") if isinstance(entry, dict) else None
+        if expected_bytes is not None and (
+            isinstance(expected_bytes, bool)
+            or not isinstance(expected_bytes, int)
+            or expected_bytes < 0
+        ):
+            raise RestoreError(
+                EXIT_ARTIFACT_INTEGRITY,
+                f"{name} has an invalid byte count in the manifest. Do not restore this run.",
+            )
+        try:
+            actual_size = artifact.stat().st_size
+            if actual_size <= 0:
+                raise RestoreError(
+                    EXIT_ARTIFACT_INTEGRITY,
+                    f"{name} is empty. Do not restore this run.",
+                )
+            if expected_bytes is not None and actual_size != expected_bytes:
+                raise RestoreError(
+                    EXIT_ARTIFACT_INTEGRITY,
+                    f"{name} size does not match the manifest "
+                    f"(expected {expected_bytes}, got {actual_size}). Do not restore this run.",
+                )
+            actual = _sha256(artifact)
+        except OSError as exc:
+            # A source can disappear or become unreadable between manifest
+            # load and this point-of-use check. Keep that distinct from a
+            # subprocess failure: no artifact bytes were safely verified.
+            raise RestoreError(
+                EXIT_ARTIFACT_INTEGRITY,
+                f"{name} could not be read while verifying the manifest: {exc}",
+            ) from exc
         if actual != expected:
             raise RestoreError(
                 EXIT_ARTIFACT_INTEGRITY,
                 f"{name} does not match the manifest sha256 "
                 f"(expected {expected}, got {actual}). Do not restore this run.",
             )
+
+
+# ============================================================================
+# Purpose: Restrict the host directory that temporarily holds dump and role
+#          artifacts before any sensitive byte is copied into it.
+# Database/ORM: None; host filesystem permissions only.
+# Standards: POSIX owner mode plus the backup publisher's verified NTFS DACL;
+#            fail closed when either policy cannot be enforced.
+# Blast Radius: Backup data, role verifiers, and local-host confidentiality.
+# Connections:
+#   - File: scripts/backup_database.py -> shared owner-only NTFS ACL policy.
+#   - File: scripts/restore_database.py -> _stage_backup_artifacts calls first.
+# ============================================================================
+def _restrict_restore_staging(path: Path) -> None:
+    """Fail closed unless restore staging is owner-only on this host."""
+    # Reuse the publisher's verified POSIX-mode and NTFS-DACL policy. Both
+    # scripts ship in the same directory; duplicating either fail-closed check
+    # here would let their owner-only definitions drift independently.
+    try:
+        import backup_database as backup_security
+    except ImportError as exc:
+        raise RestoreError(
+            EXIT_ARTIFACT_INTEGRITY,
+            "could not load backup_database.py to enforce restore staging permissions",
+        ) from exc
+    try:
+        backup_security._restrict_run_dir_mode(path, path.parent, strict=True)
+    except backup_security.BackupError as exc:
+        raise RestoreError(
+            EXIT_ARTIFACT_INTEGRITY,
+            f"could not enforce owner-only restore staging permissions: {exc}",
+        ) from exc
+
+
+# ============================================================================
+# Purpose: Copy both artifacts into a private temporary directory and verify
+#          the copies immediately before any Docker or database operation.
+# Database/ORM: None; host-side immutable restore input.
+# Standards: Separate source/copy hashes; fsync before use; cleanup never masks
+#            an active restore exception.
+# Blast Radius: Disaster recovery input integrity and host secret exposure.
+# Connections:
+#   - File: scripts/restore_database.py -> main and _execute_restore.
+# ============================================================================
+@contextmanager
+def _stage_backup_artifacts(
+    backup_dir: Path, manifest: dict[str, object]
+) -> Iterator[Path]:
+    """Yield private copies whose digests are verified at point of use."""
+    staging: Path | None = None
+    try:
+        staging = Path(tempfile.mkdtemp(prefix=".ums-restore-", dir=backup_dir.parent))
+        _restrict_restore_staging(staging)
+        for name in (DUMP_NAME, ROLES_NAME):
+            source = backup_dir / name
+            target = staging / name
+            try:
+                with source.open("rb") as source_handle, target.open("xb") as target_handle:
+                    shutil.copyfileobj(source_handle, target_handle)
+                    target_handle.flush()
+                    os.fsync(target_handle.fileno())
+                os.chmod(target, 0o600)
+                if os.name != "nt" and target.stat().st_mode & 0o777 != 0o600:
+                    raise OSError(
+                        f"effective mode on {target} is not owner read/write"
+                    )
+            except OSError as exc:
+                raise RestoreError(
+                    EXIT_ARTIFACT_INTEGRITY,
+                    f"could not stage {name} for restore: {exc}",
+                ) from exc
+        _verify_backup_artifact_digests(staging, manifest)
+        yield staging
+    finally:
+        if staging is not None:
+            try:
+                shutil.rmtree(staging)
+            except OSError as cleanup_exc:
+                if sys.exc_info()[0] is None:
+                    raise RestoreError(
+                        EXIT_RESTORE_FAILED,
+                        f"restore staging cleanup failed for {staging}: {cleanup_exc}",
+                    ) from cleanup_exc
+                print(
+                    f"WARNING: restore staging cleanup failed for {staging}: {cleanup_exc}",
+                    file=sys.stderr,
+                )
 
 
 # ============================================================================
@@ -504,10 +659,9 @@ def _verify_backup_artifact_digests(backup_dir: Path, manifest: dict[str, object
 def _require_manifest_table_row_counts(manifest: dict[str, object]) -> dict[str, int]:
     """Require a well-formed table_row_counts map before any restore apply.
 
-    FIX: malformed or missing counts used to surface only in ``_verify`` after
-    ``pg_restore --single-transaction`` committed — with ``--allow-nonempty``
-    that replaced the target and then failed, implying the original state was
-    intact. Validate before roles or data are applied.
+    FIX: malformed or missing counts once surfaced only after destructive
+    replay committed. Validate before roles or replacement creation; the
+    isolated verifier repeats the same check before cutover.
     """
     expected_raw = manifest.get("table_row_counts")
     if not isinstance(expected_raw, dict):
@@ -517,9 +671,9 @@ def _require_manifest_table_row_counts(manifest: dict[str, object]) -> dict[str,
             "refusing to apply an unverifiable backup",
         )
     # FIX: int() accepted booleans as 0/1 and truncated fractional counts, and
-    # an empty mapping verified trivially -- so --allow-nonempty could commit
-    # the destructive single-transaction replacement and only discover the
-    # mismatch, or coincidentally match, during verification. Require a
+    # an empty mapping verified trivially -- so the old overlay path could
+    # commit and only discover the mismatch, or coincidentally match, during
+    # verification. Require a
     # non-empty mapping of exact nonnegative JSON integers up front.
     if not expected_raw:
         raise RestoreError(
@@ -538,6 +692,229 @@ def _require_manifest_table_row_counts(manifest: dict[str, object]) -> dict[str,
             )
         expected[str(key)] = value
     return expected
+
+
+# ============================================================================
+# Purpose: Recheck the backup content gate from manifest facts before any
+#          cluster role or database state is changed.
+# Database/ORM: None; validates manifest table counts and content-gate metadata.
+# Standards: Fail closed on malformed verdicts, missing core seed tables,
+#            drained seeds, or aggregate values that do not match the counts.
+# Blast Radius: Disaster recovery admission; blocks empty/gutted restores.
+# Connections:
+#   - File: scripts/backup_database.py -> ContentVerdict.as_manifest_block.
+#   - File: tests/scripts/test_backup_content_gate.py -> seed-extension tests.
+# ============================================================================
+def _require_manifest_seed_floor(
+    manifest: dict[str, object], counts: dict[str, int]
+) -> tuple[str, ...]:
+    """Require every declared/current seed table to be present and populated."""
+    gate = manifest.get("content_gate")
+    required = list(CORE_SEED_TABLES)
+    if gate is not None:
+        if not isinstance(gate, dict) or gate.get("status") != "accepted":
+            raise RestoreError(
+                EXIT_USAGE,
+                "manifest.content_gate is malformed or is not accepted; "
+                "refusing to apply an unapproved backup",
+            )
+        raw_seed_tables = gate.get("seed_tables")
+        if not isinstance(raw_seed_tables, list) or not raw_seed_tables:
+            raise RestoreError(
+                EXIT_USAGE,
+                "manifest.content_gate.seed_tables is missing or empty; "
+                "refusing a backup whose seed floor cannot be reproduced",
+            )
+        if any(not isinstance(name, str) or not name.strip() for name in raw_seed_tables):
+            raise RestoreError(
+                EXIT_USAGE,
+                "manifest.content_gate.seed_tables contains a blank or non-string name",
+            )
+        if len(set(raw_seed_tables)) != len(raw_seed_tables):
+            raise RestoreError(
+                EXIT_USAGE,
+                "manifest.content_gate.seed_tables contains duplicate names",
+            )
+        if not set(CORE_SEED_TABLES).issubset(raw_seed_tables):
+            missing_contract = sorted(set(CORE_SEED_TABLES) - set(raw_seed_tables))
+            raise RestoreError(
+                EXIT_USAGE,
+                "manifest.content_gate.seed_tables omits this restore contract's "
+                f"required tables: {', '.join(missing_contract)}",
+            )
+        required = list(raw_seed_tables)
+        gate_tables = gate.get("tables")
+        gate_rows = gate.get("rows")
+        if (
+            isinstance(gate_tables, bool)
+            or not isinstance(gate_tables, int)
+            or gate_tables < 0
+            or isinstance(gate_rows, bool)
+            or not isinstance(gate_rows, int)
+            or gate_rows < 0
+        ):
+            raise RestoreError(
+                EXIT_USAGE,
+                "manifest.content_gate table/row aggregates are not exact "
+                "nonnegative integers",
+            )
+        if gate_tables != len(counts) or gate_rows != sum(counts.values()):
+            raise RestoreError(
+                EXIT_USAGE,
+                "manifest.content_gate aggregate table/row counts disagree with "
+                "manifest.table_row_counts",
+            )
+    missing = [name for name in required if name not in counts]
+    drained = [name for name in required if name in counts and counts[name] == 0]
+    if missing or drained:
+        detail: list[str] = []
+        if missing:
+            detail.append("missing: " + ", ".join(missing))
+        if drained:
+            detail.append("empty: " + ", ".join(drained))
+        raise RestoreError(
+            EXIT_USAGE,
+            "manifest fails the required seed-table floor ("
+            + "; ".join(detail)
+            + "); refusing to replace a target with a gutted database",
+        )
+    return tuple(required)
+
+
+def _require_manifest_large_object_count(manifest: dict[str, object]) -> int:
+    """Require the exact large-object population recorded by the backup."""
+    value = manifest.get("large_object_count")
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise RestoreError(
+            EXIT_USAGE,
+            "manifest.large_object_count is missing or is not an exact "
+            "nonnegative integer; refusing an unverifiable backup",
+        )
+    return value
+
+
+def _parse_database_acl(raw: object) -> tuple[str, list[tuple[str, str, bool]]]:
+    """Validate the owner/privilege JSON captured from ``pg_database``."""
+    if not isinstance(raw, str) or not raw.strip():
+        raise RestoreError(
+            EXIT_USAGE,
+            "manifest source.database_acl is missing; refusing to create a "
+            "replacement without its authorization policy",
+        )
+    try:
+        document = json.loads(raw)
+    except ValueError as exc:
+        raise RestoreError(
+            EXIT_USAGE,
+            f"manifest source.database_acl is not valid JSON: {exc}",
+        ) from exc
+    if not isinstance(document, dict):
+        raise RestoreError(EXIT_USAGE, "manifest source.database_acl is not an object")
+    owner = document.get("owner")
+    entries = document.get("entries")
+    if (
+        not isinstance(owner, str)
+        or not owner.strip()
+        or owner == "PUBLIC"
+        or not isinstance(entries, list)
+    ):
+        raise RestoreError(
+            EXIT_USAGE,
+            "manifest source.database_acl must contain a real owner and entries list",
+        )
+    parsed: list[tuple[str, str, bool]] = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            raise RestoreError(EXIT_USAGE, "manifest source.database_acl entry is not an object")
+        grantee = entry.get("grantee")
+        privilege = entry.get("privilege")
+        grantable = entry.get("grantable")
+        if (
+            not isinstance(grantee, str)
+            or not grantee.strip()
+            or not isinstance(privilege, str)
+            or privilege.upper() not in DATABASE_ACL_PRIVILEGES
+            or not isinstance(grantable, bool)
+        ):
+            raise RestoreError(
+                EXIT_USAGE,
+                "manifest source.database_acl contains an invalid grantee, "
+                "privilege or grantable flag",
+            )
+        parsed.append((grantee, privilege.upper(), grantable))
+    return owner, parsed
+
+
+def _source_database_metadata(
+    manifest: dict[str, object],
+) -> tuple[str, str, list[tuple[str, str, bool]]]:
+    """Require locale and database ACL provenance before any restore mutation."""
+    source = manifest.get("source")
+    if not isinstance(source, dict):
+        raise RestoreError(
+            EXIT_USAGE,
+            "manifest source metadata is missing; locale and database ACL "
+            "fidelity cannot be proven",
+        )
+    locale_row = source.get("database_locale")
+    if not isinstance(locale_row, str) or not locale_row.strip():
+        raise RestoreError(
+            EXIT_USAGE,
+            "manifest source.database_locale is missing; refusing a restore "
+            "whose database collation and encoding cannot be reproduced",
+        )
+    # Parse now, before role replay or replacement creation. This also rejects
+    # malformed locale fields before SQL literals are constructed.
+    _create_database_options(locale_row)
+    owner, acl = _parse_database_acl(source.get("database_acl"))
+    return locale_row, owner, acl
+
+
+# ============================================================================
+# Purpose: Bind restore to the database name recorded by the backup so
+#          roles.sql settings scoped with ALTER ROLE ... IN DATABASE retain
+#          their meaning after the replacement receives its final name.
+# Database/ORM: None; compares manifest provenance with container POSTGRES_DB.
+# Standards: Exact string match and fail-closed missing provenance.
+# Blast Radius: Role settings, permissions, and restore target selection.
+# Connections:
+#   - File: scripts/backup_database.py -> source.database manifest field.
+#   - File: scripts/restore_database.py -> _execute_restore before lock/mutation.
+# ============================================================================
+def _require_source_database_target(
+    manifest: dict[str, object], target_db: str
+) -> None:
+    """Refuse a target name different from the archive's source database."""
+    source = manifest.get("source")
+    source_db = source.get("database") if isinstance(source, dict) else None
+    if not isinstance(source_db, str) or not source_db:
+        raise RestoreError(
+            EXIT_USAGE,
+            "manifest source.database is missing; database-scoped role settings "
+            "cannot be replayed safely",
+        )
+    if source_db != target_db:
+        raise RestoreError(
+            EXIT_USAGE,
+            f"backup source database {source_db!r} does not match target "
+            f"POSTGRES_DB {target_db!r}; refusing to misapply database-scoped "
+            "role settings. Restore into a container with the recorded database name",
+        )
+
+
+def _database_acl_role_problems(
+    roles_path: Path, owner: str, entries: list[tuple[str, str, bool]]
+) -> list[str]:
+    """Return ACL roles that the preflight roles file cannot create."""
+    declared = set(_created_role_names(roles_path.read_text(encoding="utf-8", errors="replace")))
+    referenced = {owner}
+    referenced.update(grantee for grantee, _privilege, _grantable in entries)
+    missing = sorted(
+        role
+        for role in referenced
+        if role != "PUBLIC" and not role.startswith("pg_") and role not in declared
+    )
+    return missing
 
 
 def _require_manifest_schema(manifest: dict[str, object], manifest_path: Path) -> None:
@@ -571,7 +948,9 @@ def _load_backup(backup_dir: Path) -> dict[str, object]:
     _require_manifest_schema(manifest, manifest_path)
     _refuse_rejected_content_gate(manifest, backup_name=manifest_path.parent.name)
     _verify_backup_artifact_digests(backup_dir, manifest)
-    _require_manifest_table_row_counts(manifest)
+    counts = _require_manifest_table_row_counts(manifest)
+    _require_manifest_seed_floor(manifest, counts)
+    _require_manifest_large_object_count(manifest)
     return manifest
 
 
@@ -665,7 +1044,7 @@ def _await_postgres(container: str, *, wait_seconds: int, timeout: int) -> None:
             probe = _run(
                 _container_sh(
                     container,
-                    'exec psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" '
+                    'exec psql -X -U "$POSTGRES_USER" -d "$POSTGRES_DB" '
                     '--no-password -Atqc "SELECT 1"',
                 ),
                 timeout=timeout,
@@ -985,8 +1364,8 @@ _PROTECTED_APP_ROLES = REQUIRED_ROLES
 # ============================================================================
 # Purpose: Read roles.sql the way psql's own lexer reads it, so every gate
 #          below judges the statements the executor will actually run.
-# Database/ORM: None. Pure text, which is what keeps these checks safe to run
-#               BEFORE ``--allow-nonempty`` drops the target.
+# Database/ORM: None. Pure text, so these checks run before cluster role replay
+#               or replacement-database creation.
 # Standards: Comment stripping, quote-aware splitting, psql meta-command
 #            extraction and literal masking happen ONCE, here. No gate below
 #            gets its own regex over the raw file: two parsers for one language
@@ -1489,8 +1868,8 @@ def _role_membership_edges(statement: str) -> list[tuple[str, str]]:
     return []
 
 
-def _role_membership_problems(body: str) -> list[str]:
-    r"""Return the roles.sql statements that put an app role into a membership.
+def _role_membership_problems(body: str, superuser: str = "postgres") -> list[str]:
+    r"""Return roles.sql membership statements outside the safe bootstrap edge.
 
     FIX: ``GRANT <bootstrap superuser> TO app_tenant;`` matched neither the
     CREATE-anchored allowlist nor the attribute-drift gate -- a GRANT can never
@@ -1499,10 +1878,11 @@ def _role_membership_problems(body: str) -> list[str]:
     never reads pg_auth_members. The result is not a drifted attribute but an
     edge in the authorization graph, and that edge is enough on its own.
 
-    Deliberately NOT proportional to how dangerous the granted role looks: the
-    cross-lane edge ``GRANT app_tenant TO app_platform`` grants neither
-    SUPERUSER nor a ``pg_*`` role and still crosses the platform/tenant write
-    boundary 20260608_0001 exists to hold.
+    Both sides are checked. A protected role may be GRANTED TO the connected
+    bootstrap superuser because pg_dumpall emits that legitimate edge, but a
+    protected role may never be granted to an arbitrary member. Conversely,
+    an application role may never become a member of another role, including
+    another protected role or a predefined ``pg_*`` role.
     """
     problems: list[str] = []
     for statement in _scan_role_sql(body):
@@ -1511,6 +1891,10 @@ def _role_membership_problems(body: str) -> list[str]:
         for member, granted in _role_membership_edges(statement):
             if member in _PROTECTED_APP_ROLES:
                 problems.append(f"{member} becomes a member of {granted}: {statement}")
+            elif granted in _PROTECTED_APP_ROLES and member != superuser:
+                problems.append(
+                    f"{granted} is granted to non-bootstrap role {member}: {statement}"
+                )
     return problems
 
 
@@ -1660,9 +2044,8 @@ def _role_ddl_statement_problem(
         return f"RENAME is not a statement pg_dumpall --roles-only emits: {statement}"
     # FIX: the verb allowlist admits DROP ROLE, and nothing below looked at what
     # was being dropped. `DROP ROLE app_tenant;` therefore passed the read-only
-    # preflight, and under --allow-nonempty the target was already destroyed by
-    # the time _restore_roles dropped the role and the post-apply presence check
-    # refused -- leaving an empty replacement database.
+    # preflight. In the old overlay implementation the target was already gone
+    # by the time _restore_roles dropped the role and post-apply checks refused.
     if words[0] == "DROP":
         dropped = {_role_sql_identifier(t) for t in tokens[2:]}
         protected = sorted(dropped & set(_PROTECTED_APP_ROLES))
@@ -1863,16 +2246,16 @@ def _bootstrap_role_lockout_problems(body: str, superuser: str) -> list[str]:
     FIX(codex round-24 P1): ``ALTER ROLE <superuser> WITH NOLOGIN`` passed
     every gate -- the foreign-role check reads CREATE statements only and the
     drift gate covers the application roles only -- and under --allow-nonempty
-    the replay then disabled the very identity the restore connects as, after
-    the target database had already been dropped: an empty replacement
-    database and a cluster needing out-of-band superuser recovery. Genuine
+    the replay then disabled the very identity the restore connects as. The old
+    overlay path had already removed the target; the isolated path still must
+    refuse because the cluster could need out-of-band recovery. Genuine
     pg_dumpall output never disables the bootstrap role, so any
     NOLOGIN/NOSUPERUSER on it is refused on both sides of the round trip.
 
     FIX(codex round-25 P1): ``DROP ROLE <superuser>;`` walked the same gap
     from the other side -- the DROP arm of the role gate protects only the
-    application roles, so preflight approved the file and the target was
-    destroyed before the replay failed on "cannot drop the current user".
+    application roles, so preflight approved the file before replay failed on
+    "cannot drop the current user".
     pg_dumpall --roles-only emits no DROP of any kind.
     """
     problems: list[str] = []
@@ -1990,9 +2373,9 @@ def _bootstrap_password_reset_problem(body: str, superuser: str) -> str | None:
     target whose POSTGRES_PASSWORD differs replaces the target verifier
     mid-restore: the current psql stays connected, but every NEXT connection
     -- this restore's own catalog queries, the application, health checks --
-    authenticates with the unchanged container credential and fails, right
-    after ``--allow-nonempty`` destroyed the original database. The scanner
-    masks literal bodies, so the refusal message carries no secret.
+    authenticates with the unchanged container credential and fails during
+    restore. The scanner masks literal bodies, so the refusal message carries
+    no secret.
     """
     tokens = _collect_role_attribute_tokens(body).get(superuser)
     if tokens and "PASSWORD" in tokens:
@@ -2005,11 +2388,11 @@ def _bootstrap_password_reset_problem(body: str, superuser: str) -> str | None:
 
 
 def _preflight_roles_file(container: str, roles_path: Path, *, timeout: int) -> None:
-    """Validate roles.sql read-only, so it can run BEFORE anything destructive.
+    """Validate roles.sql read-only before any restore mutation.
 
     Both checks are non-mutating -- a text scan of the file plus one
-    ``SELECT current_user`` -- which is why they are safe to run against the
-    target before ``--allow-nonempty`` drops it.
+    ``SELECT current_user`` against the maintenance database -- so they run
+    before cluster role replay or replacement creation.
 
     Args:
         container: Container name to resolve the bootstrap superuser through.
@@ -2023,7 +2406,9 @@ def _preflight_roles_file(container: str, roles_path: Path, *, timeout: int) -> 
             role placed into the cluster membership graph.
     """
     body = roles_path.read_text(encoding="utf-8", errors="replace")
-    superuser = _psql(container, "SELECT current_user;", timeout=timeout).strip()
+    superuser = _psql(
+        container, "SELECT current_user;", timeout=timeout, dbname="postgres"
+    ).strip()
     unsupported = _unsupported_role_ddl_in_roles_sql(body)
     if unsupported:
         raise RestoreError(EXIT_ROLES_FAILED, unsupported)
@@ -2080,9 +2465,8 @@ def _preflight_roles_file(container: str, roles_path: Path, *, timeout: int) -> 
             "not rerun to clear them. Regenerate roles.sql from a source cluster "
             "whose application roles are NOLOGIN, NOSUPERUSER, NOBYPASSRLS.",
         )
-    # FIX(round-24 P1): the replay runs AS this identity; a file that
-    # disables it bricks the cluster right after --allow-nonempty destroyed
-    # the target database.
+    # FIX(round-24 P1): the replay runs AS this identity; a file that disables
+    # it can brick the cluster during the otherwise isolated staging phase.
     lockouts = _bootstrap_role_lockout_problems(body, superuser)
     if lockouts:
         raise RestoreError(
@@ -2090,7 +2474,7 @@ def _preflight_roles_file(container: str, roles_path: Path, *, timeout: int) -> 
             "roles.sql locks the bootstrap identity out of the cluster: "
             + "; ".join(lockouts)
             + ". The restore replays the file as that identity, so it would "
-            "disable its own connection after the target was dropped. "
+            "disable its own connection before cutover. "
             "Regenerate roles.sql from the backup source cluster.",
         )
     # FIX(round-26 P1): only the RESTORE refuses this -- the archive itself
@@ -2112,7 +2496,7 @@ def _preflight_roles_file(container: str, roles_path: Path, *, timeout: int) -> 
     # replayed, an app_tenant session with is_superuser=off and NO SET ROLE read
     # every row of an RLS table lacking FORCE, and on a FORCE table it ran
     # `ALTER TABLE ... NO FORCE ROW LEVEL SECURITY` and then read every row.
-    memberships = _role_membership_problems(body)
+    memberships = _role_membership_problems(body, superuser=superuser)
     if memberships:
         raise RestoreError(
             EXIT_ROLES_FAILED,
@@ -2135,7 +2519,9 @@ def _reset_existing_protected_role_settings(container: str, *, timeout: int) -> 
     """
     existing = [
         line.strip()
-        for line in _psql(container, ROLES_PRESENT_SQL, timeout=timeout).splitlines()
+        for line in _psql(
+            container, ROLES_PRESENT_SQL, timeout=timeout, dbname="postgres"
+        ).splitlines()
         if line.strip()
     ]
     if not existing:
@@ -2143,14 +2529,21 @@ def _reset_existing_protected_role_settings(container: str, *, timeout: int) -> 
     reset_lines = [
         f"ALTER ROLE {_quote_identifier(role)} RESET ALL;" for role in existing
     ]
-    _psql(container, "\n".join(reset_lines) + "\n", timeout=timeout)
+    _psql(
+        container,
+        "\n".join(reset_lines) + "\n",
+        timeout=timeout,
+        dbname="postgres",
+    )
 
 
 def _required_roles_present(container: str, *, timeout: int) -> list[str]:
     """Return the required application roles the cluster currently reports."""
     return [
         line.strip()
-        for line in _psql(container, ROLES_PRESENT_SQL, timeout=timeout).splitlines()
+        for line in _psql(
+            container, ROLES_PRESENT_SQL, timeout=timeout, dbname="postgres"
+        ).splitlines()
         if line.strip()
     ]
 
@@ -2160,7 +2553,9 @@ def _undeclared_role_settings(
 ) -> list[str]:
     """Return live cluster-level protected-role GUCs the file does not declare."""
     live: dict[str, set[str]] = {}
-    for line in _psql(container, ROLE_SETTINGS_KEYS_SQL, timeout=timeout).splitlines():
+    for line in _psql(
+        container, ROLE_SETTINGS_KEYS_SQL, timeout=timeout, dbname="postgres"
+    ).splitlines():
         stripped = line.strip()
         if not stripped:
             continue
@@ -2191,7 +2586,9 @@ def _refuse_post_apply_role_problems(
     """
     memberships = [
         line.strip()
-        for line in _psql(container, ROLE_MEMBERSHIPS_SQL, timeout=timeout).splitlines()
+        for line in _psql(
+            container, ROLE_MEMBERSHIPS_SQL, timeout=timeout, dbname="postgres"
+        ).splitlines()
         if line.strip()
     ]
     if memberships:
@@ -2199,8 +2596,8 @@ def _refuse_post_apply_role_problems(
             EXIT_ROLES_FAILED,
             "after applying roles.sql an application role is a member of "
             f"another role: {'; '.join(memberships)}. Memberships are "
-            "cluster-global, so this one predates the archive and survived the "
-            "database drop. It grants the lane the other role's object "
+            "cluster-global, so this one predates the archive or was installed "
+            "outside it. It grants the lane the other role's object "
             "privileges without any attribute change. REVOKE it and re-run.",
         )
     declared = _protected_role_setting_declarations(
@@ -2212,14 +2609,19 @@ def _refuse_post_apply_role_problems(
             EXIT_ROLES_FAILED,
             "after applying roles.sql the protected roles still carry "
             "cluster-global settings roles.sql does not declare: "
-            f"{'; '.join(undeclared_settings)}. Role settings survive "
-            "DROP DATABASE, so these predate the archive or were installed "
+            f"{'; '.join(undeclared_settings)}. Cluster-level role settings "
+            "survive database replacement, so these predate the archive or were installed "
             "by something other than the replayed file. Clear them with "
             "ALTER ROLE <role> RESET ALL and re-run.",
         )
     privileged = [
         line.strip()
-        for line in _psql(container, ROLE_PRIVILEGED_ATTRIBUTES_SQL, timeout=timeout).splitlines()
+        for line in _psql(
+            container,
+            ROLE_PRIVILEGED_ATTRIBUTES_SQL,
+            timeout=timeout,
+            dbname="postgres",
+        ).splitlines()
         if line.strip()
     ]
     if privileged:
@@ -2245,14 +2647,21 @@ def _live_protected_role_problems(container: str, *, timeout: int) -> list[str]:
     problems: list[str] = []
     memberships = [
         line.strip()
-        for line in _psql(container, ROLE_MEMBERSHIPS_SQL, timeout=timeout).splitlines()
+        for line in _psql(
+            container, ROLE_MEMBERSHIPS_SQL, timeout=timeout, dbname="postgres"
+        ).splitlines()
         if line.strip()
     ]
     if memberships:
         problems.append("membership edges: " + "; ".join(memberships))
     privileged = [
         line.strip()
-        for line in _psql(container, ROLE_PRIVILEGED_ATTRIBUTES_SQL, timeout=timeout).splitlines()
+        for line in _psql(
+            container,
+            ROLE_PRIVILEGED_ATTRIBUTES_SQL,
+            timeout=timeout,
+            dbname="postgres",
+        ).splitlines()
         if line.strip()
     ]
     if privileged:
@@ -2260,9 +2669,24 @@ def _live_protected_role_problems(container: str, *, timeout: int) -> list[str]:
     return problems
 
 
-def _foreign_writer_session_count(container: str, *, timeout: int) -> int:
-    """Count live non-superuser sessions on the target database."""
-    raw = _psql(container, FOREIGN_WRITER_SESSIONS_SQL, timeout=timeout).strip()
+def _foreign_writer_session_count(
+    container: str, *, timeout: int, target_db: str | None = None
+) -> int:
+    """Count sessions on ``target_db`` from the maintenance database.
+
+    When target_db is omitted the legacy current-database probe is retained for
+    focused callers.  Production restore always supplies the name, so disabling
+    connections on the target does not disable the guard itself.
+    """
+    sql = FOREIGN_WRITER_SESSIONS_SQL
+    dbname: str | None = None
+    if target_db is not None:
+        sql = (
+            "SELECT count(*) FROM pg_catalog.pg_stat_activity WHERE datname = "
+            f"{_quote_literal(target_db)};"
+        )
+        dbname = "postgres"
+    raw = _psql(container, sql, timeout=timeout, dbname=dbname).strip()
     try:
         return int(raw or "0")
     except ValueError as exc:
@@ -2272,16 +2696,140 @@ def _foreign_writer_session_count(container: str, *, timeout: int) -> int:
         ) from exc
 
 
+# ============================================================================
+# Purpose: Hold a PostgreSQL advisory lock for the complete restore critical
+#          section, including isolated replay, verification, and cutover.
+# Database/ORM: One psql session connected to the maintenance database; no ORM.
+# Standards: ``pg_try_advisory_lock`` fails closed when another restore owns the
+#            target. The holder is connected to ``postgres`` so disabling and
+#            renaming the application database cannot terminate it. Cleanup
+#            preserves an active restore exception and reports an independent
+#            cleanup failure.
+# Blast Radius: Prevents concurrent restore/cutover operations on one target.
+# Connections:
+#   - File: scripts/restore_database.py -> _execute_restore holds this lock
+#     before the first emptiness/session check and releases it after cutover.
+# ============================================================================
+def _read_lock_result(process: subprocess.Popen[str], *, timeout: int) -> str:
+    """Read one advisory-lock result line without waiting forever."""
+    stdout = process.stdout
+    assert stdout is not None
+    line_box: list[str] = []
+    error_box: list[OSError] = []
+
+    def _reader() -> None:
+        """Read psql's first result row in a daemon thread."""
+        try:
+            line_box.append(stdout.readline())
+        except OSError as exc:
+            error_box.append(exc)
+
+    reader = threading.Thread(target=_reader, daemon=True)
+    reader.start()
+    reader.join(max(1, timeout))
+    if reader.is_alive():
+        raise RestoreError(
+            EXIT_RESTORE_FAILED,
+            f"timed out acquiring the restore lock after {timeout}s",
+        )
+    if error_box:
+        raise RestoreError(
+            EXIT_RESTORE_FAILED,
+            f"restore lock psql output failed: {error_box[0]}",
+        ) from error_box[0]
+    if not line_box or not line_box[0]:
+        stderr = process.stderr.read().strip() if process.stderr is not None else ""
+        raise RestoreError(
+            EXIT_RESTORE_FAILED,
+            f"restore lock psql exited before reporting its state: {stderr}",
+        )
+    return line_box[0].strip()
+
+
+@contextmanager
+def _target_restore_lock(
+    container: str, target_db: str, *, timeout: int
+) -> Iterator[None]:
+    """Hold a target-scoped advisory lock until the restore critical section ends."""
+    if not target_db or any(char in target_db for char in "\x00\r\n"):
+        raise RestoreError(
+            EXIT_USAGE,
+            "target database name is empty or contains control characters",
+        )
+    lock_key = RESTORE_LOCK_PREFIX + target_db
+    lock_sql = (
+        "SELECT CASE WHEN pg_try_advisory_lock(hashtextextended("
+        f"{_quote_literal(lock_key)}, 0)) THEN 'UMS_RESTORE_LOCK_OK' "
+        "ELSE 'UMS_RESTORE_LOCK_BUSY' END;\n"
+    )
+    argv = _container_sh(
+        container,
+        'exec psql -X -U "$POSTGRES_USER" -d postgres '
+        "--no-password -v ON_ERROR_STOP=1 -Atq",
+    )
+    process = subprocess.Popen(
+        argv,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    assert process.stdin is not None
+    assert process.stdout is not None
+    assert process.stderr is not None
+    acquired = False
+    try:
+        process.stdin.write(lock_sql)
+        process.stdin.flush()
+        result = _read_lock_result(process, timeout=timeout)
+        if result != "UMS_RESTORE_LOCK_OK":
+            raise RestoreError(
+                EXIT_USAGE,
+                f"another restore already owns the target lock for database "
+                f"{target_db!r}; wait for it to finish and retry",
+            )
+        acquired = True
+        yield
+    finally:
+        active_error = sys.exc_info()[1]
+        cleanup_error: BaseException | None = None
+        try:
+            if acquired and process.poll() is None:
+                process.stdin.write("SELECT pg_advisory_unlock(hashtextextended(")
+                process.stdin.write(f"{_quote_literal(lock_key)}, 0));\n")
+                process.stdin.flush()
+            process.stdin.close()
+            process.wait(timeout=min(30, max(1, timeout)))
+        except (OSError, subprocess.SubprocessError) as exc:
+            cleanup_error = exc
+            try:
+                if process.poll() is None:
+                    process.kill()
+                    process.wait(timeout=5)
+            except (OSError, subprocess.SubprocessError) as kill_exc:
+                print(
+                    f"WARNING: could not terminate restore lock psql for "
+                    f"{target_db!r}: {kill_exc}",
+                    file=sys.stderr,
+                )
+        if cleanup_error is not None:
+            message = f"restore lock cleanup failed for {target_db!r}: {cleanup_error}"
+            if active_error is None:
+                raise RestoreError(EXIT_RESTORE_FAILED, message) from cleanup_error
+            print(f"WARNING: {message}; the restore error is preserved", file=sys.stderr)
+
+
 def _restore_roles(container: str, roles_path: Path, *, timeout: int) -> list[str]:
     """Apply roles.sql and return the required roles present afterward."""
     _preflight_roles_file(container, roles_path, timeout=timeout)
-    # FIX: cluster-global role settings survive DROP DATABASE just like
+    # FIX: cluster-global role settings survive database replacement just like
     # memberships do, and a clean roles.sql carries no ALTER ROLE app_* SET
     # line to overwrite a target-only leftover -- normalize before replay.
     _reset_existing_protected_role_settings(container, timeout=timeout)
     argv = _container_sh(
         container,
-        'exec psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" --no-password -v ON_ERROR_STOP=0 -q -f -',
+        'exec psql -X -U "$POSTGRES_USER" -d postgres '
+        "--no-password -v ON_ERROR_STOP=0 -q -f -",
     )
     completed = _run_with_file(argv, timeout=timeout, source=roles_path)
     unexpected = _unexpected_roles_errors(completed.stderr)
@@ -2322,35 +2870,95 @@ def _restore_roles(container: str, roles_path: Path, *, timeout: int) -> list[st
 
 
 # ============================================================================
-# Purpose: Restore the custom-format archive into the target database, in one
-#          transaction, only after the roles are known to exist.
-# Database/ORM: Recreates every table, index, constraint, RLS policy and GRANT
-#               in the archive.
-# Standards: --single-transaction (which implies --exit-on-error) so a failure
-#            leaves the target untouched rather than half-populated; --clean
-#            --if-exists only when the operator explicitly accepted a non-empty
-#            target. The archive is fed on stdin from the host file, so the
-#            dump never has to exist inside the container.
-# Blast Radius: Destructive on the target database when --allow-nonempty is
-#               used; otherwise the target was verified empty first.
+# Purpose: Reapply database ownership and database-level privileges captured by
+#          the backup after roles.sql has created the referenced roles.
+# Database/ORM: ``pg_database`` ACL state; no ORM.
+# Standards: Revoke the target's current database ACL first, then apply only
+#            validated owner/grantee/privilege tuples using quoted identifiers.
+#            This is intentionally separate from pg_restore: a custom dump made
+#            without ``--create`` does not carry the database object's ACL.
+# Blast Radius: Authorization. A missing database ACL can change who may
+#               CONNECT, CREATE or create temporary objects after recovery.
 # Connections:
-#   - File: scripts/backup_database.py -> ``_dump_database`` produced the
-#     archive this restores.
+#   - File: scripts/backup_database.py -> DATABASE_ACL_SQL writes this JSON.
+#   - File: scripts/restore_database.py -> _execute_restore applies it before
+#     data replay and verification.
 # ============================================================================
+def _apply_database_acl(
+    container: str,
+    target_db: str,
+    owner: str,
+    entries: list[tuple[str, str, bool]],
+    *,
+    timeout: int,
+) -> None:
+    """Reset and restore database owner/ACL state from validated metadata."""
+    if not target_db or target_db.casefold() in {"postgres", "template0", "template1"}:
+        raise RestoreError(
+            EXIT_USAGE,
+            f"refusing to apply database ACL to protected database {target_db!r}",
+        )
+    quoted_db = _quote_identifier(target_db)
+    role_rows = _psql(
+        container,
+        "SELECT rolname FROM pg_catalog.pg_roles ORDER BY rolname;",
+        timeout=timeout,
+        dbname="postgres",
+    )
+    current_roles = {line.strip() for line in role_rows.splitlines() if line.strip()}
+    statements = [f"REVOKE ALL PRIVILEGES ON DATABASE {quoted_db} FROM PUBLIC;"]
+    statements.extend(
+        f"REVOKE ALL PRIVILEGES ON DATABASE {quoted_db} FROM {_quote_identifier(role)};"
+        for role in sorted(current_roles)
+    )
+    statements.append(f"ALTER DATABASE {quoted_db} OWNER TO {_quote_identifier(owner)};")
+    for grantee, privilege, grantable in entries:
+        recipient = "PUBLIC" if grantee == "PUBLIC" else _quote_identifier(grantee)
+        option = " WITH GRANT OPTION" if grantable else ""
+        statements.append(
+            f"GRANT {privilege} ON DATABASE {quoted_db} TO {recipient}{option};"
+        )
+    _psql(container, "\n".join(statements) + "\n", timeout=timeout, dbname="postgres")
+
+
+def _live_database_locale_row(
+    container: str, *, timeout: int, dbname: str | None = None
+) -> str:
+    """Read the target locale row, with the PostgreSQL pre-17 fallback."""
+    try:
+        return _psql(container, DATABASE_LOCALE_SQL, timeout=timeout, dbname=dbname).strip()
+    except RestoreError:
+        return _psql(
+            container, DATABASE_LOCALE_LEGACY_SQL, timeout=timeout, dbname=dbname
+        ).strip()
+
+
+def _require_target_locale(
+    container: str, expected: str, *, timeout: int, dbname: str | None = None
+) -> None:
+    """Refuse a generated replacement whose locale differs from the source."""
+    actual = _live_database_locale_row(container, timeout=timeout, dbname=dbname)
+    if actual != expected:
+        raise RestoreError(
+            EXIT_USAGE,
+            "replacement database locale does not match the backup source "
+            f"(expected {expected!r}, got {actual!r}); refusing cutover. "
+            "Verify the target PostgreSQL version supports the recorded locale provider",
+        )
+
+
 # ============================================================================
 # Purpose: Prove the archive is READABLE by THIS container's pg_restore before
-#          --allow-nonempty drops the target. The sha256 digest proves the bytes
-#          match what backup wrote; it does NOT prove this container can parse
-#          them -- a newer archive format passes the digest and is still
-#          unrestorable here.
+#          any cluster-global role replay or staging database creation. The
+#          sha256 digest proves the bytes match what backup wrote; it does NOT
+#          prove this container can parse them.
 # Database/ORM: None. ``pg_restore --list`` reads the archive header and table
 #               of contents; it opens no connection and writes nothing.
-# Standards: Fail-closed BEFORE _recreate_target_database, exactly like the
-#            roles.sql preflight beside it. A non-zero exit is
+# Standards: Fail closed before any mutation. A non-zero exit is
 #            EXIT_RESTORE_FAILED -- the same code the later real pg_restore
 #            would have produced, so the documented exit table is unchanged.
-# Blast Radius: Disaster recovery. Turns "target destroyed, then pg_restore
-#               fails" into a refusal that changes nothing.
+# Blast Radius: Disaster recovery admission; a refusal leaves the live target
+#               and cluster roles untouched.
 # Connections:
 #   - File: scripts/backup_database.py -> ``_pg_restore_list`` runs the same
 #     read-only listing at BACKUP time to reject an unrestorable dump.
@@ -2360,10 +2968,10 @@ def _preflight_dump_readable(container: str, dump_path: Path, *, timeout: int) -
 
     Note the limit honestly: ``--list`` reads the header and TOC, so it catches
     an unreadable header, a corrupt TOC and a format version this pg_restore
-    does not support -- the failures that would otherwise surface only AFTER
-    the drop. It does not read the data section, so it is not a promise the
+    does not support -- failures that would otherwise surface during isolated
+    replay. It does not read the data section, so it is not a promise the
     restore will succeed; it is a promise the archive is not obviously
-    unrestorable before anything irreversible happens.
+    unrestorable before any restore mutation begins.
 
     Args:
         container: Container whose pg_restore must be able to read the archive.
@@ -2381,18 +2989,43 @@ def _preflight_dump_readable(container: str, dump_path: Path, *, timeout: int) -
             f"pg_restore --list could not read {dump_path.name} inside "
             f"{container} -- a newer archive format, or a corrupt header or "
             f"table of contents: {completed.stderr.strip()}. "
-            "The target database was NOT dropped.",
+            "The target database was not changed.",
         )
 
 
-def _restore_data(container: str, dump_path: Path, *, timeout: int, clean: bool) -> None:
-    """Restore database.dump into the target via pg_restore --single-transaction."""
-    flags = "--no-password --single-transaction"
+# ============================================================================
+# Purpose: Restore the custom-format archive into one isolated database in a
+#          single transaction after required roles are known to exist.
+# Database/ORM: Recreates every table, index, constraint, RLS policy, GRANT,
+#               and large object represented in database.dump.
+# Standards: --single-transaction (which implies --exit-on-error); explicit
+#            database name; archive streamed from owner-only host staging.
+#            Production replacement replay never uses --clean.
+# Blast Radius: The generated replacement only; the live target name and bytes
+#               remain untouched until verification and cutover.
+# Connections:
+#   - File: scripts/backup_database.py -> _dump_database produced the archive.
+#   - File: scripts/restore_database.py -> _execute_restore selects dbname.
+# ============================================================================
+def _restore_data(
+    container: str,
+    dump_path: Path,
+    *,
+    timeout: int,
+    clean: bool,
+    dbname: str | None = None,
+) -> None:
+    """Restore database.dump into ``dbname`` via one pg_restore transaction."""
+    # ``pg_restore`` includes large objects by default for custom archives, but
+    # make that contract explicit: a blob-only database must not appear
+    # restored merely because every ordinary table count matches.
+    flags = "--no-password --large-objects --single-transaction"
     if clean:
-        flags = "--no-password --clean --if-exists --single-transaction"
+        flags = "--no-password --large-objects --clean --if-exists --single-transaction"
+    target = shlex.quote(dbname) if dbname else '"$POSTGRES_DB"'
     argv = _container_sh(
         container,
-        f'exec pg_restore -U "$POSTGRES_USER" -d "$POSTGRES_DB" {flags}',
+        f'exec pg_restore -U "$POSTGRES_USER" -d {target} {flags}',
     )
     completed = _run_with_file(argv, timeout=timeout, source=dump_path)
     if completed.returncode != 0:
@@ -2406,16 +3039,18 @@ def _restore_data(container: str, dump_path: Path, *, timeout: int, clean: bool)
             print(f"    {line}")
 
 
-def _table_row_counts(container: str, *, timeout: int) -> dict[str, int]:
+def _table_row_counts(
+    container: str, *, timeout: int, dbname: str | None = None
+) -> dict[str, int]:
     """Return {tablename: row_count} for every table in public."""
-    raw = _psql(container, LIST_TABLES_SQL, timeout=timeout)
+    raw = _psql(container, LIST_TABLES_SQL, timeout=timeout, dbname=dbname)
     tables = [line.strip() for line in raw.splitlines() if line.strip()]
     if not tables:
         return {}
     branches = [_count_sql_branch(name) for name in tables]
     counts: dict[str, int] = {}
     sql = " UNION ALL ".join(branches) + " ORDER BY t;"
-    for line in _psql(container, sql, timeout=timeout).splitlines():
+    for line in _psql(container, sql, timeout=timeout, dbname=dbname).splitlines():
         if not line.strip():
             continue
         name, _, raw_count = line.rpartition("|")
@@ -2429,6 +3064,28 @@ def _table_row_counts(container: str, *, timeout: int) -> dict[str, int]:
                 f"could not read a row count from psql output {line!r}: {exc}",
             ) from exc
     return counts
+
+
+def _large_object_count(
+    container: str, *, timeout: int, dbname: str | None = None
+) -> int:
+    """Return the number of large objects in the restored database."""
+    raw = _psql(
+        container,
+        "SELECT count(*) FROM pg_catalog.pg_largeobject_metadata;",
+        timeout=timeout,
+        dbname=dbname,
+    ).strip()
+    try:
+        count = int(raw or "0")
+    except ValueError as exc:
+        raise RestoreError(
+            EXIT_RESTORE_FAILED,
+            f"could not read the large-object count from psql output {raw!r}: {exc}",
+        ) from exc
+    if count < 0:
+        raise RestoreError(EXIT_RESTORE_FAILED, f"large-object count is negative: {count}")
+    return count
 
 
 # ============================================================================
@@ -2446,16 +3103,36 @@ def _table_row_counts(container: str, *, timeout: int) -> dict[str, int]:
 #   - File: scripts/backup_database.py -> ``_table_row_counts`` wrote the
 #     manifest's table_row_counts block compared here.
 # ============================================================================
-def _verify(container: str, manifest: dict[str, object], *, timeout: int) -> bool:
+def _verify(
+    container: str,
+    manifest: dict[str, object],
+    *,
+    timeout: int,
+    dbname: str | None = None,
+) -> bool:
     """Compare restored public table row counts to the manifest; True if all match."""
     expected = _require_manifest_table_row_counts(manifest)
-    actual = _table_row_counts(container, timeout=timeout)
+    _require_manifest_seed_floor(manifest, expected)
+    actual = _table_row_counts(container, timeout=timeout, dbname=dbname)
+    expected_large_objects = _require_manifest_large_object_count(manifest)
+    actual_large_objects = _large_object_count(container, timeout=timeout, dbname=dbname)
     names = sorted(set(expected) | set(actual))
     if not names:
         print("VERIFY: the manifest recorded no tables and the restore produced none.")
         return False
     width = max(len(name) for name in names)
     failures = 0
+    if expected_large_objects != actual_large_objects:
+        failures += 1
+        print(
+            "large objects: "
+            f"manifest={expected_large_objects} restored={actual_large_objects} MISMATCH"
+        )
+    else:
+        print(
+            f"large objects: manifest={expected_large_objects} "
+            f"restored={actual_large_objects} ok"
+        )
     print()
     print(f"{'table'.ljust(width)}  {'manifest':>10}  {'restored':>10}  status")
     print(f"{'-' * width}  {'-' * 10}  {'-' * 10}  ------")
@@ -2525,12 +3202,14 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         "--allow-nonempty",
         action="store_true",
         help=(
-            "Permit restoring over a database that already has tables. This DROPS "
-            "AND RECREATES THE ENTIRE TARGET DATABASE (DROP DATABASE ... WITH "
-            "(FORCE), then CREATE DATABASE) before restoring, destroying every "
-            "schema, extension and object it holds -- including ones the archive "
-            "does not contain -- and disconnecting any live sessions. The restore "
-            "then runs with pg_restore --clean --if-exists."
+            "Permit a verified replacement cutover when the target has user "
+            "objects. Restore and verification happen under a unique staging "
+            "database name while the live target remains untouched. Cutover "
+            "disables/drains sessions, renames the old target to a preserved "
+            "ums_previous_<id> database, then promotes the replacement. The two "
+            "renames are a short non-atomic PostgreSQL boundary with automatic "
+            "rollback and explicit recovery names on failure. Stop application "
+            "and scheduler traffic for the entire command."
         ),
     )
     parser.add_argument(
@@ -2573,20 +3252,16 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
 
 
 # ============================================================================
-# Purpose: Recreate the whole target database on demand so an
-#          --allow-nonempty restore starts from a genuinely fresh cluster
-#          shell instead of dropping objects piecemeal.
-# Database/ORM: None in-process. Runs psql -d postgres inside the container.
-# Standards: RestoreError(EXIT_USAGE) when asked to drop the maintenance
-#            database itself; identifier/literal quoting everywhere; the fresh
-#            database is created BEFORE any roles or data are applied.
-# Blast Radius: Destructive by design under --allow-nonempty -- the operator
-#               explicitly accepted replacing that database's contents, and a
-#               failed apply afterwards leaves a pristine empty database rather
-#               than a half-cleared original.
+# Purpose: Resolve the application database name from the selected container
+#          before any target-scoped lock or SQL is constructed.
+# Database/ORM: None; reads the container's POSTGRES_DB environment value.
+# Standards: Absolute Docker executable; bounded argv-only subprocess; fail
+#            closed on missing/empty values and preserve stderr diagnostics.
+# Blast Radius: Restore target selection; read-only.
 # Connections:
-#   - File: scripts/restore_database.py -> _execute_restore calls these only
-#     when --allow-nonempty was passed; pg_restore later targets the fresh db.
+#   - File: scripts/restore_database.py -> _execute_restore validates and locks
+#     the resolved name before creating an isolated replacement.
+#   - File: docker-compose.yml -> defines POSTGRES_DB for the selected service.
 # ============================================================================
 def _container_default_database(container: str, *, timeout: int) -> str:
     """Return POSTGRES_DB straight from the container environment."""
@@ -2632,7 +3307,10 @@ def _locale_provider_options(
     if provider == "i":
         if locale:
             return [f"LOCALE_PROVIDER icu ICU_LOCALE {_quote_literal(locale)}"]
-        return []
+        raise RestoreError(
+            EXIT_USAGE,
+            "manifest source.database_locale has an ICU provider but no ICU locale",
+        )
     if provider == "b":
         # The builtin provider (PG17+) takes BUILTIN_LOCALE, never ICU_LOCALE;
         # datlocale is NULL for a builtin database created without an explicit
@@ -2640,24 +3318,31 @@ def _locale_provider_options(
         # here.
         if locale:
             return [f"LOCALE_PROVIDER builtin BUILTIN_LOCALE {_quote_literal(locale)}"]
-        return []
+        raise RestoreError(
+            EXIT_USAGE,
+            "manifest source.database_locale has a builtin provider but no locale",
+        )
     if provider not in ("c", ""):
         raise RestoreError(
             EXIT_USAGE,
             f"manifest source.database_locale carries an unrecognized locale "
-            f"provider code {provider!r}; refusing to recreate the target "
+            f"provider code {provider!r}; refusing to create a replacement "
             "with a guessed collation provider",
         )
     options: list[str] = []
-    if collate:
-        options.append(f"LC_COLLATE {_quote_literal(collate)}")
-    if ctype:
-        options.append(f"LC_CTYPE {_quote_literal(ctype)}")
+    if not collate or not ctype:
+        raise RestoreError(
+            EXIT_USAGE,
+            "manifest source.database_locale has no complete libc locale; "
+            "refusing to inherit the target template",
+        )
+    options.append(f"LC_COLLATE {_quote_literal(collate)}")
+    options.append(f"LC_CTYPE {_quote_literal(ctype)}")
     return options
 
 
 def _create_database_options(locale_row: str) -> str:
-    """Return CREATE DATABASE options reproducing the source locale, or "".
+    """Return CREATE DATABASE options reproducing the source locale.
 
     FIX(codex round-22 P2): a bare CREATE DATABASE inherits the TARGET
     template's encoding/locale; the backup uses pg_dump without --create, so
@@ -2673,55 +3358,271 @@ def _create_database_options(locale_row: str) -> str:
     malformed REFUSES rather than silently dropping the locale.
     """
     if not locale_row:
-        return ""
+        raise RestoreError(
+            EXIT_USAGE,
+            "manifest source.database_locale is missing; refusing to inherit "
+            "a template database's encoding and collation",
+        )
     parts = locale_row.split("|")
     if len(parts) != 6 or any(not _LOCALE_FIELD_RE.match(part) for part in parts):
         raise RestoreError(
             EXIT_USAGE,
             f"manifest source.database_locale is malformed: {locale_row!r}; "
-            "refusing to recreate the target with an unpreserved locale",
+            "refusing to create a replacement with an unpreserved locale",
         )
     _enc_id, encoding, collate, ctype, provider, locale = parts
     if not encoding:
         raise RestoreError(
             EXIT_USAGE,
             "manifest source.database_locale carries no encoding name; "
-            "refusing to recreate the target with an unpreserved locale",
+            "refusing to create a replacement with an unpreserved locale",
         )
     options = ["TEMPLATE template0", f"ENCODING {_quote_literal(encoding)}"]
     options.extend(_locale_provider_options(provider, collate, ctype, locale))
     return " " + " ".join(options)
 
 
-def _recreate_target_database(
-    container: str, target_db: str, *, timeout: int, locale_row: str = ""
-) -> None:
-    """Drop and recreate ``target_db``, leaving an empty shell to restore."""
-    if target_db.lower() == "postgres":
+def _validate_application_database_name(database: str) -> None:
+    """Refuse empty/control/protected database names before generated SQL."""
+    if not database or any(char in database for char in "\x00\r\n"):
         raise RestoreError(
             EXIT_USAGE,
-            "--allow-nonempty cannot drop the maintenance database itself; "
-            "point POSTGRES_DB at the application database to be replaced.",
+            "target database name is empty or contains control characters",
         )
-    quoted_db = _quote_identifier(target_db)
-    # FIX: assembled as joined static fragments so the B608 string-built-query
-    # detector stays satisfied; target_db is validated and identifier-quoted,
-    # and the locale options are charset-validated and literal-quoted.
-    drop_lines = [
-        f"DROP DATABASE IF EXISTS {quoted_db} WITH (FORCE);",
-        f"CREATE DATABASE {quoted_db}{_create_database_options(locale_row)};",
-    ]
+    if database.casefold() in {"postgres", "template0", "template1"}:
+        raise RestoreError(
+            EXIT_USAGE,
+            f"refusing to replace PostgreSQL maintenance/template database {database!r}",
+        )
+
+
+# ============================================================================
+# Purpose: Create and manage the isolated database that receives roles/ACL/data
+#          and verification before the live target name is touched.
+# Database/ORM: PostgreSQL pg_database through maintenance-database psql calls.
+# Standards: Unique generated names, explicit locale, bounded commands, quoted
+#            identifiers, and no DROP of the live target.
+# Blast Radius: Disaster recovery cutover; the original database remains intact.
+# Connections:
+#   - File: scripts/restore_database.py -> _execute_restore and cutover helpers.
+#   - File: Docs/22_BACKUP_RESTORE_AND_REHEARSAL.md -> verified cutover runbook.
+# ============================================================================
+def _create_replacement_database(
+    container: str, target_db: str, *, timeout: int, locale_row: str
+) -> str:
+    """Create a locale-faithful staging database and return its unique name."""
+    _validate_application_database_name(target_db)
+    replacement = f"ums_restore_{uuid.uuid4().hex[:24]}"
     _psql(
         container,
-        "\n".join(drop_lines),
+        f"CREATE DATABASE {_quote_identifier(replacement)}"
+        f"{_create_database_options(locale_row)};",
+        timeout=timeout,
+        dbname="postgres",
+    )
+    return replacement
+
+
+def _set_database_allow_connections(
+    container: str, database: str, *, allow: bool, timeout: int
+) -> None:
+    """Enable or disable all new connections to one database."""
+    keyword = "true" if allow else "false"
+    _psql(
+        container,
+        f"ALTER DATABASE {_quote_identifier(database)} WITH ALLOW_CONNECTIONS {keyword};",
         timeout=timeout,
         dbname="postgres",
     )
 
 
-def _guard_empty(container: str, *, allow_nonempty: bool, timeout: int) -> None:
+def _drain_database_sessions(container: str, database: str, *, timeout: int) -> None:
+    """Terminate and boundedly wait for every session on a disabled database."""
+    deadline = time.monotonic() + max(1, timeout)
+    terminate_sql = (
+        "SELECT pg_catalog.pg_terminate_backend(pid) "
+        "FROM pg_catalog.pg_stat_activity WHERE datname = "
+        f"{_quote_literal(database)};"
+    )
+    while True:
+        _psql(container, terminate_sql, timeout=timeout, dbname="postgres")
+        remaining = _foreign_writer_session_count(
+            container, timeout=timeout, target_db=database
+        )
+        if remaining == 0:
+            return
+        if time.monotonic() >= deadline:
+            raise RestoreError(
+                EXIT_RESTORE_FAILED,
+                f"could not drain {remaining} session(s) from database {database!r} "
+                f"within {timeout}s",
+            )
+        time.sleep(0.1)
+
+
+def _rename_database(
+    container: str, source: str, destination: str, *, timeout: int
+) -> None:
+    """Rename one disconnected database through the maintenance database."""
+    _psql(
+        container,
+        f"ALTER DATABASE {_quote_identifier(source)} RENAME TO "
+        f"{_quote_identifier(destination)};",
+        timeout=timeout,
+        dbname="postgres",
+    )
+
+
+def _drop_generated_database(container: str, database: str, *, timeout: int) -> None:
+    """Drop only a caller-owned generated staging database."""
+    if not database.startswith("ums_restore_"):
+        raise RestoreError(
+            EXIT_INTERNAL,
+            f"refusing cleanup of non-generated database {database!r}",
+        )
+    _psql(
+        container,
+        f"DROP DATABASE IF EXISTS {_quote_identifier(database)} WITH (FORCE);",
+        timeout=timeout,
+        dbname="postgres",
+    )
+
+
+# ============================================================================
+# Purpose: Cut over a fully verified replacement while retaining the previous
+#          database under a unique rollback name.
+# Database/ORM: PostgreSQL database admission, sessions, and ALTER DATABASE.
+# Standards: Advisory lock held by caller; disable connections before draining;
+#            one bounded rename per psql call; best-effort automatic rollback;
+#            never DROP either verified replacement or previous live database.
+# Blast Radius: Short non-atomic name cutover. Failure reports exact names and
+#               recovery SQL instead of deleting the last-good database.
+# Connections:
+#   - File: scripts/restore_database.py -> _target_restore_lock / _execute_restore.
+#   - File: Docs/22_BACKUP_RESTORE_AND_REHEARSAL.md -> cutover recovery commands.
+# ============================================================================
+def _cutover_verified_database(
+    container: str,
+    target_db: str,
+    replacement: str,
+    *,
+    timeout: int,
+    finalize: Callable[[], None] | None = None,
+) -> str:
+    """Swap verified ``replacement`` into ``target_db`` and retain the old DB."""
+    previous = f"ums_previous_{uuid.uuid4().hex[:24]}"
+    stage = "disable target connections"
+    target_disabled = False
+    replacement_disabled = False
+    old_renamed = False
+    new_renamed = False
+    try:
+        _set_database_allow_connections(
+            container, target_db, allow=False, timeout=timeout
+        )
+        target_disabled = True
+        stage = "drain target connections"
+        _drain_database_sessions(container, target_db, timeout=timeout)
+        stage = "disable replacement connections"
+        _set_database_allow_connections(
+            container, replacement, allow=False, timeout=timeout
+        )
+        replacement_disabled = True
+        stage = "drain replacement connections"
+        _drain_database_sessions(container, replacement, timeout=timeout)
+        # Recheck both names immediately before the first non-atomic rename.
+        if _foreign_writer_session_count(
+            container, timeout=timeout, target_db=target_db
+        ) or _foreign_writer_session_count(
+            container, timeout=timeout, target_db=replacement
+        ):
+            raise RestoreError(
+                EXIT_RESTORE_FAILED,
+                "database sessions reappeared after the cutover drain",
+            )
+        stage = f"rename {target_db!r} to {previous!r}"
+        _rename_database(container, target_db, previous, timeout=timeout)
+        old_renamed = True
+        stage = f"rename {replacement!r} to {target_db!r}"
+        _rename_database(container, replacement, target_db, timeout=timeout)
+        new_renamed = True
+        if finalize is not None:
+            stage = "finalize cluster roles against the cut-over database name"
+            finalize()
+        stage = f"enable connections on {target_db!r}"
+        _set_database_allow_connections(
+            container, target_db, allow=True, timeout=timeout
+        )
+        target_disabled = False
+        return previous
+    # This boundary deliberately catches unexpected callback/helper failures:
+    # once the first rename succeeds, even an internal bug must attempt the
+    # same reverse-name recovery before main maps it to exit 9.
+    except Exception as exc:
+        rollback_notes: list[str] = []
+        if new_renamed:
+            try:
+                _rename_database(container, target_db, replacement, timeout=timeout)
+            except Exception as rollback_exc:
+                rollback_notes.append(
+                    f"could not move the verified replacement back to {replacement!r}: "
+                    f"{rollback_exc}"
+                )
+            else:
+                new_renamed = False
+        if old_renamed and not new_renamed:
+            try:
+                _rename_database(container, previous, target_db, timeout=timeout)
+            except Exception as rollback_exc:
+                rollback_notes.append(
+                    f"could not restore the previous database name from {previous!r}: "
+                    f"{rollback_exc}"
+                )
+            else:
+                old_renamed = False
+        if not old_renamed and not new_renamed:
+            try:
+                _set_database_allow_connections(
+                    container, target_db, allow=True, timeout=timeout
+                )
+                target_disabled = False
+            except Exception as rollback_exc:
+                rollback_notes.append(
+                    f"could not re-enable connections on {target_db!r}: {rollback_exc}"
+                )
+        code = exc.code if isinstance(exc, RestoreError) else EXIT_INTERNAL
+        state = (
+            f"target={target_db!r}, verified_replacement={replacement!r}, "
+            f"previous={previous!r}, old_renamed={old_renamed}, "
+            f"new_renamed={new_renamed}, target_disabled={target_disabled}, "
+            f"replacement_disabled={replacement_disabled}"
+        )
+        recovery = (
+            "inspect pg_database first. Intended rollback SQL from database postgres: "
+            f"ALTER DATABASE {_quote_identifier(target_db)} WITH ALLOW_CONNECTIONS false; "
+            f"ALTER DATABASE {_quote_identifier(target_db)} RENAME TO "
+            f"{_quote_identifier(replacement)}; "
+            f"ALTER DATABASE {_quote_identifier(previous)} RENAME TO "
+            f"{_quote_identifier(target_db)}; "
+            f"ALTER DATABASE {_quote_identifier(target_db)} WITH ALLOW_CONNECTIONS true"
+        )
+        notes = "; ".join(rollback_notes) or "automatic rollback completed"
+        raise RestoreError(
+            code,
+            f"verified-database cutover failed during {stage}: {exc}; {state}; "
+            f"{notes}. {recovery}. Neither database was dropped.",
+        ) from exc
+
+
+def _guard_empty(
+    container: str,
+    *,
+    allow_nonempty: bool,
+    timeout: int,
+    dbname: str | None = None,
+) -> None:
     """Refuse a non-empty target database unless --allow-nonempty was passed."""
-    raw = _psql(container, USER_OBJECT_COUNT_SQL, timeout=timeout).strip()
+    raw = _psql(container, USER_OBJECT_COUNT_SQL, timeout=timeout, dbname=dbname).strip()
     try:
         existing = int(raw or "0")
     except ValueError as exc:
@@ -2733,11 +3634,10 @@ def _guard_empty(container: str, *, allow_nonempty: bool, timeout: int) -> None:
         raise RestoreError(
             EXIT_USAGE,
             f"the target database already has {existing} user objects outside "
-            "system catalogs. Restore into an empty database (recreate the "
-            "container/volume), or pass --allow-nonempty to DROP AND RECREATE "
-            "THE WHOLE TARGET DATABASE -- every schema, extension and object it "
-            "holds is destroyed, including ones this archive does not contain, "
-            "and it cannot be recovered afterwards.",
+            "system catalogs. Restore into an empty database, or pass "
+            "--allow-nonempty to authorize a verified replacement cutover. The "
+            "old database will be retained under an ums_previous_<id> rollback "
+            "name with connections disabled.",
         )
 
 
@@ -2764,16 +3664,16 @@ def _prepare_restore_target(
 
 
 # ============================================================================
-# Purpose: Orchestrate one restore into an already-resolved container —
-#          wait for Postgres, refuse a non-empty target unless allowed, apply
-#          ``roles.sql``, restore ``database.dump``, then verify row counts.
+# Purpose: Orchestrate one restore into an already-resolved container: preflight
+#          the live cluster, restore and verify a unique replacement database,
+#          then perform a drained two-rename cutover that preserves the old DB.
 # Database/ORM: None in-process. Runs psql / pg_restore inside the target
 #               container only.
-# Standards: Emptiness check before roles so a refused target is unmodified;
-#            roles before data so RLS grants have parents; fail-closed on any
-#            stage via RestoreError.
-# Blast Radius: Disaster recovery writes into the named container; rehearsal
-#               uses a throwaway only.
+# Standards: Emptiness/session checks before roles; roles before data so RLS
+#            grants have parents; content/seed/large-object verification before
+#            cutover; automatic rename rollback; fail closed via RestoreError.
+# Blast Radius: Cluster-global role replay plus a short live-name cutover;
+#               previous database retained. Rehearsal uses a throwaway only.
 # Connections:
 #   - File: scripts/restore_database.py -> ``_restore_roles`` / ``_restore_data`` /
 #     ``_verify`` / ``main``.
@@ -2785,109 +3685,178 @@ def _execute_restore(
     args: argparse.Namespace,
     manifest: dict[str, object],
 ) -> bool:
-    """Apply roles then dump and verify; return verification success."""
+    """Build/verify an isolated replacement, then cut it over under one lock."""
     _await_postgres(container, wait_seconds=args.wait_for_postgres, timeout=args.docker_timeout)
-    # Emptiness is checked before roles.sql is applied: a target this run
-    # is going to refuse must not be modified at all, not even by an
-    # idempotent CREATE ROLE.
-    _guard_empty(container, allow_nonempty=args.allow_nonempty, timeout=args.timeout)
-    # FIX(P1): the archive readability probe used to run ONLY under
-    # --allow-nonempty. An empty-target restore therefore replayed roles.sql
-    # first -- creating cluster-global roles on the target -- and only then
-    # discovered pg_restore could not read the archive, leaving those roles
-    # applied for a failed restore. The probe is read-only (pg_restore --list
-    # opens no connection and writes nothing), so it now runs on EVERY restore
-    # path, before roles and before the drop.
-    _preflight_dump_readable(container, backup_dir / DUMP_NAME, timeout=args.timeout)
-    if args.allow_nonempty:
-        # FIX(round-8 review): a piecemeal schema clear ran outside the restore
-        # transaction, so any later failure erased the original database while
-        # its "leave untouched on failure" guarantee held elsewhere. Dropping
-        # and recreating the TARGET DATABASE limits destruction to what the
-        # operator explicitly consented to replace, and a failed apply leaves
-        # only that pristine shell behind. It also drops the blanket PUBLIC
-        # CREATE grant the previous CREATE SCHEMA path re-introduced on PG18.
-        # FIX: validate roles.sql BEFORE the drop, not after. These checks are
-        # read-only, but they used to run inside _restore_roles -- i.e. after
-        # _recreate_target_database had already destroyed the target. A backup
-        # whose bootstrap superuser differs from this target, or one carrying
-        # unsupported role DDL, was therefore rejected only once the original
-        # database was irrecoverable. Preflighting turns that into a refusal
-        # that changes nothing.
+    target_db = _container_default_database(container, timeout=args.timeout)
+    _validate_application_database_name(target_db)
+    locale_row, acl_owner, acl_entries = _source_database_metadata(manifest)
+    _require_source_database_target(manifest, target_db)
+
+    # The advisory lock serializes every restore targeting this database name.
+    # Application sessions do not cooperate with that lock, so the final
+    # cutover separately disables connections and drains both database names.
+    with _target_restore_lock(container, target_db, timeout=args.docker_timeout):
+        _verify_backup_artifact_digests(backup_dir, manifest)
+        live_writers = _foreign_writer_session_count(
+            container, timeout=args.timeout, target_db=target_db
+        )
+        if live_writers:
+            raise RestoreError(
+                EXIT_USAGE,
+                f"the target database has {live_writers} live client session(s). "
+                "Stop the application and scheduler containers first (e.g. "
+                "`docker compose stop app app-dev`), then re-run while they "
+                "remain stopped until restore verification completes.",
+            )
+        _guard_empty(
+            container,
+            allow_nonempty=args.allow_nonempty,
+            timeout=args.timeout,
+            dbname=target_db,
+        )
+        _preflight_dump_readable(container, backup_dir / DUMP_NAME, timeout=args.timeout)
         _preflight_roles_file(container, backup_dir / ROLES_NAME, timeout=args.timeout)
-        # The archive probe above now covers the readability half on every
-        # path; before the drop it doubles as the destructive-path guarantee.
-        # FIX(round-23 P1): every LIVE cluster check also belongs BEFORE the
-        # drop. The post-replay checks inside _restore_roles used to be the
-        # only place a target-leftover membership or privileged attribute was
-        # caught -- i.e. after _recreate_target_database had already destroyed
-        # the original database, converting a recoverable refusal into
-        # permanent data loss. Reading the same catalog here turns both into
-        # refusals that change nothing.
+        acl_role_problems = _database_acl_role_problems(
+            backup_dir / ROLES_NAME, acl_owner, acl_entries
+        )
+        if acl_role_problems:
+            raise RestoreError(
+                EXIT_ROLES_FAILED,
+                "the source database ACL references roles roles.sql does not "
+                f"declare: {', '.join(acl_role_problems)}. Refusing before "
+                "the target is changed.",
+            )
         live_problems = _live_protected_role_problems(container, timeout=args.timeout)
         if live_problems:
             raise RestoreError(
                 EXIT_ROLES_FAILED,
                 "the target cluster's application roles already carry "
                 "cluster-global state a clean roles.sql neither carries nor "
-                "clears: " + "; ".join(live_problems) + ". Refusing BEFORE "
-                "the target database is dropped so the original data is "
-                "preserved. REVOKE the membership(s) and/or run ALTER ROLE "
-                "<role> WITH NOSUPERUSER NOBYPASSRLS NOLOGIN NOCREATEROLE "
-                "NOCREATEDB NOREPLICATION, then re-run.",
+                "clears: " + "; ".join(live_problems) + ". Refusing before "
+                "the target is changed; clear the state and re-run.",
             )
-        # FIX(round-23): DROP DATABASE ... WITH (FORCE) disconnects live
-        # clients but Compose restart policies reconnect them the moment the
-        # recreated database exists, so writers can mutate the target between
-        # pg_restore and _verify. Refuse up front instead.
-        live_writers = _foreign_writer_session_count(container, timeout=args.timeout)
-        if live_writers:
-            raise RestoreError(
-                EXIT_USAGE,
-                f"the target database has {live_writers} live client "
-                "session(s). DROP DATABASE ... WITH (FORCE) disconnects them, "
-                "but their pools reconnect while the restore runs -- including "
-                "pools that authenticate as the same database user, which the "
-                "standard Compose stack configures from UMS_DB_USER -- and the "
-                "verification can then pass over mutated data. Stop the "
-                "application and scheduler containers first (e.g. `docker "
-                "compose stop app app-dev`), then re-run.",
+        replacement: str | None = None
+        preserve_replacement = False
+        try:
+            replacement = _create_replacement_database(
+                container,
+                target_db,
+                timeout=args.timeout,
+                locale_row=locale_row,
             )
-        target_db = _container_default_database(container, timeout=args.timeout)
-        source_block = manifest.get("source")
-        locale_row = (
-            str(source_block.get("database_locale") or "")
-            if isinstance(source_block, dict)
-            else ""
-        )
-        _recreate_target_database(
-            container, target_db, timeout=args.timeout, locale_row=locale_row
-        )
-    roles = _restore_roles(container, backup_dir / ROLES_NAME, timeout=args.timeout)
-    print(f"roles present after roles.sql: {', '.join(roles)}")
-    _restore_data(
-        container,
-        backup_dir / DUMP_NAME,
-        timeout=args.timeout,
-        clean=args.allow_nonempty,
-    )
-    print("pg_restore completed")
-    ok = _verify(container, manifest, timeout=args.timeout)
-    if args.allow_nonempty:
-        # FIX(round-23): a pool that reconnected during the restore makes the
-        # row counts that were just verified stale the moment they are read;
-        # refuse to certify a live restore that was not actually quiesced.
-        live_writers = _foreign_writer_session_count(container, timeout=args.timeout)
-        if live_writers:
-            raise RestoreError(
-                EXIT_VERIFY_FAILED,
-                f"{live_writers} client session(s) were connected to the "
-                "target during or after the restore: the verified row counts "
-                "may no longer describe the database. Stop the application "
-                "containers, re-run the restore, and keep them stopped until "
-                "it exits 0.",
+            # CREATE success is not proof that every requested locale option
+            # landed exactly; compare the staging catalog before any replay.
+            _require_target_locale(
+                container,
+                locale_row,
+                timeout=args.timeout,
+                dbname=replacement,
             )
-    return ok
+            # Re-hash the private staged paths at each point of use. The host
+            # source can no longer swap bytes between admission and replay.
+            _verify_backup_artifact_digests(backup_dir, manifest)
+            try:
+                roles = _restore_roles(
+                    container, backup_dir / ROLES_NAME, timeout=args.timeout
+                )
+            except (RestoreError, OSError, subprocess.SubprocessError) as exc:
+                code = exc.code if isinstance(exc, RestoreError) else EXIT_ROLES_FAILED
+                raise RestoreError(
+                    code,
+                    f"{exc}; restore stopped during cluster role replay. The live "
+                    "database was not renamed or dropped, but roles.sql may have "
+                    "partially applied cluster-global state or settings scoped to "
+                    "the target database name; inspect roles, memberships and "
+                    "pg_db_role_setting before retrying.",
+                ) from exc
+            print(f"roles present after roles.sql: {', '.join(roles)}")
+            try:
+                _apply_database_acl(
+                    container,
+                    replacement,
+                    acl_owner,
+                    acl_entries,
+                    timeout=args.timeout,
+                )
+            except (RestoreError, OSError, subprocess.SubprocessError) as exc:
+                code = exc.code if isinstance(exc, RestoreError) else EXIT_RESTORE_FAILED
+                raise RestoreError(
+                    code,
+                    f"{exc}; restore stopped during staging-database ACL replay. "
+                    "The live target was not renamed or dropped.",
+                ) from exc
+            _verify_backup_artifact_digests(backup_dir, manifest)
+            try:
+                _restore_data(
+                    container,
+                    backup_dir / DUMP_NAME,
+                    timeout=args.timeout,
+                    clean=False,
+                    dbname=replacement,
+                )
+            except (RestoreError, OSError, subprocess.SubprocessError) as exc:
+                code = exc.code if isinstance(exc, RestoreError) else EXIT_RESTORE_FAILED
+                raise RestoreError(
+                    code,
+                    f"{exc}; restore stopped during isolated data replay. The "
+                    "staging transaction was rolled back when possible and the "
+                    "live target was not renamed or dropped.",
+                ) from exc
+            print(f"pg_restore completed in isolated database {replacement}")
+            ok = _verify(
+                container,
+                manifest,
+                timeout=args.timeout,
+                dbname=replacement,
+            )
+            if not ok:
+                return False
+
+            # From this point a failure must preserve every named database for
+            # operator recovery. The cutover helper attempts rollback but never
+            # drops either the verified replacement or the previous target.
+            preserve_replacement = True
+
+            def _finalize_roles() -> None:
+                """Replay per-database role settings after the new target has its final name."""
+                _verify_backup_artifact_digests(backup_dir, manifest)
+                _restore_roles(container, backup_dir / ROLES_NAME, timeout=args.timeout)
+
+            previous = _cutover_verified_database(
+                container,
+                target_db,
+                replacement,
+                timeout=args.timeout,
+                finalize=_finalize_roles,
+            )
+            print(
+                f"cutover complete: previous database preserved as {previous!r} "
+                "with connections disabled"
+            )
+            print(
+                "rollback (from database postgres, after stopping traffic): "
+                f"disable/drain {_quote_identifier(target_db)}, rename it to "
+                f"{_quote_identifier(replacement)}, rename "
+                f"{_quote_identifier(previous)} to {_quote_identifier(target_db)}, "
+                "then enable connections"
+            )
+            return True
+        finally:
+            if replacement is not None and not preserve_replacement:
+                active_error = sys.exc_info()[1]
+                try:
+                    _drop_generated_database(container, replacement, timeout=args.timeout)
+                except (RestoreError, OSError, subprocess.SubprocessError) as cleanup_exc:
+                    message = (
+                        f"could not remove failed staging database {replacement!r}: "
+                        f"{cleanup_exc}"
+                    )
+                    if active_error is None:
+                        raise RestoreError(EXIT_RESTORE_FAILED, message) from cleanup_exc
+                    print(
+                        f"WARNING: {message}; the original restore error is preserved",
+                        file=sys.stderr,
+                    )
 
 
 def _cleanup_rehearsal_throwaway(
@@ -2968,9 +3937,10 @@ def main(argv: list[str] | None = None) -> int:
         the target. 3 Docker daemon unavailable. 4 target container
         unavailable or could not be created. 5 roles restore failed or the
         required roles are absent/compromised after replay. 6 pg_restore
-        failed. 7 post-restore verification mismatch, or a client reconnected
-        during the restore window. 8 backup artifacts failed their sha256
-        integrity check. 9 unexpected internal error (traceback printed).
+        failed, including a connection-drain or rename-cutover failure.
+        7 post-restore verification mismatch in the isolated replacement.
+        8 backup artifacts failed their sha256 integrity check.
+        9 unexpected internal error (traceback printed).
         Handled failures print a stable ``RESTORE FAILED (exit N)`` line on
         stderr and never raise; ``--rehearse`` destroys its throwaway
         container on every path.
@@ -2982,9 +3952,10 @@ def main(argv: list[str] | None = None) -> int:
     ok = False
     try:
         manifest = _load_backup(backup_dir)
-        _require_docker(timeout=args.docker_timeout)
-        container, throwaway = _prepare_restore_target(args, manifest)
-        ok = _execute_restore(container, backup_dir, args, manifest)
+        with _stage_backup_artifacts(backup_dir, manifest) as staged_dir:
+            _require_docker(timeout=args.docker_timeout)
+            container, throwaway = _prepare_restore_target(args, manifest)
+            ok = _execute_restore(container, staged_dir, args, manifest)
     except RestoreError as exc:
         print(f"RESTORE FAILED (exit {exc.code}): {exc}", file=sys.stderr)
         code = exc.code

@@ -26,10 +26,10 @@ Defect 2: ``_prune`` treated "has a manifest.json" as "is a backup", so
 zero-table runs consumed ``--keep-min`` slots and evicted the only run holding
 data.
 Defect 3: the absolute floor was ``MIN_ROWS = 1`` against a database whose
-virgin state was 180 rows at the time (328 since P0.7), so total data loss with
-the schema left standing published a green ``OK`` -- and that run then became
-the reference for the next one. This file's fixtures are DERIVED from the
-migrations and anchored to a container measurement, not assumed.
+virgin state was 180 rows, so total data loss with the schema left standing
+published a green ``OK`` -- and that run then became the reference for the next
+one. This file's fixtures are DERIVED from the migrations and anchored to a
+container measurement, not assumed.
 Defect 4: the collapse check compared each run only with the one before it, so
 an 80%-a-night drain was accepted three nights running.
 Defect 5: an archive with an empty table of contents (a dropped schema) was
@@ -51,10 +51,10 @@ Defect 11: a directory dated in the FUTURE sorted above every real run, so it
 re-folded into the watermark every night (``reset_after`` could never exclude
 it) and simultaneously held both retention invariants -- one prune deleted every
 genuine backup and kept only the plant.
-Defect 12: P0.7's roles/permissions seed migration put 148 rows into three
-tables that ``SEED_TABLES`` did not list, so a VIRGIN database measured
-``non_seed_rows=148`` and tier 3b stopped refusing an empty one. The test that
-was supposed to catch it compared a literal against a literal.
+Defect 12: the seed-floor test once compared a literal against a literal, so a
+future migration could add seeded rows outside ``SEED_TABLES`` without making
+tier 3b refuse an empty database. The test now derives its expected set from
+the migration sources in this ancestry.
 
 CLI-LEVEL COVERAGE. Everything above is a function of pure inputs, which is why
 it is reproduced without a database. That is not sufficient on its own: an
@@ -77,7 +77,8 @@ import re
 import shutil
 import subprocess
 import sys
-import threading
+from collections.abc import Callable
+from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import ModuleType
@@ -85,9 +86,6 @@ from typing import Any, Self
 
 import pytest
 
-from ums_smart_revenue.auth.permissions import PERMISSION_DEFINITIONS
-from ums_smart_revenue.auth.roles import ROLE_DEFINITIONS
-from ums_smart_revenue.auth.seed import initial_role_permission_rows
 from ums_smart_revenue.db.iso_4217_2026_05 import ISO_4217_CURRENCIES_2026_05
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -112,7 +110,7 @@ backup = _load("backup_database")
 restore = _load("restore_database")
 
 
-def _backup_superuser_psql(superuser: str = "ums"):
+def _backup_superuser_psql(superuser: str = "ums") -> Callable[..., str]:
     """Return a psql stub that reports ``superuser`` as ``current_user``."""
 
     def fake_psql(_container: str, _sql: str, *, timeout: int) -> str:
@@ -131,7 +129,7 @@ def _restore_psql(
     settings: list[str] | None = None,
     privileged: list[str] | None = None,
     writers: int = 0,
-):
+) -> Callable[..., str]:
     """Return a psql stub answering each read-only query _restore_roles makes.
 
     ``memberships`` models ``ROLE_MEMBERSHIPS_SQL`` and ``settings`` models
@@ -147,21 +145,23 @@ def _restore_psql(
     gucs = list(settings or [])
     privs = list(privileged or [])
 
-    def fake_psql(_container: str, sql: str, *, timeout: int) -> str:
+    def fake_psql(
+        _container: str, sql: str, *, timeout: int, dbname: str | None = None
+    ) -> str:
         """Answer the catalog query psql was asked to run."""
-        _ = (_container, timeout)
+        _ = (_container, timeout, dbname)
         # pg_stat_activity first: its SQL also contains the literal
         # "current_user", which the branch below would misroute.
         if "pg_stat_activity" in sql:
             return f"{writers}\n"
-        if "current_user" in sql:
-            return superuser
         if "pg_auth_members" in sql:
             return ("\n".join(edges) + "\n") if edges else ""
         if "pg_db_role_setting" in sql:
             return ("\n".join(gucs) + "\n") if gucs else ""
         if "rolsuper" in sql:
             return ("\n".join(privs) + "\n") if privs else ""
+        if "current_user" in sql:
+            return superuser
         return "\n".join(roles) + "\n"
 
     return fake_psql
@@ -257,14 +257,10 @@ def test_the_injection_point_reads_the_real_clock() -> None:
 #   * `MIN_ROWS = 1` was ratified by a one-row fixture against a virgin install
 #     of 180 rows, so total data loss with the schema intact published green.
 #   * `SEED_TABLES = ("alembic_version", "currencies", "tenants")` and a
-#     hard-coded 180 were correct until P0.7's roles/permissions seed migration
-#     (20260825_0001) put 148 rows into three tables that were in neither. On a
-#     VIRGIN database ``non_seed_rows`` went 0 -> 148, which is exactly the
-#     input tier 3b keys on, so `docker compose down -v` + auto-migrate + one
-#     `--establish-watermark` would have made an empty database the directory's
-#     permanent reference. Meanwhile
-#     `test_seed_tables_match_what_the_migrations_actually_seed` kept passing,
-#     because it compared a literal against a literal.
+#     hard-coded 180 remain correct for this ancestry; the auth tables are
+#     created but not populated by its migrations. The derived scanner therefore
+#     keeps them outside the seed floor until their seed migration is merged
+#     with the script contract.
 #
 # So the row counts below are computed from the SAME sources the migrations
 # import, not re-typed. A registry that grows moves the fixture with it, and
@@ -272,13 +268,11 @@ def test_the_injection_point_reads_the_real_clock() -> None:
 # forces a re-measurement when it does.
 #
 # THE MEASUREMENT, which those derivations are checked against.
-# `alembic upgrade head` (revision 20260825_0001) into a fresh
-# postgres:18-alpine@sha256:96d56f7f container, measured 2026-08-25:
+# `alembic upgrade head` into a fresh postgres:18-alpine container, measured
+# 2026-08-25 for this ancestry:
 #
-#     tables=38 rows=328
-#       currencies                  178      permissions      26
-#       role_permission_assignments 106      roles            16
-#       alembic_version               1      tenants           1
+#     tables=38 rows=180
+#       currencies 178      alembic_version 1      tenants 1
 #
 # To re-measure:
 #   docker run -d --name ums-seedcheck-pg -e POSTGRES_USER=ums \
@@ -297,10 +291,6 @@ SEED_ROWS: dict[str, int] = {
     "alembic_version": 1,
     # 20260523_0001 bulk-inserts the frozen ISO-4217 snapshot.
     "currencies": len(ISO_4217_CURRENCIES_2026_05),
-    # 20260825_0001 seeds all three from the live auth registries.
-    "permissions": len(PERMISSION_DEFINITIONS),
-    "role_permission_assignments": len(initial_role_permission_rows()),
-    "roles": len(ROLE_DEFINITIONS),
     # 20260516_0001 inserts the single bootstrap tenant.
     "tenants": 1,
 }
@@ -308,13 +298,10 @@ SEED_ROWS: dict[str, int] = {
 #: source -- its cross-check, so a registry change forces a fresh measurement
 #: rather than silently redefining what "virgin" means.
 MEASURED_VIRGIN_TABLES = 38
-MEASURED_VIRGIN_ROWS = 328
+MEASURED_VIRGIN_ROWS = 180
 MEASURED_SEED_ROWS = {
     "alembic_version": 1,
     "currencies": 178,
-    "permissions": 26,
-    "role_permission_assignments": 106,
-    "roles": 16,
     "tenants": 1,
 }
 
@@ -334,7 +321,7 @@ def _database(**populated: int) -> dict[str, int]:
     return counts
 
 
-#: A virgin `alembic upgrade head`: 38 tables, 328 rows, no application data.
+#: A virgin `alembic upgrade head`: 38 tables, 180 rows, no application data.
 VIRGIN = _database()
 #: The documented reference database: the virgin state plus 7 application rows.
 REAL = _database(monthly_channel_revenue_facts=3, org_units=2, youtube_channels=2)
@@ -353,6 +340,16 @@ def _watermark(counts: dict[str, int], *, source: str = "test") -> backup.Waterm
 
 IDENTITY_A = backup.Identity(system_identifier="7677783453675450413", database="ums_smart_revenue")
 IDENTITY_B = backup.Identity(system_identifier="7677783473962770477", database="ums_smart_revenue")
+FAKE_DATABASE_ACL = json.dumps(
+    {
+        "owner": "ums",
+        "entries": [
+            {"grantee": "PUBLIC", "privilege": "CONNECT", "grantable": False},
+            {"grantee": "PUBLIC", "privilege": "TEMPORARY", "grantable": False},
+        ],
+    },
+    separators=(",", ":"),
+)
 
 
 def _write_run(
@@ -407,10 +404,15 @@ def _write_run(
         body["artifacts"] = artifact_entries
     if counts is not None:
         body["table_row_counts"] = counts
+        # Restore verifies large objects separately from table counts because
+        # pg_largeobject_metadata is not a public table and can otherwise be
+        # silently omitted from a superficially complete archive.
+        body["large_object_count"] = 0
         body["content_gate"] = {
             "status": "rejected" if rejected else "accepted",
             "tables": len(counts),
             "rows": sum(counts.values()),
+            "seed_tables": list(backup._required_seed_tables()),
             "failures": ["captured no application data"] if rejected else [],
         }
     (run / backup.MANIFEST_NAME).write_text(json.dumps(body), encoding="utf-8")
@@ -488,8 +490,8 @@ def test_total_data_loss_with_the_schema_intact_is_rejected() -> None:
 
     Truncate every table but ``alembic_version`` and the old floor
     (MIN_TABLES = 1, MIN_ROWS = 1) saw "many tables, one stamp row" and called it
-    a freshly migrated install. It is the opposite: a virgin install was 180 rows
-    when that was measured and is 328 today.
+    a freshly migrated install. It is the opposite: a virgin install was 180
+    rows when measured for this migration ancestry.
     """
     assert len(GUTTED) == MEASURED_VIRGIN_TABLES
     assert sum(GUTTED.values()) == 1
@@ -569,8 +571,8 @@ def test_the_whole_directory_floor_is_subsumed_by_the_per_table_rules() -> None:
 # SQL-shaped, not merely the words: an identifier followed by a column list, a
 # VALUES clause, a SELECT, or DEFAULT VALUES. MEASURED WHY: the first version
 # matched ``INSERT INTO <name>`` anywhere in any string constant, and the very
-# first prose to mention it -- a docstring in 20260825_0001 explaining this
-# parser, written the same day -- registered a table called ``x``.
+# first prose to mention it -- a migration docstring explaining this parser,
+# written the same day -- registered a table called ``x``.
 _INSERT_INTO = re.compile(
     r"INSERT\s+INTO\s+([A-Za-z_][A-Za-z0-9_]*)\s*(?:\(|VALUES\b|SELECT\b|DEFAULT\b)",
     re.IGNORECASE,
@@ -702,9 +704,8 @@ def test_seed_tables_match_what_the_migrations_actually_seed() -> None:
     ``SEED_TABLES`` is application knowledge the backup deliberately takes on,
     and the cost of it being stale is not cosmetic -- ``_non_seed_rows`` counts
     everything OUTSIDE it, which is the single input tier 3b uses to refuse to
-    make an empty database a directory's permanent reference. P0.7 added a
-    seeding migration and this test kept passing, because it asserted the same
-    three names it was supposed to be checking. It now reads the migrations.
+    make an empty database a directory's permanent reference. This test reads
+    the migration sources instead of asserting another copy of the tuple.
     """
     scanned = _tables_seeded_by_migrations()
     # The scanner's own guard: these two ARE the two idioms it knows, so a
@@ -713,15 +714,54 @@ def test_seed_tables_match_what_the_migrations_actually_seed() -> None:
     assert "currencies" in scanned, "the op.bulk_insert idiom is no longer recognised"
     assert "tenants" in scanned, "the INSERT INTO literal idiom is no longer recognised"
     expected = scanned | {"alembic_version"}  # written by Alembic itself, not a revision
-    assert set(backup.SEED_TABLES) == expected, (
-        "a migration seeds a table that SEED_TABLES does not list (or lists one it no "
-        "longer seeds). Add it to scripts/backup_database.py::SEED_TABLES and to "
-        "SEED_ROWS here, then re-measure the virgin state -- until both are updated "
-        "the gate reads seeded rows as application data and tier 3b stops firing. "
-        f"migrations seed {sorted(expected)}; SEED_TABLES holds {sorted(backup.SEED_TABLES)}"
+    assert backup.SEED_TABLE_EXTENSIONS == (), (
+        "PR #222's ancestry has no stacked auth-catalog seed migration. Extend "
+        "SEED_TABLE_EXTENSIONS only in the migration PR that actually seeds it."
     )
-    assert set(backup.SEED_TABLES) <= set(VIRGIN)
-    assert all(VIRGIN[name] > 0 for name in backup.SEED_TABLES)
+    required = backup._required_seed_tables()
+    assert set(required) == expected, (
+        "a migration seeds a table that the required seed contract does not list "
+        "(or the contract lists one it no longer seeds). Update CORE_SEED_TABLES or "
+        "the stacked SEED_TABLE_EXTENSIONS and re-measure the virgin state. "
+        f"Migrations seed {sorted(expected)}; the gate requires {sorted(required)}"
+    )
+    assert set(required) <= set(VIRGIN)
+    assert all(VIRGIN[name] > 0 for name in required)
+
+
+def test_seed_table_extension_is_consumed_by_every_backup_floor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A stacked seed table is gate behavior, not an inert exported constant."""
+    future = "future_seed_catalog"
+    monkeypatch.setattr(backup, "SEED_TABLE_EXTENSIONS", (future,))
+    required = backup._required_seed_tables()
+    assert required == backup.CORE_SEED_TABLES + (future,)
+
+    counts = dict.fromkeys(backup.CORE_SEED_TABLES, 1)
+    assert backup._counts_clear_floor(counts) is False
+    missing = backup._seed_floor_failures(counts)
+    assert len(missing) == 1 and future in missing[0] and "do not exist" in missing[0]
+    counts[future] = 0
+    assert backup._counts_clear_floor(counts) is False
+    empty = backup._seed_floor_failures(counts)
+    assert len(empty) == 1 and future in empty[0] and "hold 0 rows" in empty[0]
+    counts[future] = 1
+    assert backup._counts_clear_floor(counts) is True
+    assert backup._seed_floor_failures(counts) == []
+    assert backup._non_seed_rows(counts) == 0
+
+
+@pytest.mark.parametrize("extension", [("",), ("currencies",), ("future", "future")])
+def test_seed_table_extension_configuration_fails_closed(
+    monkeypatch: pytest.MonkeyPatch, extension: tuple[str, ...]
+) -> None:
+    """Blank or duplicate stacked entries cannot publish a content verdict."""
+    monkeypatch.setattr(backup, "SEED_TABLE_EXTENSIONS", extension)
+    with pytest.raises(backup.BackupError) as caught:
+        backup._required_seed_tables()
+    assert caught.value.code == backup.EXIT_INTERNAL
+    assert "seed-table contract" in str(caught.value)
 
 
 def test_the_derived_virgin_state_still_matches_the_measured_one() -> None:
@@ -745,14 +785,11 @@ def test_the_derived_virgin_state_still_matches_the_measured_one() -> None:
 
 
 def test_a_virgin_database_holds_no_rows_outside_the_seed_tables() -> None:
-    """Tier 3b's whole input. This is the property P0.7 silently broke.
+    """Tier 3b's whole input: a migrated schema has no application rows.
 
     ``_evaluate_content`` refuses ``--establish-watermark`` over a first run only
-    when ``non_seed == 0``. With the roles seed migration landed and SEED_TABLES
-    left at three names, a virgin database measured ``non_seed_rows=148``, so the
-    refusal never fired and `docker compose down -v` + auto-migrate + the flag
-    the exit-8 message names would have published an empty database as the
-    permanent reference.
+    when ``non_seed == 0``. Keeping the migration-derived seed set current is
+    what makes that refusal continue to fire after future seed migrations.
     """
     assert backup._non_seed_rows(VIRGIN) == 0
     verdict = backup._evaluate_content(VIRGIN, NO_WATERMARK, accept_drop=True, establish=True)
@@ -1045,23 +1082,15 @@ def test_a_shrinking_seed_table_is_overridable(tmp_path: Path) -> None:
     assert backup._load_watermark(tmp_path).tables["currencies"] == 170
 
 
-def test_retiring_a_permission_costs_exactly_one_override_night(tmp_path: Path) -> None:
-    """The price of widening SEED_TABLES, measured rather than asserted in prose.
-
-    `roles`, `permissions` and `role_permission_assignments` joined SEED_TABLES to
-    restore tier 3b, and that put them under the exact-mark seed-shrink rule too.
-    Unlike a frozen ISO snapshot these DO change on ordinary work --
-    `20260513_0002_retire_graph_permissions` is the precedent. Docs/22 promises
-    the operator that this costs one `--accept-content-drop` run and no more, so
-    that promise is a test: red, cleared, and green again with no flag.
-    """
+def test_retiring_a_seed_row_costs_exactly_one_override_night(tmp_path: Path) -> None:
+    """A real seeded-table shrink costs one override night, then clears."""
     _night(tmp_path, "20260801T020000", REAL, establish=True)
     retired = dict(REAL)
-    retired["permissions"] -= 1
+    retired["currencies"] -= 1
 
     red = _night(tmp_path, "20260802T020000", retired)
     assert red.accepted is False
-    assert any("permissions" in reason for reason in red.failures)
+    assert any("currencies" in reason for reason in red.failures)
 
     cleared = _night(tmp_path, "20260803T020000", retired, accept_drop=True)
     assert cleared.accepted is True
@@ -1069,7 +1098,7 @@ def test_retiring_a_permission_costs_exactly_one_override_night(tmp_path: Path) 
     assert _night(tmp_path, "20260804T020000", retired).accepted is True, (
         "one override night, not a standing flag in the scheduled task"
     )
-    assert backup._load_watermark(tmp_path).tables["permissions"] == retired["permissions"]
+    assert backup._load_watermark(tmp_path).tables["currencies"] == retired["currencies"]
 
 
 def test_a_disappeared_table_is_caught() -> None:
@@ -2647,12 +2676,100 @@ def test_restore_still_accepts_a_manifest_written_before_the_gate_existed(
                 # refused before any destructive apply, so the legacy-compat
                 # fixture records real counts to keep this test pointed at its
                 # actual subject -- a manifest with no content_gate verdict.
-                "table_row_counts": {"public.channels": 1},
+                "table_row_counts": dict.fromkeys(backup.CORE_SEED_TABLES, 1),
+                "large_object_count": 0,
             }
         ),
         encoding="utf-8",
     )
     assert restore._load_backup(run)["schema"] == backup.MANIFEST_SCHEMA
+
+
+def test_restore_enforces_every_seed_declared_by_a_stacked_backup() -> None:
+    """A future manifest extension fails closed when missing or empty after replay."""
+    future = "future_seed_catalog"
+    required = [*restore.CORE_SEED_TABLES, future]
+
+    def manifest_for(counts: dict[str, int]) -> dict[str, object]:
+        """Build one internally consistent accepted gate around ``counts``."""
+        return {
+            "table_row_counts": counts,
+            "content_gate": {
+                "status": "accepted",
+                "tables": len(counts),
+                "rows": sum(counts.values()),
+                "seed_tables": required,
+            },
+        }
+
+    counts = dict.fromkeys(restore.CORE_SEED_TABLES, 1)
+    with pytest.raises(restore.RestoreError, match=f"missing: {future}"):
+        restore._require_manifest_seed_floor(manifest_for(counts), counts)
+
+    counts[future] = 0
+    with pytest.raises(restore.RestoreError, match=f"empty: {future}"):
+        restore._require_manifest_seed_floor(manifest_for(counts), counts)
+
+    counts[future] = 1
+    assert restore._require_manifest_seed_floor(manifest_for(counts), counts) == tuple(
+        required
+    )
+
+
+def test_restore_rejects_an_accepted_gate_without_its_seed_contract() -> None:
+    """An accepted label alone cannot bypass seed-floor reproducibility."""
+    counts = dict.fromkeys(restore.CORE_SEED_TABLES, 1)
+    manifest = {
+        "table_row_counts": counts,
+        "content_gate": {
+            "status": "accepted",
+            "tables": len(counts),
+            "rows": sum(counts.values()),
+        },
+    }
+    with pytest.raises(restore.RestoreError) as caught:
+        restore._require_manifest_seed_floor(manifest, counts)
+    assert caught.value.code == restore.EXIT_USAGE
+    assert "seed_tables is missing or empty" in str(caught.value)
+
+
+@pytest.mark.parametrize(("field", "value"), [("tables", True), ("rows", False)])
+def test_restore_rejects_boolean_content_gate_aggregates(
+    field: str, value: bool
+) -> None:
+    """JSON booleans must not pass as integer table/row aggregate values."""
+    counts = dict.fromkeys(restore.CORE_SEED_TABLES, 1)
+    gate: dict[str, object] = {
+        "status": "accepted",
+        "tables": len(counts),
+        "rows": sum(counts.values()),
+        "seed_tables": list(restore.CORE_SEED_TABLES),
+    }
+    gate[field] = value
+    with pytest.raises(restore.RestoreError) as caught:
+        restore._require_manifest_seed_floor({"content_gate": gate}, counts)
+    assert caught.value.code == restore.EXIT_USAGE
+    assert "exact nonnegative integers" in str(caught.value)
+
+
+def test_restore_rejects_a_zero_byte_artifact_even_when_its_hash_matches(
+    tmp_path: Path,
+) -> None:
+    """A self-consistent sha256 cannot turn an empty dump into restore input."""
+    run = _write_run(tmp_path, "20260824T222105", counts=REAL)
+    dump = run / restore.DUMP_NAME
+    dump.write_bytes(b"")
+    manifest_path = run / restore.MANIFEST_NAME
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["artifacts"][restore.DUMP_NAME] = {
+        "bytes": 0,
+        "sha256": restore._sha256(dump),
+    }
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    with pytest.raises(restore.RestoreError) as caught:
+        restore._load_backup(run)
+    assert caught.value.code == restore.EXIT_ARTIFACT_INTEGRITY
+    assert "database.dump is empty" in str(caught.value)
 
 
 def test_restore_requires_sha256_for_both_artifacts(tmp_path: Path) -> None:
@@ -2898,6 +3015,7 @@ def test_dump_database_passes_snapshot_flag(
     assert isinstance(argv, list)
     joined = " ".join(argv)
     assert "--snapshot='00000004-00000005-1'" in joined
+    assert "--blobs" in joined
 
 
 def test_exit_codes_stay_distinct() -> None:
@@ -2999,11 +3117,11 @@ class _FakeContainer:
 
     def _dump_database_and_count(
         self, _container: str, target: Path, *, timeout: int
-    ) -> tuple[dict[str, int], set[str], set[str]]:
+    ) -> tuple[dict[str, int], set[str], set[str], int, str]:
         """dump database and count."""
         _ = timeout
         target.write_bytes(backup.CUSTOM_FORMAT_MAGIC + b"-fake-archive")
-        return dict(self.counts), set(), set()
+        return dict(self.counts), set(), set(), 0, FAKE_DATABASE_ACL
 
     def _pg_restore_list(self, _container: str, _dump_path: Path, *, timeout: int) -> str:
         """Return a minimal pg_restore listing for fake CLI archives."""
@@ -3026,6 +3144,8 @@ class _FakeContainer:
             "database": self.identity.database,
             "superuser": "ums",
             "system_identifier": self.identity.system_identifier,
+            "database_locale": "6|UTF8|C|C|c|",
+            "database_acl": FAKE_DATABASE_ACL,
         }
 
 
@@ -3108,20 +3228,23 @@ def test_the_cli_refuses_a_first_run_without_the_acknowledgement(
     assert _last_run(tmp_path)["status"] == "REJECTED"
 
 
-def test_the_cli_quarantines_a_dropped_schema_and_touches_nothing_else(
+def test_the_cli_quarantines_a_dropped_schema_and_prunes_only_expired_side_runs(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, clock: _Clock
 ) -> None:
     """M53's kill. Every consequence of ``if not outcome.accepted:`` at once.
 
     A dropped schema, against a directory that already holds a good backup and
     an expired one. The run must exit 8, land under ``.rejected``, leave the
-    watermark exactly where it was, and -- retention invariant 6 -- delete
-    nothing, because a night that captured nothing gets no say over what is
-    removed.
+    watermark exactly where it was, preserve the previous good backup, and
+    prune only an expired side-run. A rejected night gets no say over which
+    accepted backup occupies the retention slots.
     """
     assert _run_cli(monkeypatch, tmp_path, REAL, "--establish-watermark") == backup.EXIT_OK
     good = _run_dirs(tmp_path)[0]
-    expired = _write_run(tmp_path, "20260101T000000", counts=REAL)
+    expired_accepted = _write_run(tmp_path, "20260101T000000", counts=REAL)
+    expired_rejected = _write_run(
+        tmp_path, "20260101T000001", counts=EMPTY, rejected=True
+    )
     before = json.loads((tmp_path / backup.WATERMARK_NAME).read_text(encoding="utf-8"))
     clock.advance(timedelta(days=1))
 
@@ -3133,7 +3256,13 @@ def test_the_cli_quarantines_a_dropped_schema_and_touches_nothing_else(
     after = json.loads((tmp_path / backup.WATERMARK_NAME).read_text(encoding="utf-8"))
     assert after == before, "a rejected run must not rewrite the watermark"
     assert (tmp_path / good).is_dir(), "the previous good backup must survive"
-    assert expired.is_dir(), "retention invariant 6: a rejected run prunes nothing"
+    assert expired_accepted.is_dir(), (
+        "a rejected run is not a verified replacement and must not delete "
+        "accepted history"
+    )
+    assert not expired_rejected.is_dir(), "an expired rejected side-run should be pruned"
+    assert expired_rejected.name in _last_run(tmp_path)["pruned"]
+    assert expired_accepted.name not in _last_run(tmp_path)["pruned"]
     record = _last_run(tmp_path)
     assert record["status"] == "REJECTED"
     assert record["exit_code"] == backup.EXIT_NO_CONTENT
@@ -3730,9 +3859,11 @@ def test_parse_role_name_lines_skips_blank() -> None:
 
 def test_guard_empty_refuses_non_public_user_objects(monkeypatch: pytest.MonkeyPatch) -> None:
     """Tables outside public still block restore without --allow-nonempty."""
-    def _psql(_container: str, sql: str, *, timeout: int) -> str:
+    def _psql(
+        _container: str, sql: str, *, timeout: int, dbname: str | None = None
+    ) -> str:
         """Return a non-zero user-object count for guard-empty tests."""
-        _ = (_container, timeout)
+        _ = (_container, timeout, dbname)
         assert "pg_catalog.pg_class" in sql
         assert "typtype IN ('b', 'c', 'd', 'e', 'r', 'm')" in sql
         assert "pg_catalog.pg_proc" in sql
@@ -3964,7 +4095,7 @@ _REAL_ROLES_SQL = (
 # double-quoted -- PostgreSQL does not fold quoted identifiers -- while
 # ``SELECT current_user`` returns the bare name. A gate that folds one and not
 # the other calls the bootstrap superuser a foreign role and refuses a genuine
-# archive before the drop.
+# archive before any restore mutation.
 _REAL_MIXED_CASE_ROLES_SQL = (
     "--\n-- Roles\n--\n\n"
     'CREATE ROLE "Ums_Admin";\n'
@@ -3992,7 +4123,7 @@ def _roles_sql_gate_problems(module: ModuleType, body: str, superuser: str) -> l
         module._role_sql_meta_command_problems(body)
         + module._unsupported_role_statement_problems(body)
         + module._role_privilege_drift_problems(body)
-        + module._role_membership_problems(body)
+        + module._role_membership_problems(body, superuser=superuser)
         + [f"foreign role {name}" for name in foreign(body, superuser=superuser)]
     )
 
@@ -4019,14 +4150,14 @@ def test_roles_sql_gate_accepts_real_pg_dumpall_output() -> None:
         ("the captured container-shape dump", _REAL_ROLES_SQL, "postgres"),
         ("a mixed-case bootstrap superuser", _REAL_MIXED_CASE_ROLES_SQL, "Ums_Admin"),
         (
-            "the restricted-login membership edge",
+            "the restricted-login bootstrap membership edge",
             _BOTH_APP_ROLES
-            + "GRANT app_tenant TO ums_app WITH INHERIT FALSE GRANTED BY postgres;\n",
+            + "GRANT app_tenant TO postgres WITH INHERIT FALSE GRANTED BY postgres;\n",
             "postgres",
         ),
         (
-            "the PG<=15 membership form, no WITH clause",
-            _BOTH_APP_ROLES + "GRANT app_platform TO ums_app GRANTED BY postgres;\n",
+            "the PG<=15 bootstrap membership form, no WITH clause",
+            _BOTH_APP_ROLES + "GRANT app_platform TO postgres GRANTED BY postgres;\n",
             "postgres",
         ),
         (
@@ -4076,7 +4207,9 @@ def test_roles_sql_gate_accepts_real_pg_dumpall_output() -> None:
                 label,
             )
     # And the whole captured dump really is publishable.
-    backup._validate_dump_roles_covered(listing=None, roles_body=_REAL_ROLES_SQL)
+    backup._validate_dump_roles_covered(
+        listing=None, roles_body=_REAL_ROLES_SQL, superuser="postgres"
+    )
 
 
 def test_restore_preflight_refuses_a_role_membership_for_an_app_role(
@@ -4202,7 +4335,9 @@ def test_backup_refuses_to_publish_a_role_membership_for_an_app_role() -> None:
     assert raised.value.code == backup.EXIT_ARTIFACT_INVALID
     assert "membership graph" in str(raised.value)
 
-    backup._validate_dump_roles_covered(listing=None, roles_body=_REAL_ROLES_SQL)
+    backup._validate_dump_roles_covered(
+        listing=None, roles_body=_REAL_ROLES_SQL, superuser="postgres"
+    )
 
 
 def test_roles_sql_gate_reads_the_statements_psql_executes() -> None:
@@ -4892,17 +5027,10 @@ def test_run_is_published_backup_requires_artifact_metadata(tmp_path: Path) -> N
     assert backup._run_is_published_backup(run, manifest) is False
 
 
-def test_execute_restore_recreates_target_only_when_allow_nonempty(
+def test_execute_restore_verifies_replacement_before_cutover_on_every_path(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """--allow-nonempty must recreate the whole target before roles or data apply.
-
-    And -- the arm added for the round-13 P1 -- roles.sql's READ-ONLY validation
-    must run BEFORE the recreate. Those checks used to live inside
-    _restore_roles, i.e. after DROP DATABASE had already destroyed the target, so
-    a backup whose bootstrap superuser differed from this target was rejected
-    only once the original data was irrecoverable.
-    """
+    """No restore path may overlay the live target before isolated verification."""
     from types import SimpleNamespace
 
     order: list[str] = []
@@ -4927,10 +5055,40 @@ def test_execute_restore_recreates_target_only_when_allow_nonempty(
     )
     monkeypatch.setattr(
         restore,
-        "_recreate_target_database",
-        lambda container, target_db, timeout, locale_row="": order.append(
-            f"recreate:{target_db}"
-        ),
+        "_source_database_metadata",
+        lambda manifest: ("6|UTF8|C|C|c|", "postgres", []),
+    )
+    monkeypatch.setattr(restore, "_database_acl_role_problems", lambda *a, **k: [])
+    monkeypatch.setattr(
+        restore,
+        "_verify_backup_artifact_digests",
+        lambda *a, **k: order.append("digest"),
+    )
+
+    @contextmanager
+    def fake_target_lock(*_args: object, **_kwargs: object):
+        """Model one target-scoped lock without starting a subprocess."""
+        order.append("lock")
+        try:
+            yield
+        finally:
+            order.append("unlock")
+
+    monkeypatch.setattr(restore, "_target_restore_lock", fake_target_lock)
+    monkeypatch.setattr(
+        restore,
+        "_apply_database_acl",
+        lambda _c, database, *_a, **_k: order.append(f"acl:{database}"),
+    )
+    monkeypatch.setattr(
+        restore,
+        "_require_target_locale",
+        lambda *_a, dbname=None, **_k: order.append(f"locale:{dbname}"),
+    )
+    monkeypatch.setattr(
+        restore,
+        "_create_replacement_database",
+        lambda _c, target_db, **_k: order.append(f"create:{target_db}") or "staging-db",
     )
     monkeypatch.setattr(
         restore,
@@ -4938,11 +5096,37 @@ def test_execute_restore_recreates_target_only_when_allow_nonempty(
         lambda container, path, timeout: order.append("roles") or set(),
     )
     monkeypatch.setattr(
-        restore, "_restore_data", lambda *a, **k: order.append("data")
+        restore,
+        "_restore_data",
+        lambda *_a, dbname=None, **_k: order.append(f"data:{dbname}"),
     )
-    monkeypatch.setattr(restore, "_verify", lambda *a, **k: True)
+    monkeypatch.setattr(
+        restore,
+        "_verify",
+        lambda *_a, dbname=None, **_k: order.append(f"verify:{dbname}") or True,
+    )
+    monkeypatch.setattr(restore, "_drop_generated_database", lambda *a, **k: None)
+    monkeypatch.setattr(restore, "_live_protected_role_problems", lambda *a, **k: [])
+    monkeypatch.setattr(restore, "_foreign_writer_session_count", lambda *a, **k: 0)
+
+    def fake_cutover(
+        _container: str,
+        target_db: str,
+        replacement: str,
+        *,
+        timeout: int,
+        finalize: Callable[[], None] | None = None,
+    ) -> str:
+        """Model the rename boundary and its final role replay."""
+        _ = timeout
+        order.append(f"cutover:{target_db}<-{replacement}")
+        if finalize is not None:
+            finalize()
+        return "previous-db"
+
+    monkeypatch.setattr(restore, "_cutover_verified_database", fake_cutover)
     # The round-23 live checks read the catalog through _psql; stub it as a
-    # healthy cluster so the destructive path is reached and its ORDER can be
+    # healthy cluster so the replacement path is reached and its ORDER can be
     # asserted below.
     monkeypatch.setattr(restore, "_psql", _restore_psql())
 
@@ -4955,23 +5139,30 @@ def test_execute_restore_recreates_target_only_when_allow_nonempty(
             wait_for_postgres=60,
             docker_timeout=5,
         )
-        return restore._execute_restore("container", tmp_path, args, {})
+        return restore._execute_restore(
+            "container", tmp_path, args, {"source": {"database": "appdb"}}
+        )
 
     assert _run(allow_nonempty=True) is True
+    assert order.index("dbname") < order.index("lock") < order.index("guard")
     assert (
         order.index("guard")
         < order.index("dumpcheck")
         < order.index("preflight")
-        < order.index("dbname")
-        < order.index("recreate:appdb")
+        < order.index("create:appdb")
         < order.index("roles")
+        < order.index("acl:staging-db")
+        < order.index("data:staging-db")
+        < order.index("verify:staging-db")
+        < order.index("cutover:appdb<-staging-db")
+        < order.index("unlock")
     ), (
-        "the archive AND roles.sql must be validated BEFORE the target is "
-        "dropped; the archive probe now runs on every path, ahead of roles"
+        "preflights must precede staging, and the verified replacement must "
+        "precede the only live-name cutover"
     )
 
     assert _run(allow_nonempty=False) is True
-    assert "recreate:appdb" not in order and "dbname" not in order
+    assert "create:appdb" in order and "dbname" in order
     assert "dumpcheck" in order, (
         "the archive readability probe is read-only and must run on EVERY "
         "restore path -- an empty-target restore applies roles.sql, so an "
@@ -4980,6 +5171,7 @@ def test_execute_restore_recreates_target_only_when_allow_nonempty(
     assert order.index("dumpcheck") < order.index("roles"), (
         "the probe must refuse before roles.sql is applied, not after"
     )
+    assert order.index("preflight") < order.index("locale:staging-db") < order.index("roles")
 
 
 def test_preflight_dump_readable_fails_closed_on_a_nonzero_listing(
@@ -5013,38 +5205,55 @@ def test_preflight_dump_readable_fails_closed_on_a_nonzero_listing(
         restore._preflight_dump_readable("container", dump, timeout=5)
     assert raised.value.code == restore.EXIT_RESTORE_FAILED
     assert "unsupported version" in str(raised.value)
-    assert "NOT dropped" in str(raised.value)
+    assert "not changed" in str(raised.value)
 
     joined = " ".join(seen[0])
     assert "pg_restore --list" in joined
     # --list neither connects nor writes; a probe that did either would not be
-    # safe to run before the drop, which is the whole point of running it there.
+    # safe to run before any mutation, which is the point of running it here.
     assert "-d " not in joined and "--clean" not in joined
 
     monkeypatch.setattr(restore, "_run_with_file", _listing(0, ""))
     restore._preflight_dump_readable("container", dump, timeout=5)
 
 
-def test_execute_restore_refuses_an_unreadable_archive_before_dropping_target(
+def test_execute_restore_refuses_an_unreadable_archive_before_staging(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """An archive this container's pg_restore cannot read must be refused first.
 
     The sha256 digest is checked on the way in, but it only proves the bytes
     match what backup wrote. A newer archive format hashes correctly and is
-    still unreadable here -- and that was discovered by _restore_data, one step
-    AFTER DROP DATABASE had committed, leaving an empty shell and no original.
+    still unreadable here. The probe runs before roles.sql replay and before the
+    replacement database is created, so a refusal changes no cluster state.
 
-    The load-bearing assertion is "recreate" not in order: without it this would
-    only prove the probe ran, not that the drop was actually skipped. The probe
-    now runs BEFORE the roles.sql preflight on every path, so a refusal lands
-    before any cluster state is touched at all.
+    The load-bearing assertion is "create" not in order: without it this would
+    only prove the probe ran, not that staging was actually skipped.
     """
     from types import SimpleNamespace
 
     order: list[str] = []
     monkeypatch.setattr(restore, "_await_postgres", lambda *a, **k: None)
     monkeypatch.setattr(restore, "_guard_empty", lambda *a, **k: None)
+    monkeypatch.setattr(
+        restore,
+        "_source_database_metadata",
+        lambda manifest: ("6|UTF8|C|C|c|", "postgres", []),
+    )
+    monkeypatch.setattr(restore, "_database_acl_role_problems", lambda *a, **k: [])
+    monkeypatch.setattr(
+        restore, "_verify_backup_artifact_digests", lambda *a, **k: None
+    )
+    monkeypatch.setattr(restore, "_foreign_writer_session_count", lambda *a, **k: 0)
+    monkeypatch.setattr(restore, "_live_protected_role_problems", lambda *a, **k: [])
+
+    @contextmanager
+    def fake_target_lock(*_args: object, **_kwargs: object):
+        """Model lock ownership while the preflight rejects the archive."""
+        order.append("lock")
+        yield
+
+    monkeypatch.setattr(restore, "_target_restore_lock", fake_target_lock)
     monkeypatch.setattr(
         restore, "_preflight_roles_file", lambda *a, **k: order.append("preflight")
     )
@@ -5065,7 +5274,7 @@ def test_execute_restore_refuses_an_unreadable_archive_before_dropping_target(
         lambda *a, **k: order.append("dbname") or "appdb",
     )
     monkeypatch.setattr(
-        restore, "_recreate_target_database", lambda *a, **k: order.append("recreate")
+        restore, "_create_replacement_database", lambda *a, **k: order.append("create")
     )
     monkeypatch.setattr(
         restore, "_restore_roles", lambda *a, **k: order.append("roles") or set()
@@ -5077,15 +5286,18 @@ def test_execute_restore_refuses_an_unreadable_archive_before_dropping_target(
         timeout=5, allow_nonempty=True, wait_for_postgres=60, docker_timeout=5
     )
     with pytest.raises(restore.RestoreError) as raised:
-        restore._execute_restore("container", tmp_path, args, {})
+        restore._execute_restore(
+            "container", tmp_path, args, {"source": {"database": "appdb"}}
+        )
 
     assert raised.value.code == restore.EXIT_RESTORE_FAILED
     # The archive probe moved ahead of the roles.sql preflight (every path),
     # so the refusal lands before ANYTHING touches the cluster -- the stub
     # raises inside the probe, so the roles preflight is never even reached.
-    assert order == ["dumpcheck"], (
+    assert order == ["dbname", "lock", "dumpcheck"], (
         f"the target must be untouched after the probe refuses, got {order}"
     )
+    assert "create" not in order
 
 
 def test_windows_dacl_parser_fail_closed() -> None:
@@ -5976,7 +6188,7 @@ def test_restore_roles_resets_existing_protected_roles_before_replay(
 ) -> None:
     """A cluster that already has the app roles must be RESET ALL'd first.
 
-    Cluster-global role settings survive DROP DATABASE exactly like
+    Cluster-global role settings survive database replacement exactly like
     memberships; without the normalization a target-only ``ALTER ROLE
     app_tenant SET statement_timeout`` outlived the restore (Qodo round-21).
     """
@@ -5986,16 +6198,18 @@ def test_restore_roles_resets_existing_protected_roles_before_replay(
     )
     issued: list[str] = []
 
-    def recording_psql(_container: str, sql: str, *, timeout: int) -> str:
+    def recording_psql(
+        _container: str, sql: str, *, timeout: int, dbname: str | None = None
+    ) -> str:
         """Record every statement; answer as a healthy cluster."""
-        _ = timeout
+        _ = (timeout, dbname)
         issued.append(sql)
-        if "current_user" in sql:
-            return "ums"
         if "pg_auth_members" in sql or "pg_db_role_setting" in sql:
             return ""
         if "rolsuper" in sql or "pg_stat_activity" in sql:
             return ""
+        if "current_user" in sql:
+            return "ums"
         return "app_tenant\napp_platform\n"
 
     applied: list[str] = []
@@ -6319,10 +6533,39 @@ def _patched_execute_restore(monkeypatch: pytest.MonkeyPatch, order: list[str]):
     )
     monkeypatch.setattr(
         restore,
-        "_recreate_target_database",
-        lambda container, target_db, timeout, locale_row="": order.append(
-            f"recreate:{target_db}"
-        ),
+        "_source_database_metadata",
+        lambda manifest: ("6|UTF8|C|C|c|", "postgres", []),
+    )
+    monkeypatch.setattr(restore, "_database_acl_role_problems", lambda *a, **k: [])
+    monkeypatch.setattr(
+        restore,
+        "_verify_backup_artifact_digests",
+        lambda *a, **k: order.append("digest"),
+    )
+
+    @contextmanager
+    def fake_target_lock(*_args: object, **_kwargs: object):
+        """Model one target lock without starting a subprocess."""
+        order.append("lock")
+        try:
+            yield
+        finally:
+            order.append("unlock")
+
+    monkeypatch.setattr(restore, "_target_restore_lock", fake_target_lock)
+    monkeypatch.setattr(
+        restore, "_apply_database_acl", lambda *a, **k: order.append("acl")
+    )
+    monkeypatch.setattr(
+        restore, "_require_target_locale", lambda *a, **k: order.append("locale")
+    )
+    monkeypatch.setattr(
+        restore,
+        "_create_replacement_database",
+        lambda _container, target_db, **_kwargs: order.append(
+            f"create:{target_db}"
+        )
+        or "staging-db",
     )
     monkeypatch.setattr(
         restore,
@@ -6331,13 +6574,35 @@ def _patched_execute_restore(monkeypatch: pytest.MonkeyPatch, order: list[str]):
     )
     monkeypatch.setattr(restore, "_restore_data", lambda *a, **k: order.append("data"))
     monkeypatch.setattr(restore, "_verify", lambda *a, **k: True)
+    monkeypatch.setattr(
+        restore,
+        "_drop_generated_database",
+        lambda _container, database, **_kwargs: order.append(f"cleanup:{database}"),
+    )
+
+    def fake_cutover(
+        _container: str,
+        target_db: str,
+        replacement: str,
+        *,
+        timeout: int,
+        finalize: Callable[[], None] | None = None,
+    ) -> str:
+        """Model a successful cutover including the final role replay."""
+        _ = timeout
+        order.append(f"cutover:{target_db}<-{replacement}")
+        if finalize is not None:
+            finalize()
+        return "previous-db"
+
+    monkeypatch.setattr(restore, "_cutover_verified_database", fake_cutover)
     return SimpleNamespace
 
 
-def test_execute_restore_refuses_live_role_state_before_the_drop(
+def test_execute_restore_refuses_live_role_state_before_staging(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A target-leftover membership must refuse BEFORE the drop (codex P1)."""
+    """A target-leftover membership must refuse before replacement creation."""
     order: list[str] = []
     args_ns = _patched_execute_restore(monkeypatch, order)
     monkeypatch.setattr(restore, "_psql", _restore_psql(memberships=["app_tenant -> postgres"]))
@@ -6347,17 +6612,17 @@ def test_execute_restore_refuses_live_role_state_before_the_drop(
             "container",
             tmp_path,
             args_ns(timeout=5, allow_nonempty=True, wait_for_postgres=60, docker_timeout=5),
-            {},
+            {"source": {"database": "appdb"}},
         )
     assert caught.value.code == restore.EXIT_ROLES_FAILED
     assert "membership edges: app_tenant -> postgres" in str(caught.value)
-    assert "recreate:appdb" not in order, "the refusal must land before the drop"
+    assert "create:appdb" not in order, "the refusal must land before staging"
 
 
-def test_execute_restore_refuses_live_privileged_attributes_before_the_drop(
+def test_execute_restore_refuses_live_privileged_attributes_before_staging(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A target app_tenant left SUPERUSER by hand must refuse pre-drop."""
+    """A target app_tenant left SUPERUSER by hand must refuse before staging."""
     order: list[str] = []
     args_ns = _patched_execute_restore(monkeypatch, order)
     monkeypatch.setattr(restore, "_psql", _restore_psql(privileged=["app_tenant"]))
@@ -6367,17 +6632,17 @@ def test_execute_restore_refuses_live_privileged_attributes_before_the_drop(
             "container",
             tmp_path,
             args_ns(timeout=5, allow_nonempty=True, wait_for_postgres=60, docker_timeout=5),
-            {},
+            {"source": {"database": "appdb"}},
         )
     assert caught.value.code == restore.EXIT_ROLES_FAILED
     assert "privileged attributes on: app_tenant" in str(caught.value)
-    assert "recreate:appdb" not in order
+    assert "create:appdb" not in order
 
 
-def test_execute_restore_refuses_live_writers_before_the_drop(
+def test_execute_restore_refuses_live_writers_before_staging(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Live application pools must be stopped before a destructive restore."""
+    """Live application pools must be stopped before staging and cutover."""
     order: list[str] = []
     args_ns = _patched_execute_restore(monkeypatch, order)
     monkeypatch.setattr(restore, "_psql", _restore_psql(writers=3))
@@ -6387,45 +6652,38 @@ def test_execute_restore_refuses_live_writers_before_the_drop(
             "container",
             tmp_path,
             args_ns(timeout=5, allow_nonempty=True, wait_for_postgres=60, docker_timeout=5),
-            {},
+            {"source": {"database": "appdb"}},
         )
     assert caught.value.code == restore.EXIT_USAGE
     assert "3 live client" in str(caught.value)
     assert "docker compose stop" in str(caught.value)
-    assert "recreate:appdb" not in order
+    assert "create:appdb" not in order
 
 
-def test_execute_restore_fails_verification_when_writers_returned(
+def test_execute_restore_never_cuts_over_a_failed_replacement_verification(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A pool that reconnects during the restore invalidates the verification.
-
-    The session count is read twice: zero before the drop (the guard passes),
-    one after _verify -- exactly what a Compose app with restart:
-    unless-stopped does the moment the recreated database exists.
-    """
+    """A failed count/seed/large-object proof leaves the live name untouched."""
     order: list[str] = []
     args_ns = _patched_execute_restore(monkeypatch, order)
-    writer_reads = {"n": 0}
-    healthy = _restore_psql()
+    monkeypatch.setattr(restore, "_psql", _restore_psql())
+    monkeypatch.setattr(
+        restore,
+        "_verify",
+        lambda *a, **k: order.append("verify-failed") or False,
+    )
 
-    def sequencing_psql(_container: str, sql: str, *, timeout: int) -> str:
-        """Answer the writer count 0 first, 1 on every later read."""
-        if "pg_stat_activity" in sql:
-            writer_reads["n"] += 1
-            return "0\n" if writer_reads["n"] == 1 else "1\n"
-        return healthy(_container, sql, timeout=timeout)
+    ok = restore._execute_restore(
+        "container",
+        tmp_path,
+        args_ns(timeout=5, allow_nonempty=True, wait_for_postgres=60, docker_timeout=5),
+        {"source": {"database": "appdb"}},
+    )
 
-    monkeypatch.setattr(restore, "_psql", sequencing_psql)
-    with pytest.raises(restore.RestoreError) as caught:
-        restore._execute_restore(
-            "container",
-            tmp_path,
-            args_ns(timeout=5, allow_nonempty=True, wait_for_postgres=60, docker_timeout=5),
-            {},
-        )
-    assert caught.value.code == restore.EXIT_VERIFY_FAILED
-    assert "may no longer describe the database" in str(caught.value)
+    assert ok is False
+    assert "verify-failed" in order
+    assert "cleanup:staging-db" in order
+    assert not any(item.startswith("cutover:") for item in order)
 
 
 def test_restore_roles_rejects_privileged_attributes(
@@ -6593,7 +6851,7 @@ def test_psql_dbname_is_shell_quoted() -> None:
 def test_preflight_refuses_bootstrap_password_rewrite(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """ALTER ROLE <superuser> PASSWORD must refuse pre-drop (round-26 P1)."""
+    """ALTER ROLE <superuser> PASSWORD must refuse before replay (round-26 P1)."""
     monkeypatch.setattr(restore, "_psql", _restore_psql())
     roles_path = tmp_path / restore.ROLES_NAME
     roles_path.write_text(
@@ -6680,6 +6938,8 @@ def test_backup_records_the_database_locale_row() -> None:
         # must be matched BEFORE that branch.
         if "datlocprovider" in sql:
             return "6|UTF8|en_US.UTF-8|en_US.UTF-8|c|\n"
+        if "json_build_object" in sql:
+            return FAKE_DATABASE_ACL + "\n"
         if "current_database()" in sql:
             return "ums\n"
         if "current_user" in sql:
@@ -6698,6 +6958,38 @@ def test_backup_records_the_database_locale_row() -> None:
         )
         facts = backup._container_facts("ctr", timeout=5)
     assert facts["database_locale"] == "6|UTF8|en_US.UTF-8|en_US.UTF-8|c|"
+
+
+def test_backup_refuses_to_publish_without_a_database_locale_row(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A missing pg_database row cannot become a deferred restore failure."""
+
+    def fake_psql(_container: str, sql: str, *, timeout: int) -> str:
+        """Answer provenance queries except the deliberately empty locale row."""
+        _ = timeout
+        if "datlocprovider" in sql:
+            return "\n"
+        if "current_database()" in sql:
+            return "ums\n"
+        if "current_user" in sql:
+            return "ums\n"
+        if "server_version" in sql:
+            return "18.6\n"
+        if "pg_control_system" in sql:
+            return "123\n"
+        raise AssertionError(f"unexpected query: {sql}")
+
+    monkeypatch.setattr(backup, "_psql", fake_psql)
+    monkeypatch.setattr(
+        backup,
+        "_run",
+        lambda *_args, **_kwargs: subprocess.CompletedProcess([], 0, "", ""),
+    )
+    with pytest.raises(backup.BackupError) as caught:
+        backup._container_facts("ctr", timeout=5)
+    assert caught.value.code == backup.EXIT_COMMAND_FAILED
+    assert "locale fidelity" in str(caught.value)
 
 
 def test_database_locale_row_falls_back_to_the_legacy_column(
@@ -6758,7 +7050,8 @@ def test_create_database_options_preserve_the_source_locale() -> None:
     old comparison expected, which sent real ICU databases down the libc
     branch and silently changed collation semantics after restore.
     """
-    assert restore._create_database_options("") == ""
+    with pytest.raises(restore.RestoreError, match="database_locale"):
+        restore._create_database_options("")
     assert restore._create_database_options("6|UTF8|en_US.UTF-8|en_US.UTF-8|c|") == (
         " TEMPLATE template0 ENCODING 'UTF8'"
         " LC_COLLATE 'en_US.UTF-8' LC_CTYPE 'en_US.UTF-8'"
@@ -6789,36 +7082,454 @@ def test_create_database_options_preserve_the_source_locale() -> None:
     assert "provider" in str(unknown_provider.value)
 
 
-def test_audit_phase_is_bounded_under_a_blocked_audit_sink(
+def test_restore_target_name_must_match_the_backup_source_database() -> None:
+    """Database-scoped role settings cannot be silently applied to another name."""
+    manifest = {"source": {"database": "ums_smart_revenue"}}
+    restore._require_source_database_target(manifest, "ums_smart_revenue")
+    with pytest.raises(restore.RestoreError) as mismatch:
+        restore._require_source_database_target(manifest, "different_database")
+    assert mismatch.value.code == restore.EXIT_USAGE
+    assert "database-scoped role settings" in str(mismatch.value)
+    with pytest.raises(restore.RestoreError) as missing:
+        restore._require_source_database_target({"source": {}}, "ums_smart_revenue")
+    assert missing.value.code == restore.EXIT_USAGE
+
+
+def test_restore_stages_and_rechecks_the_artifacts_at_point_of_use(
+    tmp_path: Path,
+) -> None:
+    """A source replacement after load cannot change bytes sent to pg_restore."""
+    run = _write_run(tmp_path, "20260824T222105", counts=REAL)
+    manifest = restore._load_backup(run)
+    original_dump = (run / restore.DUMP_NAME).read_bytes()
+    original_roles = (run / restore.ROLES_NAME).read_bytes()
+
+    with restore._stage_backup_artifacts(run, manifest) as staged:
+        assert staged != run
+        assert (staged / restore.DUMP_NAME).read_bytes() == original_dump
+        assert (staged / restore.ROLES_NAME).read_bytes() == original_roles
+        (run / restore.DUMP_NAME).write_bytes(b"attacker-replaced")
+        (run / restore.ROLES_NAME).write_bytes(b"attacker-replaced")
+        assert (staged / restore.DUMP_NAME).read_bytes() == original_dump
+        assert (staged / restore.ROLES_NAME).read_bytes() == original_roles
+
+
+def test_restore_restricts_staging_before_copying_sensitive_bytes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A permission failure lands before either dump or roles bytes are copied."""
+    run = _write_run(tmp_path, "20260824T222105", counts=REAL)
+    manifest = restore._load_backup(run)
+    attempted: list[Path] = []
+
+    def refuse(staging: Path) -> None:
+        """Prove the new directory is empty at the permission boundary."""
+        attempted.append(staging)
+        assert list(staging.iterdir()) == []
+        raise restore.RestoreError(
+            restore.EXIT_ARTIFACT_INTEGRITY, "permissions unavailable"
+        )
+
+    monkeypatch.setattr(restore, "_restrict_restore_staging", refuse)
+    with pytest.raises(restore.RestoreError) as caught:
+        with restore._stage_backup_artifacts(run, manifest):
+            pytest.fail("permission-refused staging must never be yielded")
+    assert caught.value.code == restore.EXIT_ARTIFACT_INTEGRITY
+    assert len(attempted) == 1
+    assert not attempted[0].exists(), "failed private staging must be removed"
+
+
+def test_restore_staging_delegates_to_the_strict_publisher_permission_policy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Backup and restore cannot drift into different owner-only definitions."""
+    calls: list[tuple[Path, Path, bool]] = []
+    monkeypatch.setattr(
+        backup,
+        "_restrict_run_dir_mode",
+        lambda path, out_dir, *, strict: calls.append((path, out_dir, strict)),
+    )
+    restore._restrict_restore_staging(tmp_path)
+    assert calls == [(tmp_path, tmp_path.parent, True)]
+
+
+def test_database_acl_metadata_validates_privileges_and_ignores_predefined_roles() -> None:
+    """ACL coverage must reject malformed rows without rejecting built-ins."""
+    document = {
+        "owner": "ums",
+        "entries": [
+            {"grantee": "PUBLIC", "privilege": "CONNECT", "grantable": False},
+            {"grantee": "app_tenant", "privilege": "CREATE", "grantable": True},
+            {"grantee": "pg_read_all_data", "privilege": "CONNECT", "grantable": False},
+        ],
+    }
+    assert backup._database_acl_role_names(json.dumps(document)) == {"ums", "app_tenant"}
+    for entry in (
+        {"grantee": "app_tenant", "privilege": "DROP", "grantable": False},
+        {"grantee": "app_tenant", "privilege": "CONNECT", "grantable": "false"},
+        {"grantee": "", "privilege": "CONNECT", "grantable": False},
+    ):
+        malformed = {"owner": "ums", "entries": [entry]}
+        with pytest.raises(backup.BackupError) as caught:
+            backup._database_acl_role_names(json.dumps(malformed))
+        assert caught.value.code == backup.EXIT_ARTIFACT_INVALID
+    with pytest.raises(backup.BackupError, match="PUBLIC as the database owner"):
+        backup._database_acl_role_names(
+            json.dumps({"owner": "PUBLIC", "entries": []})
+        )
+
+
+def test_restore_database_acl_replays_exact_database_privileges(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A blocked audit write must not hold the close deadline hostage."""
-    import time as time_module
+    """Recreation must not silently restore PUBLIC-only/default ACL state."""
+    calls: list[tuple[str, str | None]] = []
 
-    from ums_smart_revenue.connectors.runs import executor as executor_module
+    def fake_psql(
+        _container: str,
+        sql: str,
+        *,
+        timeout: int,
+        dbname: str | None = None,
+    ) -> str:
+        """Return current roles, then record the ACL statements."""
+        _ = timeout
+        calls.append((sql, dbname))
+        if "SELECT rolname FROM pg_catalog.pg_roles" in sql:
+            return "app_tenant\npg_read_all_data\n"
+        return ""
 
-    released = threading.Event()
-
-    def blocked_audit(**_kwargs: object) -> None:
-        """Simulate an audit session blocked on a hung shared connection."""
-        released.wait(timeout=30)
-
-    # monkeypatch restores the production constant automatically; a bare
-    # assignment here used to leak the 0.2s budget into the rest of the
-    # pytest process (round-28 finding).
-    monkeypatch.setattr(executor_module, "SHUTDOWN_AUDIT_BUDGET_SECONDS", 0.2)
-    instance = executor_module.ConnectorJobExecutor.__new__(
-        executor_module.ConnectorJobExecutor
+    monkeypatch.setattr(restore, "_psql", fake_psql)
+    restore._apply_database_acl(
+        "container",
+        "appdb",
+        "ums",
+        [
+            ("PUBLIC", "CONNECT", False),
+            ("app_tenant", "CREATE", True),
+        ],
+        timeout=5,
     )
-    instance._audit_failed_before_start = blocked_audit  # type: ignore[method-assign]
-    # The close deadline is shared between the audit join and the drain wait
-    # (round-28 P1); give this direct call a deadline far beyond the budget so
-    # the join is bounded by the budget alone.
-    started = time_module.monotonic()
-    instance._audit_cancelled_within_budget(
-        [(("t", "k", "a", "m"), None)],  # type: ignore[arg-type]
-        deadline=time_module.monotonic() + 30,
+    assert calls[0][1] == "postgres"
+    assert calls[1][1] == "postgres"
+    applied = calls[1][0]
+    assert 'REVOKE ALL PRIVILEGES ON DATABASE "appdb" FROM PUBLIC;' in applied
+    assert 'REVOKE ALL PRIVILEGES ON DATABASE "appdb" FROM "app_tenant";' in applied
+    assert 'ALTER DATABASE "appdb" OWNER TO "ums";' in applied
+    assert 'GRANT CONNECT ON DATABASE "appdb" TO PUBLIC;' in applied
+    assert 'GRANT CREATE ON DATABASE "appdb" TO "app_tenant" WITH GRANT OPTION;' in applied
+
+
+def test_restore_data_explicitly_includes_large_objects(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The restore command must carry the blob-preservation flag explicitly."""
+    seen: list[list[str]] = []
+    dump = tmp_path / restore.DUMP_NAME
+    dump.write_bytes(b"dump")
+
+    def fake_run_with_file(
+        argv: list[str], *, timeout: int, source: Path
+    ) -> subprocess.CompletedProcess[str]:
+        """Capture the pg_restore argv without touching Docker."""
+        _ = (timeout, source)
+        seen.append(argv)
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(restore, "_run_with_file", fake_run_with_file)
+    restore._restore_data("container", dump, timeout=5, clean=False)
+    restore._restore_data("container", dump, timeout=5, clean=True)
+    assert all("--large-objects" in " ".join(argv) for argv in seen)
+    assert "--clean" not in " ".join(seen[0])
+    assert "--clean" in " ".join(seen[1])
+
+
+def test_restore_verification_counts_large_objects_separately(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A blob mismatch fails verification even when every table matches."""
+    manifest = {"table_row_counts": REAL, "large_object_count": 2}
+    monkeypatch.setattr(restore, "_table_row_counts", lambda *a, **k: REAL)
+    monkeypatch.setattr(restore, "_large_object_count", lambda *a, **k: 1)
+    assert restore._verify("container", manifest, timeout=5) is False
+    output = capsys.readouterr().out
+    assert "large objects" in output
+    assert "MISMATCH" in output
+
+
+def test_restore_rejects_a_manifest_without_large_object_count(tmp_path: Path) -> None:
+    """Legacy-shaped manifests must not skip blob verification silently."""
+    run = _write_run(tmp_path, "20260824T222106", counts=REAL)
+    manifest_path = run / restore.MANIFEST_NAME
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    del manifest["large_object_count"]
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    with pytest.raises(restore.RestoreError) as caught:
+        restore._load_backup(run)
+    assert caught.value.code == restore.EXIT_USAGE
+    assert "large_object_count" in str(caught.value)
+
+
+def test_target_restore_lock_is_target_scoped_and_released(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One persistent psql session owns and then explicitly releases the lock."""
+
+    class _Input:
+        """Minimal text stdin retaining writes after close for assertions."""
+
+        def __init__(self) -> None:
+            self.writes: list[str] = []
+            self.closed = False
+
+        def write(self, value: str) -> int:
+            self.writes.append(value)
+            return len(value)
+
+        def flush(self) -> None:
+            """Match the text stream API."""
+
+        def close(self) -> None:
+            self.closed = True
+
+    class _Output:
+        """One immediate advisory-lock result row."""
+
+        def readline(self) -> str:
+            return "UMS_RESTORE_LOCK_OK\n"
+
+    class _Process:
+        """Fake persistent psql process used by the lock contract test."""
+
+        def __init__(self) -> None:
+            self.stdin = _Input()
+            self.stdout = _Output()
+            self.stderr = _Output()
+            self.returncode: int | None = None
+
+        def poll(self) -> int | None:
+            return self.returncode
+
+        def wait(self, *, timeout: int) -> int:
+            _ = timeout
+            self.returncode = 0
+            return 0
+
+        def kill(self) -> None:
+            self.returncode = -9
+
+    process = _Process()
+    seen: list[list[str]] = []
+
+    def fake_popen(argv: list[str], **_kwargs: object) -> _Process:
+        """Capture the maintenance-database lock process argv."""
+        seen.append(argv)
+        return process
+
+    monkeypatch.setattr(restore.subprocess, "Popen", fake_popen)
+    with restore._target_restore_lock("container", "app-db", timeout=5):
+        pass
+    assert "psql -X" in seen[0][-1]
+    assert "-d postgres" in seen[0][-1]
+    assert "hashtextextended" in process.stdin.writes[0]
+    assert "pg_advisory_unlock" in "".join(process.stdin.writes)
+    assert process.stdin.closed is True
+
+
+def test_replacement_create_failure_never_touches_the_live_target(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed isolated CREATE leaves the original name and bytes untouched."""
+    calls: list[str] = []
+
+    def fake_psql(_container: str, sql: str, *, timeout: int, dbname: str | None = None) -> str:
+        """Fail the replacement CREATE before the target is touched."""
+        _ = (timeout, dbname)
+        calls.append(sql)
+        raise restore.RestoreError(restore.EXIT_RESTORE_FAILED, "disk full")
+
+    monkeypatch.setattr(restore, "_psql", fake_psql)
+    with pytest.raises(restore.RestoreError) as caught:
+        restore._create_replacement_database(
+            "container", "appdb", timeout=5, locale_row="6|UTF8|C|C|c|"
+        )
+    assert caught.value.code == restore.EXIT_RESTORE_FAILED
+    assert "disk full" in str(caught.value)
+    assert len(calls) == 1 and "DROP DATABASE" not in calls[0]
+    assert "appdb" not in calls[0], "CREATE must name only the random staging database"
+
+
+def test_cutover_failure_between_renames_restores_the_previous_target(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Injected second-rename failure rolls the preserved old DB name back."""
+    renames: list[tuple[str, str]] = []
+    connection_changes: list[tuple[str, bool]] = []
+
+    monkeypatch.setattr(restore, "_drain_database_sessions", lambda *a, **k: None)
+    monkeypatch.setattr(restore, "_foreign_writer_session_count", lambda *a, **k: 0)
+    monkeypatch.setattr(
+        restore,
+        "_set_database_allow_connections",
+        lambda _c, database, *, allow, timeout: connection_changes.append(
+            (database, allow)
+        ),
     )
-    elapsed = time_module.monotonic() - started
-    released.set()
-    assert elapsed < 5, "the audit phase must return within its budget"
+
+    def fake_rename(
+        _container: str, source: str, destination: str, *, timeout: int
+    ) -> None:
+        """Fail exactly between old->previous and staging->target."""
+        _ = timeout
+        renames.append((source, destination))
+        if source == "staging-db" and destination == "appdb":
+            raise restore.RestoreError(restore.EXIT_RESTORE_FAILED, "rename refused")
+
+    monkeypatch.setattr(restore, "_rename_database", fake_rename)
+    with pytest.raises(restore.RestoreError) as caught:
+        restore._cutover_verified_database(
+            "container", "appdb", "staging-db", timeout=5
+        )
+    assert caught.value.code == restore.EXIT_RESTORE_FAILED
+    assert "rename refused" in str(caught.value)
+    assert "automatic rollback completed" in str(caught.value)
+    assert "Neither database was dropped" in str(caught.value)
+    previous = renames[0][1]
+    assert renames == [
+        ("appdb", previous),
+        ("staging-db", "appdb"),
+        (previous, "appdb"),
+    ]
+    assert connection_changes[-1] == ("appdb", True)
+
+
+def test_cutover_drains_rechecks_and_preserves_the_previous_database(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The success path reaches renames only after both names are closed and empty."""
+    events: list[str] = []
+    monkeypatch.setattr(
+        restore,
+        "_set_database_allow_connections",
+        lambda _c, database, *, allow, timeout: events.append(
+            f"allow:{database}:{allow}"
+        ),
+    )
+    monkeypatch.setattr(
+        restore,
+        "_drain_database_sessions",
+        lambda _c, database, *, timeout: events.append(f"drain:{database}"),
+    )
+
+    def no_sessions(
+        _container: str, *, timeout: int, target_db: str | None = None
+    ) -> int:
+        """Record the immediate pre-rename rechecks."""
+        events.append(f"count:{target_db}")
+        return 0
+
+    monkeypatch.setattr(restore, "_foreign_writer_session_count", no_sessions)
+    monkeypatch.setattr(
+        restore,
+        "_rename_database",
+        lambda _c, source, destination, *, timeout: events.append(
+            f"rename:{source}->{destination}"
+        ),
+    )
+
+    previous = restore._cutover_verified_database(
+        "container",
+        "appdb",
+        "staging-db",
+        timeout=5,
+        finalize=lambda: events.append("finalize"),
+    )
+    assert previous.startswith("ums_previous_")
+    assert events == [
+        "allow:appdb:False",
+        "drain:appdb",
+        "allow:staging-db:False",
+        "drain:staging-db",
+        "count:appdb",
+        "count:staging-db",
+        f"rename:appdb->{previous}",
+        "rename:staging-db->appdb",
+        "finalize",
+        "allow:appdb:True",
+    ]
+
+
+def test_role_finalization_failure_rolls_both_database_names_back(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A fail-closed final role replay cannot strand the old DB under a side name."""
+    renames: list[tuple[str, str]] = []
+    monkeypatch.setattr(restore, "_drain_database_sessions", lambda *a, **k: None)
+    monkeypatch.setattr(restore, "_foreign_writer_session_count", lambda *a, **k: 0)
+    monkeypatch.setattr(restore, "_set_database_allow_connections", lambda *a, **k: None)
+    monkeypatch.setattr(
+        restore,
+        "_rename_database",
+        lambda _c, source, destination, *, timeout: renames.append(
+            (source, destination)
+        ),
+    )
+
+    def fail_roles() -> None:
+        """Inject an unexpected failure after promotion, before admission."""
+        raise RuntimeError("role replay crashed")
+
+    with pytest.raises(restore.RestoreError) as caught:
+        restore._cutover_verified_database(
+            "container", "appdb", "staging-db", timeout=5, finalize=fail_roles
+        )
+    previous = renames[0][1]
+    assert caught.value.code == restore.EXIT_INTERNAL
+    assert "automatic rollback completed" in str(caught.value)
+    assert renames == [
+        ("appdb", previous),
+        ("staging-db", "appdb"),
+        ("appdb", "staging-db"),
+        (previous, "appdb"),
+    ]
+
+
+def test_strict_backup_permissions_fail_closed_on_chmod_error(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Sensitive staging cannot become usable when POSIX mode enforcement fails."""
+
+    def fail_chmod(_path: Path, _mode: int) -> None:
+        """Simulate an unenforceable destination mode."""
+        raise OSError("chmod denied")
+
+    monkeypatch.setattr(backup.os, "chmod", fail_chmod)
+    with pytest.raises(backup.BackupError) as caught:
+        backup._restrict_run_dir_mode(tmp_path, tmp_path, strict=True)
+    assert caught.value.code == backup.EXIT_ARTIFACT_INVALID
+    assert "refusing to publish" in str(caught.value)
+
+
+def test_crash_window_lock_uses_directory_mtime_for_reclaim(
+    tmp_path: Path, clock: _Clock
+) -> None:
+    """mkdir followed by a crash before started.at must eventually self-heal."""
+    lock_dir = tmp_path / backup.LOCK_DIR_NAME
+    lock_dir.mkdir()
+    old = (clock.now - backup.LOCK_STALE_AFTER - timedelta(minutes=1)).timestamp()
+    os.utime(lock_dir, (old, old))
+    assert backup._lock_age_exceeds_bound(lock_dir) is True
+
+
+def test_restore_acl_role_preflight_runs_before_replacement_creation(tmp_path: Path) -> None:
+    """A hand-edited ACL cannot name a role absent from the replay file."""
+    roles_path = tmp_path / restore.ROLES_NAME
+    roles_path.write_text(_REAL_ROLES_SQL, encoding="utf-8")
+    assert restore._database_acl_role_problems(
+        roles_path,
+        "postgres",
+        [("app_tenant", "CONNECT", False), ("PUBLIC", "TEMPORARY", False)],
+    ) == []
+    assert restore._database_acl_role_problems(
+        roles_path, "operator_only", [("app_tenant", "CONNECT", False)]
+    ) == ["operator_only"]

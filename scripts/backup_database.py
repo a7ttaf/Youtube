@@ -34,10 +34,10 @@ environment.
 Content gate: a backup that captured no data is a failure, not a success. Four
 tiers decide, and they have different authority:
 
-* **The seed floor** is absolute and has no override. Every UMS migration path
-  ends with the six tables in ``SEED_TABLES`` populated, so any of them empty
-  means the dump is not of a working UMS database. A bare row count cannot do
-  this job: a virgin ``alembic upgrade head`` measures 38 tables / **328** rows,
+* **The seed floor** is absolute and has no override. Every migration in this
+  ancestry populates the three tables in ``SEED_TABLES``; auth tables are only
+  created here and are seeded by a later migration. A bare row count cannot do
+  this job: a virgin ``alembic upgrade head`` measures 38 tables / **180** rows,
   so the old ``MIN_ROWS = 1`` accepted a database truncated to nothing but its
   Alembic stamp.
 * **The identity binding** is overridable only by ``--adopt-database``. An
@@ -123,10 +123,9 @@ Usage::
 #     ``currencies`` is a seed table.
 #   - File: backend/ums_smart_revenue/db/alembic/versions/20260516_0001_tenants_foundation.py
 #     -> the bootstrap tenant insert is why ``tenants`` is a seed table.
-#   - File: backend/ums_smart_revenue/db/alembic/versions/
-#     20260825_0001_security_role_permission_seed.py -> seeds ``roles``,
-#     ``permissions`` and ``role_permission_assignments`` from the live auth
-#     registries, which is why those three are seed tables.
+#   - File: backend/ums_smart_revenue/db/alembic/versions/ -> migrations in
+#     this ancestry seed ``currencies`` and ``tenants``; the security
+#     foundation creates auth tables but does not populate them here.
 #   - File: scripts/restore_database.py -> Consumes this layout, roles first.
 #   - File: Docs/22_BACKUP_RESTORE_AND_REHEARSAL.md -> Operator runbook,
 #     rehearsal procedure, and Windows Task Scheduler wiring.
@@ -204,6 +203,7 @@ WATERMARK_SCHEMA = "ums-backup-watermark/1"
 # login roles out of a plaintext file sitting on the operator's disk without
 # losing anything the restore needs.
 REQUIRED_ROLES = ("app_tenant", "app_platform")
+DATABASE_ACL_PRIVILEGES = frozenset({"CONNECT", "CREATE", "TEMPORARY"})
 
 # pg_dump --format=custom archives start with this magic. A cheap truncation
 # and wrong-format guard; the authoritative check is pg_restore --list.
@@ -255,27 +255,21 @@ STAMP_FUTURE_TOLERANCE = timedelta(minutes=5)
 # all. A table that the migrations seed but that is MISSING from this tuple
 # therefore reads as application data, and tier 3b stops firing.
 #
-# MEASURED, not assumed. `alembic upgrade head` against
-# postgres:18-alpine@sha256:96d56f7f (the compose pin), head revision
-# 20260825_0001, measured 2026-08-25: 38 tables, 328 rows, and exactly six
-# tables hold any of them --
-#     currencies 178   role_permission_assignments 106   permissions 26
-#     roles 16         alembic_version 1                 tenants 1
+# MEASURED, not assumed. `alembic upgrade head` against the migrations in this
+# ancestry measures 38 tables, 180 rows, and exactly three tables hold any of
+# them -- currencies 178, alembic_version 1, and tenants 1. The security
+# foundation creates the auth tables but does not populate them until the later
+# auth-seed migration is merged.
 #
 # It has been wrong twice, in the same direction both times, so the direction is
 # the thing to watch:
 #   * MIN_ROWS = 1 was justified by "a freshly migrated database has one stamp
 #     row". It was 180. That let a database truncated to nothing but its Alembic
 #     stamp publish a green OK.
-#   * The three-name tuple was correct until P0.7's roles/permissions seed
-#     migration (20260825_0001) landed 148 rows into three tables that were not
-#     in it. ``non_seed_rows`` went 0 -> 148 on a VIRGIN database, so tier 3b's
-#     "every table outside SEED_TABLES is EMPTY" stopped being true of an empty
-#     database, and `docker compose down -v` + auto-migrate + one
-#     --establish-watermark would have made an empty database the directory's
-#     permanent reference -- the exact self-perpetuating failure tier 3b exists
-#     to stop. tests/scripts/test_backup_content_gate.py derives the seeded set
-#     from the migration sources so the next one goes red here instead.
+#   * A later auth-seed migration is intentionally outside this PR's ancestry.
+#     Do not count rows as seeded until the migration that creates them is in
+#     the same deploy; the migration-derived test below catches that drift
+#     instead of manufacturing auth rows in the fixture.
 #
 # Non-empty rather than a hardcoded count, on purpose. Coupling to 178 would
 # make an ordinary refresh of the frozen ISO-4217 snapshot
@@ -284,47 +278,33 @@ STAMP_FUTURE_TOLERANCE = timedelta(minutes=5)
 # watermark's job; existence is this floor's job, and they do not overlap.
 #
 # WHAT THIS COSTS, stated because it is a real operator event and not a
-# hypothetical: these six are also held to their EXACT high-water mark by the
-# seed-shrink rule in ``_evaluate_content``. Retiring a role or a permission
-# (precedent: 20260513_0002_retire_graph_permissions) shrinks one of them, so
-# the first night after that deploy exits 8 and the operator clears it with ONE
-# --accept-content-drop run, exactly as an ISO-4217 refresh would. That is
-# bounded and self-clearing -- ``reset_after`` means the night after needs no
-# flag -- and it is the same cost the tuple already carried for `currencies`.
+# hypothetical: every required seed is also held to its EXACT high-water mark
+# by the seed-shrink rule in ``_evaluate_content``. Retiring a seeded currency
+# (or, after a stacked migration widens the extension, one of its seeded rows)
+# makes the first backup after deploy exit 8. The operator clears that expected
+# shrink with ONE --accept-content-drop run. It is bounded and self-clearing --
+# ``reset_after`` means the following night needs no flag.
 # Proved, not reasoned: tests/scripts/test_backup_content_gate.py has
-# ``test_retiring_a_permission_costs_exactly_one_override_night``, which walks
+# ``test_retiring_a_seed_row_costs_exactly_one_override_night``, which walks
 # red -> one override night -> green again with no flag.
 #
-# KNOWN, UNCLOSED, AND UNREACHABLE HERE -- widening this tuple reclassifies runs
-# that were published BEFORE the widening. ``_run_has_content`` re-tests a run's
-# recorded counts against this floor, and a manifest written before
-# 20260825_0001 has no ``roles`` key at all, so ``counts.get(name, 0) > 0``
-# reads it as 0 and the run becomes PROVEN EMPTY: it stops consuming a
-# --keep-min slot and becomes eligible for deletion by age. That is the wrong
-# direction on the one destructive path in this script.
-#   * Unreachable in this deployment: no backup directory predates this script's
-#     first release, which is the same release as 20260825_0001.
-#   * NOT fixed here on purpose. The obvious fix -- "a seed table absent from a
-#     manifest is schema drift, so return None (unknown) rather than False" --
-#     also swallows the ``{}`` case, which is a dropped schema and the exact
-#     fixture retention invariant 2 is built on
-#     (``test_empty_runs_do_not_consume_a_keep_min_slot``). Trading that
-#     invariant away to close a hazard nothing can reach today would be a guard
-#     lost for a guard gained.
-#   * FOR THE NEXT WIDENING: decide this deliberately, with a reject->accept
-#     matrix over ``_prune``, before adding a seventh name. The likely shape is a
-#     schema-generation stamp in the manifest rather than a heuristic over which
-#     keys are present.
+# Historical manifests from a later seed generation are not reinterpreted by
+# this revision. A future PR that adds the auth-seed migration must widen this
+# tuple and update its migration-derived measurement in the same change.
 # ---------------------------------------------------------------------------
 MIN_TABLES = 1
-SEED_TABLES: tuple[str, ...] = (
+# ``SEED_TABLE_EXTENSIONS`` is the deliberately narrow stack seam for a later
+# migration PR.  This PR's ancestry seeds only the three core tables below; a
+# stacked migration must add its own table names to the extension tuple and its
+# migration-derived tests in the same change.  Keeping the seam empty here is
+# what prevents #222 from claiming catalogs that do not exist in this tree.
+CORE_SEED_TABLES: tuple[str, ...] = (
     "alembic_version",
     "currencies",
-    "permissions",
-    "role_permission_assignments",
-    "roles",
     "tenants",
 )
+SEED_TABLE_EXTENSIONS: tuple[str, ...] = ()
+SEED_TABLES: tuple[str, ...] = CORE_SEED_TABLES + SEED_TABLE_EXTENSIONS
 
 # Relative collapse, measured against the PERSISTENT watermark rather than
 # against last night's run. See ``_load_watermark``.
@@ -372,6 +352,35 @@ class BackupError(Exception):
         """init."""
         super().__init__(message)
         self.code = code
+
+
+# ============================================================================
+# Purpose: Resolve the deterministic seed-floor contract at each gate use so a
+#          stacked migration can extend it without replacing gate logic.
+# Database/ORM: Seeded tables represented in manifest table_row_counts.
+# Standards: Immutable tuple result; reject malformed or duplicate extension
+#            entries before a backup verdict can be published.
+# Blast Radius: Backup content admission, watermark comparison, and retention.
+# Connections:
+#   - File: scripts/restore_database.py -> re-enforces manifest seed_tables.
+#   - File: tests/scripts/test_backup_content_gate.py -> extension seam tests.
+# ============================================================================
+def _required_seed_tables() -> tuple[str, ...]:
+    """Return the deterministic seed-floor contract, including stacked additions.
+
+    The extension is read at the point of use so a stacked PR and focused tests
+    can prove the actual gate behavior, not merely the value of an exported
+    tuple.  Duplicates and malformed names are configuration defects and fail
+    closed before a content verdict can be published.
+    """
+    combined = CORE_SEED_TABLES + SEED_TABLE_EXTENSIONS
+    malformed = [name for name in combined if not isinstance(name, str) or not name.strip()]
+    if malformed or len(set(combined)) != len(combined):
+        raise BackupError(
+            EXIT_INTERNAL,
+            "seed-table contract contains blank, non-string, or duplicate names",
+        )
+    return combined
 
 
 def _utc_now() -> datetime:
@@ -440,7 +449,7 @@ def _psql(container: str, sql: str, *, timeout: int) -> str:
     """Run SQL in the container and return raw ``psql -At`` output."""
     argv = _container_sh(
         container,
-        'exec psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" '
+        'exec psql -X -U "$POSTGRES_USER" -d "$POSTGRES_DB" '
         "--no-password -v ON_ERROR_STOP=1 -Atq -f -",
     )
     completed = _run_with_input(argv, timeout=timeout, stdin_text=sql)
@@ -664,7 +673,7 @@ def _await_postgres(container: str, *, wait_seconds: int, timeout: int) -> None:
             probe = _run(
                 _container_sh(
                     container,
-                    'exec psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" '
+                    'exec psql -X -U "$POSTGRES_USER" -d "$POSTGRES_DB" '
                     '--no-password -Atqc "SELECT 1"',
                 ),
                 timeout=timeout,
@@ -743,8 +752,20 @@ def _container_facts(container: str, *, timeout: int) -> dict[str, str]:
     # separated row: encoding id|encoding name|collate|ctype|provider code|
     # locale name for the provider.
     locale_row = _database_locale_row(container, timeout=timeout)
-    if locale_row:
-        facts["database_locale"] = locale_row
+    # FIX: an empty pg_database result used to omit locale provenance and let a
+    # manifest describe a run that restore could never safely recreate. Locale
+    # is part of database identity/semantics, so fail before any dump is used.
+    if not locale_row:
+        raise BackupError(
+            EXIT_COMMAND_FAILED,
+            "could not capture source database locale; refusing to publish "
+            "without locale fidelity",
+        )
+    facts["database_locale"] = locale_row
+    database_acl = _psql(container, DATABASE_ACL_SQL, timeout=timeout).strip()
+    if database_acl:
+        _database_acl_role_names(database_acl)
+        facts["database_acl"] = database_acl
     return facts
 
 
@@ -766,7 +787,7 @@ def _container_facts(container: str, *, timeout: int) -> dict[str, str]:
 #               recreate the target with the source's locale; a missing row
 #               degrades to "unpreserved locale" on the restore side, never
 #               to a wrong one.
-# Connections:
+    # Connections:
 #   - File: scripts/backup_database.py -> ``_container_facts`` stores the row
 #     in the manifest's source block.
 #   - File: scripts/restore_database.py -> ``_create_database_options`` parses
@@ -856,7 +877,7 @@ def _dump_database(
     argv = _container_sh(
         container,
         'exec pg_dump -U "$POSTGRES_USER" -d "$POSTGRES_DB" '
-        f"--format=custom --compress=6 --no-password{snapshot_flag}",
+        f"--format=custom --compress=6 --blobs --no-password{snapshot_flag}",
     )
     completed = _run_to_file(argv, timeout=timeout, target=target)
     if completed.returncode != 0:
@@ -964,7 +985,7 @@ def _held_repeatable_read_session(container: str, *, timeout: int):
     """Yield ``(snapshot_id, run_sql)`` for one held REPEATABLE READ transaction."""
     argv = _container_sh(
         container,
-        'exec psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" --no-password -v ON_ERROR_STOP=1 -Atq',
+        'exec psql -X -U "$POSTGRES_USER" -d "$POSTGRES_DB" --no-password -v ON_ERROR_STOP=1 -Atq',
     )
     process = subprocess.Popen(
         argv,
@@ -1028,24 +1049,137 @@ def _held_repeatable_read_session(container: str, *, timeout: int):
             if process.poll() is None:
                 stdin.write("ROLLBACK;\n")
                 stdin.flush()
-        except OSError:
-            pass
+        except OSError as rollback_exc:
+            # The operation that failed is the useful error. Keep it as the
+            # active exception, but leave a visible breadcrumb if rollback
+            # could not reach the holder session.
+            print(
+                f"WARNING: snapshot-holder rollback failed: {rollback_exc}",
+                file=sys.stderr,
+            )
         raise
     finally:
+        active_error = sys.exc_info()[1]
+        cleanup_error: BaseException | None = None
         try:
             stdin.close()
-        except OSError:
-            pass
+        except OSError as close_exc:
+            cleanup_error = close_exc
         try:
             process.wait(timeout=min(30, timeout))
-        except subprocess.TimeoutExpired:
-            process.kill()
-            process.wait(timeout=5)
+        except (OSError, subprocess.SubprocessError) as wait_exc:
+            cleanup_error = cleanup_error or wait_exc
+            try:
+                process.kill()
+            except (OSError, subprocess.SubprocessError) as kill_exc:
+                cleanup_error = cleanup_error or kill_exc
+                print(
+                    f"WARNING: could not terminate snapshot-holder psql: {kill_exc}",
+                    file=sys.stderr,
+                )
+            else:
+                try:
+                    process.wait(timeout=5)
+                except (OSError, subprocess.SubprocessError) as final_wait_exc:
+                    cleanup_error = cleanup_error or final_wait_exc
+        if cleanup_error is not None:
+            message = f"snapshot-holder cleanup failed: {cleanup_error}"
+            if active_error is None:
+                raise BackupError(EXIT_COMMAND_FAILED, message) from cleanup_error
+            print(f"WARNING: {message}; the backup error is preserved", file=sys.stderr)
 
 
 def _parse_role_name_lines(raw: str) -> set[str]:
     """Parse one-role-per-line psql -At output into a role name set."""
     return {line.strip() for line in raw.splitlines() if line.strip()}
+
+
+# ============================================================================
+# Purpose: Capture the database owner and effective database ACL from the same
+#          repeatable-read snapshot as the custom archive.
+# Database/ORM: ``pg_database.datdba`` and ``datacl``; no ORM.
+# Standards: JSON is produced by PostgreSQL and parsed before publication. The
+#            owner and every named non-predefined grantee are returned to the
+#            coverage gate, so restore cannot publish an ACL referring to an
+#            undeclared user role; built-in pg_* roles already exist cluster-wide.
+# Blast Radius: Authorization and restore portability. Database-level CONNECT,
+#               CREATE and TEMPORARY grants otherwise disappear on recreation.
+# Connections:
+#   - File: scripts/restore_database.py -> applies this source ACL after roles
+#     are present and before data verification.
+# ============================================================================
+DATABASE_ACL_SQL = """
+SELECT json_build_object(
+  'owner', owner.rolname,
+  'entries', COALESCE(
+    (
+      SELECT json_agg(
+        json_build_object(
+          'grantee', CASE WHEN e.grantee = 0 THEN 'PUBLIC' ELSE grantee.rolname END,
+          'privilege', e.privilege_type,
+          'grantable', e.is_grantable
+        ) ORDER BY e.grantee, e.privilege_type
+      )
+      FROM aclexplode(COALESCE(d.datacl, acldefault('d', d.datdba))) e
+      LEFT JOIN pg_catalog.pg_roles grantee ON grantee.oid = e.grantee
+    ),
+    '[]'::json
+  )
+)::text
+FROM pg_catalog.pg_database d
+JOIN pg_catalog.pg_roles owner ON owner.oid = d.datdba
+WHERE d.datname = current_database();
+""".strip()
+
+
+def _database_acl_role_names(raw: str) -> set[str]:
+    """Validate and return declared-role names from a database ACL document."""
+    try:
+        document = json.loads(raw)
+    except (TypeError, ValueError) as exc:
+        raise BackupError(
+            EXIT_ARTIFACT_INVALID,
+            f"database ACL query returned invalid JSON: {exc}",
+        ) from exc
+    if not isinstance(document, dict):
+        raise BackupError(EXIT_ARTIFACT_INVALID, "database ACL query returned no object")
+    owner = document.get("owner")
+    entries = document.get("entries")
+    if not isinstance(owner, str) or not owner.strip() or not isinstance(entries, list):
+        raise BackupError(
+            EXIT_ARTIFACT_INVALID,
+            "database ACL query returned an incomplete owner/entries object",
+        )
+    if owner == "PUBLIC":
+        raise BackupError(
+            EXIT_ARTIFACT_INVALID,
+            "database ACL query returned PUBLIC as the database owner",
+        )
+    names = {owner} if not owner.startswith("pg_") else set()
+    for entry in entries:
+        if not isinstance(entry, dict):
+            raise BackupError(EXIT_ARTIFACT_INVALID, "database ACL entry is not an object")
+        grantee = entry.get("grantee")
+        privilege = entry.get("privilege")
+        grantable = entry.get("grantable")
+        if (
+            not isinstance(grantee, str)
+            or not grantee.strip()
+            or not isinstance(privilege, str)
+            or privilege.upper() not in DATABASE_ACL_PRIVILEGES
+            or not isinstance(grantable, bool)
+        ):
+            raise BackupError(
+                EXIT_ARTIFACT_INVALID,
+                "database ACL entry has an invalid grantee, privilege or grantable flag",
+            )
+        # PostgreSQL's predefined pg_* roles already exist on the target
+        # cluster and are not emitted by pg_dumpall --roles-only. They remain
+        # in the ACL JSON for faithful replay, but must not create a false
+        # roles.sql coverage failure.
+        if grantee != "PUBLIC" and not grantee.startswith("pg_"):
+            names.add(grantee)
+    return names
 
 
 # Snapshot-time ACL grantees for roles.sql coverage. pg_restore --list ACL TOC
@@ -1153,6 +1287,10 @@ ORDER BY 1;
 OWNER_ROLES_SQL = """
 SELECT DISTINCT r.rolname
 FROM (
+  SELECT d.datdba AS owner_oid
+  FROM pg_catalog.pg_database d
+  WHERE d.datname = current_database()
+  UNION ALL
   SELECT n.nspowner AS owner_oid
   FROM pg_catalog.pg_namespace n
   WHERE n.nspname NOT IN ('pg_catalog', 'information_schema', 'pg_toast')
@@ -1240,11 +1378,13 @@ ORDER BY 1;
 
 def _dump_database_and_count(
     container: str, target: Path, *, timeout: int
-) -> tuple[dict[str, int], set[str], set[str]]:
-    """Dump the database; return counts, ACL grantees and owners from the snapshot."""
+) -> tuple[dict[str, int], set[str], set[str], int, str]:
+    """Dump data and snapshot metadata needed for a faithful restore."""
     with _held_repeatable_read_session(container, timeout=timeout) as (snapshot, run_sql):
         _dump_database(container, target, timeout=timeout, snapshot=snapshot)
         acl_grantees = _parse_role_name_lines(run_sql(ACL_GRANTEE_SQL))
+        database_acl = run_sql(DATABASE_ACL_SQL).strip()
+        acl_grantees.update(_database_acl_role_names(database_acl))
         # FIX: owners are collected HERE, on the same held snapshot, so
         # --no-verify-dump (which never runs pg_restore --list) can no longer
         # publish an archive whose objects belong to a role roles.sql does
@@ -1256,12 +1396,29 @@ def _dump_database_and_count(
             "WHERE schemaname = 'public' ORDER BY tablename;"
         )
         tables = [line.strip() for line in raw_tables.splitlines() if line.strip()]
+        large_objects_raw = run_sql(
+            "SELECT count(*) FROM pg_catalog.pg_largeobject_metadata;"
+        ).strip()
+        try:
+            large_object_count = int(large_objects_raw or "0")
+        except ValueError as exc:
+            raise BackupError(
+                EXIT_COMMAND_FAILED,
+                f"could not read the large-object count {large_objects_raw!r}: {exc}",
+            ) from exc
+        if large_object_count < 0:
+            raise BackupError(
+                EXIT_COMMAND_FAILED,
+                f"large-object count cannot be negative: {large_object_count}",
+            )
         if not tables:
-            return {}, acl_grantees, snapshot_owners
+            return {}, acl_grantees, snapshot_owners, large_object_count, database_acl
         return (
             _parse_counts_output(run_sql(_count_sql_for_tables(tables))),
             acl_grantees,
             snapshot_owners,
+            large_object_count,
+            database_acl,
         )
 
 
@@ -1876,8 +2033,8 @@ def _role_membership_edges(statement: str) -> list[tuple[str, str]]:
     return []
 
 
-def _role_membership_problems(body: str) -> list[str]:
-    r"""Return the roles.sql statements that put an app role into a membership.
+def _role_membership_problems(body: str, superuser: str = "postgres") -> list[str]:
+    r"""Return roles.sql membership statements outside the safe bootstrap edge.
 
     FIX: ``GRANT <bootstrap superuser> TO app_tenant;`` matched neither the
     CREATE-anchored allowlist nor the attribute-drift gate -- a GRANT can never
@@ -1886,10 +2043,11 @@ def _role_membership_problems(body: str) -> list[str]:
     never reads pg_auth_members. The result is not a drifted attribute but an
     edge in the authorization graph, and that edge is enough on its own.
 
-    Deliberately NOT proportional to how dangerous the granted role looks: the
-    cross-lane edge ``GRANT app_tenant TO app_platform`` grants neither
-    SUPERUSER nor a ``pg_*`` role and still crosses the platform/tenant write
-    boundary 20260608_0001 exists to hold.
+    Both sides are checked. A protected role may be GRANTED TO the connected
+    bootstrap superuser because pg_dumpall emits that legitimate edge, but a
+    protected role may never be granted to an arbitrary member. Conversely,
+    an application role may never become a member of another role, including
+    another protected role or a predefined ``pg_*`` role.
     """
     problems: list[str] = []
     for statement in _scan_role_sql(body):
@@ -1898,6 +2056,10 @@ def _role_membership_problems(body: str) -> list[str]:
         for member, granted in _role_membership_edges(statement):
             if member in _PROTECTED_APP_ROLES:
                 problems.append(f"{member} becomes a member of {granted}: {statement}")
+            elif granted in _PROTECTED_APP_ROLES and member != superuser:
+                problems.append(
+                    f"{granted} is granted to non-bootstrap role {member}: {statement}"
+                )
     return problems
 
 
@@ -2047,9 +2209,8 @@ def _role_ddl_statement_problem(
         return f"RENAME is not a statement pg_dumpall --roles-only emits: {statement}"
     # FIX: the verb allowlist admits DROP ROLE, and nothing below looked at what
     # was being dropped. `DROP ROLE app_tenant;` therefore passed the read-only
-    # preflight, and under --allow-nonempty the target was already destroyed by
-    # the time _restore_roles dropped the role and the post-apply presence check
-    # refused -- leaving an empty replacement database.
+    # preflight. In the old overlay implementation the target was already gone
+    # by the time _restore_roles dropped the role and post-apply checks refused.
     if words[0] == "DROP":
         dropped = {_role_sql_identifier(t) for t in tokens[2:]}
         protected = sorted(dropped & set(_PROTECTED_APP_ROLES))
@@ -2250,16 +2411,16 @@ def _bootstrap_role_lockout_problems(body: str, superuser: str) -> list[str]:
     FIX(codex round-24 P1): ``ALTER ROLE <superuser> WITH NOLOGIN`` passed
     every gate -- the foreign-role check reads CREATE statements only and the
     drift gate covers the application roles only -- and under --allow-nonempty
-    the replay then disabled the very identity the restore connects as, after
-    the target database had already been dropped: an empty replacement
-    database and a cluster needing out-of-band superuser recovery. Genuine
+    the replay then disabled the very identity the restore connects as. The old
+    overlay path had already removed the target; the isolated path still must
+    refuse because the cluster could need out-of-band recovery. Genuine
     pg_dumpall output never disables the bootstrap role, so any
     NOLOGIN/NOSUPERUSER on it is refused on both sides of the round trip.
 
     FIX(codex round-25 P1): ``DROP ROLE <superuser>;`` walked the same gap
     from the other side -- the DROP arm of the role gate protects only the
-    application roles, so preflight approved the file and the target was
-    destroyed before the replay failed on "cannot drop the current user".
+    application roles, so preflight approved the file before replay failed on
+    "cannot drop the current user".
     pg_dumpall --roles-only emits no DROP of any kind.
     """
     problems: list[str] = []
@@ -2391,7 +2552,7 @@ def _refuse_roles_body_text_gates(roles_body: str, superuser: str) -> None:
             + ". The restore replays the file as that identity; refusing to "
             "publish an archive whose own restore bricks the cluster.",
         )
-    memberships = _role_membership_problems(roles_body)
+    memberships = _role_membership_problems(roles_body, superuser=superuser)
     if memberships:
         raise BackupError(
             EXIT_ARTIFACT_INVALID,
@@ -2654,7 +2815,7 @@ class ContentVerdict:
             "rows": self.rows,
             "non_seed_rows": self.non_seed_rows,
             "min_tables": MIN_TABLES,
-            "seed_tables": list(SEED_TABLES),
+            "seed_tables": list(_required_seed_tables()),
             "collapse_row_fraction": COLLAPSE_ROW_FRACTION,
             "table_collapse_min_rows": TABLE_COLLAPSE_MIN_ROWS,
             "watermark": self.watermark.as_manifest_block(),
@@ -2765,12 +2926,13 @@ def _counts_clear_floor(counts: dict[str, int]) -> bool:
     """counts clear floor."""
     if len(counts) < MIN_TABLES:
         return False
-    return all(counts.get(name, 0) > 0 for name in SEED_TABLES)
+    return all(counts.get(name, 0) > 0 for name in _required_seed_tables())
 
 
 def _non_seed_rows(counts: dict[str, int]) -> int:
     """Rows outside the seeded lookup/bootstrap tables -- the application's data."""
-    return sum(value for name, value in counts.items() if name not in SEED_TABLES)
+    seed_tables = frozenset(_required_seed_tables())
+    return sum(value for name, value in counts.items() if name not in seed_tables)
 
 
 # ============================================================================
@@ -3219,14 +3381,18 @@ def _lock_started_at(lock_dir: Path) -> datetime | None:
 def _lock_age_exceeds_bound(lock_dir: Path) -> bool:
     """True when the lock's recorded start is older than ``LOCK_STALE_AFTER``.
 
-    A lock without a readable ``started.at`` (hand-made, or written by the
-    pre-timestamp revision) is never stale BY AGE; the liveness probe still
-    governs it. Every lock this script writes carries the stamp, and it is
-    written before ``owner.pid``, so a lock with an owner always has one.
+    A crash can happen after atomic ``mkdir`` and before ``started.at`` is
+    created. In that window there is no owner PID to probe and the directory
+    mtime is the only durable age marker; using it prevents a crash-window lock
+    from wedging every future scheduled backup forever. A fresh or unreadable
+    marker remains protected until the six-hour bound expires.
     """
     started = _lock_started_at(lock_dir)
     if started is None:
-        return False
+        try:
+            started = datetime.fromtimestamp(lock_dir.stat().st_mtime, tz=UTC)
+        except OSError:
+            return False
     return _utc_now() - started > LOCK_STALE_AFTER
 
 
@@ -3403,8 +3569,10 @@ def _restrict_run_dir_mode(
 ) -> None:
     """Restrict a backup-related directory to owner-only access.
 
-    POSIX stays best-effort either way -- a refused chmod lands on the durable
-    record and stderr instead of vanishing.
+    A non-strict call is best-effort for diagnostic/legacy callers. Production
+    staging and publication pass ``strict=True``; an unenforceable mode then
+    fails closed on every filesystem, including POSIX, before sensitive files
+    can be treated as a usable backup.
 
     ``strict`` (Windows NTFS DACL enforcement) makes an unenforceable or
     permissive ACL raise instead of warn, and strips inherited grants up
@@ -3421,9 +3589,10 @@ def _restrict_run_dir_mode(
             f"owner-only permissions: {chmod_exc}; the directory keeps the "
             "filesystem's default mode"
         )
-        if os.name == "nt" and strict:
-            # FIX: on NTFS the chmod above proves nothing -- an operator-readable
-            # backup directory must be refused, not warned about.
+        if strict:
+            # FIX: chmod failure means the destination's inherited permissions
+            # are unknown. Refuse on POSIX as well as NTFS instead of placing a
+            # dump or role verifier in a directory that may be world-readable.
             raise BackupError(
                 EXIT_ARTIFACT_INVALID,
                 f"could not restrict {path} to owner-only permissions: {chmod_exc}; "
@@ -3431,6 +3600,24 @@ def _restrict_run_dir_mode(
             ) from chmod_exc
         _append_log(out_dir, line)
         print(f"WARNING: {line}", file=sys.stderr)
+    if strict and os.name != "nt":
+        # FIX: a successful chmod call is not proof on every POSIX-backed
+        # filesystem (and a symlink/race could point it elsewhere). Verify the
+        # effective mode before sensitive artifacts are treated as publishable.
+        try:
+            actual_mode = path.stat().st_mode & 0o777
+        except OSError as stat_exc:
+            raise BackupError(
+                EXIT_ARTIFACT_INVALID,
+                f"could not verify owner-only permissions on {path}: {stat_exc}; "
+                "refusing to publish to an insecure destination",
+            ) from stat_exc
+        if actual_mode != 0o700:
+            raise BackupError(
+                EXIT_ARTIFACT_INVALID,
+                f"{path} has effective mode {actual_mode:o}, not 700; refusing "
+                "to publish to an insecure destination",
+            )
     if os.name == "nt" and strict:
         _windows_enforce_owner_only_acl(path)
 
@@ -3971,10 +4158,11 @@ def _absolute_content_failures(counts: dict[str, int], *, toc_entries: int) -> l
 
 
 def _seed_floor_failures(counts: dict[str, int]) -> list[str]:
-    """Absolute refusals when SEED_TABLES are missing or drained."""
+    """Absolute refusals when the current seed contract is missing or drained."""
     failures: list[str] = []
-    absent = [name for name in SEED_TABLES if name not in counts]
-    drained = [name for name in SEED_TABLES if name in counts and counts[name] == 0]
+    seed_tables = _required_seed_tables()
+    absent = [name for name in seed_tables if name not in counts]
+    drained = [name for name in seed_tables if name in counts and counts[name] == 0]
     if absent:
         failures.append(
             f"seed table(s) {', '.join(absent)} do not exist in schema public. "
@@ -3984,10 +4172,10 @@ def _seed_floor_failures(counts: dict[str, int]) -> list[str]:
     if drained:
         failures.append(
             f"seed table(s) {', '.join(drained)} exist but hold 0 rows. A virgin "
-            "'alembic upgrade head' leaves alembic_version, currencies and "
-            "tenants populated, so an empty one means this database was "
-            "truncated or restored from nothing -- total loss of application "
-            "data with the schema left standing."
+            f"'alembic upgrade head' leaves every required seed populated "
+            f"({', '.join(seed_tables)}), so an empty one means this database "
+            "was truncated or restored from nothing -- total loss of "
+            "application data with the schema left standing."
         )
     return failures
 
@@ -4052,7 +4240,7 @@ def _append_shrunk_seed_tables(
     """
     seeds_shrunk = [
         name
-        for name in SEED_TABLES
+        for name in _required_seed_tables()
         if watermark.tables.get(name, 0) > 0 and 0 < counts.get(name, 0) < watermark.tables[name]
     ]
     if not seeds_shrunk:
@@ -4321,7 +4509,7 @@ def _evaluate_content(
     tables = len(counts)
     rows = sum(counts.values())
     non_seed = _non_seed_rows(counts)
-    seed_names = ", ".join(SEED_TABLES)
+    seed_names = ", ".join(_required_seed_tables())
     absolute = _absolute_content_failures(counts, toc_entries=toc_entries)
     relative, rebaseline = _relative_content_failures(counts, watermark, rows=rows)
     first_run = watermark.is_empty
@@ -4482,9 +4670,11 @@ def _classify_unusable(
 #                 whose stated purpose is that the newest run with content is
 #                 never deleted. ``_run_stamp`` now refuses it, so it enters
 #                 neither the protection list nor the deletion list.
-#            The caller adds a sixth: retention runs only after a backup that
-#            passed the content gate, and only after the watermark is durable
-#            (see ``main``).
+#            The caller adds the sequencing contract for accepted runs:
+#            retention runs only after a backup passed the content gate and
+#            only after the watermark is durable. Rejected runs may prune
+#            expired rejected/partial siblings, but never accepted history
+#            (see ``_execute``).
 # Blast Radius: Destructive, on the backup directory only, and the one place in
 #               this script that can lose history. Invariant 1 is enforced by
 #               pinning that run before any age comparison happens rather than
@@ -4662,6 +4852,46 @@ def _prune(out_dir: Path, *, keep_days: int, keep_min: int, now: datetime) -> Pr
         removed=removed,
     )
     return PruneOutcome(removed=removed, skipped=sorted(set(skipped)), future=sorted(set(future)))
+
+
+# ============================================================================
+# Purpose: Age-delete only rejected and partial side artifacts after a backup
+#          that failed the content gate.
+# Database/ORM: None; immediate children of the configured backup directory.
+# Standards: Reject negative retention; exact side-run name matching; never
+#            enumerate or delete accepted backup history on a rejected run.
+# Blast Radius: Backup retention and last-good recovery history.
+# Connections:
+#   - File: scripts/backup_database.py -> _execute rejected-verdict branch.
+#   - File: Docs/22_BACKUP_RESTORE_AND_REHEARSAL.md -> retention invariant.
+# ============================================================================
+def _prune_side_runs(out_dir: Path, *, keep_days: int, now: datetime) -> PruneOutcome:
+    """Expire rejected/partial artifacts without touching accepted history.
+
+    A rejected run is not a verified replacement and therefore has no authority
+    to age-delete even an apparently redundant accepted backup.  It may only
+    clean disposable side artifacts so repeated rejected nights cannot fill the
+    disk with full dump files.
+    """
+    if keep_days < 0:
+        raise ValueError(f"--keep-days must be >= 0, got {keep_days}")
+    skipped: list[str] = []
+    future: list[str] = []
+    removed: list[str] = []
+    cutoff = now - timedelta(days=keep_days)
+    _prune_side_run_directories(
+        out_dir,
+        now=now,
+        cutoff=cutoff,
+        skipped=skipped,
+        future=future,
+        removed=removed,
+    )
+    return PruneOutcome(
+        removed=removed,
+        skipped=sorted(set(skipped)),
+        future=sorted(set(future)),
+    )
 
 
 # ============================================================================
@@ -5182,7 +5412,13 @@ def run_backup(args: argparse.Namespace, out_dir: Path) -> BackupOutcome:
         # TOC ACL lines only name the object owner, and --no-verify-dump never
         # reads the TOC at all, so a dropped grantee or owner still fails
         # closed here on both paths.
-        counts, acl_grantees, snapshot_owners = _dump_database_and_count(
+        (
+            counts,
+            acl_grantees,
+            snapshot_owners,
+            large_object_count,
+            database_acl,
+        ) = _dump_database_and_count(
             container, staging / DUMP_NAME, timeout=args.timeout
         )
         roles = _dump_roles(
@@ -5208,6 +5444,10 @@ def run_backup(args: argparse.Namespace, out_dir: Path) -> BackupOutcome:
         # the publish gate can judge the bootstrap-superuser lockout shape
         # against the same identity the restore will connect as.
         facts = _container_facts(container, timeout=args.docker_timeout)
+        # The database ACL and large-object count came from the same snapshot
+        # as database.dump. Do not replace them with later, potentially
+        # concurrent catalog reads from the provenance probe.
+        facts["database_acl"] = database_acl
         roles_body = (staging / ROLES_NAME).read_text(encoding="utf-8", errors="replace")
         _warn_when_roles_body_carries_bootstrap_password(
             roles_body,
@@ -5269,6 +5509,7 @@ def run_backup(args: argparse.Namespace, out_dir: Path) -> BackupOutcome:
             },
             "dump_toc_entries": toc_entries,
             "table_row_counts": counts,
+            "large_object_count": large_object_count,
             "table_row_counts_note": ROW_COUNT_NOTE,
             "content_gate": verdict.as_manifest_block(),
             "watermark_after": next_watermark if verdict.accepted else None,
@@ -5574,9 +5815,28 @@ def _execute(args: argparse.Namespace, out_dir: Path, report: _RunReport, starte
 
         if not outcome.accepted:
             # Retention invariant 6. A run that captured nothing gets no say over
-            # what is deleted, so the previous good backups are untouched however
-            # many empty nights follow one another.
-            _record_rejected(report, outcome, started)
+            # which accepted backups are deleted, but its own quarantined
+            # artifacts still age out. The old early return skipped _prune
+            # entirely, allowing rejected full archives to fill the disk.
+            pruned = PruneOutcome()
+            retention_error: str | None = None
+            if args.prune:
+                try:
+                    pruned = _prune_side_runs(
+                        out_dir,
+                        keep_days=args.keep_days,
+                        now=_utc_now(),
+                    )
+                except OSError as exc:
+                    retention_error = f"retention failed: {exc}"
+                    print(f"WARNING: {retention_error}", file=sys.stderr)
+            _record_rejected(
+                report,
+                outcome,
+                started,
+                pruned=pruned,
+                retention_error=retention_error,
+            )
             return EXIT_NO_CONTENT
 
         try:
@@ -5764,14 +6024,23 @@ def _record_bookkeeping_failure(
 # Blast Radius: Operator contract. This is the red light.
 # Connections:
 #   - File: scripts/backup_database.py -> ``_evaluate_content`` produced the
-#     verdict; ``_execute`` skips retention entirely on this path.
+#     verdict; ``_execute`` prunes expired side-run directories on this path
+#     and never lets the rejected run consume an accepted-backup slot.
 #   - File: Docs/22_BACKUP_RESTORE_AND_REHEARSAL.md -> exit-code 8 row.
 # ============================================================================
-def _record_rejected(report: _RunReport, outcome: BackupOutcome, started: datetime) -> None:
+def _record_rejected(
+    report: _RunReport,
+    outcome: BackupOutcome,
+    started: datetime,
+    *,
+    pruned: PruneOutcome | None = None,
+    retention_error: str | None = None,
+) -> None:
     """record rejected."""
     verdict = outcome.verdict
     _, total_bytes = _total_artifact_bytes(outcome.manifest)
     reasons = "; ".join(verdict.failures)
+    pruned = pruned or PruneOutcome()
     report.finalise(
         f"{started.isoformat()} REJECTED exit={EXIT_NO_CONTENT} "
         f"run={outcome.run_dir.name} bytes={total_bytes} "
@@ -5786,6 +6055,8 @@ def _record_rejected(report: _RunReport, outcome: BackupOutcome, started: dateti
             "rows": verdict.rows,
             "content_gate": verdict.as_manifest_block(),
             "error": reasons,
+            "pruned": pruned.removed,
+            "retention_error": retention_error,
         },
     )
     print(
@@ -5799,12 +6070,17 @@ def _record_rejected(report: _RunReport, outcome: BackupOutcome, started: dateti
         file=sys.stderr,
     )
     print(f"   watermark={verdict.watermark.source}", file=sys.stderr)
+    if pruned.removed:
+        print(f"   pruned={', '.join(pruned.removed)}", file=sys.stderr)
+    if retention_error:
+        print(f"   WARNING: {retention_error}", file=sys.stderr)
     if verdict.observed_identity is not None:
         print(f"   read {verdict.observed_identity.describe()}", file=sys.stderr)
     for reason in verdict.failures:
         print(f"   - {reason}", file=sys.stderr)
     print(
-        "   Retention was skipped, so earlier backups were left alone.",
+        "   Retention pruned only expired side-run directories; accepted backups "
+        "were left alone.",
         file=sys.stderr,
     )
 

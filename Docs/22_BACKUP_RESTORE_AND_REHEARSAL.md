@@ -33,10 +33,9 @@ The measured numbers are in [Evidence](#evidence--what-was-actually-run).
 > verifier and one of them caused by a *different* piece of work landing in the same
 > release: **a single directory dated in the future permanently wedged the watermark
 > and captured both retention invariants at once**; the tests never drove the CLI, so
-> two catastrophic mutations survived a 55-mutation matrix; and P0.7's roles seed
-> migration put 148 rows into three tables `SEED_TABLES` did not list, which switched
-> off the refusal that stops an empty database becoming the permanent reference. See
-> [Round 5](#round-5--the-future-dated-directory-the-untested-cli-and-a-cross-lane-regression).
+> two catastrophic mutations survived a 55-mutation matrix; and the migration-derived
+> seed-floor test now fails closed if a later auth-seed migration is added without a
+> matching script update. See [Round 5](#round-5--the-future-dated-directory-the-untested-cli-and-a-cross-lane-regression).
 
 ---
 
@@ -227,15 +226,15 @@ published as a backup.
      re-run ONCE with --establish-watermark.
 ```
 
-> The transcripts in this section were captured **before P0.7's roles seed migration**,
-> when a virgin install was 180 rows and `SEED_TABLES` held three names. The shape is
-> unchanged; the numbers you will see today are 148 higher, and the message names six
-> seed tables. `non_seed_rows=` is unaffected — that is the point of it.
+> The current PR ancestry has no auth-seed migration: a virgin install is 180 rows and
+> `SEED_TABLES` holds the three tables actually populated by these migrations. If a
+> later migration adds seeded rows, update the script and its measurement in the same
+> change; do not manufacture rows in this fixture or silently widen the floor.
 
-Read `rows=` and, above all, **`non_seed_rows=`** — the rows outside the six seed tables
-(`alembic_version`, `currencies`, `permissions`, `role_permission_assignments`, `roles`,
-`tenants`). That number is your data; the other 328 rows are what every UMS database has
-on the day it is created. If it is what this database should hold, run it again with the
+Read `rows=` and, above all, **`non_seed_rows=`** — the rows outside the three seed tables
+(`alembic_version`, `currencies`, `tenants`). That number is your data; the other 180 rows
+are what every UMS database has on the day it is created in this ancestry. If it is what
+this database should hold, run it again with the
 flag — **once, by hand, never in the scheduled task**:
 
 ```powershell
@@ -253,7 +252,7 @@ OK backup=D:\UMS-Backups\ums-backup-20260824T220311Z
 ```
 
 > ⚠️ **If `non_seed_rows=0`, `--establish-watermark` is refused, and that is deliberate.**
-> A database whose every table outside the six seeded ones is empty is not a database
+> A database whose every table outside the three seeded ones is empty is not a database
 > whose numbers you can confirm — it is a freshly migrated one, or one you have just
 > lost. This was measured as a live sequence: exit `8` told the operator to *"re-run ONCE
 > with `--establish-watermark`"*, doing so **published the empty database**, and it then
@@ -263,11 +262,10 @@ OK backup=D:\UMS-Backups\ums-backup-20260824T220311Z
 > `--this-database-is-intentionally-empty` alongside it. It is long on purpose: it must
 > not be reachable by copying a remediation line.
 >
-> **`non_seed_rows` is exactly as good as `SEED_TABLES` is complete**, which is how P0.7
-> turned this refusal off without touching a line of this script — a seeding migration
-> landed 148 rows into three tables the tuple did not name, so a *virgin* database
-> reported `non_seed_rows=148` and read as "has data". Round 5 restored it and added a
-> test that derives the seeded set from the migration sources.
+> **`non_seed_rows` is exactly as good as `SEED_TABLES` is complete**, which is why the
+> migration-derived test is required whenever a seed migration lands. A later auth-seed
+> migration must update the tuple and measured fixture in the same change; do not
+> manufacture rows here.
 
 **The directory also binds itself to one database.** The first accepted run records the
 Postgres cluster's `system_identifier` and the database name in `watermark.json`, and a
@@ -323,9 +321,8 @@ An archive `pg_restore` reads perfectly and that contains nothing is deliberatel
 **Exit `8` is the content gate firing.** It has five causes, and the message names
 which one:
 
-1. **The seed floor** — `public` has no tables, or any of the six `SEED_TABLES`
-   (`alembic_version`, `currencies`, `permissions`, `role_permission_assignments`,
-   `roles`, `tenants`) is missing or empty. No flag overrides this. It is what a backup
+1. **The seed floor** — `public` has no tables, or any of the three `SEED_TABLES`
+   (`alembic_version`, `currencies`, `tenants`) is missing or empty. No flag overrides this. It is what a backup
    fired against a dropped schema, an unmigrated container, a truncated database, or
    somebody else's Postgres produces.
 2. **The watermark** — a table that once held rows is gone or empty, a table fell below
@@ -342,7 +339,7 @@ which one:
    `--accept-content-drop`, which is about how many rows there are, not about which
    database they came from.
 5. **An empty database on a first run** — `--establish-watermark` was passed but every
-   table outside the six seeded ones holds zero rows. Overridable by
+   table outside the three seeded ones holds zero rows. Overridable by
    `--this-database-is-intentionally-empty` on top of `--establish-watermark`, and by
    nothing else.
 
@@ -430,7 +427,7 @@ name dated ahead of now. A non-empty `future_dated_dirs` means either a planted 
 or a clock that was wrong at 02:00 — check the clock first, then delete it. Neither list
 can ever be a directory this script wrote while its clock was right.
 
-`rows` shown here is the reference database — a virgin `alembic upgrade head` (328) plus
+`rows` shown here is the reference database — a virgin `alembic upgrade head` (180) plus
 seven application rows.
 
 > ✅ **A stale green status is now structurally impossible.** An earlier revision
@@ -492,20 +489,17 @@ what it cannot promise, and why.
 
 #### The three tiers, and what each one can actually see
 
-**1. The seed floor — no override, correct with no history.** Every UMS migration path
-ends with **six** tables populated, and `SEED_TABLES` is exactly that list:
+**1. The seed floor — no override, correct with no history.** The migrations in this
+PR ancestry populate **three** tables, and `SEED_TABLES` is exactly that list:
 
 | Table | Rows | Seeded by |
 |---|---:|---|
 | `currencies` | 178 | `20260523_0001` — the frozen `ISO_4217_CURRENCIES_2026_05` snapshot |
-| `role_permission_assignments` | 106 | `20260825_0001` — from `auth/seed.py` |
-| `permissions` | 26 | `20260825_0001` — from `auth/permissions.py` |
-| `roles` | 16 | `20260825_0001` — from `auth/roles.py` |
 | `alembic_version` | 1 | Alembic itself |
 | `tenants` | 1 | `20260516_0001` — the bootstrap `ums` tenant |
 
-A virgin `alembic upgrade head` therefore measures **38 tables / 328 rows** (measured
-2026-08-25 against `postgres:18-alpine`), and exactly those six hold any of them. Any of
+A virgin `alembic upgrade head` therefore measures **38 tables / 180 rows** (measured
+2026-08-25 against `postgres:18-alpine`), and exactly those three hold any of them. Any of
 them missing or empty means the dump is not of a working UMS database, and no flag waves
 it through.
 
@@ -523,29 +517,31 @@ and row-count regressions are the watermark's job.
 > **If a future migration changes what is seeded, backups start failing closed.** That
 > is the intended direction — a gate that degrades to "accept everything" when the
 > schema moves is not a gate — but it does mean a migration that drops, renames or
-> empties one of those six tables requires a matching edit to `SEED_TABLES` in
+> empties one of those three tables requires a matching edit to `CORE_SEED_TABLES` in
 > `scripts/backup_database.py` and to `SEED_ROWS` in
 > `tests/scripts/test_backup_content_gate.py`. The symptom is every run exiting `8`
 > naming the table.
 >
-> **Round 5 proved the other direction is worse**, because it is silent. P0.7's
-> `20260825_0001` *added* 148 rows in three tables that `SEED_TABLES` did not list. The
-> floor kept passing, nothing exited `8` — and `non_seed_rows`, which counts everything
-> *outside* `SEED_TABLES`, went from `0` to `148` on a **virgin** database. That number
-> is tier 3b's only input, so the refusal that stops `--establish-watermark` publishing
-> an empty database stopped firing. `tests/scripts/test_backup_content_gate.py` now
-> parses the migration sources for `op.bulk_insert(sa.table("x", …), …)` and literal
-> `INSERT INTO x (…)` statements and fails if `SEED_TABLES` and that set disagree, so the
-> next seeding migration goes red instead of quiet.
+> A stacked migration that adds new seed catalogs uses the deliberately narrow
+> `SEED_TABLE_EXTENSIONS` tuple instead. It is empty in PR #222 because this ancestry
+> does not seed additional catalogs. `_required_seed_tables()` is consumed dynamically
+> by the content gate, watermark/retention classification and manifest writer; restore
+> then enforces the exact declared list. Tests prove an added required table is refused
+> when missing or empty. The stacked migration must also extend the migration-derived
+> measurement in the same commit—do not name catalogs here before their migration lands.
 >
-> **The cost of the wider tuple, stated plainly.** All six are also held to their exact
-> high-water mark by the seed-shrink rule, and unlike `currencies` the three registry
-> catalogs change on ordinary work — retiring a permission (precedent:
-> `20260513_0002_retire_graph_permissions`) shrinks `permissions`. The first night after
-> such a deploy exits `8` naming the table; **one** run with `--accept-content-drop`
-> clears it and the night after needs no flag. That is the same cost the tuple already
-> carried for an ISO-4217 refresh, and it is why `SEED_TABLES` was widened rather than
-> tier 3b being taught a second list.
+> The migration-derived test is the guard against the other direction: if a future
+> migration adds rows outside the required seed tuple, `non_seed_rows` would misclassify a virgin
+> database and tier 3b could stop firing. `tests/scripts/test_backup_content_gate.py`
+> parses the migration sources for `op.bulk_insert(sa.table("x", …), …)` and literal
+> `INSERT INTO x (…)` statements and fails if the required tuple and that set disagree, so
+> the next seeding migration goes red instead of quiet.
+>
+> **The tuple is also held to its exact high-water mark by the seed-shrink rule.** If a
+> future migration retires or changes a seeded row, the first night after that deploy
+> exits `8` naming the table; **one** run with `--accept-content-drop` clears it and the
+> night after needs no flag. The migration-derived test and measured fixture must be
+> updated with any intentional seed change.
 
 **1b. The identity binding — the one thing row counts cannot see.** An output directory
 holds the history of exactly *one* database: its watermark, its retention decisions and
@@ -602,7 +598,7 @@ That is the shape that took 180 rows to 1 in three nights, all green.
 
 **3. The first-run acknowledgement — the one thing that cannot be decided.** With no
 watermark and no accepted run, a healthy database and one that was wiped and
-re-migrated are *the same database*: 38 tables, 328 rows, seeds intact. No amount of
+re-migrated are *the same database*: 38 tables, 180 rows, seeds intact. No amount of
 inspection separates them (there are no sequences in this schema to compare against —
 every primary key is a UUID). So that run is refused and the numbers are printed, and
 the operator confirms them once per directory with `--establish-watermark`. That also
@@ -669,7 +665,7 @@ that *should* hold 700. The flag remains an acknowledgement, and the printed
   neither a watermark nor an identity, so it needs `--establish-watermark` and a look at
   the numbers — and it is the one state in which a run against the wrong database cannot
   be caught.
-- **Read `non_seed_rows=` on the OK line, at least weekly.** `rows=` includes the 328
+- **Read `non_seed_rows=` on the OK line, at least weekly.** `rows=` includes the 180
   seeded rows every UMS database has on day one; `non_seed_rows=` is your data, and it is
   printed precisely so a human can notice a number that should not have moved.
 - **Read `LastTaskResult` before `last-run.json`.** If they disagree, the exit code is
@@ -710,7 +706,7 @@ rehearsal becomes the only thing standing between you and a bad backup.
 does not wake up and delete its own last backup.
 
 Retention counts **content, not directories**, and it uses the same seed floor the
-gate does. A run whose manifest does not show all six `SEED_TABLES` populated does not
+gate does. A run whose manifest does not show all three `SEED_TABLES` populated does not
 consume a `--keep-min` slot, and the newest run that does hold content is never deleted
 — not by age, not by arithmetic, not when every other run has expired. Without that,
 seven nights of a silently-empty database would fill the seven-run window and push the
@@ -741,10 +737,12 @@ and re-hashing multi-hundred-megabyte dumps to decide a watermark contribution w
 trade a nightly cost against a check the restore script already performs, in full, on the
 one run being restored.
 
-Retention also runs **only after a backup that passed the content gate, and only after
-`watermark.json` has been written**. A night that captured nothing deletes nothing (see
-exit `8`), and pruning never runs ahead of the watermark, because pruning deletes the
-manifests the watermark is rebuilt from.
+Retention for accepted runs runs **only after a backup that passed the content gate and
+only after `watermark.json` has been written**. A rejected run does not prune accepted
+history or contribute to the watermark, but it does age-prune its own expired
+`.rejected`/`.partial` siblings so repeated failed nights cannot fill the backup disk.
+Pruning never runs ahead of the watermark for an accepted run, because pruning deletes
+the manifests the watermark is rebuilt from.
 
 Deletion only ever touches immediate children of the output directory whose names
 match `ums-backup-YYYYMMDDTHHMMSSZ` exactly **and whose timestamp parses as a real date
@@ -1043,77 +1041,94 @@ Step 2's "do not run migrations" matters: the archive contains the full schema a
 own Alembic revision, and `alembic_version` is restored with it. Running `alembic
 upgrade head` first would leave a non-empty database that the restore then refuses.
 
-### The restore window, and what the scheduled backup does inside it
+### The restore and cutover window
 
-Steps 2 and 3 create a stretch of minutes during which the live database is empty or
-half-populated. The nightly task does not know that. Step 0 exists because of it — but
-the design is also built so that **forgetting step 0 is survivable**, and it is worth
-knowing exactly what each shape produces:
+The live target is no longer the database receiving `pg_restore`. Every restore,
+including an empty-target restore, creates a unique `ums_restore_<id>` database with
+the source encoding and locale, applies the recorded database owner/ACL, restores the
+archive there in one transaction, and verifies exact table counts, the complete
+manifest-declared seed floor, and the large-object count. Until those checks pass, the
+live target name and its data are untouched. A failed staging restore removes only the
+generated staging database; it never deletes accepted backup history or the live target.
 
-| If the 02:00 task fires… | Result | Damage |
-|---|---|---|
-| between step 2 and step 3 (schema present, 0 rows) | **exit `8`** — the seed floor fires; quarantined as `…Z.rejected`, `last-run.json` = `REJECTED` | None. Retention is skipped on this path, so no earlier backup is touched. |
-| after `docker volume rm` but before step 2 (no container) | **exit `4`** — `FAILED` | None. Nothing was written. |
-| the stack auto-migrated on start, so 38 tables / 328 seeded rows | **exit `8`** — the application tables that held rows are now empty against the directory's watermark (measured: `1 table(s) that held rows at their high-water mark are now empty: org_units`), *and* the cluster's `system_identifier` changed with the volume | None. This is what the per-table watermark added; a whole-directory percentage alone misses it entirely — 328 rows is the virgin-install seed floor this revision measures against. |
-| the same, but into a **fresh** `--out-dir`, so there is no watermark to compare against | **exit `8`** — `non_seed_rows=0`, and `--establish-watermark` is refused on its own | None. Before tier 3b this was the sharpest edge left: the exit-8 message told the operator to pass that flag, and doing so published the empty database as the reference. |
-| **during** `pg_restore` (step 3, partially populated) | Usually **exit `8`** — the tables restored so far are still empty against their high-water marks | None *usually*. Not guaranteed: see the note below. |
+`--allow-nonempty` now authorizes only the final verified replacement cutover. Without
+it, a target that already has user objects is refused (exit `2`). It does **not**
+authorize `DROP DATABASE`, `pg_restore --clean`, or an unverified overlay.
 
-That last row is the one to take seriously. A partial restore that happens to leave
-every table non-empty and above 10% of its mark would be **accepted and published**.
-It would not lower the watermark — the mark is a maximum, so the next night is still
-judged against the real numbers — but it would be a published backup of a partial
-database. The gate is a safety net here, not a guarantee, which is precisely why step 0
-is in the procedure rather than being left to the gate. If you do forget it, check
-`last-run.json` afterwards and re-run a manual backup once the restore has verified.
+The operator must stop application and scheduler traffic for the whole command, for
+example `docker compose stop app app-dev`. The script refuses if any target session is
+present before staging. One target-scoped advisory lock, held from the maintenance
+database, serializes restore operators. Immediately before cutover the script also:
 
-The narrower earlier claim — that the restore window "used to publish a content-free
-run and overwrite `last-run.json` with `OK`" — is what the content gate closed. It
-closes the *empty* case, and now the *wiped-and-re-migrated* case too. It does not
-close the *partially restored* case.
+1. sets `ALLOW_CONNECTIONS false` on the target and verified replacement;
+2. terminates and boundedly drains every session on both names;
+3. rechecks both session counts;
+4. renames the target to `ums_previous_<id>`;
+5. renames the verified `ums_restore_<id>` database to the target name;
+6. replays role settings that are scoped to the final database name; and
+7. enables connections on the promoted target.
 
-**If you must restore over a database that already has tables**, add
-`--allow-nonempty`. That **drops and recreates the entire target database** —
-`DROP DATABASE ... WITH (FORCE)` (which disconnects any live sessions), then
-`CREATE DATABASE` — before restoring with `pg_restore --clean --if-exists`.
-Everything the database held is destroyed, **including schemas, extensions and
-objects this archive does not contain**, and none of it is recoverable once the
-drop runs. It is a real repair path — it was used to repair a roles-less
-half-populated database back to a byte-for-byte-equivalent privilege surface —
-but the blast radius is the whole database, not just the dump's own schemas.
-Without the flag the script refuses and tells you so (exit `2`).
+PostgreSQL cannot make steps 4 and 5 one transaction. That is the exact short
+non-atomic cutover window. Failure at or after either rename triggers automatic reverse
+renames while connections remain disabled. The error names the target, replacement and
+previous databases and reports whether rollback completed; neither database is dropped.
 
-There is no automatic pre-restore safety copy. If the target holds anything you
-might still need, take a backup of it **before** running with `--allow-nonempty`.
+If automatic rollback also fails, connect to the maintenance database with `psql -X`,
+inspect `pg_database` first, keep application traffic stopped, and recover according to
+the names printed by the error. The post-promotion recovery shape is:
 
-Before the drop runs, the script read-only preflights the live target and
-refuses (changing nothing) when: the archive cannot be read by this
-container's `pg_restore --list` (exit `6` — that probe runs on **every**
-restore path, before `roles.sql` is applied, so a refusal never leaves
-cluster roles behind), an application role already carries a cluster
-membership or a privileged attribute a clean `roles.sql` would not clear
-(exit `5`), or any client still holds a session on the target database
-(exit `2`) — `DROP DATABASE ... WITH (FORCE)` disconnects them, but Compose
-restart policies reconnect their pools mid-restore and the verification would
-then pass over mutated data. The count includes pools that authenticate as
-the same database user as the restore: the standard Compose stack configures
-both the application and `POSTGRES_USER` from `UMS_DB_USER`, so the guard
-excludes only its own connection. Stop the application and scheduler
-containers first (e.g. `docker compose stop app app-dev`) and keep them
-stopped until the restore exits `0`; the script re-checks after verification
-and fails the run (exit `7`) if a client reconnected during the restore
-window.
+```sql
+SELECT datname, datallowconn
+FROM pg_catalog.pg_database
+WHERE datname IN ('<target>', 'ums_restore_<id>', 'ums_previous_<id>');
+
+ALTER DATABASE "<target>" WITH ALLOW_CONNECTIONS false;
+SELECT pg_catalog.pg_terminate_backend(pid)
+FROM pg_catalog.pg_stat_activity
+WHERE datname = '<target>';
+ALTER DATABASE "<target>" RENAME TO "ums_restore_<id>";
+ALTER DATABASE "ums_previous_<id>" RENAME TO "<target>";
+ALTER DATABASE "<target>" WITH ALLOW_CONNECTIONS true;
+```
+
+If the second rename never succeeded, `<target>` is absent and the verified replacement
+still has its `ums_restore_<id>` name; skip the first rename and rename only
+`ums_previous_<id>` back to `<target>`. Do not guess names—use the failure's state line
+and the catalog query.
+
+On success, the previous database remains under `ums_previous_<id>` with connections
+disabled. Keep it until the promoted database has passed application acceptance and a
+fresh accepted backup has been published. Only then may an operator explicitly drop
+that exact previous name from the maintenance database. Restore never prunes or drops
+it automatically.
+
+`roles.sql` is validated before apply, but PostgreSQL role creation, membership and
+role-setting replay are cluster operations and are **not transactionally coupled** to
+the database renames. A role replay failure is fail-closed and leaves the live database
+name unchanged or automatically rolled back, but the error may still require inspection
+and cleanup of partially applied cluster role state before retrying. Do not describe the
+database-plus-roles operation as atomic.
+
+The two host artifacts are copied into an owner-only temporary directory and re-hashed
+there before Docker is contacted and again at each point of use. All `psql` calls use
+`-X`; live sessions, source locale, database owner/ACL, required roles, protected-role
+memberships/attributes/settings, table counts, seed populations, and large objects all
+fail closed. The target `POSTGRES_DB` must exactly match the source database name in the
+manifest; otherwise `ALTER ROLE ... IN DATABASE` settings could be replayed against the
+wrong name, so restore refuses instead of translating or guessing. Rehearsal uses the
+same isolated replacement and cutover logic inside its disposable container.
 
 Restore exit codes:
 
 | Code | Meaning |
 |---|---|
 | `0` | Restored and verified |
-| `2` | Bad backup directory (including a `manifest.json` whose `schema` is not `ums-backup/1`), the target database is not empty, the run was quarantined by the backup content gate (`…Z.rejected`), or the resolved rehearsal image is not a Postgres image |
+| `2` | Bad/malformed backup metadata (including content-gate or seed-floor drift), the target is non-empty without `--allow-nonempty`, target sessions are still live, the run was quarantined (`…Z.rejected`), or the resolved rehearsal image is not Postgres |
 | `3` | Docker daemon unavailable |
 | `4` | Target container unavailable or could not be created |
-| `5` | **`app_tenant` / `app_platform` still missing after `roles.sql`** — nothing was restored |
-| `6` | `pg_restore` failed — including the read-only readability preflight, which runs on every restore path before `roles.sql` is applied |
-| `7` | Post-restore row counts did not match the manifest |
+| `5` | Role preflight/replay/finalization failed, or protected roles are missing/unsafe; inspect possibly partial cluster role state before retrying |
+| `6` | Archive preflight, `pg_restore`, connection drain, staging cleanup, or database cutover failed; inspect the named database state and recovery message |
+| `7` | Replacement table counts, seed populations, or large-object count did not match the manifest; no cutover occurred |
 | `8` | An artifact failed its sha256 check — do not restore that run |
 | `9` | Unexpected internal error — the traceback is printed above the summary |
 
@@ -1121,26 +1136,47 @@ Restore exit codes:
 
 ## Evidence — what was actually run
 
+### Current PR #222 repair validation — 2026-08-31
+
+The final four-file repair was validated without creating another PostgreSQL or Docker
+container because the workstation had only 12.44 GB free and the existing multi-PG run
+had already exhausted Docker storage. Do not read the fault-injection tests as a claim
+that a live two-rename cutover was rehearsed on this final snapshot.
+
+| Command / check | Final result |
+|---|---|
+| `uv sync --extra dev --extra test --extra lint` | success — 89 packages resolved, 86 checked |
+| `uv run ruff check backend tests scripts` | `All checks passed!` |
+| `uv run mypy scripts/backup_database.py scripts/restore_database.py` | `Success: no issues found in 2 source files` |
+| `uv run pytest -q tests/scripts/test_backup_content_gate.py` | **299 passed** — includes missing/empty stacked-seed refusal, rejected-run retention isolation, private restore staging, replacement-before-cutover ordering, second-rename rollback, unexpected finalizer rollback, ACL/locale/roles and large-object gates |
+| `git diff --check` | success |
+| `uv run pytest -q` | **not a pass** — `UMS_TEST_DATABASE_URL` was unset, the suite reached its explicit real-Postgres setup errors, and the non-actionable run was stopped at 65% when the repair owner requested immediate closeout |
+
+To close the remaining environment gate, provision one operator-owned disposable
+PostgreSQL database, set `UMS_TEST_DATABASE_URL` to that database, then run
+`uv run pytest -q`. A separate live rehearsal should inject a failure between the two
+`ALTER DATABASE ... RENAME` statements and confirm the catalog state matches the unit
+fault test before this becomes the production restore procedure.
+
 Against `postgres:18-alpine` (PostgreSQL 18.4) migrated to this repository's real
 Alembic head, seeded with 2 org units, 2 channels and 3
 `monthly_channel_revenue_facts` rows, on Docker Engine 29.5.3.
 
-> **Dated note — 2026-08-25: the virgin-database row count changed under these tables.**
-> Every figure in the rounds 1–4 tables below was measured when a virgin
-> `alembic upgrade head` was **38 tables / 180 rows**. The P0.7 roles-seed migration
-> (`20260825_0001`) added 148 seeded rows — `role_permission_assignments` 106,
-> `permissions` 26, `roles` 16 — so the same measurement today is **38 tables / 328
-> rows**. Round 5 re-measured it and records both figures.
+> **Dated note — 2026-08-25: historical seed-floor snapshots.** Every figure in the
+> rounds 1–4 tables below was measured against the then-current ancestry, where a
+> virgin `alembic upgrade head` was **38 tables / 180 rows**. A later P0.7 snapshot
+> temporarily added 148 auth-seed rows and Round 5 recorded that separate state;
+> that migration is not present in the current PR #222 ancestry.
 >
 > **The old numbers are left exactly as they were run.** They are the evidence for what
 > those rounds actually proved, and rewriting them would misrepresent when each hole was
 > found and closed. Read `180` in any rounds 1–4 row as *"the virgin baseline at the time
-> of that run"*, and expect `328` from any run you take now. The derived percentages in
+> of that run"*. For the current PR #222 snapshot, the expected virgin floor remains
+> `180` rows in the three migration-populated tables. The derived percentages in
 > those rows (for example "180 rows is 98% of a 184-row mark") are likewise historical
-> arithmetic, not a claim about today's database. One consequence is load-bearing rather
-> than cosmetic: `_non_seed_rows` on a virgin database read **148** under the old figure,
-> which silently switched tier 3b's empty-database refusal off — see
-> [Round 5, finding 4](#round-5--the-future-dated-directory-the-untested-cli-and-a-cross-lane-regression).
+> arithmetic, not a claim about today's database. The historical `148` non-seed-row
+> reading belongs only to that later snapshot; the migration-derived test now fails if
+> a future seed migration is not reflected in `SEED_TABLES`.
 
 | Check | Result |
 |---|---|
@@ -1228,12 +1264,14 @@ own exit code and its own files.
 | `uv run pytest tests/scripts/test_backup_content_gate.py -q` | 62 tests | **98 passed** |
 | `uv run pytest -q` (with `UMS_TEST_DATABASE_URL` set) | — | **3068 passed**, 0 failed, in 10m24s |
 
-#### Round 5 — the future-dated directory, the untested CLI, and a cross-lane regression
+#### Round 5 — historical snapshot: the future-dated directory, the untested CLI, and a cross-lane regression
 
-**Provenance, because it matters here.** Findings 1–3 below were found and proved with
+**Provenance, because it matters here.** This subsection preserves a historical review
+of a different branch snapshot; the P0.7 migration named below is not in PR #222's
+current ancestry. Findings 1–3 below were found and proved with
 **live CLI runs by an adversarial verifier**, not by the author of the fix; the run
 transcripts quoted are theirs. Finding 4 was found by the same pass reading the P0.7
-migration against `SEED_TABLES`. The measurements in the *After* column, the 328-row
+migration against `SEED_TABLES`. The measurements in the *After* column, including the 328-row
 virgin state, and the mutation matrix are the fix author's own, run on 2026-08-25 against
 Docker Engine 29.5.3 and `postgres:18-alpine@sha256:96d56f7f`.
 
@@ -1404,11 +1442,11 @@ otherwise have surfaced during a real incident on a freshly recreated container.
   permanent reference. The only barrier is the operator reading the `rows=` /
   `non_seed_rows=` figures on the OK line and knowing they are wrong.
 
-  **That barrier got harder to read on 2026-08-25, and you need the current number.** A
-  virgin `alembic upgrade head` is now **328 rows**, not the **180** that every round
-  before 5 measured and that older notes still quote — the P0.7 roles-seed migration
-  (`20260825_0001`) added 148. So `rows=328, non_seed_rows=0` is the *expected* reading
-  for a genuine fresh install, and any older instruction to expect `180` is stale. Read
+  **The current number follows the migrations actually deployed.** In PR #222's
+  ancestry a virgin `alembic upgrade head` is **180 rows** in the three seeded tables.
+  A future auth-seed migration must update the script, migration-derived test and
+  measured fixture together. So `rows=180, non_seed_rows=0` is the *expected* reading
+  for a genuine fresh install in this snapshot. Read
   **`non_seed_rows=`**, not `rows=`: it excludes the seeded rows entirely and is
   therefore the figure that does not move when a future migration seeds more. If it is
   not the number of rows you believe you have, do not pass the flag.
@@ -1442,10 +1480,10 @@ otherwise have surfaced during a real incident on a freshly recreated container.
   backup of a half-populated database. See
   [the restore window](#the-restore-window-and-what-the-scheduled-backup-does-inside-it).
 - **The seed floor is coupled to what the migrations seed.** A future migration that
-  drops, renames or empties any of the six `SEED_TABLES` turns every backup red until
-  `SEED_TABLES` and the test fixture are updated. That direction is deliberate, but it
-  is a maintenance obligation — and a migration that *retires* a role or a permission
-  costs one `--accept-content-drop` run on the night after it deploys.
+  drops, renames or empties any of the three `SEED_TABLES` turns every backup red until
+  the core/extension tuple and test fixture are updated. That direction is deliberate,
+  but it is a maintenance obligation. Any intentional shrink of a required seeded
+  catalog costs one `--accept-content-drop` run on the night after it deploys.
 - **The migration parser that keeps `SEED_TABLES` honest is a parser.** It recognises
   `op.bulk_insert(sa.table("x", …), …)` and literal `INSERT INTO x (…)` statements, and
   a revision that seeds through a third idiom (`bind.execute(_ROLES.insert(), rows)` is
@@ -1470,9 +1508,8 @@ otherwise have surfaced during a real incident on a freshly recreated container.
   direction is wrong.** Retention re-tests each run's *recorded* counts against the
   current floor, and a manifest written before a table existed has no key for it, which
   reads as "empty". Such a run stops consuming a `--keep-min` slot and becomes eligible
-  for deletion by age. **It cannot happen on this deployment** — no backup directory
-  predates this script's first release, which ships in the same release as
-  `20260825_0001` — and it is deliberately not patched here, because the obvious fix
+  for deletion by age. It remains a maintenance hazard if a future release widens the
+  tuple, and it is deliberately not patched here, because the obvious fix
   ("an absent seed table is drift, so call the run *unknown*") also swallows the
   dropped-schema case that retention invariant 2 is built on.
 
@@ -1480,7 +1517,7 @@ otherwise have surfaced during a real incident on a freshly recreated container.
   re-tests each run's recorded counts through `all(counts.get(name, 0) > 0 for name in
   SEED_TABLES)`. `counts.get(name, 0)` cannot distinguish *"this table held zero rows"*
   from *"this manifest was written before the table existed"* — both arrive as `0`. A
-  manifest predating the roles-seed migration has no `roles` key at all, so widening
+  manifest predating a newly seeded table has no key for it at all, so widening
   `SEED_TABLES` retroactively reclassifies it as **proven empty**. It then stops
   consuming a `--keep-min` slot and becomes deletable by age. The direction is wrong:
   widening the safety net deletes old backups.
@@ -1498,7 +1535,7 @@ otherwise have surfaced during a real incident on a freshly recreated container.
   an earlier generation), and confirm the rule separates them *before* writing it.
   Round 5 recorded two tests that passed with their guard deleted; a rule chosen
   without that matrix is how a test ends up ratifying the hole it was written to close.
-  Do this before a **seventh** name is added to `SEED_TABLES`.
+  Do this before **any** name is added to `SEED_TABLE_EXTENSIONS`.
 - **The `app-data` volume is not backed up.** P0.2 gave export artifacts and connector
   blobs a named volume. Compose and the README warn that `-v` destroys it and that the
   database backup does not protect it. It is not in this backup set, and no rehearsal
