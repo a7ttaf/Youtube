@@ -7,7 +7,7 @@ import AppShell, { isImportScopeSettled } from "@/components/srcc/AppShell";
 import { DEFAULT_MONTH, MONTH_OPTIONS } from "@/components/srcc/shared";
 import { SessionProvider } from "@/contexts/SessionContext";
 import { TenantProvider } from "@/contexts/TenantContext";
-import type { SessionMe } from "@/lib/api/types";
+import type { SessionMe, TenantRead } from "@/lib/api/types";
 import { monthKeyLabel } from "@/lib/months";
 import { withDisplayDigest } from "../../helpers/displayDigestFixtures";
 
@@ -18,7 +18,12 @@ const ORIGINAL_FETCH = globalThis.fetch;
 const FULL_SESSION: SessionMe = {
   user_id: "00000000-0000-0000-0000-0000000000aa",
   email: "dev@ums.local",
-  tenant: { id: "t1", slug: "ums", display_name: "UMS" },
+  tenant: {
+    id: "t1",
+    slug: "ums",
+    display_name: "UMS",
+    primary_currency: "USD",
+  },
   roles: [],
   permissions: [],
   is_service_account: false,
@@ -102,8 +107,29 @@ const urlOf = (input: unknown): string => {
 const SESSION_ROUTE = "/session/me";
 const TENANT_ROUTE = "/tenants/me";
 
-// The one tenant every shell test resolves to; duplicated per route map before.
-const SHELL_TENANT = { id: "t1", slug: "ums", display_name: "UMS" };
+// Successful /tenants/me responses are checked against the wire DTO so a
+// fixture cannot silently omit a field that AppShell hydrates into context.
+const BOOTSTRAP_TENANT = {
+  id: "00000000-0000-0000-0000-000000000001",
+  slug: "ums",
+  display_name: "UMS",
+  primary_currency: "USD",
+} satisfies TenantRead;
+
+const ACME_TENANT = {
+  id: "00000000-0000-0000-0000-0000000000ac",
+  slug: "acme",
+  display_name: "Acme Holdings",
+  primary_currency: "EGP",
+} satisfies TenantRead;
+
+// The one tenant every shell test resolves to; typed as the complete API DTO.
+const SHELL_TENANT = {
+  id: "t1",
+  slug: "ums",
+  display_name: "UMS",
+  primary_currency: "USD",
+} satisfies TenantRead;
 
 const isTenantCall = (input: unknown): boolean => {
   return urlOf(input).includes(TENANT_ROUTE);
@@ -161,11 +187,7 @@ describe("AppShell tenant proof tag", () => {
   it("hydrates the tenant and shows UMS (ums) on the dev-only tag", async () => {
     (globalThis.fetch as ReturnType<typeof vi.fn>).mockImplementation(
       routeFetch(() =>
-        jsonResponse({
-          id: "00000000-0000-0000-0000-000000000001",
-          slug: "ums",
-          display_name: "UMS",
-        }),
+        jsonResponse(BOOTSTRAP_TENANT),
       ),
     );
     render(
@@ -224,11 +246,7 @@ describe("AppShell tenant proof tag", () => {
     const fetchMock = globalThis.fetch as ReturnType<typeof vi.fn>;
     fetchMock.mockImplementation(
       routeFetch(() =>
-        jsonResponse({
-          id: "00000000-0000-0000-0000-000000000001",
-          slug: "ums",
-          display_name: "UMS",
-        }),
+        jsonResponse(BOOTSTRAP_TENANT),
       ),
     );
     render(
@@ -256,11 +274,7 @@ describe("AppShell tenant proof tag", () => {
         tenantCallCount += 1;
         return tenantCallCount === 1
           ? jsonResponse({ detail: "transient 503" }, 503)
-          : jsonResponse({
-              id: "00000000-0000-0000-0000-000000000001",
-              slug: "ums",
-              display_name: "UMS",
-            });
+          : jsonResponse(BOOTSTRAP_TENANT);
       }),
     );
     render(
@@ -288,11 +302,7 @@ describe("AppShell tenant proof tag", () => {
   it("renders the presentation-only hint beside the role preview switcher", async () => {
     (globalThis.fetch as ReturnType<typeof vi.fn>).mockImplementation(
       routeFetch(() =>
-        jsonResponse({
-          id: "00000000-0000-0000-0000-000000000001",
-          slug: "ums",
-          display_name: "UMS",
-        }),
+        jsonResponse(BOOTSTRAP_TENANT),
       ),
     );
     render(
@@ -317,11 +327,7 @@ describe("AppShell tenant proof tag", () => {
     const fetchMock = globalThis.fetch as ReturnType<typeof vi.fn>;
     fetchMock.mockImplementation(
       routeFetch(() =>
-        jsonResponse({
-          id: "00000000-0000-0000-0000-0000000000ac",
-          slug: "acme",
-          display_name: "Acme Holdings",
-        }),
+        jsonResponse(ACME_TENANT),
       ),
     );
     render(
@@ -550,9 +556,7 @@ describe("AppShell production session hydration", () => {
     (globalThis.fetch as ReturnType<typeof vi.fn>).mockImplementation((input: unknown) => {
       if (isSessionCall(input)) return Promise.reject(new Error("network down"));
       if (isTenantCall(input)) {
-        return Promise.resolve(
-          jsonResponse({ id: "t1", slug: "ums", display_name: "UMS" }),
-        );
+        return Promise.resolve(jsonResponse(SHELL_TENANT));
       }
       return Promise.resolve(jsonResponse(NET_REVENUE_BODY));
     });

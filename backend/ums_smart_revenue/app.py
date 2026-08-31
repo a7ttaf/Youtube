@@ -101,15 +101,27 @@ from ums_smart_revenue.tenancy.resolver import (
 )
 
 
+# ============================================================================
+# Purpose: Build the API after resolving the effective authorization mode and
+#   validate only settings consumed by that mode.
+# Database/ORM: Configures SQLAlchemy session factories when database_url resolves.
+# Standards: Explicit factory overrides win over environment defaults; headers
+#   currency validation stays fail-closed without affecting database mode.
+# Blast Radius: Application startup, tenant resolution, and authorization wiring.
+# Connections:
+#   - File: backend/ums_smart_revenue/config/settings.py -> mode-aware currency resolver.
+#   - File: backend/ums_smart_revenue/tenancy/resolver.py -> database tenant rows.
+# ============================================================================
 def create_app(*, database_url: str | None = None, authz_source: str | None = None) -> FastAPI:
     """Create the FastAPI application with optional SQL-backed authorization."""
-    settings = load_app_settings()
+    settings = load_app_settings(validate_tenant_currency=False)
     resolved_database_url = database_url or settings.database_url
     resolved_authz_source = (authz_source or settings.authz_source).strip().lower()
     if resolved_authz_source not in {AUTHZ_SOURCE_HEADERS, AUTHZ_SOURCE_DATABASE}:
         raise ValueError("authz_source must be 'headers' or 'database'")
     if resolved_authz_source == AUTHZ_SOURCE_DATABASE and not resolved_database_url:
         raise ValueError("database authz_source requires database_url or UMS_DATABASE_URL")
+    tenant_primary_currency = settings.tenant_primary_currency_for_authz(resolved_authz_source)
 
     # ========================================================================
     # Purpose: Close the module-owned GroupSyncScheduler and ConnectorJobExecutor
@@ -163,6 +175,7 @@ def create_app(*, database_url: str | None = None, authz_source: str | None = No
         _configure_database_dependencies(
             _app,
             resolved_authz_source=resolved_authz_source,
+            tenant_primary_currency=tenant_primary_currency,
             sqlite_database=sqlite_database,
             session_factory=session_factory,
             platform_session_factory=platform_session_factory,
@@ -278,15 +291,15 @@ def _wire_connector_background_workers(
 
 # ============================================================================
 # Purpose: Install the database-backed dependency overrides (sessions,
-#   registries, audit sinks, principal loader) and the authz-mode middleware.
-#   Extracted from create_app so the factory stays under the cyclomatic-
-#   complexity budget; override and middleware order is verbatim.
+#   registries, audit sinks, principal loader) and authz-mode middleware,
+#   including the startup-validated bootstrap currency in headers mode.
 # Database/ORM: Wires SQLAlchemy session factories into FastAPI dependencies;
 #   no table or query changes.
 # Standards: Atomic-lane audit sinks for all-or-nothing routes; platform-lane
-#   session for tenant resolution under database authz.
+#   session for database tenant resolution; injected immutable tenant label for
+#   headers mode.
 # Blast Radius: Authorization (principal source + tenant resolver middleware)
-#   and audit-sink routing -- moved verbatim, no behavior change.
+#   and audit-sink routing; headers-mode tenant currency label only.
 # Connections:
 #   - File: backend/ums_smart_revenue/api/dependencies.py -> override targets.
 #   - File: backend/ums_smart_revenue/api/dependencies_audit.py -> the
@@ -298,6 +311,7 @@ def _configure_database_dependencies(
     fastapi_app: FastAPI,
     *,
     resolved_authz_source: str,
+    tenant_primary_currency: str,
     sqlite_database: bool,
     session_factory: SessionFactory,
     platform_session_factory: SessionFactory,
@@ -318,7 +332,10 @@ def _configure_database_dependencies(
             if sqlite_database
             else session_dependency(platform_session_factory)
         )
-        fastapi_app.add_middleware(DefaultTenantMiddleware)
+        fastapi_app.add_middleware(
+            DefaultTenantMiddleware,
+            primary_currency=tenant_primary_currency,
+        )
     overrides[current_channel_registry] = sql_channel_registry_from_session
     overrides[current_group_registry] = sql_group_registry_from_session
     overrides[current_audit_sink] = sql_audit_sink_from_session
@@ -414,17 +431,28 @@ class TrustedGatewayTenantResolverMiddleware:
         await self._resolver(scope, receive, send)
 
 
+# ============================================================================
+# Purpose: Bind the configured bootstrap tenant in headers authorization mode.
+# Database/ORM: None; database mode uses TenantResolverMiddleware instead.
+# Standards: The app factory validates and injects the currency once at startup.
+# Blast Radius: Request-scoped tenant identity and currency labels in headers mode.
+# Connections:
+#   - File: backend/ums_smart_revenue/config/settings.py -> strict ISO currency parser.
+#   - File: backend/ums_smart_revenue/api/tenants.py -> exposes the bound tenant.
+# ============================================================================
 class DefaultTenantMiddleware:
     """Bind the bootstrap UMS tenant for SQL-backed trusted-header requests."""
 
     def __init__(
         self,
         asgi_app: ASGIApp,
+        primary_currency: str,
         bypass_paths: Iterable[str] = DEFAULT_BYPASS_PATHS,
     ) -> None:
         """Initialise with the inner ASGI app and optional bypass paths."""
         self.app = asgi_app
         self._bypass_paths = _normalise_bypass_paths(bypass_paths)
+        self._primary_currency = primary_currency
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         """Bind the bootstrap tenant context and delegate to the inner app."""
@@ -436,7 +464,7 @@ class DefaultTenantMiddleware:
             await self.app(scope, receive, send)
             return
 
-        token = TENANT_CTX.set(_bootstrap_tenant())
+        token = TENANT_CTX.set(_bootstrap_tenant(primary_currency=self._primary_currency))
         try:
             await self.app(scope, receive, send)
         finally:
@@ -470,14 +498,39 @@ async def _send_http_exception(
     )(scope, receive, send)
 
 
-def _bootstrap_tenant() -> Tenant:
+# ============================================================================
+# Purpose: Fabricate the single-tenant bootstrap Tenant bound by
+#   DefaultTenantMiddleware in headers/trusted-gateway mode, where no
+#   ``tenants`` row is read. Its declared primary currency is now CONFIGURED
+#   (UMS_TENANT_PRIMARY_CURRENCY) instead of hardcoded, so a deployment can
+#   declare its reporting currency without a code change.
+# Database/ORM: None -- deliberately no ``tenants`` read. Database-authz mode
+#   does not use this function at all: TenantResolverMiddleware loads the real
+#   row, and ``tenants.primary_currency`` stays the source of truth there.
+# Standards: create_app resolves the effective authz mode, validates the
+#   headers-only env value against the repository's ISO-4217 snapshot, and
+#   injects it into middleware once at boot. This is stricter than
+#   the ck_tenants_primary_currency_iso4217 CHECK, which is shape-only and
+#   would accept a value such as ``ZZZ``.
+# Blast Radius: The declared currency LABEL on the bootstrap tenant, surfaced
+#   read-only by GET /tenants/me and GET /session/me. No conversion, no FX, no
+#   fact table, no CHECK constraint, no finance math -- the default is still
+#   "USD", so this wiring changes no observable behaviour on its own.
+# Connections:
+#   - File: backend/ums_smart_revenue/config/settings.py -> AppSettings
+#     .tenant_primary_currency and its fail-fast loader.
+#   - File: backend/ums_smart_revenue/tenancy/currency.py ->
+#     get_tenant_primary_currency reads this back off TENANT_CTX.
+#   - File: backend/ums_smart_revenue/api/tenants.py -> GET /tenants/me.
+# ============================================================================
+def _bootstrap_tenant(*, primary_currency: str) -> Tenant:
     """Return the bootstrap UMS tenant for single-tenant trusted-header requests."""
     now = datetime.now(UTC)
     return Tenant(
         id=UUID(UMS_TENANT_ID),
         slug="ums",
         display_name="UMS",
-        primary_currency="USD",
+        primary_currency=primary_currency,
         status=TenantStatus.ACTIVE,
         onboarding_at=now,
         created_at=now,

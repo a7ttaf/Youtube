@@ -21,6 +21,8 @@ name: ums-smart-revenue
 x-app-env: &app-env
   UMS_DATABASE_URL: postgresql+psycopg://${UMS_DB_USER:?Set UMS_DB_USER}:${UMS_DB_PASSWORD_URLENC:?Set UMS_DB_PASSWORD_URLENC}@postgres:5432/${UMS_DB_NAME:?Set UMS_DB_NAME}
   UMS_AUTHZ_SOURCE: ${UMS_AUTHZ_SOURCE:-headers}
+  # Declared reporting-currency label, fail-fast validated, default USD (never a conversion rate).
+  UMS_TENANT_PRIMARY_CURRENCY:
   UMS_TRUSTED_GATEWAY_TOKEN: ${UMS_TRUSTED_GATEWAY_TOKEN:?Set UMS_TRUSTED_GATEWAY_TOKEN}
   UMS_CORS_ALLOWED_ORIGINS: ${UMS_CORS_ALLOWED_ORIGINS:-http://localhost:3000,http://localhost:5173}
   UMS_RATE_LIMIT_PER_MINUTE: ${UMS_RATE_LIMIT_PER_MINUTE:-120}

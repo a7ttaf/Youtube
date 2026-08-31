@@ -4,6 +4,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { ApiError, useApiClient } from "@/lib/api/client";
 import { TenantProvider } from "@/contexts/TenantContext";
+import type { TenantRead } from "@/lib/api/types";
 
 const wrapper = ({ children }: { children: React.ReactNode }) => {
   return <TenantProvider initialSlug="ums">{children}</TenantProvider>;
@@ -31,6 +32,13 @@ const jsonResponse = (body: unknown, init: ResponseInit = {}) => {
     ...init,
   });
 };
+
+const TENANT_READ = {
+  id: "abc",
+  slug: "ums",
+  display_name: "UMS",
+  primary_currency: "USD",
+} satisfies TenantRead;
 
 const textResponse = (body: string, init: ResponseInit = {}) => {
   return new Response(body, {
@@ -221,11 +229,12 @@ describe("useApiClient Content-Type handling", () => {
 describe("useApiClient response handling", () => {
   it("returns the parsed JSON body on 200", async () => {
     (globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
-      jsonResponse({ id: "abc", slug: "ums", display_name: "UMS" }),
+      jsonResponse(TENANT_READ),
     );
     const { result } = renderHook(() => useApiClient(), { wrapper });
-    const payload = await result.current.get<{ id: string }>("/tenants/me");
+    const payload = await result.current.get<TenantRead>("/tenants/me");
     expect(payload.id).toBe("abc");
+    expect(payload.primary_currency).toBe("USD");
   });
 
   it("resolves to undefined on 204", async () => {

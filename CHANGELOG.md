@@ -16,6 +16,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the latent silent-zero gap where every channel kept `content_owner_id=None`
   and no channel was ever selected for ingestion. No migration — the
   `youtube_channels.content_owner_id` column already existed.
+- Tenant primary-currency spine: `GET /tenants/me` and the optional tenant in
+  `GET /session/me` now expose additive `primary_currency` labels, and the SPA
+  carries that label through tenant context instead of hardcoding it. Headers
+  mode reads the strictly validated `UMS_TENANT_PRIMARY_CURRENCY` setting with
+  the unchanged `USD` default; database mode reads `tenants.primary_currency`
+  from PostgreSQL. No migration/backfill is required for this additive Phase 1
+  work, and no amount conversion or finance calculation was added. A later
+  database-mode EGP flip requires a separate controlled tenant-row data
+  migration/backfill that captures each prior value for rollback; changing the
+  headers-only setting is insufficient.
 - Root governance: `README.md`, `SECURITY.md`, `CONTRIBUTING.md`, `CODEOWNERS`, `CODE_OF_CONDUCT.md`, `.gitignore`.
 
 ### Changed
@@ -62,6 +72,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `.created`, `.updated`, and `.unchanged` for source-row classification.
 
 ### Fixed
+- Database-mode app startup no longer parses or rejects the unused
+  `UMS_TENANT_PRIMARY_CURRENCY` headers-mode setting. Currency validation now
+  follows the effective authorization mode, including an explicit
+  `create_app(authz_source=...)` override; headers mode remains fail-closed on
+  malformed or unknown ISO-4217 codes.
 - Regenerated the stale `uv.lock`. It still resolved `fastapi==0.136.3` and
   `pytest==9.0.3` while `pyproject.toml` declared `0.137.1` and `9.1.0`, so
   container images silently ran the older packages. `uv lock --check` now

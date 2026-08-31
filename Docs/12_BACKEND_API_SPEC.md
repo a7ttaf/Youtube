@@ -7,6 +7,8 @@ Define initial API endpoints for the UMS Smart Revenue Control Center.
 
 ```text
 /auth
+/session
+/tenants
 /users
 /org-units
 /channels
@@ -36,6 +38,29 @@ The trusted gateway still supplies identity headers, but authorization can run i
 Database authorization rejects unknown users and disabled users before route code executes.
 
 ## Example endpoints
+
+### Session and tenant context
+
+```http
+GET /session/me
+GET /tenants/me
+```
+
+Both authenticated responses expose the resolved tenant's additive
+`primary_currency` field as a three-letter uppercase ISO-4217 code. In
+`GET /tenants/me`, it appears beside `id`, `slug`, and `display_name`; in
+`GET /session/me`, it appears inside the optional `tenant` object beside the
+same identity fields. The field is the tenant's declared reporting **label**,
+not an exchange rate or proof that every stored amount uses that currency. UMS
+does not convert finance values from this field.
+
+The source is authorization-mode specific. `headers` mode fabricates the
+bootstrap tenant from the strictly validated `UMS_TENANT_PRIMARY_CURRENCY`
+setting (default `USD`). `database` mode ignores that setting and resolves
+`tenants.primary_currency` from PostgreSQL, the source of truth. Therefore a
+future database-mode EGP flip requires a reviewed, tenant-scoped data
+migration/backfill with captured prior values for rollback; changing the
+environment setting alone cannot alter the database response.
 
 ### Channels
 

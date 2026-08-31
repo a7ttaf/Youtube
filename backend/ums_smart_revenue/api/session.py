@@ -47,6 +47,12 @@ class SessionTenant(BaseModel):
     id: str
     slug: str
     display_name: str
+    # Additive (2026-08-27): the tenant's DECLARED ISO-4217 reporting currency,
+    # mirroring GET /tenants/me so the SPA gets the same label from whichever
+    # hydration call answers first. A label, not a rate — UMS performs no
+    # currency conversion, and this says nothing about how any stored amount
+    # is denominated.
+    primary_currency: str
 
 
 class SessionScopeAssignment(BaseModel):
@@ -251,10 +257,17 @@ def _resolve_tenant() -> SessionTenant | None:
     #          when tenant context is unavailable.
     # Database/ORM: None — reads the contextvar set by tenant middleware.
     # Standards: get_current_tenant() (the non-raising read) by design returns
-    #            None instead of raising TenantContextMissing.
-    # Blast Radius: Read-only. No graph projection impact detected.
+    #            None instead of raising TenantContextMissing. primary_currency
+    #            is therefore read off the already-resolved tenant rather than
+    #            through tenancy.currency.get_tenant_primary_currency(), whose
+    #            fail-closed raise is exactly the behaviour this route must not
+    #            have; the value is identical either way.
+    # Blast Radius: Read-only. No graph projection impact detected. The
+    #               primary_currency label carries no rate and converts nothing.
     # Connections:
     #   - File: backend/ums_smart_revenue/tenancy/context.py -> get_current_tenant.
+    #   - File: backend/ums_smart_revenue/tenancy/currency.py -> the fail-closed
+    #     sibling accessor used by GET /tenants/me.
     # ========================================================================
     tenant = get_current_tenant()
     if tenant is None:
@@ -263,6 +276,7 @@ def _resolve_tenant() -> SessionTenant | None:
         id=str(tenant.id),
         slug=tenant.slug,
         display_name=tenant.display_name,
+        primary_currency=tenant.primary_currency,
     )
 
 

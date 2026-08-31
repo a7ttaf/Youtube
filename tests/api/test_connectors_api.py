@@ -32,7 +32,11 @@ from ums_smart_revenue.app import create_app
 from ums_smart_revenue.auth.models import RoleAssignment, UserPrincipal
 from ums_smart_revenue.auth.roles import RoleKey
 from ums_smart_revenue.auth.scopes import AccessScope
-from ums_smart_revenue.config.settings import load_app_settings
+from ums_smart_revenue.config.settings import (
+    AUTHZ_SOURCE_ENV,
+    TENANT_PRIMARY_CURRENCY_ENV,
+    load_app_settings,
+)
 from ums_smart_revenue.connectors.credentials import (
     ConnectorCredentialEntry,
     ConnectorCredentialPage,
@@ -133,11 +137,14 @@ class _FakeExecutor:
         self.submit_calls: list[dict] = []
         self.activate_calls: list[dict] = []
         self.cancel_calls: list[dict] = []
+        self.closed = False
 
     def has_active_job(self, **kwargs) -> bool:
+        """Return the preset active flag."""
         return self.active
 
     def submit_if_absent(self, **kwargs):
+        """Record the call and mimic the atomic duplicate check."""
         # Record the call and mimic the atomic check: if ``active`` is set
         # the route receives None and falls into the duplicate path.
         self.submit_calls.append(kwargs)
@@ -146,11 +153,17 @@ class _FakeExecutor:
         return _FakeReservation(kwargs)
 
     def activate(self, reservation):
+        """Record the reservation activation."""
         self.activate_calls.append({"reservation": reservation})
 
     def cancel_reservation(self, reservation):
+        """Record and accept the reservation cancellation."""
         self.cancel_calls.append({"reservation": reservation})
         return True
+
+    def close(self) -> None:
+        """Mirror the production executor lifecycle used by app shutdown."""
+        self.closed = True
 
 
 class _FakeReservation:
@@ -182,6 +195,7 @@ def _seed_active_credential(
     credential_smoked: bool = True,
     token_expiry_at: datetime | None = None,
 ):
+    """Insert one credential row with the given smoke status and expiry."""
     engine = create_engine(database_url)
     # The jobs route reads connector_runs for the dup/orphan guard; ensure the
     # ReportBase tables exist so the reader runs against a real (empty) table.
@@ -431,7 +445,45 @@ def test_revenue_operations_admin_can_request_connector_job_and_audit(tmp_path):
     assert fake.cancel_calls == []
 
 
+def test_connector_job_runtime_ignores_currency_changed_after_headers_app_start(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Gateway and job settings reads defer a currency already fixed at app boot."""
+    monkeypatch.setenv(AUTHZ_SOURCE_ENV, "headers")
+    monkeypatch.delenv(TENANT_PRIMARY_CURRENCY_ENV, raising=False)
+    load_app_settings.cache_clear()
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    _seed_active_credential(database_url)
+    fake = _FakeExecutor(active=False)
+    app = _enable_executor_app(database_url, fake)
+
+    monkeypatch.setenv(TENANT_PRIMARY_CURRENCY_ENV, "not-a-currency")
+    load_app_settings.cache_clear()
+    with TestClient(app) as client:
+        response = client.post(
+            "/connectors/jobs",
+            headers=auth_headers(
+                "revenue_operations_admin",
+                "connector",
+                "youtube_reporting",
+            ),
+            json={
+                "connector_key": "youtube_reporting",
+                "account_id": "content-owner-1",
+                "report_month": "2026-03",
+                "reason": "Validate mode-independent runtime settings reads",
+            },
+        )
+
+    assert response.status_code == 202, response.text
+    assert len(fake.activate_calls) == 1
+    assert fake.closed is True
+
+
 def test_request_connector_job_live_requires_successful_credential_smoke(tmp_path):
+    """A live job request requires a successful credential smoke before dispatch."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     _seed_active_credential(database_url, credential_smoked=False)
@@ -464,6 +516,7 @@ def test_request_connector_job_live_requires_successful_credential_smoke(tmp_pat
 
 
 def test_request_connector_job_live_requires_unexpired_credential_smoke(tmp_path):
+    """A live job request requires an unexpired credential smoke before dispatch."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     _seed_active_credential(
@@ -907,6 +960,7 @@ def test_request_connector_job_after_rollback_cancels_reservation(tmp_path, monk
     # Patch _supersede_or_block_running_runs to raise so the request
     # session rolls back via FastAPI's session_dependency wrapper.
     def _explode(*_args, **_kwargs):
+        """Raise on any call, simulating a DB failure during the supersede check."""
         raise RuntimeError("simulated DB failure during supersede check")
 
     monkeypatch.setattr(
@@ -958,6 +1012,7 @@ def test_request_connector_job_activate_failure_writes_bucket_a_audit(
         """Fake executor whose activate() raises to simulate shutdown."""
 
         def activate(self, reservation):  # type: ignore[override]
+            """Record the activation, then raise: shutdown is rejecting new work."""
             self.activate_calls.append({"reservation": reservation})
             raise RuntimeError("simulated shutdown rejecting new work")
 
@@ -969,6 +1024,7 @@ def test_request_connector_job_activate_failure_writes_bucket_a_audit(
     # _FakeExecutor doesn't ship with that method, so install a passthrough.
 
     def _noop(*_args, **_kwargs):
+        """Absorb any call; used to neuter audit recording in failure paths."""
         return None
 
     real_audit = _ActivateFailExecutor.__dict__.get("_audit_failed_before_start")
@@ -1195,7 +1251,6 @@ def test_test_connection_requires_manage_connectors_permission(tmp_path):
 
 def test_credential_integrity_classifier_uses_duplicate_constraint_only():
     """Integrity classifier returns True only for the unique-constraint violation, not FK errors."""
-
     # pylint: disable=too-few-public-methods
     class DuplicateDiag:
         """Minimal constraint diagnostic stub for testing the integrity classifier."""
@@ -1688,11 +1743,14 @@ def test_credential_health_returns_telemetry_and_state_for_viewer(tmp_path):
 
 
 class _TenantRecordingHealthRepository:
+    """Fake health repository recording the tenant binding it was asked for."""
+
     def __init__(self) -> None:
         self.bound_tenant_id: UUID | str | None = None
         self.connector_keys: frozenset[str] | None = None
 
     def for_tenant(self, tenant_id: UUID | str) -> Self:
+        """Bind the fake to a tenant id, recording the binding for assertions."""
         self.bound_tenant_id = tenant_id
         return self
 
@@ -1703,6 +1761,7 @@ class _TenantRecordingHealthRepository:
         offset: int = 0,
         connector_keys: frozenset[str] | None = None,
     ) -> ConnectorCredentialPage:
+        """Return the seeded credential rows; filters are accepted and ignored."""
         self.connector_keys = connector_keys
         return ConnectorCredentialPage(
             items=[
@@ -1870,7 +1929,8 @@ def test_derive_credential_health_state_missing_without_secret_ref():
 
 def test_derive_credential_health_state_auth_failed_precedence_over_missing():
     """auth_failed is evaluated before missing: a failed refresh with no secret
-    still derives 'auth_failed' (locks the documented rule precedence)."""
+    still derives 'auth_failed' (locks the documented rule precedence).
+    """
     as_of = datetime(2026, 6, 14, 12, 0, tzinfo=UTC)
     entry = ConnectorCredentialEntry(
         id="x",

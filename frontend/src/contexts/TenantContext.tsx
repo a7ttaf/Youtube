@@ -11,12 +11,14 @@ type TenantState = {
   tenantSlug: string;
   id: string | null;
   displayName: string | null;
+  primaryCurrency: string | null;
 };
 
 type TenantHydrationPayload = {
   id: string;
   slug: string;
   display_name: string;
+  primary_currency: string;
 };
 
 type TenantContextValue = TenantState & {
@@ -26,8 +28,9 @@ type TenantContextValue = TenantState & {
 const TenantContext = createContext<TenantContextValue | null>(null);
 
 // ============================================================================
-// Purpose: Hold the resolved tenant identity. Initial slug is intentionally
-//          empty so the first /tenants/me bootstrap call does NOT inject
+// Purpose: Hold the resolved tenant identity and declared currency label.
+//          Initial slug is intentionally empty so the first /tenants/me
+//          bootstrap call does NOT inject
 //          X-UMS-Tenant — the trusted gateway / dev proxy is the source of
 //          truth for tenant identity in production. A hardcoded fallback
 //          ("ums") would pin every non-UMS user's bootstrap to that tenant
@@ -36,7 +39,8 @@ const TenantContext = createContext<TenantContextValue | null>(null);
 // Standards: initialSlug stays opt-in for tests/storybooks that need a
 //            specific seed; production main.tsx uses the empty default.
 // Blast Radius: Authorization — wrong default slug can mask non-UMS users
-//               from discovering their real tenant. No graph projection impact.
+//               from discovering their real tenant. The currency is a read-only
+//               label and never performs finance math. No graph projection impact.
 // Connections:
 //   - File: frontend/src/lib/api/client.ts -> reads tenantSlug to decide
 //     whether to inject the X-UMS-Tenant header on each request.
@@ -54,6 +58,7 @@ export const TenantProvider = ({
     tenantSlug: initialSlug,
     id: null,
     displayName: null,
+    primaryCurrency: null,
   });
 
   const hydrate = useCallback((payload: TenantHydrationPayload) => {
@@ -62,6 +67,7 @@ export const TenantProvider = ({
       tenantSlug: payload.slug,
       id: payload.id,
       displayName: payload.display_name,
+      primaryCurrency: payload.primary_currency,
     }));
   }, []);
 
@@ -75,6 +81,7 @@ export const TenantProvider = ({
   );
 };
 
+/** Return the active tenant context value; must be called inside TenantProvider. */
 export const useTenant = (): TenantContextValue => {
   const value = useContext(TenantContext);
   if (value === null) {

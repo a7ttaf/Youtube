@@ -276,9 +276,22 @@ def _is_retryable_principal_storage_error(exc: SQLAlchemyError) -> bool:
     return isinstance(exc, DBAPIError) and exc.connection_invalidated
 
 
+# ============================================================================
+# Purpose: Validate the trusted-gateway token without reparsing the unrelated
+#   headers-only tenant currency after the app has resolved its authz mode.
+# Database/ORM: None.
+# Standards: Constant-time token comparison; missing configuration and invalid
+#   input fail closed; only currency validation is explicitly deferred.
+# Blast Radius: Trusted-gateway authentication availability in both authz modes.
+# Connections:
+#   - File: backend/ums_smart_revenue/config/settings.py -> strict-by-default
+#     loader with an explicit mode-independent deferral.
+#   - File: backend/ums_smart_revenue/app.py -> validates headers currency once
+#     while constructing the effective authz-mode middleware.
+# ============================================================================
 def _require_trusted_gateway_token(provided_token: str | None) -> None:
     """Require the configured trusted-gateway token to match the request token."""
-    configured_token = load_app_settings().trusted_gateway_token
+    configured_token = load_app_settings(validate_tenant_currency=False).trusted_gateway_token
     if not configured_token:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,

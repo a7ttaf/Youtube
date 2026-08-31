@@ -32,6 +32,7 @@ from ums_smart_revenue.auth.audit_service import InMemoryAuditSink
 from ums_smart_revenue.auth.permissions import Permission
 from ums_smart_revenue.config.settings import (
     GOOGLE_CONNECTOR_SERVICE_ACTOR_ID_ENV,
+    TENANT_PRIMARY_CURRENCY_ENV,
 )
 from ums_smart_revenue.connectors.google.audit import (
     build_connector_service_principal,
@@ -119,6 +120,19 @@ def test_build_service_principal_requires_actor_id_setting(
         build_connector_service_principal(tenant_id=_TENANT_ID)
     message = str(excinfo.value)
     assert GOOGLE_CONNECTOR_SERVICE_ACTOR_ID_ENV in message
+
+
+def test_build_service_principal_defers_unrelated_currency_validation(
+    configured_service_actor: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Audit identity construction ignores the headers-only currency setting."""
+    monkeypatch.setenv(TENANT_PRIMARY_CURRENCY_ENV, "not-a-currency")
+
+    principal = build_connector_service_principal(tenant_id=_TENANT_ID)
+
+    assert principal.user_id == configured_service_actor
+    assert principal.tenant_id == str(_TENANT_ID)
 
 
 # ---------------------------------------------------------------------------
