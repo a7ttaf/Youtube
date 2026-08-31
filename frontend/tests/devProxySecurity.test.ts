@@ -52,9 +52,15 @@ const BASE_ENV: Record<string, string> = {
 };
 
 const ATTACKER_GATEWAY_HEADERS: Record<string, string> = {
+  "X-Company": "attacker-company-root",
   "X-Company-ID": "attacker-company",
+  "X-Company-Shadow": "attacker-company-shadow",
+  "X-Permission": "finance.override",
+  "X-Permission-Shadow": "finance.shadow",
   "X-Permissions": "finance.close",
+  "X-Permissions-Shadow": "finance.close.shadow",
   "X-Role": "super_owner",
+  "X-Role-Shadow": "super_owner-shadow",
   "X-Scope-Forged": "attacker-scope",
   "X-Scope-ID": "attacker-company",
   "X-Scope-Type": "company",
@@ -379,7 +385,13 @@ describe("real development gateway proxy", () => {
       BASE_ENV.UMS_TRUSTED_GATEWAY_TOKEN,
     );
     expect(headers?.["x-company-id"]).toBeUndefined();
+    expect(headers?.["x-company"]).toBeUndefined();
+    expect(headers?.["x-company-shadow"]).toBeUndefined();
+    expect(headers?.["x-permission"]).toBeUndefined();
+    expect(headers?.["x-permission-shadow"]).toBeUndefined();
     expect(headers?.["x-permissions"]).toBeUndefined();
+    expect(headers?.["x-permissions-shadow"]).toBeUndefined();
+    expect(headers?.["x-role-shadow"]).toBeUndefined();
     expect(headers?.["x-scope-forged"]).toBeUndefined();
     expect(headers?.["x-ums-impersonation"]).toBeUndefined();
     expect(headers?.["x-user-impersonated"]).toBeUndefined();
@@ -407,7 +419,13 @@ describe("real development gateway proxy", () => {
       BASE_ENV.UMS_TRUSTED_GATEWAY_TOKEN,
     );
     expect(hit?.headers["x-company-id"]).toBeUndefined();
+    expect(hit?.headers["x-company"]).toBeUndefined();
+    expect(hit?.headers["x-company-shadow"]).toBeUndefined();
+    expect(hit?.headers["x-permission"]).toBeUndefined();
+    expect(hit?.headers["x-permission-shadow"]).toBeUndefined();
     expect(hit?.headers["x-permissions"]).toBeUndefined();
+    expect(hit?.headers["x-permissions-shadow"]).toBeUndefined();
+    expect(hit?.headers["x-role-shadow"]).toBeUndefined();
     expect(hit?.headers["x-scope-forged"]).toBeUndefined();
     expect(hit?.headers["x-ums-impersonation"]).toBeUndefined();
     expect(hit?.headers["x-user-impersonated"]).toBeUndefined();

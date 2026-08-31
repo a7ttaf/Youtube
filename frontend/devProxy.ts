@@ -58,9 +58,9 @@ export const TRUSTED_GATEWAY_HEADERS = [
 
 const TRUSTED_GATEWAY_HEADER_PATTERNS: readonly RegExp[] = [
   /^x-user-/iu,
-  /^x-role$/iu,
-  /^x-permissions$/iu,
-  /^x-company-id$/iu,
+  /^x-role(?:-|$)/iu,
+  /^x-permissions?(?:-|$)/iu,
+  /^x-company(?:-|$)/iu,
   /^x-scope-/iu,
   /^x-ums-/iu,
 ];
