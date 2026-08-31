@@ -152,13 +152,18 @@ class SqlAlchemyUserPermissionGrantRepository:
         scope = self._get_or_create_scope(scope_type=scope_type, scope_id=scope_id)
 
         existing = self._session.scalars(
-            select(UserPermissionGrantORM).where(
+            select(UserPermissionGrantORM)
+            .where(
                 UserPermissionGrantORM.tenant_id == self._tenant_id,
                 UserPermissionGrantORM.user_id == target_user_id,
                 UserPermissionGrantORM.permission_key == permission.value,
                 UserPermissionGrantORM.scope_id == scope.id,
                 UserPermissionGrantORM.active.is_(True),
             )
+            # FIX: Lock an existing active grant before returning the
+            # idempotent conflict; a concurrent revoker must not be able to
+            # commit after this read and invalidate the conflict answer.
+            .with_for_update()
         ).one_or_none()
         if existing is not None:
             raise UserPermissionGrantConflictError("Active permission grant already exists")
@@ -179,13 +184,17 @@ class SqlAlchemyUserPermissionGrantRepository:
                 self._session.flush()
         except IntegrityError as exc:
             duplicate = self._session.scalars(
-                select(UserPermissionGrantORM).where(
+                select(UserPermissionGrantORM)
+                .where(
                     UserPermissionGrantORM.tenant_id == self._tenant_id,
                     UserPermissionGrantORM.user_id == target_user_id,
                     UserPermissionGrantORM.permission_key == permission.value,
                     UserPermissionGrantORM.scope_id == scope.id,
                     UserPermissionGrantORM.active.is_(True),
                 )
+                # FIX: lock the surviving row so the conflict decision reads
+                # the post-race state, not a pre-race snapshot.
+                .with_for_update()
             ).one_or_none()
             if duplicate is not None:
                 raise UserPermissionGrantConflictError(

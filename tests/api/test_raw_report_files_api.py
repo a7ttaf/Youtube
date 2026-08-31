@@ -293,3 +293,32 @@ def test_user_without_raw_file_permission_cannot_probe_raw_file_ids(tmp_path):
 
     assert response.status_code == 403
     assert response.json()["detail"] == "Missing permission: raw_files.view"
+
+
+def test_human_connector_admin_cannot_register_raw_file_metadata(tmp_path):
+    """RUN_CONNECTOR_JOBS is not a human ingestion path for raw-file metadata."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    client = TestClient(create_app(database_url=database_url))
+
+    response = client.post(
+        "/reports/raw-files",
+        headers=auth_headers("connector_admin", "connector", "youtube_reporting"),
+        json={
+            "source": "youtube_reporting",
+            "report_type": "YOUTUBE_CMS_REVENUE",
+            "report_month": "2026-03",
+            "storage_uri": "s3://ums-raw-reports/youtube/2026-03/cms.csv",
+            "checksum": "sha256:83f8b7d92d8a",
+            "parse_status": "DOWNLOADED",
+            "reason": "Attempt human connector-power registration",
+        },
+    )
+
+    engine = create_engine(database_url)
+    with Session(engine) as session:
+        assert session.scalars(select(RawReportFileORM)).all() == []
+        assert session.scalars(select(AuditLogORM)).all() == []
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Missing permission: connectors.run_jobs"

@@ -137,13 +137,19 @@ class SqlAlchemyUserRoleAssignmentRepository:
         scope = self._get_or_create_scope(scope_type=scope_type, scope_id=scope_id)
 
         existing = self._session.scalars(
-            select(UserRoleAssignmentORM).where(
+            select(UserRoleAssignmentORM)
+            .where(
                 UserRoleAssignmentORM.tenant_id == self._tenant_id,
                 UserRoleAssignmentORM.user_id == target_user_id,
                 UserRoleAssignmentORM.role_key == role.value,
                 UserRoleAssignmentORM.scope_id == scope.id,
                 UserRoleAssignmentORM.active.is_(True),
             )
+            # FIX: Lock an existing active assignment before returning the
+            # idempotent conflict.  Without this lock a concurrent revoker
+            # could commit after this read and leave the CONFLICT result with
+            # no active role by the time the caller commits.
+            .with_for_update()
         ).one_or_none()
         if existing is not None:
             raise UserRoleAssignmentConflictError("Active role assignment already exists")
@@ -171,13 +177,18 @@ class SqlAlchemyUserRoleAssignmentRepository:
                 self._session.flush()
         except IntegrityError as exc:
             duplicate = self._session.scalars(
-                select(UserRoleAssignmentORM).where(
+                select(UserRoleAssignmentORM)
+                .where(
                     UserRoleAssignmentORM.tenant_id == self._tenant_id,
                     UserRoleAssignmentORM.user_id == target_user_id,
                     UserRoleAssignmentORM.role_key == role.value,
                     UserRoleAssignmentORM.scope_id == scope.id,
                     UserRoleAssignmentORM.active.is_(True),
                 )
+                # FIX: lock the surviving row so the conflict decision reads
+                # the post-race state, not a snapshot from before the insert
+                # race resolved.
+                .with_for_update()
             ).one_or_none()
             if duplicate is not None:
                 raise UserRoleAssignmentConflictError(

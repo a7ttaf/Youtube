@@ -19,7 +19,7 @@ from ums_smart_revenue.auth.models import UserPrincipal
 from ums_smart_revenue.auth.permissions import Permission
 from ums_smart_revenue.auth.policy import has_permission
 from ums_smart_revenue.auth.roles import RoleKey
-from ums_smart_revenue.auth.scopes import AccessScope
+from ums_smart_revenue.auth.scopes import AccessScope, OrgAccessIndex, ScopeType
 from ums_smart_revenue.auth.user_permissions import (
     SqlAlchemyUserPermissionGrantRepository,
     UserPermissionGrantConflictError,
@@ -487,7 +487,8 @@ def assign_user_role(
     """
     _require_role_assignment_permission(user)
     role = _parse_role_for_policy(payload.role_key)
-    _require_role_assignment_policy(user, role)
+    target_scope = _parse_scope_for_policy(payload.scope_type, payload.scope_id)
+    _require_role_assignment_policy(user, role, target_scope)
     try:
         assignment = repository.assign_role(
             user_id=user_id,
@@ -544,7 +545,11 @@ def revoke_user_role(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)
         ) from exc
 
-    _require_role_assignment_policy(user, RoleKey(existing.role_key))
+    existing_role = _parse_role_for_policy(existing.role_key)
+    existing_scope = _parse_scope_for_policy(
+        existing.scope_type, existing.scope_id, stored=True
+    )
+    _require_role_assignment_policy(user, existing_role, existing_scope)
 
     try:
         assignment = repository.revoke_role(
@@ -587,7 +592,8 @@ def grant_user_permission(
     """Grant a direct permission to a user; enforces family-specific authority rules."""
     _require_role_assignment_permission(user)
     permission = _parse_permission_for_policy(payload.permission_key)
-    _require_permission_grant_policy(user, permission)
+    target_scope = _parse_scope_for_policy(payload.scope_type, payload.scope_id)
+    _require_permission_grant_policy(user, permission, target_scope)
     try:
         grant = repository.grant_permission(
             user_id=user_id,
@@ -645,7 +651,10 @@ def revoke_user_permission(
         ) from exc
 
     permission = _parse_permission_for_policy(existing.permission_key)
-    _require_permission_grant_policy(user, permission)
+    existing_scope = _parse_scope_for_policy(
+        existing.scope_type, existing.scope_id, stored=True
+    )
+    _require_permission_grant_policy(user, permission, existing_scope)
 
     try:
         grant = repository.revoke_permission(
@@ -723,15 +732,92 @@ def _parse_permission_for_policy(permission_key: str) -> Permission:
         ) from exc
 
 
-def _require_role_assignment_policy(user: UserPrincipal, role: RoleKey) -> None:
-    """Enforce role-family-specific assignment authority."""
+def _parse_scope_for_policy(
+    scope_type: str,
+    scope_id: str | None,
+    *,
+    stored: bool = False,
+) -> AccessScope:
+    """Parse a requested or stored scope before applying grant authority."""
+    try:
+        parsed_type = ScopeType(scope_type.strip().lower())
+    except (AttributeError, ValueError) as exc:
+        if stored:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Stored authorization scope is invalid",
+            ) from exc
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=f"Unknown scope_type: {scope_type}",
+        ) from exc
+
+    normalized_id = scope_id.strip() if isinstance(scope_id, str) else scope_id
+    if parsed_type == ScopeType.GLOBAL:
+        if normalized_id is not None:
+            detail = (
+                "Stored global authorization scope has an id"
+                if stored
+                else "scope_id must be omitted for global scope"
+            )
+            raise HTTPException(
+                status_code=(
+                    status.HTTP_403_FORBIDDEN if stored else status.HTTP_422_UNPROCESSABLE_CONTENT
+                ),
+                detail=detail,
+            )
+        return AccessScope.global_scope()
+    if not normalized_id:
+        detail = (
+            "Stored scoped authorization scope is missing an id"
+            if stored
+            else f"scope_id is required for scope type: {parsed_type.value}"
+        )
+        raise HTTPException(
+            status_code=(
+                status.HTTP_403_FORBIDDEN if stored else status.HTTP_422_UNPROCESSABLE_CONTENT
+            ),
+            detail=detail,
+        )
+    return AccessScope(parsed_type, normalized_id)
+
+
+# ============================================================================
+# Purpose: Enforce family-specific grant authority and scope containment for
+#          role assignments and direct permission grants.
+# Database/ORM: None; evaluates the database-backed UserPrincipal snapshot.
+# Standards: Disabled or malformed principals fail closed; only Super Owner can
+#            assign/revoke Connector Admin, and a scoped authority cannot mint
+#            or revoke a broader connector or finance grant.
+# Blast Radius: Authorization and audit-gated user-management writes only.
+# Connections:
+#   - File: backend/ums_smart_revenue/auth/scopes.py -> OrgAccessIndex containment.
+#   - File: backend/ums_smart_revenue/auth/user_roles.py -> stored role scope.
+#   - File: backend/ums_smart_revenue/auth/user_permissions.py -> stored grant scope.
+# ============================================================================
+def _require_role_assignment_policy(
+    user: UserPrincipal, role: RoleKey, target_scope: AccessScope
+) -> None:
+    """Enforce role-family authority without permitting scoped escalation."""
     if role == RoleKey.SUPER_OWNER and not _has_role(user, RoleKey.SUPER_OWNER):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Super Owner assignments require Super Owner",
         )
+    # FIX: Corporate Admin carries roles.assign@global. Because Connector
+    # Admin was not a protected role family, that was enough to assign the
+    # role to itself (or another account) and acquire connectors.manage
+    # indirectly. Connector administration is bootstrapped only by Super
+    # Owner; scoped Connector Admins may still manage direct connector grants
+    # below their own scope but cannot reproduce or widen their role
+    # assignment.
+    if role == RoleKey.CONNECTOR_ADMIN and not _has_role(user, RoleKey.SUPER_OWNER):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Connector Admin assignments require Super Owner",
+        )
     if role in FINANCE_ROLE_KEYS and not _has_any_role(
-        user, {RoleKey.FINANCE_ADMIN, RoleKey.SUPER_OWNER}
+        user, {RoleKey.FINANCE_ADMIN, RoleKey.SUPER_OWNER}, target_scope
     ):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -739,22 +825,24 @@ def _require_role_assignment_policy(user: UserPrincipal, role: RoleKey) -> None:
         )
 
 
-def _require_permission_grant_policy(user: UserPrincipal, permission: Permission) -> None:
-    """Enforce permission-family-specific grant authority."""
+def _require_permission_grant_policy(
+    user: UserPrincipal, permission: Permission, target_scope: AccessScope
+) -> None:
+    """Enforce permission-family authority and target-scope containment."""
     if permission in SUPER_OWNER_ONLY_PERMISSION_KEYS and not _has_role(user, RoleKey.SUPER_OWNER):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Administrative permissions require Super Owner",
         )
     if permission in FINANCE_PERMISSION_KEYS and not _has_any_role(
-        user, {RoleKey.FINANCE_ADMIN, RoleKey.SUPER_OWNER}
+        user, {RoleKey.FINANCE_ADMIN, RoleKey.SUPER_OWNER}, target_scope
     ):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Finance permissions require Finance Admin or Super Owner",
         )
     if permission in CONNECTOR_PERMISSION_KEYS and not _has_any_role(
-        user, {RoleKey.CONNECTOR_ADMIN, RoleKey.SUPER_OWNER}
+        user, {RoleKey.CONNECTOR_ADMIN, RoleKey.SUPER_OWNER}, target_scope
     ):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -764,15 +852,24 @@ def _require_permission_grant_policy(user: UserPrincipal, permission: Permission
 
 def _has_role(user: UserPrincipal, role: RoleKey) -> bool:
     """Return whether the caller has an active assignment for one role."""
-    return any(
-        assignment.active and assignment.role == role for assignment in user.role_assignments
-    )
+    return _has_scoped_role(user, role, AccessScope.global_scope())
 
 
-def _has_any_role(user: UserPrincipal, roles: set[RoleKey]) -> bool:
+def _has_any_role(user: UserPrincipal, roles: set[RoleKey], target_scope: AccessScope) -> bool:
     """Return whether the caller has any active assignment in a role set."""
+    return any(_has_scoped_role(user, role, target_scope) for role in roles)
+
+
+def _has_scoped_role(user: UserPrincipal, role: RoleKey, target_scope: AccessScope) -> bool:
+    """Return whether an active role assignment contains the target scope."""
+    if user.disabled:
+        return False
+    index = OrgAccessIndex()
     return any(
-        assignment.active and assignment.role in roles for assignment in user.role_assignments
+        assignment.active
+        and assignment.role == role
+        and index.contains(assignment.scope, target_scope)
+        for assignment in user.role_assignments
     )
 
 
