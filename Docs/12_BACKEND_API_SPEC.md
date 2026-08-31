@@ -496,10 +496,17 @@ GET /revenue/source-rows?month=2026-03&cursor_ingested_at=2026-05-10T12:00:00Z&c
 GET /revenue/source-rows/{id}
 ```
 
-`POST /revenue/facts` is an implemented connector-controlled import endpoint
-for monthly channel revenue facts. It requires `connectors.run_jobs` for the
-connector scope, validates connector/source-kind compatibility, rejects locked
-finance months, and audits `REPORT_IMPORTED`. The payload accepts optional
+`POST /revenue/facts` is an implemented import endpoint for monthly channel
+revenue facts. Connector/service callers require `connectors.run_jobs` for the
+connector scope. The Google-free beta path instead accepts the global
+`finance.import_manual_revenue` permission only when `connector_key` is
+`manual-upload` (or its supported `manual_upload` alias) and `source_kind` is
+`MANUAL_UPLOAD`. That narrow permission does not authorize connector jobs,
+raw-file registration, AdSense/payment sync, exchange-rate sync, or other
+source kinds. The `REPORT_IMPORTED` audit row records whichever permission
+actually authorized the write. The route validates connector/source-kind
+compatibility, rejects locked finance months, and audits every accepted write.
+The payload accepts optional
 official `shorts_revenue_usd`, `longform_revenue_usd`, and
 `subscription_revenue_usd` values when supplied by YouTube/AdSense reports.
 Each component must be a finite non-negative USD decimal and the known component

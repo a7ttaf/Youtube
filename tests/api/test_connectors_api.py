@@ -511,8 +511,9 @@ def test_request_connector_job_live_requires_unexpired_credential_smoke(tmp_path
     assert fake.cancel_calls == []
 
 
-def test_request_connector_job_missing_permission_403(tmp_path):
-    """assistant_analyst is denied with the run_jobs permission detail (no audit)."""
+@pytest.mark.parametrize("role", ["assistant_analyst", "beta_operator"])
+def test_request_connector_job_missing_permission_403(tmp_path, role):
+    """Non-connector roles are denied with the run_jobs detail and no submission."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     _seed_active_credential(database_url)
@@ -521,7 +522,7 @@ def test_request_connector_job_missing_permission_403(tmp_path):
 
     response = client.post(
         "/connectors/jobs",
-        headers=auth_headers("assistant_analyst"),
+        headers=auth_headers(role),
         json={
             "connector_key": "youtube_reporting",
             "account_id": "content-owner-1",

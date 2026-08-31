@@ -142,6 +142,68 @@ def test_system_integration_user_imports_monthly_revenue_fact_with_audit(tmp_pat
     assert audit_log.sensitive is True
 
 
+def test_beta_operator_imports_only_manual_revenue_without_connector_power(tmp_path):
+    """The beta workflow writes MANUAL_UPLOAD facts under its narrow audit permission."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    client = TestClient(create_app(database_url=database_url))
+
+    response = client.post(
+        "/revenue/facts",
+        headers=auth_headers("beta_operator", "global"),
+        json={
+            "month": "2026-03",
+            "youtube_channel_id": "channel-tv-a",
+            "source_kind": "MANUAL_UPLOAD",
+            "connector_key": "manual-upload",
+            "source_report_id": "operator-upload-2026-03",
+            "gross_revenue_usd": "1234.56",
+            "views": 250000,
+            "confidence_score": "0.95",
+            "reason": "Google-free beta revenue upload",
+        },
+    )
+
+    engine = create_engine(database_url)
+    with Session(engine) as session:
+        fact = session.scalars(select(MonthlyChannelRevenueFactORM)).one()
+        audit_log = session.scalars(select(AuditLogORM)).one()
+
+    assert response.status_code == 201, response.text
+    assert fact.source_kind == "MANUAL_UPLOAD"
+    assert audit_log.details["permission"] == "finance.import_manual_revenue"
+    assert audit_log.scope_type == "connector"
+    assert audit_log.scope_id == "manual-upload"
+
+
+def test_beta_operator_cannot_import_connector_sourced_revenue(tmp_path):
+    """The narrow grant is not an alternate connector-ingestion boundary."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    client = TestClient(create_app(database_url=database_url))
+
+    response = client.post(
+        "/revenue/facts",
+        headers=auth_headers("beta_operator", "global"),
+        json={
+            "month": "2026-03",
+            "youtube_channel_id": "channel-tv-a",
+            "source_kind": "YOUTUBE_CMS",
+            "connector_key": "youtube-cms",
+            "gross_revenue_usd": "1234.56",
+            "reason": "Attempt connector-backed import",
+        },
+    )
+
+    engine = create_engine(database_url)
+    with Session(engine) as session:
+        assert session.scalars(select(MonthlyChannelRevenueFactORM)).all() == []
+        assert session.scalars(select(AuditLogORM)).all() == []
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Missing permission: connectors.run_jobs"
+
+
 def test_import_rejects_connector_source_kind_mismatch(tmp_path):
     database_url = build_database_url(tmp_path)
     seed_database(database_url)

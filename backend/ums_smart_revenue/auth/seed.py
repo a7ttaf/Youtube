@@ -52,6 +52,25 @@ ROLE_PERMISSIONS: dict[RoleKey, frozenset[Permission]] = {
             Permission.ASSIGN_ROLES,
         }
     ),
+    RoleKey.BETA_OPERATOR: frozenset(
+        {
+            Permission.VIEW_ANALYTICS,
+            Permission.VIEW_CONFIDENCE,
+            Permission.VIEW_REVENUE,
+            Permission.VIEW_FINALIZED_PAYMENTS,
+            Permission.VIEW_BANK_RECONCILIATION,
+            Permission.MANAGE_BANK_RECONCILIATION,
+            Permission.CREATE_MANUAL_OVERRIDE,
+            Permission.APPROVE_MANUAL_OVERRIDE,
+            Permission.LOCK_FINANCE_MONTH,
+            Permission.UNLOCK_FINANCE_MONTH,
+            Permission.CHANGE_ALLOCATION_RULE,
+            Permission.EXPORT_ANALYTICS_REPORT,
+            Permission.EXPORT_REVENUE_REPORT,
+            Permission.VIEW_AUDIT_LOG,
+            Permission.IMPORT_MANUAL_REVENUE,
+        }
+    ),
     RoleKey.FINANCE_APPROVER: frozenset(
         {
             Permission.VIEW_ANALYTICS,
