@@ -9,7 +9,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import ts from "typescript";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { createServer as createViteServer } from "vite";
 
 import {
@@ -316,14 +316,10 @@ type HttpResponse = {
 
 const listenOnLoopback = (server: Server): Promise<number> =>
   new Promise((resolve, reject) => {
-    /** Reject a failed listen attempt and detach the success listener. */
-    function onError(error: Error): void {
-      server.off("listening", onListening);
-      reject(error);
-    }
+    let onError: (error: Error) => void;
 
     /** Resolve the ephemeral port and detach the failure listener. */
-    function onListening(): void {
+    const onListening = (): void => {
       server.off("error", onError);
       const address = server.address();
       if (!address || typeof address === "string") {
@@ -331,7 +327,13 @@ const listenOnLoopback = (server: Server): Promise<number> =>
         return;
       }
       resolve((address as AddressInfo).port);
-    }
+    };
+
+    /** Reject a failed listen attempt and detach the success listener. */
+    onError = (error: Error): void => {
+      server.off("listening", onListening);
+      reject(error);
+    };
 
     server.once("error", onError);
     server.once("listening", onListening);
@@ -416,9 +418,23 @@ type ProxyBoundaryCase = {
   expectContinue: boolean;
 };
 
+type ViteServer = Awaited<ReturnType<typeof createViteServer>>;
+
 type RunningViteProxy = {
-  server: Awaited<ReturnType<typeof createViteServer>>;
+  server: ViteServer;
   port: number;
+};
+
+type ViteProxyStartupDependencies = {
+  createServer: (
+    config: Parameters<typeof createViteServer>[0],
+  ) => Promise<ViteServer>;
+  resolvePort: typeof portOf;
+};
+
+const DEFAULT_VITE_PROXY_STARTUP_DEPENDENCIES: ViteProxyStartupDependencies = {
+  createServer: createViteServer,
+  resolvePort: portOf,
 };
 
 /** Create the real HTTP backend fixture that records forwarded request metadata. */
@@ -436,37 +452,63 @@ const createRecordingBackend = (backendRequests: BackendRequest[]): Server =>
     });
   });
 
+/** Close an owned Vite server and watcher before preserving its startup failure. */
+const rethrowAfterViteStartupCleanup = async (
+  server: ViteServer | undefined,
+  startupError: unknown,
+): Promise<never> => {
+  if (!server) {
+    throw startupError;
+  }
+  try {
+    await server.close();
+  } catch (cleanupError) {
+    throw new AggregateError(
+      [startupError, cleanupError],
+      "Vite proxy startup failed and cleanup also failed",
+    );
+  }
+  throw startupError;
+};
+
 /** Start a real Vite proxy on loopback and return its verified listening port. */
 const startRealViteProxy = async (
   backendPort: number,
   gatewayHeaders: [string, string][],
+  dependencies: ViteProxyStartupDependencies = DEFAULT_VITE_PROXY_STARTUP_DEPENDENCIES,
 ): Promise<RunningViteProxy> => {
-  const server = await createViteServer({
-    root: path.resolve(HERE, ".."),
-    configFile: false,
-    logLevel: "silent",
-    resolve: {
-      alias: {
-        "@": path.resolve(HERE, "..", "src"),
+  // FIX: Startup owns the Vite server until handoff; close it and its watcher
+  // before rethrowing any listen or port-resolution failure.
+  let server: ViteServer | undefined;
+  try {
+    server = await dependencies.createServer({
+      root: path.resolve(HERE, ".."),
+      configFile: false,
+      logLevel: "silent",
+      resolve: {
+        alias: {
+          "@": path.resolve(HERE, "..", "src"),
+        },
       },
-    },
-    server: {
-      host: "127.0.0.1",
-      port: 0,
-      strictPort: true,
-      proxy: buildTenantScopedProxy(
-        TENANT_SCOPED_ROUTES,
-        `http://127.0.0.1:${backendPort}`,
-        gatewayHeaders,
-      ),
-    },
-  });
-  await server.listen();
-  if (!server.httpServer) {
-    await server.close();
-    throw new Error("expected Vite to expose its listening HTTP server");
+      server: {
+        host: "127.0.0.1",
+        port: 0,
+        strictPort: true,
+        proxy: buildTenantScopedProxy(
+          TENANT_SCOPED_ROUTES,
+          `http://127.0.0.1:${backendPort}`,
+          gatewayHeaders,
+        ),
+      },
+    });
+    await server.listen();
+    if (!server.httpServer) {
+      throw new Error("expected Vite to expose its listening HTTP server");
+    }
+    return { server, port: dependencies.resolvePort(server.httpServer) };
+  } catch (startupError) {
+    return rethrowAfterViteStartupCleanup(server, startupError);
   }
-  return { server, port: portOf(server.httpServer) };
 };
 
 /** Assert that every configured gateway value replaced the browser's value. */
@@ -691,6 +733,60 @@ describe("dev proxy trust and header contracts", () => {
       expect(lastRemove).toBeGreaterThanOrEqual(0);
       expect(lastRemove).toBeLessThan(firstSet);
     }
+  });
+
+  it("preserves a Vite creation error when no server was returned to close", async () => {
+    const startupError = new Error("synthetic Vite creation failure");
+    const createServer = vi.fn(async () => {
+      throw startupError;
+    });
+    const resolvePort = vi.fn(portOf);
+
+    await expect(
+      startRealViteProxy(8000, ALL_GATEWAY_HEADERS, { createServer, resolvePort }),
+    ).rejects.toBe(startupError);
+    expect(resolvePort).not.toHaveBeenCalled();
+  });
+
+  it("closes the Vite server and watcher when listen fails before handoff", async () => {
+    const startupError = new Error("synthetic Vite listen failure");
+    const close = vi.fn(async () => undefined);
+    const server = {
+      close,
+      httpServer: null,
+      listen: vi.fn(async () => {
+        throw startupError;
+      }),
+    } as unknown as ViteServer;
+    const createServer = vi.fn(async () => server);
+
+    await expect(
+      startRealViteProxy(8000, ALL_GATEWAY_HEADERS, { createServer, resolvePort: portOf }),
+    ).rejects.toBe(startupError);
+    expect(close).toHaveBeenCalledOnce();
+  });
+
+  it("closes the Vite server and watcher when port resolution fails before handoff", async () => {
+    const startupError = new Error("synthetic Vite port failure");
+    let createdServer: ViteServer | undefined;
+    const createServer: ViteProxyStartupDependencies["createServer"] = async (config) => {
+      createdServer = await createViteServer(config);
+      return createdServer;
+    };
+    const resolvePort = vi.fn(() => {
+      throw startupError;
+    });
+
+    await expect(
+      startRealViteProxy(8000, ALL_GATEWAY_HEADERS, { createServer, resolvePort }),
+    ).rejects.toBe(startupError);
+    if (!createdServer) {
+      throw new Error("expected the startup fixture to create a Vite server");
+    }
+    const watcher = createdServer.watcher as typeof createdServer.watcher & { closed: boolean };
+    expect(resolvePort).toHaveBeenCalledWith(createdServer.httpServer);
+    expect(createdServer.httpServer?.listening).toBe(false);
+    expect(watcher.closed).toBe(true);
   });
 
   it("scrubs Expect requests at the real Vite/backend boundary", async () => {
