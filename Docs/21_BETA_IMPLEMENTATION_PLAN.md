@@ -32,8 +32,9 @@ breaks, what it unblocks — not estimated from the finding text.
 | P0-d / #224 | open, non-draft; not merged | Logging/ops |
 | P0-e / #225 | open, non-draft; not merged | Dev gateway docs + `/org-units` and `/users` proxy |
 | P1.2 / #211 | **merged to `main` as `41b4953`** | Rolling months |
-| P1 / #212–#216 | open drafts | Remaining P1 work; not implemented on `main` |
-| EGP Phase 1 / #217 | open draft | Currency-spine foundation; not selector behavior |
+| P1 / #212 | open, non-draft, BLOCKED; head `db576e01` | Remaining P1 work; not implemented on `main` |
+| P1 / #213–#216 | open drafts (mixed BLOCKED/DIRTY) | Remaining P1 work; not implemented on `main` |
+| EGP Phase 1 / #217 | open draft, BLOCKED; head `80ef0fd` | Currency-spine foundation; not selector behavior |
 | [`23_ADMIN_ACCESS_AND_CONFIG_PLAN.md`](23_ADMIN_ACCESS_AND_CONFIG_PLAN.md) | plan in PR #220 | Admin / access / config extension |
 | [`24_US_WITHHOLDING_AND_US_REVENUE_PLAN.md`](24_US_WITHHOLDING_AND_US_REVENUE_PLAN.md) | plan in PR #220 | US revenue + withholding estimate |
 | [`25_PROGRAM_DEPENDENCY_GRAPH.md`](25_PROGRAM_DEPENDENCY_GRAPH.md) | plan in PR #220 | Explicit execution DAG |

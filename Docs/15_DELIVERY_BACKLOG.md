@@ -33,7 +33,8 @@ the five plan documents from former draft plan PRs (#209 Docs/20–21, #218 Docs
 PR #210 is historical: GitHub merged it into the closed #209 branch, but neither its
 head nor merge commit is on `main`. Living P0 execution is the open, non-draft split
 fleet **#221–#225 (P0-a…P0-e)**; none was merged as of 2026-08-31. PR #211 is merged
-to `main`; #212–#216 remain open P1 drafts, while #217 is a separate open EGP draft. See
+to `main`; #212 is open/non-draft/BLOCKED, #213–#216 remain open P1 drafts, and #217
+is a separate open EGP draft/BLOCKED. See
 [`25_PROGRAM_DEPENDENCY_GRAPH.md`](25_PROGRAM_DEPENDENCY_GRAPH.md) for the exact map.
 
 **US-withholding plan note (2026-08-28):** Docs/24 — treaty treatment is

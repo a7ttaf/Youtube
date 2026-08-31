@@ -25,10 +25,12 @@ main-targeted P0 successors.
 | #228 | `579c7f13` | OPEN, non-draft, BEHIND | Persistence/repository scaffold only; not A6, A7, or U3 completion |
 | #229 | `4d6967ca` | OPEN, non-draft, DIRTY | Router/query/design-system scaffold with static fixtures; rewrite/restack required |
 
-PR #211 is already **merged** to `main` as `41b4953` (rolling months). PRs #212–#216
-remain open P1 drafts. PR #217 is a separate open EGP Phase 1 draft, not part of the
-remaining P1 band. #211's month options are computed at module load, so a long-running
-tab needs reload until a clock/provider follow-up lands.
+PR #211 is already **merged** to `main` as `41b4953` (rolling months). PR #212 at
+`db576e01` is OPEN, non-draft, BLOCKED. PR #213 at `fed1e2ab` and #216 at `b1bd238b`
+are OPEN drafts/BLOCKED; #214 at `f0d1c1e4` and #215 at `27dd1401` are OPEN
+drafts/DIRTY. PR #217 at `80ef0fd` is a separate OPEN EGP Phase 1 draft/BLOCKED, not
+part of the remaining P1 band. #211's month options are computed at module load, so a
+long-running tab needs reload until a clock/provider follow-up lands.
 
 ---
 

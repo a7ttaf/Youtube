@@ -102,8 +102,9 @@ no treaty rate is hardcoded. Arming recon / `UsViewShareProvider` requires a
 
 ## 2. The program — bands U1–U4
 
-Sequenced after the current P1 fleet (#211 merged; #212–#216 open drafts) and
-coordinated with the separate EGP Phase 1 draft #217. The finance program is independent
+Sequenced after the current P1 fleet (#211 merged; #212 open/non-draft/BLOCKED;
+#213–#216 open drafts) and coordinated with separate EGP Phase 1 draft/BLOCKED #217.
+The finance program is independent
 of the admin program
 ([`23_ADMIN_ACCESS_AND_CONFIG_PLAN.md`](23_ADMIN_ACCESS_AND_CONFIG_PLAN.md)). Parent
 context: Docs/21 (frozen costing snapshot; Docs/25 + live GitHub own execution status) P3

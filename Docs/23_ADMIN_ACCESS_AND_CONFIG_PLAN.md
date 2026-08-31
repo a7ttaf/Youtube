@@ -1,7 +1,8 @@
 # 23 — Admin, Access & Configuration Plan
 
 *Written 2026-08-27 and status-reconciled 2026-08-31. PR #211 is merged to `main` as
-`41b4953`; #212–#216 remain open P1 drafts and #217 is a separate open EGP draft.
+`41b4953`; #212 is open/non-draft/BLOCKED, #213–#216 remain open P1 drafts, and #217
+is a separate open EGP draft/BLOCKED.
 PR #210 was merged only into the closed #209 planning branch and never reached `main`;
 #221–#225 are the open main-targeted P0 successors. Every "exists today" claim below
 was verified against code, not recalled.*
