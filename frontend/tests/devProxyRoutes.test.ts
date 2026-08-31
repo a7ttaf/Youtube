@@ -1,4 +1,3 @@
-import { readdirSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -64,18 +63,17 @@ const SCANNER_HEALTH_PREFIXES = [
   "/tenants",
 ];
 
-/** Every supported TypeScript application file under frontend/src, recursively. */
+/** Recognize every TypeScript module form Vite can load for this application. */
 const hasApplicationSourceSuffix = (fileName: string): boolean =>
   SOURCE_SUFFIXES.some((suffix) => fileName.endsWith(suffix));
 
-const sourceFiles = (dir: string): string[] =>
-  readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
-    const full = path.join(dir, entry.name);
-    if (entry.isDirectory()) {
-      return sourceFiles(full);
-    }
-    return hasApplicationSourceSuffix(entry.name) ? [full] : [];
-  });
+/** Check containment without string-prefix ambiguity across Windows drives. */
+const isWithinDirectory = (fileName: string, directory: string): boolean => {
+  const relative = path.relative(directory, fileName);
+  return relative !== "" &&
+    !relative.startsWith("..") &&
+    !path.isAbsolute(relative);
+};
 
 const API_CLIENT_METHOD_NAMES = [
   "delete",
@@ -1705,15 +1703,12 @@ export const discoverRequestedPrefixesInSource = (
   return requestRootsInSourceFile(sourceFile, checker, directClientBindings);
 };
 
-/** Keep every compiler-loaded application file under frontend, including imports outside src. */
+/** Keep every compiler-loaded application file, including imports outside src/frontend. */
 const applicationProgramSourceFiles = (program: ts.Program): ts.SourceFile[] =>
   program.getSourceFiles().filter((sourceFile) => {
-    const relative = path.relative(FRONTEND_ROOT, sourceFile.fileName);
+    const normalizedFile = sourceFile.fileName.replaceAll("\\", "/");
     return !sourceFile.isDeclarationFile &&
-      relative !== "" &&
-      !relative.startsWith("..") &&
-      !path.isAbsolute(relative) &&
-      !relative.split(path.sep).includes("node_modules") &&
+      !normalizedFile.split("/").includes("node_modules") &&
       hasApplicationSourceSuffix(sourceFile.fileName);
   });
 
@@ -1741,7 +1736,15 @@ export const discoverRequestedPrefixes = (): string[] => {
         .join("\n"),
     );
   }
-  const files = sourceFiles(SRC_DIR);
+  // FIX: Use the TypeScript config's source universe as the root authority;
+  // filesystem-only walking silently missed supported module forms and imports.
+  const files = parsed.fileNames.filter(
+    (fileName) =>
+      isWithinDirectory(fileName, SRC_DIR) && hasApplicationSourceSuffix(fileName),
+  );
+  if (files.length === 0) {
+    throw new Error("TypeScript config contains no frontend application source files");
+  }
   const program = ts.createProgram({ options: parsed.options, rootNames: files });
   const checker = program.getTypeChecker();
   const programSourceFiles = applicationProgramSourceFiles(program);
@@ -1841,8 +1844,8 @@ describe("dev proxy route coverage (derived from frontend/src)", () => {
   it("audits compiler-loaded .mts/.cts and application imports outside src", () => {
     const names = [
       path.join(FRONTEND_ROOT, "src", "entry.ts"),
-      path.join(FRONTEND_ROOT, "shared", "outside.mts"),
-      path.join(FRONTEND_ROOT, "shared", "worker.cts"),
+      path.resolve(FRONTEND_ROOT, "..", "shared", "outside.mts"),
+      path.resolve(FRONTEND_ROOT, "..", "shared", "worker.cts"),
     ];
     const sources = new Map(
       names.map((name) => [
