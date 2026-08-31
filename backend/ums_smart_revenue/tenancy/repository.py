@@ -24,10 +24,18 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.orm import Session, object_session
 
+from ums_smart_revenue.db.iso_4217_2026_05 import ISO_4217_CURRENCIES_2026_05
 from ums_smart_revenue.db.tenant_models import TenantORM
 from ums_smart_revenue.tenancy.models import Tenant, TenantStatus
 
 CURRENCY_RE = re.compile(r"^[A-Z]{3}$")
+# The tenants.primary_currency CHECK constraint can only enforce SHAPE (three
+# uppercase letters). Membership in the frozen ISO 4217 catalog is enforced at
+# domain conversion, so a database-mode tenant row can never surface a triplet
+# the headers-mode settings path would reject (e.g. "ZZZ") as a valid currency.
+_ISO_4217_CURRENCY_CODES = frozenset(
+    str(entry["code"]) for entry in ISO_4217_CURRENCIES_2026_05
+)
 MAX_TENANT_SLUG_LENGTH = 255
 
 
@@ -154,8 +162,10 @@ def _coerce_aware_datetime(row: TenantORM, field_name: str) -> datetime:
 
 
 def _validate_currency(row: TenantORM) -> str:
-    """Return the ISO 4217 currency code or reject malformed values."""
+    """Return the ISO 4217 currency code or reject malformed or unknown values."""
     value = row.primary_currency
     if not isinstance(value, str) or CURRENCY_RE.fullmatch(value) is None:
         raise ValueError("invalid primary_currency: must be 3 uppercase letters")
+    if value not in _ISO_4217_CURRENCY_CODES:
+        raise ValueError(f"invalid primary_currency: {value!r} is not an ISO 4217 code")
     return value

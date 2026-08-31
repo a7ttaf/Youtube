@@ -198,6 +198,29 @@ def test_tenants_me_returns_bootstrap_tenant_for_resolved_slug(
     assert response.headers.get("Vary") and "X-UMS-Tenant" in response.headers["Vary"]
 
 
+def test_openapi_documents_primary_currency_on_both_hydration_responses(
+    client_db_mode,
+):
+    """The published OpenAPI contract carries ``primary_currency`` on BOTH hydration endpoints.
+
+    The SPA hydrates from whichever of GET /tenants/me or GET /session/me
+    answers first, so a schema-generated client must see the field on both
+    response models — an undocumented field is a contract regression even
+    when the runtime response carries it.
+    """
+    schema = client_db_mode.get("/openapi.json").json()
+
+    tenant_properties = schema["components"]["schemas"]["TenantRead"]["properties"]
+    assert "primary_currency" in tenant_properties, (
+        "GET /tenants/me must document primary_currency"
+    )
+
+    session_properties = schema["components"]["schemas"]["SessionTenant"]["properties"]
+    assert "primary_currency" in session_properties, (
+        "GET /session/me must document primary_currency on its nested tenant"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Case 2 — missing X-UMS-Tenant header → 400
 # ---------------------------------------------------------------------------

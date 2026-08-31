@@ -175,6 +175,21 @@ def test_to_domain_rejects_naive_datetimes():
         _to_domain(row)
 
 
+def test_to_domain_rejects_shaped_but_unknown_currency():
+    """A triplet that passes the CHECK shape (e.g. ZZZ) is not a valid currency.
+
+    The database constraint enforces three uppercase letters only; ISO 4217
+    membership is enforced here so database-mode rows can never present an
+    unknown code the headers-mode settings path would reject.
+    """
+    from ums_smart_revenue.tenancy.repository import _to_domain
+
+    row = _make_tenant_row(primary_currency="ZZZ")
+
+    with pytest.raises(ValueError, match="not an ISO 4217 code"):
+        _to_domain(row)
+
+
 def test_to_domain_normalises_non_utc_datetimes():
     """Tenant rows with offset-aware datetimes are normalized to UTC."""
     from ums_smart_revenue.tenancy.repository import _to_domain
