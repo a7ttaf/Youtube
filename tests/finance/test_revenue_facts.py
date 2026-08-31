@@ -25,6 +25,7 @@ DEFAULT_TENANT_ID = UUID(UMS_TENANT_ID)
 
 
 def test_revenue_fact_repository_rejects_invalid_metric_ranges():
+    """Reject negative counts and confidence scores outside zero through one."""
     engine = create_engine("sqlite+pysqlite:///:memory:")
     OrgBase.metadata.create_all(engine)
     FinanceBase.metadata.create_all(engine)
@@ -109,6 +110,7 @@ def test_revenue_fact_repository_rejects_invalid_metric_ranges():
 
 
 def test_revenue_fact_repository_rejects_invalid_amounts_and_non_finite_metrics():
+    """Reject negative revenue and non-finite decimal metrics."""
     engine = create_engine("sqlite+pysqlite:///:memory:")
     OrgBase.metadata.create_all(engine)
     FinanceBase.metadata.create_all(engine)
@@ -248,6 +250,7 @@ def test_revenue_fact_repository_upserts_duplicate_source_key_without_duplicate_
 
 
 def test_delete_month_facts_can_scope_by_source_report_id():
+    """Deleting one report leaves facts from other reports in the month intact."""
     engine = create_engine("sqlite+pysqlite:///:memory:")
     OrgBase.metadata.create_all(engine)
     FinanceBase.metadata.create_all(engine)
@@ -323,6 +326,7 @@ def test_delete_month_facts_can_scope_by_source_report_id():
 
 
 def test_revenue_fact_rejects_locked_month_in_bound_tenant():
+    """Reject fact writes only when the matching tenant-month is locked."""
     engine = create_engine("sqlite+pysqlite:///:memory:")
     OrgBase.metadata.create_all(engine)
     FinanceBase.metadata.create_all(engine)

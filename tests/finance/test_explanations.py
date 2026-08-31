@@ -631,11 +631,13 @@ def test_build_explanation_preserves_null_primary_source_report_id():
         metric=ADJUSTED_GROSS_REVENUE_METRIC,
     )
 
-    baseline_component = next(
+    baseline_components = [
         component
         for component in entry.components
         if component["key"] == "baseline_gross_revenue_usd"
-    )
+    ]
+    assert len(baseline_components) == 1
+    baseline_component = baseline_components[0]
     assert baseline_component["source_kind"] == "YOUTUBE_CMS"
     assert baseline_component["source_report_id"] is None
 
