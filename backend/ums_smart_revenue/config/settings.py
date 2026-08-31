@@ -113,7 +113,14 @@ class AppSettings:
         )
 
     def tenant_primary_currency_for_authz(self, authz_source: str) -> str:
-        """Resolve currency after an app factory chooses its effective authz mode."""
+        """Resolve the tenant currency for the app factory's effective authz mode.
+
+        Headers mode parses the configured currency strictly. Database mode
+        returns the unused bootstrap placeholder (``DEFAULT_TENANT_PRIMARY_CURRENCY``)
+        without parsing, because ``TenantResolverMiddleware`` hydrates the
+        persisted ``tenants.primary_currency`` instead. Any other mode string
+        raises ``ValueError``.
+        """
         normalized_authz_source = authz_source.strip().lower()
         if normalized_authz_source == AUTHZ_SOURCE_DATABASE:
             # FIX: Database mode must not parse a setting it never consumes;

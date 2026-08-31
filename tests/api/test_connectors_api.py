@@ -1744,6 +1744,7 @@ def test_credential_health_returns_telemetry_and_state_for_viewer(tmp_path):
 
 class _TenantRecordingHealthRepository:
     """Fake health repository recording the tenant binding it was asked for."""
+
     def __init__(self) -> None:
         self.bound_tenant_id: UUID | str | None = None
         self.connector_keys: frozenset[str] | None = None

@@ -166,6 +166,9 @@ def _validate_currency(row: TenantORM) -> str:
     value = row.primary_currency
     if not isinstance(value, str) or CURRENCY_RE.fullmatch(value) is None:
         raise ValueError("invalid primary_currency: must be 3 uppercase letters")
+    # FIX: shape alone let a persisted "ZZZ" reach the API as a valid currency;
+    # membership in the frozen ISO 4217 catalog is now required, matching the
+    # headers-mode settings path.
     if value not in _ISO_4217_CURRENCY_CODES:
         raise ValueError(f"invalid primary_currency: {value!r} is not an ISO 4217 code")
     return value
