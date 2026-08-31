@@ -91,6 +91,55 @@ def test_partition_follows_transitive_pytest_plugins(tmp_path):
     assert Path("tests/api/test_uses_fixture.py") in partition.database
 
 
+def test_partition_follows_mutated_pytest_plugins(tmp_path):
+    _write_test(tmp_path, "tests/unit/test_regular.py")
+    _write_test(tmp_path, "tests/db/test_schema.py")
+    _write_test(tmp_path, "tests/api/test_uses_fixture.py")
+    _write_test(
+        tmp_path,
+        "tests/api/conftest.py",
+        'pytest_plugins = []\npytest_plugins.append("tests.fixtures.postgres")\n',
+    )
+    fixture_sentinel = "UMS_TEST_" + "DATABASE_URL"
+    _write_test(
+        tmp_path,
+        "tests/fixtures/postgres.py",
+        f'DATABASE_URL = "{fixture_sentinel}"\n',
+    )
+
+    partition = build_test_partition(tmp_path)
+
+    assert partition.fast == (Path("tests/unit/test_regular.py"),)
+    assert Path("tests/api/test_uses_fixture.py") in partition.database
+
+
+def test_partition_follows_fixture_imported_into_conftest(tmp_path):
+    _write_test(tmp_path, "tests/unit/test_regular.py")
+    _write_test(tmp_path, "tests/db/test_schema.py")
+    _write_test(tmp_path, "tests/api/test_uses_fixture.py")
+    _write_test(
+        tmp_path,
+        "tests/api/conftest.py",
+        "from tests.fixtures.postgres import postgres_fixture\n",
+    )
+    fixture_sentinel = "require_" + "postgres_url"
+    _write_test(
+        tmp_path,
+        "tests/fixtures/postgres.py",
+        "import pytest\n"
+        "from tests.db._postgres_helpers import "
+        f"{fixture_sentinel}\n\n"
+        "@pytest.fixture\n"
+        "def postgres_fixture():\n"
+        f"    return {fixture_sentinel}()\n",
+    )
+
+    partition = build_test_partition(tmp_path)
+
+    assert partition.fast == (Path("tests/unit/test_regular.py"),)
+    assert Path("tests/api/test_uses_fixture.py") in partition.database
+
+
 def test_partition_fails_closed_for_dynamic_pytest_plugins(tmp_path):
     _write_test(tmp_path, "tests/unit/test_regular.py")
     _write_test(tmp_path, "tests/db/test_schema.py")

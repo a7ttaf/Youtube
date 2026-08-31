@@ -144,6 +144,21 @@ def _pytest_plugin_modules(source_path: Path) -> tuple[str, ...]:
 
     modules: list[str] = []
     for statement in _module_scope_statements(tree.body):
+        if (
+            isinstance(statement, ast.Expr)
+            and isinstance(statement.value, ast.Call)
+            and isinstance(statement.value.func, ast.Attribute)
+            and isinstance(statement.value.func.value, ast.Name)
+            and statement.value.func.value.id == "pytest_plugins"
+        ):
+            call = statement.value
+            if call.keywords or call.func.attr not in {"append", "extend"} or len(call.args) != 1:
+                raise PartitionError(
+                    f"{source_path} mutates pytest_plugins dynamically; "
+                    "CI cannot prove its fixture database requirements"
+                )
+            modules.extend(_plugin_literals(call.args[0], source_path))
+            continue
         value: ast.expr | None = None
         targets: Sequence[ast.expr] = ()
         if isinstance(statement, ast.Assign):
@@ -161,6 +176,87 @@ def _pytest_plugin_modules(source_path: Path) -> tuple[str, ...]:
             continue
         modules.extend(_plugin_literals(value, source_path))
     return tuple(dict.fromkeys(modules))
+
+
+def _absolute_import_name(
+    source_path: Path,
+    project_root: Path,
+    module: str | None,
+    level: int,
+) -> str | None:
+    """Resolve one Python import name without importing test support code."""
+
+    if level == 0:
+        return module
+    try:
+        relative_source = source_path.resolve().relative_to(project_root.resolve())
+    except ValueError as exc:
+        raise PartitionError(f"pytest support file escapes project root: {source_path}") from exc
+    package = list(relative_source.with_suffix("").parts[:-1])
+    keep = len(package) - (level - 1)
+    if keep < 0:
+        raise PartitionError(f"invalid relative import in pytest support file {source_path}")
+    parts = package[:keep]
+    if module:
+        parts.extend(module.split("."))
+    return ".".join(parts) or None
+
+
+def _resolve_test_support_import(
+    project_root: Path,
+    source_path: Path,
+    module: str,
+) -> Path | None:
+    """Resolve a test-local imported module, ignoring runtime/application imports."""
+
+    relative = Path(*module.split("."))
+    candidates = [
+        project_root / relative.with_suffix(".py"),
+        project_root / relative / "__init__.py",
+    ]
+    if "." not in module:
+        candidates.extend(
+            (
+                source_path.parent / relative.with_suffix(".py"),
+                source_path.parent / relative / "__init__.py",
+            )
+        )
+    tests_root = (project_root / "tests").resolve()
+    for candidate in candidates:
+        resolved = candidate.resolve()
+        if resolved.is_file() and (resolved == tests_root or resolved.is_relative_to(tests_root)):
+            return resolved
+    return None
+
+
+def _test_support_imports(source_path: Path, project_root: Path) -> tuple[Path, ...]:
+    """Return test-local modules imported at module scope by pytest support."""
+
+    try:
+        source = source_path.read_text(encoding="utf-8")
+        tree = ast.parse(source, filename=str(source_path))
+    except (OSError, UnicodeError, SyntaxError) as exc:
+        raise PartitionError(f"cannot inspect pytest support file {source_path}: {exc}") from exc
+
+    imported: list[Path] = []
+    for statement in _module_scope_statements(tree.body):
+        module_names: list[str] = []
+        if isinstance(statement, ast.Import):
+            module_names.extend(alias.name for alias in statement.names)
+        elif isinstance(statement, ast.ImportFrom):
+            base = _absolute_import_name(
+                source_path, project_root, statement.module, statement.level
+            )
+            if base:
+                module_names.append(base)
+                module_names.extend(
+                    f"{base}.{alias.name}" for alias in statement.names if alias.name != "*"
+                )
+        for module_name in module_names:
+            resolved = _resolve_test_support_import(project_root, source_path, module_name)
+            if resolved is not None:
+                imported.append(resolved)
+    return tuple(dict.fromkeys(imported))
 
 
 def _resolve_project_plugin(project_root: Path, module: str) -> Path:
@@ -214,6 +310,7 @@ def _pytest_support_files(test_path: Path, project_root: Path) -> tuple[Path, ..
             _resolve_project_plugin(project_root, module)
             for module in _pytest_plugin_modules(source_path)
         )
+        pending.extend(_test_support_imports(source_path, project_root))
     return tuple(support_files)
 
 
