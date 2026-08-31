@@ -254,10 +254,16 @@ Exports must define canonical serialized fields for US revenue, US share/status,
 estimated withholding, rate id/rate, currency, source tokens, and confidence, or
 explicitly exclude them with a typed evidence reason; the SPA cannot be the only place
 where reviewed finance values exist.
-Withholding-rate and estimate mutation/read APIs require explicit authorization: seed a
-withholding-specific permission, or name an existing finance write permission, scoped to
-the relevant AdSense account/month. Tests must cover missing, insufficient,
-cross-account, and storage-failure paths.
+Withholding-rate and estimate mutation/read APIs require explicit authorization. The
+implementation must add a withholding-specific permission (or explicitly reuse a named
+finance write permission) and an enforceable `ScopeType.ADSENSE_ACCOUNT_MONTH`
+representation before seeding grants. The scope id is the canonical
+`{adsense_account_id}:{YYYY-MM}` pair, resolved from the tenant-scoped
+`AdsenseContentOwnerLinkORM`/payment account rather than a browser-supplied account id;
+global grants are reserved for audited break-glass roles only. Missing scope, malformed
+scope id, cross-account/month mismatch, and scope-storage errors fail closed before any
+rate or estimate mutation. Tests must cover missing, insufficient, cross-account,
+wrong-month, malformed-scope, and storage-failure paths.
 
 **Acceptance criteria (U3):**
 - [ ] PostgreSQL rate migration/repository/API are tenant-scoped, audited, non-overlapping, and append/revoke historical corrections
@@ -269,7 +275,8 @@ cross-account, and storage-failure paths.
 - [ ] With one confirmed effective rate resolved through the channel→content-owner→AdSense bridge, backend returns labeled estimate fields and rate-record provenance only
 - [ ] Numerator/denominator provenance must match; mismatches return a typed status and no share/estimate
 - [ ] Export/API contracts preserve the new finance values and their source/confidence tokens
-- [ ] Authorization gates are explicit and fail closed for missing, insufficient, cross-account, and storage-failure cases
+- [ ] Authorization gates are explicit and fail closed for missing, insufficient, cross-account, wrong-month, malformed-scope, and storage-failure cases
+- [ ] Permission seeding includes the concrete account/month scope type and rejects grants whose scope id is not the canonical account/month pair
 - [ ] SPA renders backend fields; no client-side withholding math
 - [ ] Recon `DEFAULT_US_WITHHOLDING_RATE` (0.30) unchanged and dormant
 
@@ -286,8 +293,14 @@ Persist tenant-scoped `us_withholding_actuals` revisions with a composite
 `(tenant_id, payment_id)` FK to the existing `adsense_payments` row plus income
 category. Because payment sync updates amount, currency, source-report id, and payment
 metadata in place, each actual revision also snapshots the payment amount, currency,
-source report/version, payment name, account id, payment month, and covered earnings
-period used for comparison; otherwise the FK is only a mutable pointer. Store a
+source report/version, payment name, account id, payment month, covered earnings
+period used for comparison, and the payment status used for eligibility; otherwise the
+FK is only a mutable pointer. The repository admits `PAID`, `PENDING`, `UNPAID`, and
+`CANCELLED`, and sync updates `payment_status` in place, so an anchor may be written
+only while the locked payment holds a finalized `PAID` status — validated in the same
+transaction that locks it — and reads must suppress the estimated-vs-actual delta
+(returning `delta=null` with a typed `PAYMENT_NOT_FINALIZED` status) whenever the
+parent payment is no longer finalized. Store a
 non-negative finite actual withheld amount/currency, non-blank AdSense transaction-
 report reference, optional durable artifact hash/reference, client idempotency key,
 entered_by/reason/created_at, `supersedes_id`, and revoked_by/reason/at. Require the
@@ -298,29 +311,45 @@ revision rows remain as history.
 
 `adsense_payments.id` is currently the sole primary key; U4 must also add the redundant
 parent uniqueness on `(tenant_id, id)` required by that composite tenant FK. This is a
-constraint-only parent-table change, not a payment-row backfill.
+constraint-only parent-table change, not a payment-row backfill. PostgreSQL does not
+index foreign-key columns automatically, and the partial active-revision unique index
+cannot serve general FK lookups, so the migration must also create a non-partial btree
+index on the child columns `(tenant_id, payment_id)`; revoked history stays in the
+table, and payment updates or FK checks must not scan it sequentially.
 
 `POST /adsense/payments/{payment_id}/withholding-actuals` and its CSV service use one
-transaction to lock and validate the payment/month plus current active revision, mark
-that prior revision inactive, insert the new row pointing to it, and append the audit
-event. A replay with the same idempotency key returns the same committed revision; a key
-reused with different content fails closed. There is no DELETE or in-place amount edit.
-A locked finance month rejects new/corrected anchors; the operator must use the existing
-audited unlock workflow, append the correction with a new reason/source reference, and
-re-lock. Reads return revision provenance and a backend-computed estimated-vs-actual
-delta **only when both values carry the same currency and the actual's covered earnings
-period/account aggregation matches the U3 estimate period**; the SPA renders that value
-and performs no finance math. If the report does not expose a trustworthy covered
-period, return the actual without a delta. Missing estimate data returns `delta=null`
-with a typed missing-estimate status. A currency mismatch returns `delta=null` with
-`CURRENCY_MISMATCH_NO_FX`, preserving both source amounts without conversion. The
-comparison remains reproducible after restart. This is the only way to catch a silently
-lapsed W-8 (actual jumps to 24/30% while the estimate stays 15%). Until U4, that check
-is a monthly manual glance at the AdSense payments report.
+transaction to lock and validate the payment plus current active revision, mark that
+prior revision inactive, insert the new row pointing to it, and append the audit event. A
+replay with the same idempotency key returns the same committed revision; a key reused
+with different content fails closed. There is no DELETE or in-place amount edit. The
+mutation must normalize the actual's covered earnings period into a deterministic month
+set before writing: a single-month report produces one covered month; a multi-month
+report expands to every inclusive `YYYY-MM` in the covered period. The transaction then
+locks those finance-month rows in sorted order with the same lock primitive used by close
+/ unlock, serializes against concurrent close/unlock operations, and rejects the insert
+or correction if **any** covered earnings month is locked even when the payment month is
+later and still open. If the AdSense report or CSV row cannot prove the covered earnings
+months, the mutation fails closed instead of falling back to `adsense_payments.month`.
+The operator must use the existing audited unlock workflow, append the correction with a
+new reason/source reference, and re-lock.
+
+Reads return revision provenance and a backend-computed estimated-vs-actual delta **only
+when both values carry the same currency and the actual's covered earnings period/account
+aggregation matches the U3 estimate period**; the SPA renders that value and performs no
+finance math. Existing historical rows without a trustworthy covered period can be
+returned for audit visibility, but they return no delta and cannot be corrected without
+supplying the covered month set through a new revision. Missing estimate data returns
+`delta=null` with a typed missing-estimate status. A currency mismatch returns
+`delta=null` with `CURRENCY_MISMATCH_NO_FX`, preserving both source amounts without
+conversion. The comparison remains reproducible after restart. This is the only way to
+catch a silently lapsed W-8 (actual jumps to 24/30% while the estimate stays 15%). Until
+U4, that check is a monthly manual glance at the AdSense payments report.
 
 **Acceptance criteria (U4):**
 - [ ] Migration, tenant RLS, repository/service, typed API/CSV validation, and audit reason are present
 - [ ] Anchor references an existing account/payment and source report; currency mismatch and unknown payment fail closed
+- [ ] Anchors are written only against a locked `PAID` payment, snapshot its status, and reads suppress the delta with typed `PAYMENT_NOT_FINALIZED` once the parent leaves the finalized state
+- [ ] A non-partial `(tenant_id, payment_id)` btree index backs child FK checks and payment-update scans
 - [ ] Anchor snapshots mutable payment fields and records the covered earnings period; no delta is emitted when period/account linkage is absent or incompatible
 - [ ] Retry is idempotent; correction appends/supersedes and preserves prior revision;
   concurrent writers leave one active revision

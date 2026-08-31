@@ -27,7 +27,7 @@ PR #210 is historical: it merged on 2026-08-29 into the non-main
         ▼
 [P0-e dev gateway/docs] ──► Vite proxy (/users, /org-units); .env.example; runbook
         │
-        ├──► [manual-import gate] — source-verified USD manifest; audited open-month replacement for reduced manifests; resumable/idempotent loop; complete active roster + exact manual-fact set/report id/totals compared before complete
+        ├──► [manual-import gate] — source-verified USD manifest; immutable PostgreSQL import-batch ledger inside the replacement transaction; audited open-month replacement for reduced manifests; resumable/idempotent loop; complete active roster + exact manual-fact set/report id/totals compared before complete
         │
         ├──► [ci-fast + ci-database + ci-frontend] proposed required gates (see status note)
         │
@@ -76,7 +76,7 @@ PR #210 is historical: it merged on 2026-08-29 into the non-main
 | --- | --- |
 | All current #220 review threads resolved | Re-check after the final push; the DAG status above must be updated from the same repoll |
 | P0-a…P0-e merged to `main` | A1, beta runbook, living Docs/21 status |
-| USD manifest preflight + audited replacement + resumable import + complete-roster/exact-fact-set comparison green | Any real manual revenue import / claim that a month is complete |
+| USD manifest preflight + immutable PostgreSQL import-batch ledger + audited replacement + resumable import + complete-roster/exact-fact-set comparison green | Any real manual revenue import / claim that a month is complete |
 | Proposed `ci-fast` + `ci-database` + `ci-frontend` gates in #226 | Future review-readiness gate; not active on current `main` |
 | Final reviewed PR #227 SHA supplied, exact contract verified, then merged | U2 country ingest; intermediate/open heads are not shipped evidence |
 | D-U1 AdSense rate confirmed + config row written | U3 estimate surfaces |
@@ -122,7 +122,21 @@ $docs = @(
   'Docs/24_US_WITHHOLDING_AND_US_REVENUE_PLAN.md',
   'Docs/25_PROGRAM_DEPENDENCY_GRAPH.md'
 )
-rg -n '2026-08-31|#221 and #225 are open/BLOCKED|#222.?#224 are open/BEHIND|No migration/backfill required|Final PR #227 SHA is supplied|no environment fallback and no default rate|global `roles.assign` plus either active `connector_admin` or `super_owner`' $docs
+$markers = @(
+  '2026-08-31',
+  '#221 and #225 are open/BLOCKED',
+  '#222–#224 are open/BEHIND',
+  'No migration/backfill required',
+  'Final PR #227 SHA is supplied',
+  'no environment fallback and no default rate',
+  'global `roles.assign` plus either active `connector_admin` or `super_owner`',
+  'typed `PAYMENT_NOT_FINALIZED` status',
+  'non-partial btree index on the child columns'
+)
+foreach ($m in $markers) {
+  rg -n -F $m $docs
+  if ($LASTEXITCODE -ne 0) { Write-Error "recertification marker not found: $m"; exit 1 }
+}
 $conflicts = rg -n '^(<<<<<<<|=======|>>>>>>>)' $docs
 if ($LASTEXITCODE -eq 0) { $conflicts; exit 1 }
 if ($LASTEXITCODE -gt 1) { exit $LASTEXITCODE }
