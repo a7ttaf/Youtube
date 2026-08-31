@@ -1,10 +1,10 @@
-import { readFileSync, readdirSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import ts from "typescript";
 import { resolveConfig } from "vite";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import {
   TENANT_SCOPED_ROUTES,
@@ -187,6 +187,67 @@ const assertCanonicalViteHtmlFiles = (files: readonly string[]): string => {
     throw new Error("additional Vite-served HTML pages are unsupported by route coverage");
   }
   return canonicalHtml;
+};
+
+/** Vite serves frontend/public statically at the site root, same-origin. */
+const PUBLIC_DIR = path.join(FRONTEND_ROOT, "public");
+
+/** Document suffixes a browser executes as a top-level same-origin document. */
+const PUBLIC_EXECUTABLE_DOCUMENT_SUFFIXES = [
+  ".html",
+  ".mht",
+  ".mhtml",
+  ".svg",
+  ".xhtml",
+  ".xml",
+];
+
+type PublicAsset = {
+  file: string;
+  content: string;
+};
+
+/** Enumerate every file Vite would serve statically from frontend/public. */
+const vitePublicAssets = (directory = PUBLIC_DIR): PublicAsset[] => {
+  if (!existsSync(directory)) {
+    return [];
+  }
+  const assets: PublicAsset[] = [];
+  for (const entry of readdirSync(directory, { withFileTypes: true })) {
+    const resolved = path.join(directory, entry.name);
+    if (entry.isDirectory()) {
+      assets.push(...vitePublicAssets(resolved));
+    } else if (entry.isFile()) {
+      assets.push({ file: resolved, content: readFileSync(resolved, "utf8") });
+    }
+  }
+  return assets.sort((left, right) => left.file.localeCompare(right.file));
+};
+
+/**
+ * Reject script-bearing documents served from frontend/public: sirv mounts the
+ * directory at the site root, so an inline script in an SVG/XHTML document
+ * executes same-origin next to the trusted development gateway. A public .html
+ * entry additionally fails the single-page assertion above, which still walks
+ * the public tree.
+ */
+const assertPublicAssetsCarryNoExecutableContent = (
+  assets: readonly PublicAsset[],
+): void => {
+  for (const { file, content } of assets) {
+    const executableDocument = PUBLIC_EXECUTABLE_DOCUMENT_SUFFIXES.some((suffix) =>
+      file.toLowerCase().endsWith(suffix),
+    );
+    if (!executableDocument) {
+      continue;
+    }
+    const normalized = content.toLowerCase();
+    if (normalized.includes("<script") || normalized.includes("javascript:")) {
+      throw new Error(
+        `executable script in a statically served public document is unsupported: ${file}`,
+      );
+    }
+  }
 };
 
 /** Reject Vite library/SSR entry modes that bypass the audited HTML root. */
@@ -1052,6 +1113,50 @@ const isHookDeclarationReference = (identifier: ts.Identifier): boolean => {
   );
 };
 
+/** Vite's DEFAULT_EXTENSIONS probe order for extensionless relative requests. */
+const VITE_DEFAULT_EXTENSIONS = [".mjs", ".js", ".mts", ".ts", ".jsx", ".tsx", ".json"];
+
+/**
+ * Fail closed when a relative specifier without an explicit .js-family
+ * extension resolves on disk to bytes outside the audited program: Vite probes
+ * its DEFAULT_EXTENSIONS and serves the first hit same-origin, while allowJs
+ * stays false so .js-family files and never-imported modules never enter the
+ * compiler sources this audit walks. The first existing candidate is the file
+ * Vite actually serves, so the probe order below is load-bearing.
+ */
+const assertSpecifierResolvesIntoAuditedProgram = (
+  specifier: string,
+  sourceFileName: string,
+  scannedFiles: ReadonlySet<string>,
+): void => {
+  if (!specifier.startsWith(".") && !specifier.startsWith("/")) {
+    return; // bare package specifiers are Node-resolved, not root-served
+  }
+  const specifierPath = specifier.split(/[?#]/u, 1)[0] ?? "";
+  if (!specifierPath || specifierPath.endsWith("/")) {
+    return;
+  }
+  const base = specifierPath.startsWith("/")
+    ? path.join(FRONTEND_ROOT, specifierPath)
+    : path.resolve(path.dirname(sourceFileName), specifierPath);
+  const candidates = [
+    ...VITE_DEFAULT_EXTENSIONS.map((extension) => base + extension),
+    ...VITE_DEFAULT_EXTENSIONS.map((extension) => path.join(base, `index${extension}`)),
+  ];
+  for (const candidate of candidates) {
+    if (!existsSync(candidate)) {
+      continue;
+    }
+    if (!scannedFiles.has(canonicalFileIdentity(candidate))) {
+      throw new Error(
+        `extensionless specifier resolves to Vite-served bytes outside the audited program: ` +
+          `${specifier} -> ${candidate}; require an explicit extension into the audited sources`,
+      );
+    }
+    return; // Vite serves the first existing candidate; it is audited.
+  }
+};
+
 /** Enforce the deliberately small direct-client syntax before route discovery. */
 const validateDirectApiClientContract = (
   programSourceFiles: readonly ts.SourceFile[],
@@ -1159,6 +1264,14 @@ const validateDirectApiClientContract = (
           `unscanned executable module import is forbidden: ${specifier}`,
         );
       }
+      // FIX: an extensionless or directory specifier still resolves through
+      // Vite's DEFAULT_EXTENSIONS to disk bytes the compiler program never
+      // includes (allowJs stays false), so prove the target is audited.
+      assertSpecifierResolvesIntoAuditedProgram(
+        specifier,
+        node.getSourceFile().fileName,
+        scannedFiles,
+      );
     }
     if (
       ts.isIdentifier(node) &&
@@ -2321,6 +2434,10 @@ export const discoverRequestedPrefixes = (): string[] => {
     files.map((fileName) => canonicalFileIdentity(fileName)),
   );
   const htmlFile = assertCanonicalViteHtmlFiles(viteHtmlFiles());
+  // FIX: frontend/public is served statically at the site root; script-bearing
+  // documents there execute same-origin and were never enumerated by the
+  // HTML-only walk above.
+  assertPublicAssetsCarryNoExecutableContent(vitePublicAssets());
   const htmlEntries = viteHtmlModuleEntries(readFileSync(htmlFile, "utf8"));
   for (const entry of htmlEntries) {
     if (
@@ -2529,6 +2646,26 @@ describe("dev proxy route coverage (derived from frontend/src)", () => {
     ]);
   });
 
+  it("pins the dev server /@fs surface to the audited frontend root", async () => {
+    vi.stubEnv("UMS_TRUSTED_GATEWAY_TOKEN", "fs-allow-pin-token");
+    try {
+      const config = await resolveConfig(
+        {
+          configFile: path.join(FRONTEND_ROOT, "vite.config.ts"),
+          logLevel: "silent",
+          root: FRONTEND_ROOT,
+        },
+        "serve",
+        "development",
+      );
+      expect(config.server.fs.allow.map((entry) => canonicalFileIdentity(entry))).toEqual([
+        canonicalFileIdentity(FRONTEND_ROOT),
+      ]);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
   it("treats literal fragments as non-transport metadata but rejects encoded hashes", () => {
     expect(isSafeRouteUrl("/users#section", "/users")).toBe(true);
     expect(isSafeRouteUrl("/users?view=all#section", "/users")).toBe(true);
@@ -2653,6 +2790,76 @@ describe("dev proxy route coverage (derived from frontend/src)", () => {
     expect(() => discoverRequestedPrefixesInSource(source)).toThrow(
       /unscanned executable module import is forbidden/iu,
     );
+  });
+
+  it("fails closed on an extensionless import resolving to unscanned .js bytes", () => {
+    expect(() =>
+      discoverRequestedPrefixesInSource(
+        'import bypass from "./fixtures/extensionless-bypass"; void bypass;',
+      ),
+    ).toThrow(
+      /extensionless specifier resolves to Vite-served bytes outside the audited program/iu,
+    );
+  });
+
+  it("fails closed on a public SVG document carrying an inline script", () => {
+    expect(() =>
+      assertPublicAssetsCarryNoExecutableContent([
+        {
+          file: path.join(PUBLIC_DIR, "evil.svg"),
+          content:
+            '<svg xmlns="http://www.w3.org/2000/svg"><script>fetch("/session")</script></svg>',
+        },
+      ]),
+    ).toThrow(/executable script in a statically served public document/iu);
+  });
+
+  it("fails closed on a javascript: URI in a served public document", () => {
+    expect(() =>
+      assertPublicAssetsCarryNoExecutableContent([
+        {
+          file: path.join(PUBLIC_DIR, "evil.xhtml"),
+          content:
+            "<html><body><a href=\"JaVaScRiPt:fetch('/session')\">go</a></body></html>",
+        },
+      ]),
+    ).toThrow(/executable script in a statically served public document/iu);
+  });
+
+  it("passes non-executable public assets such as fonts", () => {
+    expect(() =>
+      assertPublicAssetsCarryNoExecutableContent([
+        {
+          file: path.join(PUBLIC_DIR, "fonts", "font.woff2"),
+          content: "   font-bytes",
+        },
+      ]),
+    ).not.toThrow();
+    expect(() =>
+      assertPublicAssetsCarryNoExecutableContent(vitePublicAssets()),
+    ).not.toThrow();
+  });
+
+  it("keeps bare, explicit-extension, and audited-target imports unchanged", () => {
+    const scannedFiles = new Set([CANONICAL_API_CLIENT_FILE]);
+    const importingFile = path.join(SRC_DIR, "lib", "api", "consumer.ts");
+    expect(() =>
+      assertSpecifierResolvesIntoAuditedProgram("react", importingFile, scannedFiles),
+    ).not.toThrow();
+    expect(() =>
+      assertSpecifierResolvesIntoAuditedProgram(
+        "./client",
+        importingFile,
+        scannedFiles,
+      ),
+    ).not.toThrow();
+    expect(() =>
+      assertSpecifierResolvesIntoAuditedProgram(
+        "./client.css",
+        importingFile,
+        scannedFiles,
+      ),
+    ).not.toThrow();
   });
 
   it.each([

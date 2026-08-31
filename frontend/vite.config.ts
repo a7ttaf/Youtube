@@ -171,6 +171,10 @@ export default defineConfig(({ command, mode, isPreview }) => {
     },
     server: {
       host: "127.0.0.1",
+      // FIX: /@fs defaults to Vite's workspace-root search, which can reach
+      // past frontend/ to repo-root bytes the dev-gateway audit never
+      // enumerates. Pin the servable filesystem to the audited frontend root.
+      fs: { allow: [FRONTEND_ROOT] },
       ...(devProxy ? { proxy: devProxy } : {}),
     },
   };
