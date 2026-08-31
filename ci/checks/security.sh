@@ -20,8 +20,22 @@ if [ -z "${CI_CHECKS_SECRET_PATTERN:-}" ]; then
   exit "$CI_RESULT_FAIL_INFRA"
 fi
 
+security_data_has_secret() {
+  local data="$1" grep_rc=0
+
+  set +e
+  printf '%s' "$data" | grep -a -q -E "$CI_CHECKS_SECRET_PATTERN"
+  grep_rc=$?
+  set -e
+  case "$grep_rc" in
+    0) return 0 ;;
+    1) return 1 ;;
+    *) security_infra_failure "Security could not scan raw metadata bytes." ;;
+  esac
+}
+
 security_path_for_log() {
-  if printf '%s' "$1" | grep -a -q -E "$CI_CHECKS_SECRET_PATTERN"; then
+  if security_data_has_secret "$1"; then
     printf '[redacted-secret-like-path]'
   else
     printf '%q' "$1"
@@ -50,7 +64,7 @@ scan_sensitive_path() {
 
   # A credential can be leaked in a tree entry even when the blob is harmless.
   # Feed the raw decoded path through stdin so leading dashes are never options.
-  if printf '%s' "$path" | grep -a -q -E "$CI_CHECKS_SECRET_PATTERN"; then
+  if security_data_has_secret "$path"; then
     echo "Potential secret-like content in path: $path_for_log"
     matches=1
   fi
@@ -100,9 +114,9 @@ scan_file() {
     # the byte payload Git stores; following it could read outside the project.
     readlink -- "$filesystem_path" > "$security_temp_dir/blob" \
       || security_infra_failure "Security could not read symlink payload: $(security_path_for_log "$path")"
-    raw_hits="$(grep -a -n -o -E "$CI_CHECKS_SECRET_PATTERN" -- "$security_temp_dir/blob" 2>/dev/null || true)"
+    raw_hits="$(scan_searchable_file "$path" "$security_temp_dir/blob" worktree)"
   elif [ -f "$filesystem_path" ]; then
-    raw_hits="$(grep -a -n -o -E "$CI_CHECKS_SECRET_PATTERN" -- "$filesystem_path" 2>/dev/null || true)"
+    raw_hits="$(scan_searchable_file "$path" "$filesystem_path" worktree)"
   else
     return 0
   fi
@@ -110,7 +124,7 @@ scan_file() {
 }
 
 security_infra_failure() {
-  echo "$1"
+  echo "$1" >&2
   exit "$CI_RESULT_FAIL_INFRA"
 }
 
@@ -128,15 +142,86 @@ ensure_security_temp_dir() {
     || security_infra_failure "Security could not create its scan workspace."
 }
 
-scan_blob_additions() {
-  local path="$1" old_blob="$2" new_blob="$3" diff_rc=0 raw_hits=""
+prepare_searchable_projections() {
+  local input_file="$1" output_prefix="$2" label="$3" bom_hex=""
 
-  # A NUL byte must not suppress either the diff or the secret matcher. Force
-  # Git and grep to treat arbitrary committed blob bytes as searchable text.
+  ci::common::command_exists od \
+    || security_infra_failure "Security requires od to inspect encoded content."
+  bom_hex="$(LC_ALL=C od -An -tx1 -N2 "$input_file" 2>/dev/null | tr -d '[:space:]')" \
+    || security_infra_failure "Security could not inspect encoded content: $(security_path_for_log "$label")"
+  case "$bom_hex" in
+    fffe)
+      ci::common::command_exists iconv \
+        || security_infra_failure "Security requires iconv for UTF-16LE content."
+      iconv -f UTF-16LE -t UTF-8 "$input_file" > "${output_prefix}-primary" 2>/dev/null \
+        || security_infra_failure "Security could not decode UTF-16LE content: $(security_path_for_log "$label")"
+      ;;
+    feff)
+      ci::common::command_exists iconv \
+        || security_infra_failure "Security requires iconv for UTF-16BE content."
+      iconv -f UTF-16BE -t UTF-8 "$input_file" > "${output_prefix}-primary" 2>/dev/null \
+        || security_infra_failure "Security could not decode UTF-16BE content: $(security_path_for_log "$label")"
+      ;;
+    *)
+      cp -- "$input_file" "${output_prefix}-primary" \
+        || security_infra_failure "Security could not prepare content: $(security_path_for_log "$label")"
+      ;;
+  esac
+
+  # BOM-less UTF-16 has no reliable declaration. A second projection removes
+  # interleaved NUL bytes, exposing ASCII credential patterns in either endian
+  # order without guessing that arbitrary binary data is valid Unicode text.
+  LC_ALL=C tr -d '\000' < "$input_file" > "${output_prefix}-nul-stripped" \
+    || security_infra_failure "Security could not normalize NUL content: $(security_path_for_log "$label")"
+}
+
+append_secret_hits() {
+  local input_file="$1" output_file="$2" label="$3" grep_rc=0
+
+  set +e
+  grep -a -n -o -E "$CI_CHECKS_SECRET_PATTERN" -- "$input_file" >> "$output_file" 2>/dev/null
+  grep_rc=$?
+  set -e
+  [ "$grep_rc" -le 1 ] \
+    || security_infra_failure "Security could not scan content: $(security_path_for_log "$label")"
+}
+
+projections_differ() {
+  local first="$1" second="$2" cmp_rc=0
+
+  ci::common::command_exists cmp \
+    || security_infra_failure "Security requires cmp for normalized content."
+  set +e
+  cmp -s -- "$first" "$second"
+  cmp_rc=$?
+  set -e
+  case "$cmp_rc" in
+    0) return 1 ;;
+    1) return 0 ;;
+    *) security_infra_failure "Security could not compare normalized content." ;;
+  esac
+}
+
+scan_searchable_file() {
+  local label="$1" input_file="$2" slot="$3"
+  local projection_prefix="$security_temp_dir/searchable-$slot"
+
+  prepare_searchable_projections "$input_file" "$projection_prefix" "$label"
+  : > "$security_temp_dir/hits-$slot"
+  append_secret_hits "${projection_prefix}-primary" "$security_temp_dir/hits-$slot" "$label"
+  if projections_differ "${projection_prefix}-primary" "${projection_prefix}-nul-stripped"; then
+    append_secret_hits "${projection_prefix}-nul-stripped" "$security_temp_dir/hits-$slot" "$label"
+  fi
+  cat -- "$security_temp_dir/hits-$slot"
+}
+
+append_projection_additions() {
+  local path="$1" old_projection="$2" new_projection="$3" slot="$4" diff_rc=0
+
   set +e
   git diff --no-index --text --no-ext-diff --no-textconv --unified=0 \
-    --output-indicator-new='>' -- "$old_blob" "$new_blob" \
-    > "$security_temp_dir/blob-diff" 2>/dev/null
+    --output-indicator-new='>' -- "$old_projection" "$new_projection" \
+    > "$security_temp_dir/blob-diff-$slot" 2>/dev/null
   diff_rc=$?
   set -e
   [ "$diff_rc" -le 1 ] \
@@ -144,9 +229,25 @@ scan_blob_additions() {
 
   # Git's dedicated new-line indicator avoids confusing diff headers with
   # content. Removing exactly one marker preserves a content line beginning >.
-  sed -n 's/^>//p' "$security_temp_dir/blob-diff" > "$security_temp_dir/added-lines" \
+  sed -n 's/^>//p' "$security_temp_dir/blob-diff-$slot" > "$security_temp_dir/added-lines-$slot" \
     || security_infra_failure "Security could not extract committed additions: $(security_path_for_log "$path")"
-  raw_hits="$(grep -a -n -o -E "$CI_CHECKS_SECRET_PATTERN" -- "$security_temp_dir/added-lines" 2>/dev/null || true)"
+  append_secret_hits "$security_temp_dir/added-lines-$slot" "$security_temp_dir/blob-addition-hits" "$path"
+}
+
+scan_blob_additions() {
+  local path="$1" old_blob="$2" new_blob="$3" raw_hits=""
+  local old_prefix="$security_temp_dir/delta-old" new_prefix="$security_temp_dir/delta-new"
+
+  prepare_searchable_projections "$old_blob" "$old_prefix" "$path"
+  prepare_searchable_projections "$new_blob" "$new_prefix" "$path"
+  : > "$security_temp_dir/blob-addition-hits"
+  append_projection_additions "$path" "${old_prefix}-primary" "${new_prefix}-primary" primary
+  if projections_differ "${old_prefix}-primary" "${old_prefix}-nul-stripped" \
+    || projections_differ "${new_prefix}-primary" "${new_prefix}-nul-stripped"; then
+    append_projection_additions "$path" \
+      "${old_prefix}-nul-stripped" "${new_prefix}-nul-stripped" nul-stripped
+  fi
+  raw_hits="$(cat -- "$security_temp_dir/blob-addition-hits")"
   record_secret_hits "$path" "$raw_hits"
 }
 
@@ -169,7 +270,7 @@ scan_commit_object_delta() {
   fi
 
   if [ "$old_mode" = "160000" ] || printf '%s' "$old_oid" | grep -Eq '^0+$'; then
-    raw_hits="$(grep -a -n -o -E "$CI_CHECKS_SECRET_PATTERN" -- "$security_temp_dir/blob-new" 2>/dev/null || true)"
+    raw_hits="$(scan_searchable_file "$path" "$security_temp_dir/blob-new" committed-new)"
     record_secret_hits "$path" "$raw_hits"
     return 0
   fi
@@ -177,7 +278,7 @@ scan_commit_object_delta() {
     security_infra_failure "Security could not read prior committed object: $old_oid ($(security_path_for_log "$path"))"
   fi
   if [ "$old_type" != "blob" ]; then
-    raw_hits="$(grep -a -n -o -E "$CI_CHECKS_SECRET_PATTERN" -- "$security_temp_dir/blob-new" 2>/dev/null || true)"
+    raw_hits="$(scan_searchable_file "$path" "$security_temp_dir/blob-new" committed-new)"
     record_secret_hits "$path" "$raw_hits"
     return 0
   fi
@@ -200,7 +301,7 @@ scan_index_blob() {
   if ! git cat-file blob "$new_oid" > "$security_temp_dir/blob"; then
     security_infra_failure "Security could not materialize staged blob: $(security_path_for_log "$path")"
   fi
-  raw_hits="$(grep -a -n -o -E "$CI_CHECKS_SECRET_PATTERN" -- "$security_temp_dir/blob" 2>/dev/null || true)"
+  raw_hits="$(scan_searchable_file "$path" "$security_temp_dir/blob" staged)"
   record_secret_hits "$path" "$raw_hits"
 }
 
@@ -255,33 +356,38 @@ scan_commit_delta() {
   done 3< "$security_temp_dir/paths"
 }
 
+scan_metadata_file() {
+  local label="$1" input_file="$2" slot="$3" separator_rc=0
+  local header_hits="" message_hits=""
+
+  set +e
+  grep -a -q -x '' -- "$input_file"
+  separator_rc=$?
+  set -e
+  [ "$separator_rc" -eq 0 ] \
+    || security_infra_failure "Security received malformed object metadata: $label"
+  sed -n '1,/^$/p' "$input_file" > "$security_temp_dir/metadata-headers-$slot" \
+    || security_infra_failure "Security could not extract object headers: $label"
+  sed '1,/^$/d' "$input_file" > "$security_temp_dir/metadata-message-$slot" \
+    || security_infra_failure "Security could not extract object message: $label"
+  header_hits="$(scan_searchable_file "$label" "$security_temp_dir/metadata-headers-$slot" "metadata-headers-$slot")"
+  message_hits="$(scan_searchable_file "$label" "$security_temp_dir/metadata-message-$slot" "metadata-message-$slot")"
+  printf '%s%s%s' "$header_hits" "${header_hits:+${message_hits:+$'\n'}}" "$message_hits"
+}
+
 scan_commit_metadata() {
   local commit="$1" raw_hits=""
 
   if ! git cat-file commit "$commit" > "$security_temp_dir/commit-object"; then
     security_infra_failure "Security could not materialize commit metadata: $commit"
   fi
-  raw_hits="$(grep -a -n -o -E "$CI_CHECKS_SECRET_PATTERN" -- "$security_temp_dir/commit-object" 2>/dev/null || true)"
+  raw_hits="$(scan_metadata_file "commit-metadata-$commit" "$security_temp_dir/commit-object" commit)"
   record_secret_hits "commit-metadata-$commit" "$raw_hits"
 }
 
-scan_commit_history() {
-  local old_commit="$1" new_commit="$2" commit="" commit_line="" first_parent=""
+scan_commit_list_file() {
+  local commits_file="$1" commit="" commit_line="" first_parent=""
   local -a commit_fields=()
-
-  ensure_security_temp_dir
-
-  # `old..new` is intentional even for a force update: it is exactly the set
-  # of commits newly reachable from the destination tip. When there is no old
-  # destination, every commit reachable from new is new and must be inspected.
-  if [ -z "$old_commit" ]; then
-    git rev-list --reverse --topo-order "$new_commit" -- > "$security_temp_dir/commits" \
-      || security_infra_failure "Security could not enumerate the initial committed history."
-  else
-    git rev-list --reverse --topo-order "${old_commit}..${new_commit}" \
-      -- > "$security_temp_dir/commits" \
-      || security_infra_failure "Security could not enumerate the committed range."
-  fi
 
   while IFS= read -r commit; do
     [ -n "$commit" ] || continue
@@ -304,7 +410,26 @@ scan_commit_history() {
     # commit is scanned separately above, while resolution-only bytes appear in
     # the merge result compared with its first parent.
     scan_commit_delta "$first_parent" "$commit" "commit delta"
-  done < "$security_temp_dir/commits"
+  done < "$commits_file"
+}
+
+scan_commit_history() {
+  local old_commit="$1" new_commit="$2"
+
+  ensure_security_temp_dir
+
+  # `old..new` is intentional even for a force update: it is exactly the set
+  # of commits newly reachable from the destination tip. When there is no old
+  # destination, every commit reachable from new is new and must be inspected.
+  if [ -z "$old_commit" ]; then
+    git rev-list --reverse --topo-order "$new_commit" -- > "$security_temp_dir/commits" \
+      || security_infra_failure "Security could not enumerate the initial committed history."
+  else
+    git rev-list --reverse --topo-order "${old_commit}..${new_commit}" \
+      -- > "$security_temp_dir/commits" \
+      || security_infra_failure "Security could not enumerate the committed range."
+  fi
+  scan_commit_list_file "$security_temp_dir/commits"
 
   if [ -n "$old_commit" ]; then
     # A force update can move backward to a commit already reachable from the
@@ -312,6 +437,92 @@ scan_commit_history() {
     # exact destination state transition in addition to newly reachable history.
     scan_commit_delta "$old_commit" "$new_commit" "destination transition"
   fi
+}
+
+scanned_tip_commit=""
+
+scan_tag_chain() {
+  local object_oid="$1" object_type="" tag_line="" type_line="" target_oid=""
+  local declared_type="" actual_type="" raw_hits="" seen=""
+
+  while :; do
+    if printf '%s\n' "$seen" | grep -F -x -q -- "$object_oid"; then
+      security_infra_failure "Security found a cycle in the outgoing tag chain: $object_oid"
+    fi
+    seen="${seen}${seen:+$'\n'}${object_oid}"
+    object_type="$(git cat-file -t "$object_oid" 2>/dev/null)" \
+      || security_infra_failure "Security could not read outgoing object: $object_oid"
+    case "$object_type" in
+      commit)
+        scanned_tip_commit="$object_oid"
+        return 0
+        ;;
+      tag)
+        git cat-file tag "$object_oid" > "$security_temp_dir/tag-object" \
+          || security_infra_failure "Security could not materialize outgoing tag: $object_oid"
+        raw_hits="$(scan_metadata_file "tag-metadata-$object_oid" "$security_temp_dir/tag-object" tag)"
+        record_secret_hits "tag-metadata-$object_oid" "$raw_hits"
+        IFS= read -r tag_line < "$security_temp_dir/tag-object" \
+          || security_infra_failure "Security could not read outgoing tag target: $object_oid"
+        IFS= read -r type_line < <(sed -n '2p' "$security_temp_dir/tag-object") \
+          || security_infra_failure "Security could not read outgoing tag type: $object_oid"
+        target_oid="${tag_line#object }"
+        declared_type="${type_line#type }"
+        if [ "$tag_line" = "$target_oid" ] \
+          || [[ ! "$target_oid" =~ ^[0-9a-f]{40,64}$ ]] \
+          || [ "$type_line" = "$declared_type" ]; then
+          security_infra_failure "Security received ambiguous outgoing tag metadata: $object_oid"
+        fi
+        actual_type="$(git cat-file -t "$target_oid" 2>/dev/null)" \
+          || security_infra_failure "Security could not read outgoing tag target: $target_oid"
+        [ "$actual_type" = "$declared_type" ] \
+          || security_infra_failure "Security outgoing tag type does not match its target: $object_oid"
+        case "$actual_type" in
+          commit|tag) object_oid="$target_oid" ;;
+          *) security_infra_failure "Security only supports tags resolving to commits: $object_oid" ;;
+        esac
+        ;;
+      *) security_infra_failure "Security outgoing ref does not resolve to a commit: $object_oid" ;;
+    esac
+  done
+}
+
+scan_outgoing_tip_history() {
+  local tip_commit="$1" remote_tip="" remote_commit=""
+  local -a rev_args=("$tip_commit")
+
+  # Destination tips are exclusions, not a guessed single base. If they are
+  # absent or unreadable, omit the exclusion and safely scan more history.
+  if [ -n "${CI_GATE_PUSH_REMOTE_TIPS_FOR:-}" ] \
+    && [ "${CI_GATE_PUSH_REMOTE_TIPS_FOR}" = "${CI_GATE_PUSH_REMOTE:-}" ]; then
+    # Word splitting is the hook's contract: these are hexadecimal object IDs.
+    # shellcheck disable=SC2086
+    for remote_tip in ${CI_GATE_PUSH_REMOTE_TIPS:-}; do
+      remote_commit="$(git rev-parse --verify "${remote_tip}^{commit}" 2>/dev/null || true)"
+      [ -n "$remote_commit" ] && rev_args+=("^$remote_commit")
+    done
+  fi
+  git rev-list --reverse --topo-order "${rev_args[@]}" -- \
+    > "$security_temp_dir/outgoing-commits" \
+    || security_infra_failure "Security could not enumerate outgoing ref history: $tip_commit"
+  scan_commit_list_file "$security_temp_dir/outgoing-commits"
+}
+
+scan_outgoing_ref_tips() {
+  local tip="" object_oid=""
+
+  ensure_security_temp_dir
+  # Word splitting is safe for hook-exported object IDs and rejects everything
+  # that does not resolve to one exact local object below.
+  # shellcheck disable=SC2086
+  for tip in ${CI_GATE_PUSH_TAG_TIPS:-} ${CI_GATE_PUSH_OTHER_TIPS:-}; do
+    object_oid="$(git rev-parse --verify "$tip" 2>/dev/null)" \
+      || security_infra_failure "Security outgoing ref tip is missing or unreadable: $tip"
+    [[ "$object_oid" =~ ^[0-9a-f]{40,64}$ ]] \
+      || security_infra_failure "Security outgoing ref tip is ambiguous: $tip"
+    scan_tag_chain "$object_oid"
+    scan_outgoing_tip_history "$scanned_tip_commit"
+  done
 }
 
 scan_local_paths() {
@@ -345,12 +556,19 @@ scan_local_paths() {
 # and prevents the required context from ever reporting on the PR range. The
 # push contract already carries the exact old/new commits; validate them and
 # scan every newly reachable commit without inventing a debt baseline.
+push_context_seen=0
 if [ -n "${CI_GATE_PUSH_OLD_SHA:-}${CI_GATE_PUSH_NEW_SHA:-}" ]; then
+  push_context_seen=1
   old_sha="${CI_GATE_PUSH_OLD_SHA:-}"
   new_sha="${CI_GATE_PUSH_NEW_SHA:-HEAD}"
-  if ! new_commit="$(git rev-parse --verify "${new_sha}^{commit}" 2>/dev/null)"; then
+  ensure_security_temp_dir
+  if ! new_object="$(git rev-parse --verify "$new_sha" 2>/dev/null)"; then
     security_infra_failure "Security committed-range head is missing or unreadable: $new_sha"
   fi
+  [[ "$new_object" =~ ^[0-9a-f]{40,64}$ ]] \
+    || security_infra_failure "Security committed-range head is ambiguous: $new_sha"
+  scan_tag_chain "$new_object"
+  new_commit="$scanned_tip_commit"
   if ! head_commit="$(git rev-parse --verify "HEAD^{commit}" 2>/dev/null)" \
     || [ "$new_commit" != "$head_commit" ]; then
     security_infra_failure "Security committed-range head must be the checked-out HEAD."
@@ -365,9 +583,37 @@ if [ -n "${CI_GATE_PUSH_OLD_SHA:-}${CI_GATE_PUSH_NEW_SHA:-}" ]; then
     if ! old_commit="$(git rev-parse --verify "${old_sha}^{commit}" 2>/dev/null)"; then
       security_infra_failure "Security committed-range base is missing or unreadable: $old_sha"
     fi
+    [[ "$old_commit" =~ ^[0-9a-f]{40,64}$ ]] \
+      || security_infra_failure "Security committed-range base is ambiguous: $old_sha"
   fi
   scan_commit_history "$old_commit" "$new_commit"
-else
+fi
+
+if [ -n "${CI_GATE_PUSH_TAG_TIPS:-}${CI_GATE_PUSH_OTHER_TIPS:-}" ]; then
+  push_context_seen=1
+  scan_outgoing_ref_tips
+fi
+
+if [ -n "${CI_GATE_PUSH_BRANCH_TIPS:-}" ] \
+  && [ -z "${CI_GATE_PUSH_NEW_SHA:-}" ]; then
+  security_infra_failure "Security received branch tips without an authoritative branch range."
+fi
+
+if [ -n "${CI_GATE_PUSH_REMOTE_REFS+set}${CI_GATE_PUSH_BRANCH_TIPS+set}${CI_GATE_PUSH_TAG_TIPS+set}${CI_GATE_PUSH_OTHER_TIPS+set}" ]; then
+  push_context_seen=1
+  if security_data_has_secret "${CI_GATE_PUSH_REMOTE_REFS:-}"; then
+    echo "Potential secret-like content in outgoing ref name: [redacted-secret-like-ref]"
+    matches=1
+  fi
+fi
+
+if [ -n "${CI_GATE_PUSH_REMOTE_REFS:-}" ] \
+  && [ -z "${CI_GATE_PUSH_NEW_SHA:-}${CI_GATE_PUSH_BRANCH_TIPS:-}${CI_GATE_PUSH_TAG_TIPS:-}${CI_GATE_PUSH_OTHER_TIPS:-}" ] \
+  && [ "${CI_GATE_PUSH_DELETIONS_ONLY:-0}" != "1" ]; then
+  security_infra_failure "Security received outgoing ref names without their object tips."
+fi
+
+if [ "$push_context_seen" -eq 0 ]; then
   scan_local_paths
 fi
 

@@ -45,6 +45,15 @@ security_github_token() {
   printf 'A%.0s' {1..36}
 }
 
+security_utf16_secret() {
+  local encoding="$1" bom="${2:-no-bom}"
+  case "$encoding:$bom" in
+    UTF-16LE:bom) printf '\377\376' ;;
+    UTF-16BE:bom) printf '\376\377' ;;
+  esac
+  security_secret_line | iconv -f UTF-8 -t "$encoding"
+}
+
 @test "security: committed range ignores an unchanged historical finding" {
   base="$(cd "$SECURITY_SB" && git rev-parse HEAD)"
   printf 'changed safely\n' >> "$SECURITY_SB/safe.txt"
@@ -179,6 +188,39 @@ security_github_token() {
 
   [ "$status" -eq 20 ]
   [[ "$output" == *"Potential secret-like content in modified-nul.bin"* ]]
+}
+
+@test "security: committed UTF-16 BOM and BOM-less blobs are normalized" {
+  base="$(cd "$SECURITY_SB" && git rev-parse HEAD)"
+  security_utf16_secret UTF-16LE bom > "$SECURITY_SB/utf16le-bom.bin"
+  security_utf16_secret UTF-16BE > "$SECURITY_SB/utf16be-no-bom.bin"
+  security_commit committed-utf16-secrets
+  tip="$(cd "$SECURITY_SB" && git rev-parse HEAD)"
+
+  run bash -c "cd '$SECURITY_SB' && CI_GATE_PUSH_OLD_SHA='$base' \
+    CI_GATE_PUSH_NEW_SHA='$tip' bash ci/checks/security.sh 2>&1"
+
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"Potential secret-like content in utf16le-bom.bin"* ]]
+  [[ "$output" == *"Potential secret-like content in utf16be-no-bom.bin"* ]]
+}
+
+@test "security: a UTF-16 blob modification scans only normalized additions" {
+  printf 'safe baseline\n' | iconv -f UTF-8 -t UTF-16BE > "$SECURITY_SB/utf16-modified.bin"
+  security_commit utf16-safe-baseline
+  base="$(cd "$SECURITY_SB" && git rev-parse HEAD)"
+  {
+    printf 'safe baseline\n'
+    security_secret_line
+  } | iconv -f UTF-8 -t UTF-16BE > "$SECURITY_SB/utf16-modified.bin"
+  security_commit utf16-secret-addition
+  tip="$(cd "$SECURITY_SB" && git rev-parse HEAD)"
+
+  run bash -c "cd '$SECURITY_SB' && CI_GATE_PUSH_OLD_SHA='$base' \
+    CI_GATE_PUSH_NEW_SHA='$tip' bash ci/checks/security.sh 2>&1"
+
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"Potential secret-like content in utf16-modified.bin"* ]]
 }
 
 @test "security: committed leading-dash path bytes are scanned for secrets" {
@@ -389,6 +431,43 @@ security_github_token() {
   [[ "$output" == *"Potential secret-like content in staged-nul.bin"* ]]
 }
 
+@test "security: staged UTF-16 LE and BE blobs are normalized" {
+  security_utf16_secret UTF-16LE > "$SECURITY_SB/staged-utf16le.bin"
+  security_utf16_secret UTF-16BE bom > "$SECURITY_SB/staged-utf16be-bom.bin"
+  (
+    cd "$SECURITY_SB"
+    git add staged-utf16le.bin staged-utf16be-bom.bin
+  )
+
+  run bash -c "cd '$SECURITY_SB' && bash ci/checks/security.sh 2>&1"
+
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"Potential secret-like content in staged-utf16le.bin"* ]]
+  [[ "$output" == *"Potential secret-like content in staged-utf16be-bom.bin"* ]]
+}
+
+@test "security: unstaged worktree UTF-16 blob is normalized" {
+  security_utf16_secret UTF-16LE bom > "$SECURITY_SB/safe.txt"
+
+  run bash -c "cd '$SECURITY_SB' && bash ci/checks/security.sh 2>&1"
+
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"Potential secret-like content in safe.txt"* ]]
+}
+
+@test "security: malformed BOM-declared UTF-16 fails closed" {
+  printf '\377\376\000' > "$SECURITY_SB/malformed-utf16.bin"
+  (
+    cd "$SECURITY_SB"
+    git add malformed-utf16.bin
+  )
+
+  run bash -c "cd '$SECURITY_SB' && bash ci/checks/security.sh 2>&1"
+
+  [ "$status" -eq 30 ]
+  [[ "$output" == *"UTF-16LE"* ]]
+}
+
 @test "security: staged path bytes are scanned for secrets" {
   token="$(security_github_token)"
   secret_path="staged-$token"
@@ -420,6 +499,91 @@ security_github_token() {
 
   [ "$status" -eq 20 ]
   [[ "$output" == *"Potential secret-like content in path:"* ]]
+}
+
+@test "security: annotated tag message bytes are scanned in tag-only context" {
+  base="$(cd "$SECURITY_SB" && git rev-parse HEAD)"
+  tag_message="$(security_secret_line)"
+  (
+    cd "$SECURITY_SB"
+    git -c user.email=t@t -c user.name=t tag -a security-tag -m "$tag_message" HEAD
+  )
+  tag_oid="$(cd "$SECURITY_SB" && git rev-parse refs/tags/security-tag)"
+
+  run bash -c "cd '$SECURITY_SB' && CI_GATE_PUSH_REMOTE=origin \
+    CI_GATE_PUSH_REMOTE_TIPS_FOR=origin CI_GATE_PUSH_REMOTE_TIPS='$base' \
+    CI_GATE_PUSH_REMOTE_REFS=refs/tags/security-tag \
+    CI_GATE_PUSH_TAG_TIPS='$tag_oid' bash ci/checks/security.sh 2>&1"
+
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"Potential secret-like content in tag-metadata-$tag_oid"* ]]
+}
+
+@test "security: nested annotated tag chain scans inner metadata" {
+  base="$(cd "$SECURITY_SB" && git rev-parse HEAD)"
+  inner_message="$(security_secret_line)"
+  (
+    cd "$SECURITY_SB"
+    git -c user.email=t@t -c user.name=t tag -a inner-security-tag -m "$inner_message" HEAD
+    git -c user.email=t@t -c user.name=t tag -a outer-security-tag -m safe-tag inner-security-tag
+  )
+  inner_oid="$(cd "$SECURITY_SB" && git rev-parse refs/tags/inner-security-tag)"
+  outer_oid="$(cd "$SECURITY_SB" && git rev-parse refs/tags/outer-security-tag)"
+  [ "$(cd "$SECURITY_SB" && git cat-file tag "$outer_oid" | sed -n '2p')" = "type tag" ]
+
+  run bash -c "cd '$SECURITY_SB' && CI_GATE_PUSH_REMOTE=origin \
+    CI_GATE_PUSH_REMOTE_TIPS_FOR=origin CI_GATE_PUSH_REMOTE_TIPS='$base' \
+    CI_GATE_PUSH_REMOTE_REFS=refs/tags/outer-security-tag \
+    CI_GATE_PUSH_TAG_TIPS='$outer_oid' bash ci/checks/security.sh 2>&1"
+
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"Potential secret-like content in tag-metadata-$inner_oid"* ]]
+}
+
+@test "security: lightweight tag scans unpublished add-delete history" {
+  base="$(cd "$SECURITY_SB" && git rev-parse HEAD)"
+  security_secret_line > "$SECURITY_SB/tag-transient.txt"
+  security_commit tag-add-secret
+  rm "$SECURITY_SB/tag-transient.txt"
+  security_commit tag-delete-secret
+  (
+    cd "$SECURITY_SB"
+    git tag lightweight-security HEAD
+  )
+  tag_tip="$(cd "$SECURITY_SB" && git rev-parse refs/tags/lightweight-security)"
+
+  run bash -c "cd '$SECURITY_SB' && CI_GATE_PUSH_REMOTE=origin \
+    CI_GATE_PUSH_REMOTE_TIPS_FOR=origin CI_GATE_PUSH_REMOTE_TIPS='$base' \
+    CI_GATE_PUSH_REMOTE_REFS=refs/tags/lightweight-security \
+    CI_GATE_PUSH_TAG_TIPS='$tag_tip' bash ci/checks/security.sh 2>&1"
+
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"Potential secret-like content in tag-transient.txt"* ]]
+}
+
+@test "security: other-ref tips scan unpublished reachable history" {
+  base="$(cd "$SECURITY_SB" && git rev-parse HEAD)"
+  security_secret_line > "$SECURITY_SB/other-transient.txt"
+  security_commit other-add-secret
+  rm "$SECURITY_SB/other-transient.txt"
+  security_commit other-delete-secret
+  tip="$(cd "$SECURITY_SB" && git rev-parse HEAD)"
+
+  run bash -c "cd '$SECURITY_SB' && CI_GATE_PUSH_REMOTE=origin \
+    CI_GATE_PUSH_REMOTE_TIPS_FOR=origin CI_GATE_PUSH_REMOTE_TIPS='$base' \
+    CI_GATE_PUSH_REMOTE_REFS=refs/notes/security \
+    CI_GATE_PUSH_OTHER_TIPS='$tip' bash ci/checks/security.sh 2>&1"
+
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"Potential secret-like content in other-transient.txt"* ]]
+}
+
+@test "security: hook ref names without object tips fail closed" {
+  run bash -c "cd '$SECURITY_SB' && CI_GATE_PUSH_REMOTE_REFS=refs/tags/missing-tip \
+    bash ci/checks/security.sh 2>&1"
+
+  [ "$status" -eq 30 ]
+  [[ "$output" == *"without their object tips"* ]]
 }
 
 @test "security: a zero destination scans the complete new history" {
