@@ -398,38 +398,13 @@ def test_dedicated_cluster_accepts_only_stock_pg18_memberships(
         image_id="sha256:" + "a" * 64,
         image_reference="postgres:18-alpine@sha256:" + "b" * 64,
     )
+    # Seven-column shape matches the query: database comments are not
+    # compared (this postgres:18-alpine build initializes them NULL).
     databases = [
-        (
-            "postgres",
-            "postgres",
-            False,
-            True,
-            -1,
-            "pg_default",
-            True,
-            "default administrative connection database",
-        ),
-        (
-            "template0",
-            "postgres",
-            True,
-            False,
-            -1,
-            "pg_default",
-            True,
-            "unmodifiable empty database",
-        ),
-        (
-            "template1",
-            "postgres",
-            True,
-            True,
-            -1,
-            "pg_default",
-            True,
-            "default template for new databases",
-        ),
-        ("ums", "postgres", False, True, -1, "pg_default", True, None),
+        ("postgres", "postgres", False, True, -1, "pg_default", True),
+        ("template0", "postgres", True, False, -1, "pg_default", True),
+        ("template1", "postgres", True, True, -1, "pg_default", True),
+        ("ums", "postgres", False, True, -1, "pg_default", True),
     ]
     bootstrap_roles = [
         (

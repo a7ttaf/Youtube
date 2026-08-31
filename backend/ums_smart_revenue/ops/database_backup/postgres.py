@@ -1295,50 +1295,14 @@ def require_dedicated_cluster(source: ContainerConnection) -> None:
         ) from exc
     finally:
         connection.close()
-    expected_databases: list[tuple[str, str, bool, bool, int, str, bool, str | None]] = [
-        (
-            "postgres",
-            source.user,
-            False,
-            True,
-            -1,
-            "pg_default",
-            True,
-            "default administrative connection database",
-        ),
-        (
-            "template0",
-            source.user,
-            True,
-            False,
-            -1,
-            "pg_default",
-            True,
-            "unmodifiable empty database",
-        ),
-        (
-            "template1",
-            source.user,
-            True,
-            True,
-            -1,
-            "pg_default",
-            True,
-            "default template for new databases",
-        ),
+    expected_databases: list[tuple[str, str, bool, bool, int, str, bool]] = [
+        ("postgres", source.user, False, True, -1, "pg_default", True),
+        ("template0", source.user, True, False, -1, "pg_default", True),
+        ("template1", source.user, True, True, -1, "pg_default", True),
     ]
     if source.database != "postgres":
         expected_databases.append(
-            (
-                source.database,
-                source.user,
-                False,
-                True,
-                -1,
-                "pg_default",
-                True,
-                None,
-            )
+            (source.database, source.user, False, True, -1, "pg_default", True)
         )
     expected_databases.sort(key=lambda row: row[0])
     if databases != expected_databases:
