@@ -166,6 +166,37 @@ def test_partition_follows_project_root_fixture_imported_into_conftest(tmp_path)
     assert Path("tests/api/test_uses_fixture.py") in partition.database
 
 
+def test_partition_follows_fixture_from_configured_pythonpath(tmp_path):
+    _write_test(tmp_path, "tests/unit/test_regular.py")
+    _write_test(tmp_path, "tests/db/test_schema.py")
+    _write_test(tmp_path, "tests/api/test_uses_fixture.py")
+    _write_test(
+        tmp_path,
+        "pyproject.toml",
+        '[tool.pytest.ini_options]\npythonpath = ["backend"]\n',
+    )
+    _write_test(
+        tmp_path,
+        "tests/api/conftest.py",
+        "from ci_fixtures import postgres_fixture\n",
+    )
+    fixture_sentinel = "UMS_TEST_" + "DATABASE_URL"
+    _write_test(
+        tmp_path,
+        "backend/ci_fixtures.py",
+        "import pytest\n\n"
+        f'DATABASE_URL = "{fixture_sentinel}"\n\n'
+        "@pytest.fixture\n"
+        "def postgres_fixture():\n"
+        "    return DATABASE_URL\n",
+    )
+
+    partition = build_test_partition(tmp_path)
+
+    assert partition.fast == (Path("tests/unit/test_regular.py"),)
+    assert Path("tests/api/test_uses_fixture.py") in partition.database
+
+
 def test_partition_fails_closed_for_pytest_plugins_subscript_mutation(tmp_path):
     _write_test(tmp_path, "tests/unit/test_regular.py")
     _write_test(tmp_path, "tests/db/test_schema.py")
@@ -177,6 +208,34 @@ def test_partition_fails_closed_for_pytest_plugins_subscript_mutation(tmp_path):
     )
 
     with pytest.raises(PartitionError, match="mutates pytest_plugins dynamically"):
+        build_test_partition(tmp_path)
+
+
+@pytest.mark.parametrize(
+    "source",
+    (
+        '(pytest_plugins := ["tests.fixtures.postgres"])\n',
+        'globals()["pytest_plugins"] = ["tests.fixtures.postgres"]\n',
+        (
+            "pytest_plugins = []\n"
+            "plugin_alias = pytest_plugins\n"
+            'plugin_alias.append("tests.fixtures.postgres")\n'
+        ),
+        (
+            "import sys\n"
+            "pytest_plugins = []\n"
+            'getattr(sys.modules[__name__], "pytest_plugins").append('
+            '"tests.fixtures.postgres")\n'
+        ),
+    ),
+)
+def test_partition_fails_closed_for_unknown_pytest_plugin_mutation(tmp_path, source):
+    _write_test(tmp_path, "tests/unit/test_regular.py")
+    _write_test(tmp_path, "tests/db/test_schema.py")
+    _write_test(tmp_path, "tests/api/test_uses_fixture.py")
+    _write_test(tmp_path, "tests/api/conftest.py", source)
+
+    with pytest.raises(PartitionError, match="pytest_plugins dynamically"):
         build_test_partition(tmp_path)
 
 
@@ -243,7 +302,7 @@ def test_collection_gate_rejects_assigned_module_with_no_items(tmp_path, monkeyp
         ci_test_partition._validate_collected_items(partition, tmp_path.resolve())
 
 
-def test_collection_gate_rejects_changed_canonical_node_manifest(tmp_path, monkeypatch):
+def test_collection_gate_rejects_changed_fast_lane_node_manifest(tmp_path, monkeypatch):
     _write_test(tmp_path, "tests/unit/test_regular.py")
     _write_test(tmp_path, "tests/db/test_schema.py")
     partition = build_test_partition(tmp_path)
@@ -261,8 +320,56 @@ def test_collection_gate_rejects_changed_canonical_node_manifest(tmp_path, monke
 
     monkeypatch.setattr(ci_test_partition.subprocess, "run", fake_run)
     monkeypatch.setattr(ci_test_partition, "PROJECT_ROOT", tmp_path.resolve())
-    monkeypatch.setattr(ci_test_partition, "EXPECTED_COLLECTED_ITEM_COUNT", 3)
-    monkeypatch.setattr(ci_test_partition, "EXPECTED_COLLECTED_NODEID_SHA256", "stale")
+    monkeypatch.setattr(ci_test_partition, "EXPECTED_FAST_ITEM_COUNT", 2)
+    monkeypatch.setattr(ci_test_partition, "EXPECTED_FAST_NODEID_SHA256", "stale")
+    monkeypatch.setattr(ci_test_partition, "EXPECTED_DATABASE_ITEM_COUNT", 1)
+    monkeypatch.setattr(ci_test_partition, "EXPECTED_DATABASE_NODEID_SHA256", "stale")
 
-    with pytest.raises(PartitionError, match="collected pytest item manifest changed"):
+    with pytest.raises(PartitionError, match="collected pytest fast lane manifest changed"):
         ci_test_partition._validate_collected_items(partition, tmp_path.resolve())
+
+
+def test_collection_gate_rejects_lane_assignment_swap(tmp_path, monkeypatch):
+    _write_test(tmp_path, "tests/unit/test_regular.py")
+    _write_test(tmp_path, "tests/db/test_schema.py")
+    partition = build_test_partition(tmp_path)
+    fast_nodeid = "tests/unit/test_regular.py::test_regular"
+    database_nodeid = "tests/db/test_schema.py::test_schema"
+
+    def fake_run(*args, **kwargs):
+        return SimpleNamespace(
+            returncode=0,
+            stdout=f"{database_nodeid}\n{fast_nodeid}\n\n2 tests collected\n",
+            stderr="",
+        )
+
+    def digest(nodeid):
+        return ci_test_partition.hashlib.sha256(nodeid.encode("utf-8")).hexdigest()
+
+    monkeypatch.setattr(ci_test_partition.subprocess, "run", fake_run)
+    monkeypatch.setattr(ci_test_partition, "PROJECT_ROOT", tmp_path.resolve())
+    monkeypatch.setattr(ci_test_partition, "EXPECTED_FAST_ITEM_COUNT", 1)
+    monkeypatch.setattr(ci_test_partition, "EXPECTED_FAST_NODEID_SHA256", digest(fast_nodeid))
+    monkeypatch.setattr(ci_test_partition, "EXPECTED_DATABASE_ITEM_COUNT", 1)
+    monkeypatch.setattr(
+        ci_test_partition, "EXPECTED_DATABASE_NODEID_SHA256", digest(database_nodeid)
+    )
+    swapped = ci_test_partition.TestPartition(
+        fast=partition.database,
+        database=partition.fast,
+    )
+
+    with pytest.raises(PartitionError, match="collected pytest fast lane manifest changed"):
+        ci_test_partition._validate_collected_items(swapped, tmp_path.resolve())
+
+
+def test_collection_nodeid_normalizes_module_path_only(tmp_path):
+    canonical = ci_test_partition._canonical_collected_nodeid(
+        r"tests\unit\test_regular.py::test_regular[a\b]",
+        tmp_path.resolve(),
+    )
+
+    assert canonical == (
+        "tests/unit/test_regular.py",
+        r"tests/unit/test_regular.py::test_regular[a\b]",
+    )

@@ -17,15 +17,21 @@ import hashlib
 import os
 import subprocess
 import sys
+import tomllib
 from collections.abc import Sequence
 from dataclasses import dataclass
+from functools import cache
 from pathlib import Path
 from typing import Final
 
 PROJECT_ROOT: Final = Path(__file__).resolve().parents[1]
-EXPECTED_COLLECTED_ITEM_COUNT: Final = 2919
-EXPECTED_COLLECTED_NODEID_SHA256: Final = (
-    "9fd700d17551ea30175e9ff4466bd3d5266763c92f50627de242d714f78c9687"
+EXPECTED_FAST_ITEM_COUNT: Final = 2530
+EXPECTED_FAST_NODEID_SHA256: Final = (
+    "bff9bed02972e605b9d36ff8b16980426d2c2097cc0b22b8910bcb22acea0b46"
+)
+EXPECTED_DATABASE_ITEM_COUNT: Final = 396
+EXPECTED_DATABASE_NODEID_SHA256: Final = (
+    "6e409f07565b8369042978cb458bb3327443a2225572e387ae1b467f0001b8bf"
 )
 
 DATABASE_DIRECTORIES: Final = (
@@ -87,6 +93,7 @@ def belongs_to_database_lane(relative_path: Path) -> bool:
     )
 
 
+@cache
 def _uses_real_postgres(path: Path) -> bool:
     try:
         source = path.read_text(encoding="utf-8")
@@ -138,6 +145,43 @@ def _plugin_literals(value: ast.expr, source_path: Path) -> tuple[str, ...]:
     )
 
 
+def _mentions_pytest_plugins(node: ast.AST) -> bool:
+    """Return whether executable syntax references the pytest plugin registry."""
+
+    for child in ast.walk(node):
+        if isinstance(child, ast.Name) and child.id == "pytest_plugins":
+            return True
+        if (
+            isinstance(child, ast.Constant)
+            and isinstance(child.value, str)
+            and "pytest_plugins" in child.value
+        ):
+            return True
+        if isinstance(child, ast.alias) and (
+            child.name == "pytest_plugins" or child.asname == "pytest_plugins"
+        ):
+            return True
+        if isinstance(child, ast.Attribute) and child.attr == "pytest_plugins":
+            return True
+        if isinstance(child, ast.keyword) and child.arg == "pytest_plugins":
+            return True
+    return False
+
+
+def _statement_header_mentions_pytest_plugins(statement: ast.stmt) -> bool:
+    """Inspect import-time control expressions without re-reading nested bodies."""
+
+    body_fields = {"body", "orelse", "finalbody", "handlers", "cases"}
+    for field_name, value in ast.iter_fields(statement):
+        if field_name in body_fields:
+            continue
+        nodes = value if isinstance(value, list) else (value,)
+        if any(isinstance(node, ast.AST) and _mentions_pytest_plugins(node) for node in nodes):
+            return True
+    return False
+
+
+@cache
 def _pytest_plugin_modules(source_path: Path) -> tuple[str, ...]:
     """Return literal import-time pytest_plugins declarations from one source."""
 
@@ -149,6 +193,8 @@ def _pytest_plugin_modules(source_path: Path) -> tuple[str, ...]:
 
     modules: list[str] = []
     for statement in _module_scope_statements(tree.body):
+        if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            continue
         if (
             isinstance(statement, ast.Expr)
             and isinstance(statement.value, ast.Call)
@@ -178,22 +224,37 @@ def _pytest_plugin_modules(source_path: Path) -> tuple[str, ...]:
         targets_plugins = any(
             isinstance(target, ast.Name) and target.id == "pytest_plugins" for target in targets
         )
-        mutates_plugin_member = any(
-            not isinstance(target, ast.Name)
-            and any(
-                isinstance(node, ast.Name) and node.id == "pytest_plugins"
-                for node in ast.walk(target)
-            )
-            for target in targets
-        )
-        if mutates_plugin_member:
+        if targets_plugins:
+            if value is not None:
+                modules.extend(_plugin_literals(value, source_path))
+            continue
+        if isinstance(
+            statement,
+            (ast.Assign, ast.AnnAssign, ast.AugAssign, ast.Delete, ast.Import, ast.ImportFrom),
+        ) and _mentions_pytest_plugins(statement):
             raise PartitionError(
                 f"{source_path} mutates pytest_plugins dynamically; "
                 "CI cannot prove its fixture database requirements"
             )
-        if value is None or not targets_plugins:
-            continue
-        modules.extend(_plugin_literals(value, source_path))
+        if isinstance(statement, ast.Expr) and not isinstance(statement.value, ast.Constant):
+            if _mentions_pytest_plugins(statement):
+                raise PartitionError(
+                    f"{source_path} mutates pytest_plugins dynamically; "
+                    "CI cannot prove its fixture database requirements"
+                )
+        if any(
+            isinstance(node, ast.NamedExpr) and _mentions_pytest_plugins(node)
+            for node in ast.walk(statement)
+        ):
+            raise PartitionError(
+                f"{source_path} mutates pytest_plugins dynamically; "
+                "CI cannot prove its fixture database requirements"
+            )
+        if _statement_header_mentions_pytest_plugins(statement):
+            raise PartitionError(
+                f"{source_path} mutates pytest_plugins dynamically; "
+                "CI cannot prove its fixture database requirements"
+            )
     return tuple(dict.fromkeys(modules))
 
 
@@ -221,6 +282,7 @@ def _absolute_import_name(
     return ".".join(parts) or None
 
 
+@cache
 def _resolve_project_support_import(
     project_root: Path,
     source_path: Path,
@@ -229,10 +291,11 @@ def _resolve_project_support_import(
     """Resolve an imported project module without allowing path escape."""
 
     relative = Path(*module.split("."))
-    candidates = [
-        project_root / relative.with_suffix(".py"),
-        project_root / relative / "__init__.py",
-    ]
+    candidates: list[Path] = []
+    for import_root in _project_import_roots(project_root):
+        candidates.extend(
+            (import_root / relative.with_suffix(".py"), import_root / relative / "__init__.py")
+        )
     if "." not in module:
         candidates.extend(
             (
@@ -250,6 +313,38 @@ def _resolve_project_support_import(
     return None
 
 
+@cache
+def _project_import_roots(project_root: Path) -> tuple[Path, ...]:
+    """Return project root plus pytest's configured in-repository pythonpath roots."""
+
+    resolved_root = project_root.resolve()
+    roots = [resolved_root]
+    config_path = resolved_root / "pyproject.toml"
+    if not config_path.is_file():
+        return tuple(roots)
+    try:
+        config = tomllib.loads(config_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, tomllib.TOMLDecodeError) as exc:
+        raise PartitionError(f"cannot inspect pytest pythonpath in {config_path}: {exc}") from exc
+    configured = (
+        config.get("tool", {}).get("pytest", {}).get("ini_options", {}).get("pythonpath", ())
+    )
+    if isinstance(configured, str):
+        configured = (configured,)
+    if not isinstance(configured, list | tuple) or not all(
+        isinstance(entry, str) for entry in configured
+    ):
+        raise PartitionError(f"pytest pythonpath in {config_path} must be a string list")
+    for entry in configured:
+        candidate = (resolved_root / entry).resolve()
+        if not candidate.is_relative_to(resolved_root) or not candidate.is_dir():
+            raise PartitionError(f"pytest pythonpath entry {entry!r} is not a project directory")
+        if candidate not in roots:
+            roots.append(candidate)
+    return tuple(roots)
+
+
+@cache
 def _project_support_imports(source_path: Path, project_root: Path) -> tuple[Path, ...]:
     """Return project modules imported at module scope by pytest support."""
 
@@ -280,17 +375,19 @@ def _project_support_imports(source_path: Path, project_root: Path) -> tuple[Pat
     return tuple(dict.fromkeys(imported))
 
 
+@cache
 def _resolve_project_plugin(project_root: Path, module: str) -> Path:
     """Resolve a project-local pytest plugin module without importing it."""
 
     relative = Path(*module.split("."))
-    candidates = (
-        project_root / relative.with_suffix(".py"),
-        project_root / relative / "__init__.py",
-    )
-    for candidate in candidates:
-        if candidate.is_file():
-            return candidate
+    for import_root in _project_import_roots(project_root):
+        candidates = (
+            import_root / relative.with_suffix(".py"),
+            import_root / relative / "__init__.py",
+        )
+        for candidate in candidates:
+            if candidate.is_file():
+                return candidate
     raise PartitionError(
         f"pytest plugin {module!r} is not a readable project module; "
         "CI cannot classify its database requirements"
@@ -318,20 +415,30 @@ def _applicable_conftests(test_path: Path, project_root: Path) -> tuple[Path, ..
 def _pytest_support_files(test_path: Path, project_root: Path) -> tuple[Path, ...]:
     """Resolve applicable conftests and their transitive project plugin closure."""
 
-    pending = [test_path, *_applicable_conftests(test_path, project_root)]
+    pending = [
+        (source_path, True)
+        for source_path in (test_path, *_applicable_conftests(test_path, project_root))
+    ]
     support_files: list[Path] = []
-    seen: set[Path] = set()
+    seen_imports: set[Path] = set()
+    seen_plugins: set[Path] = set()
     while pending:
-        source_path = pending.pop(0).resolve()
-        if source_path in seen:
-            continue
-        seen.add(source_path)
-        support_files.append(source_path)
-        pending.extend(
-            _resolve_project_plugin(project_root, module)
-            for module in _pytest_plugin_modules(source_path)
-        )
-        pending.extend(_project_support_imports(source_path, project_root))
+        raw_source_path, inspect_plugins = pending.pop(0)
+        source_path = raw_source_path.resolve()
+        if source_path not in support_files:
+            support_files.append(source_path)
+        if inspect_plugins and source_path not in seen_plugins:
+            seen_plugins.add(source_path)
+            pending.extend(
+                (_resolve_project_plugin(project_root, module), True)
+                for module in _pytest_plugin_modules(source_path)
+            )
+        if source_path not in seen_imports:
+            seen_imports.add(source_path)
+            pending.extend(
+                (imported_path, False)
+                for imported_path in _project_support_imports(source_path, project_root)
+            )
     return tuple(support_files)
 
 
@@ -396,6 +503,23 @@ def check_partition(project_root: Path = PROJECT_ROOT) -> int:
     return 0
 
 
+def _canonical_collected_nodeid(raw_line: str, project_root: Path) -> tuple[str, str] | None:
+    """Normalize only a collected node's module path, preserving its parameter ID."""
+
+    if "::" not in raw_line:
+        return None
+    raw_nodeid = raw_line.strip()
+    raw_module, _, suffix = raw_nodeid.partition("::")
+    module = raw_module.replace("\\", "/")
+    module_path = Path(raw_module)
+    if module_path.is_absolute():
+        try:
+            module = module_path.resolve().relative_to(project_root).as_posix()
+        except ValueError:
+            return None
+    return module, f"{module}::{suffix}"
+
+
 def _validate_collected_items(partition: TestPartition, project_root: Path) -> None:
     """Prove every assigned module collects tests and ratchet canonical node IDs."""
 
@@ -428,25 +552,20 @@ def _validate_collected_items(partition: TestPartition, project_root: Path) -> N
             + (f":\n{details}" if details else "")
         )
 
-    expected_modules = {path.as_posix() for path in assigned}
-    nodeids: list[str] = []
+    fast_modules = {path.as_posix() for path in partition.fast}
+    database_modules = {path.as_posix() for path in partition.database}
+    expected_modules = fast_modules | database_modules
+    lane_nodeids: dict[str, list[str]] = {"fast": [], "database": []}
     collected_modules: set[str] = set()
     for raw_line in completed.stdout.splitlines():
-        if "::" not in raw_line:
+        canonical = _canonical_collected_nodeid(raw_line, project_root)
+        if canonical is None:
             continue
-        nodeid = raw_line.strip().replace("\\", "/")
-        raw_module, _, suffix = nodeid.partition("::")
-        module = raw_module
-        module_path = Path(raw_module)
-        if module_path.is_absolute():
-            try:
-                module = module_path.resolve().relative_to(project_root).as_posix()
-            except ValueError:
-                continue
-            nodeid = f"{module}::{suffix}"
+        module, nodeid = canonical
         if module not in expected_modules:
             continue
-        nodeids.append(nodeid)
+        lane = "fast" if module in fast_modules else "database"
+        lane_nodeids[lane].append(nodeid)
         collected_modules.add(module)
 
     missing = sorted(expected_modules - collected_modules)
@@ -454,18 +573,22 @@ def _validate_collected_items(partition: TestPartition, project_root: Path) -> N
         rendered = "\n".join(f"  - {module}" for module in missing)
         raise PartitionError(f"assigned pytest module(s) collected no test items:\n{rendered}")
 
-    if project_root == PROJECT_ROOT.resolve():
+    if project_root != PROJECT_ROOT.resolve():
+        return
+
+    expected_manifests = {
+        "fast": (EXPECTED_FAST_ITEM_COUNT, EXPECTED_FAST_NODEID_SHA256),
+        "database": (EXPECTED_DATABASE_ITEM_COUNT, EXPECTED_DATABASE_NODEID_SHA256),
+    }
+    for lane, nodeids in lane_nodeids.items():
         digest = hashlib.sha256("\n".join(sorted(nodeids)).encode("utf-8")).hexdigest()
-        if (
-            len(nodeids) != EXPECTED_COLLECTED_ITEM_COUNT
-            or digest != EXPECTED_COLLECTED_NODEID_SHA256
-        ):
+        expected_count, expected_digest = expected_manifests[lane]
+        if len(nodeids) != expected_count or digest != expected_digest:
             raise PartitionError(
-                "collected pytest item manifest changed: "
+                f"collected pytest {lane} lane manifest changed: "
                 f"count={len(nodeids)} sha256={digest}; expected "
-                f"count={EXPECTED_COLLECTED_ITEM_COUNT} "
-                f"sha256={EXPECTED_COLLECTED_NODEID_SHA256}. Review the node-ID change "
-                "and update the ratchet deliberately."
+                f"count={expected_count} sha256={expected_digest}. Review the node-ID "
+                "or lane-assignment change and update the ratchet deliberately."
             )
 
 
