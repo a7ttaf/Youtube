@@ -19,6 +19,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, field_validator
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from ums_smart_revenue.api.authz import raise_missing_permission, require_permission
@@ -139,6 +140,7 @@ router = APIRouter(prefix="/exports", tags=["exports"])
 logger = logging.getLogger(__name__)
 MAX_AUTHORIZED_EXPORT_JOB_SCAN_PAGES = 10
 _ANALYTICS_SUMMARY_CSV_TYPE = "ANALYTICS_SUMMARY_CSV"
+_ARTIFACT_CACHE_CONTROL = "no-store"
 _ANALYTICS_SUMMARY_CSV_REQUIRED_PERMISSIONS = (
     Permission.EXPORT_ANALYTICS_REPORT,
     Permission.VIEW_ANALYTICS,
@@ -550,12 +552,13 @@ def preview_finance_workbook(
 
 
 # ============================================================================
-# Purpose: Download a persisted or freshly-generated ANALYTICS_SUMMARY_CSV
-# artifact for the requesting user after export-owner and scoped read checks.
+# Purpose: Prepare or download a persisted/fresh ANALYTICS_SUMMARY_CSV artifact
+# for the requesting user after export-owner and scoped read checks.
 # Database/ORM: ExportJobORM lookup and audit insert; generation helper reads
 # google_revenue_source_rows/youtube_channels.
 # Standards: Thin route, fail-closed analytics+revenue authorization, typed
-# validation/storage errors, and audit after successful artifact availability.
+# validation/storage errors, bodyless unaudited preparation, and audit only when
+# artifact bytes are returned by the ordinary GET.
 # Blast Radius: Analytics export downloads, finance-visible source amounts,
 # artifact checksums, and audit logs.
 # Connections:
@@ -574,8 +577,12 @@ def download_analytics_summary_csv(
     ],
     session: Annotated[Session, Depends(current_db_session)],
     audit_sink: Annotated[AuditSink, Depends(current_audit_sink)],
+    prepare: Annotated[
+        bool,
+        Query(description="Generate and validate the artifact without returning its bytes"),
+    ] = False,
 ) -> Response:
-    """Generate or serve the cached analytics summary CSV for an analytics export job."""
+    """Prepare, generate, or serve an analytics summary CSV export artifact."""
     if not _has_any_export_permission(user):
         raise_missing_permission(Permission.EXPORT_ANALYTICS_REPORT)
     try:
@@ -619,6 +626,13 @@ def download_analytics_summary_csv(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)
         ) from exc
 
+    # FIX: A preparation request exercises the complete authenticated generation
+    # path but deliberately returns no artifact bytes and records no download.
+    # The browser follows with a same-origin GET that reauthorizes and emits the
+    # normal read/download audit records while its native downloader streams.
+    if prepare:
+        return _prepared_artifact_response(session=session)
+
     _record_analytics_export_artifact_audit(
         audit_sink=audit_sink,
         user=user,
@@ -629,10 +643,20 @@ def download_analytics_summary_csv(
     return Response(
         content=artifact.content,
         media_type=artifact.content_type,
-        headers={"Content-Disposition": f'attachment; filename="{artifact.filename}"'},
+        headers=_artifact_download_headers(artifact.filename),
     )
 
 
+# ============================================================================
+# Purpose: Prepare or download the persisted/fresh finance workbook artifact.
+# Database/ORM: ExportJobORM plus SQL-backed finance source reads and audit rows.
+# Standards: Existing fail-closed authorization and typed errors apply to both
+# modes; preparation returns 204, while the ordinary GET owns download auditing.
+# Blast Radius: Finance export bytes, persistence metadata, and sensitive audit.
+# Connections:
+#   - File: frontend/src/components/srcc/views/ExportsView.tsx -> Prepare/native GET.
+#   - File: Docs/12_BACKEND_API_SPEC.md -> Artifact handshake contract.
+# ============================================================================
 @router.get("/{export_id}/finance-workbook.xlsx")
 def download_finance_workbook(
     export_id: str,
@@ -646,8 +670,12 @@ def download_finance_workbook(
     session: Annotated[Session, Depends(current_db_session)],
     platform_session: Annotated[Session, Depends(current_platform_db_session)],
     audit_sink: Annotated[AuditSink, Depends(current_audit_sink)],
+    prepare: Annotated[
+        bool,
+        Query(description="Generate and validate the artifact without returning its bytes"),
+    ] = False,
 ) -> Response:
-    """Generate or serve the cached finance workbook XLSX file for a FINANCE_EXCEL export job."""
+    """Prepare, generate, or serve a finance workbook XLSX export artifact."""
     if not _has_any_export_permission(user):
         raise_missing_permission(Permission.EXPORT_ANALYTICS_REPORT)
     try:
@@ -730,6 +758,9 @@ def download_finance_workbook(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)
         ) from exc
 
+    if prepare:
+        return _prepared_artifact_response(session=session)
+
     _record_finance_export_artifact_audit(
         context=_FinanceExportAuditContext(
             audit_sink=audit_sink,
@@ -743,10 +774,20 @@ def download_finance_workbook(
     return Response(
         content=workbook_bytes,
         media_type=content_type,
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        headers=_artifact_download_headers(filename),
     )
 
 
+# ============================================================================
+# Purpose: Prepare or download the persisted/fresh executive PDF artifact.
+# Database/ORM: ExportJobORM plus SQL-backed finance source reads and audit rows.
+# Standards: Existing fail-closed authorization and typed errors apply to both
+# modes; preparation returns 204, while the ordinary GET owns download auditing.
+# Blast Radius: Finance export bytes, persistence metadata, and sensitive audit.
+# Connections:
+#   - File: frontend/src/components/srcc/views/ExportsView.tsx -> Prepare/native GET.
+#   - File: Docs/12_BACKEND_API_SPEC.md -> Artifact handshake contract.
+# ============================================================================
 @router.get("/{export_id}/executive.pdf")
 def download_executive_pdf(
     export_id: str,
@@ -760,8 +801,12 @@ def download_executive_pdf(
     session: Annotated[Session, Depends(current_db_session)],
     platform_session: Annotated[Session, Depends(current_platform_db_session)],
     audit_sink: Annotated[AuditSink, Depends(current_audit_sink)],
+    prepare: Annotated[
+        bool,
+        Query(description="Generate and validate the artifact without returning its bytes"),
+    ] = False,
 ) -> Response:
-    """Generate or serve the cached executive summary PDF for an EXECUTIVE_PDF export job."""
+    """Prepare, generate, or serve an executive summary PDF export artifact."""
     if not _has_any_export_permission(user):
         raise_missing_permission(Permission.EXPORT_ANALYTICS_REPORT)
     try:
@@ -852,6 +897,9 @@ def download_executive_pdf(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)
         ) from exc
 
+    if prepare:
+        return _prepared_artifact_response(session=session)
+
     _record_finance_export_artifact_audit(
         context=_FinanceExportAuditContext(
             audit_sink=audit_sink,
@@ -865,10 +913,20 @@ def download_executive_pdf(
     return Response(
         content=pdf_bytes,
         media_type=content_type,
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        headers=_artifact_download_headers(filename),
     )
 
 
+# ============================================================================
+# Purpose: Prepare or download the persisted/fresh branded slide-pack artifact.
+# Database/ORM: ExportJobORM plus SQL-backed finance source reads and audit rows.
+# Standards: Existing fail-closed authorization and typed errors apply to both
+# modes; preparation returns 204, while the ordinary GET owns download auditing.
+# Blast Radius: Finance export bytes, persistence metadata, and sensitive audit.
+# Connections:
+#   - File: frontend/src/components/srcc/views/ExportsView.tsx -> Prepare/native GET.
+#   - File: Docs/12_BACKEND_API_SPEC.md -> Artifact handshake contract.
+# ============================================================================
 @router.get("/{export_id}/branded-slide-pack.pptx")
 def download_branded_slide_pack(
     export_id: str,
@@ -882,8 +940,12 @@ def download_branded_slide_pack(
     session: Annotated[Session, Depends(current_db_session)],
     platform_session: Annotated[Session, Depends(current_platform_db_session)],
     audit_sink: Annotated[AuditSink, Depends(current_audit_sink)],
+    prepare: Annotated[
+        bool,
+        Query(description="Generate and validate the artifact without returning its bytes"),
+    ] = False,
 ) -> Response:
-    """Generate or serve the cached branded slide pack PPTX for a BRANDED_SLIDE_PACK export job."""
+    """Prepare, generate, or serve a branded slide-pack PPTX export artifact."""
     if not _has_any_export_permission(user):
         raise_missing_permission(Permission.EXPORT_ANALYTICS_REPORT)
     try:
@@ -976,6 +1038,9 @@ def download_branded_slide_pack(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)
         ) from exc
 
+    if prepare:
+        return _prepared_artifact_response(session=session)
+
     _record_finance_export_artifact_audit(
         context=_FinanceExportAuditContext(
             audit_sink=audit_sink,
@@ -989,7 +1054,7 @@ def download_branded_slide_pack(
     return Response(
         content=pptx_bytes,
         media_type=content_type,
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        headers=_artifact_download_headers(filename),
     )
 
 
@@ -1014,6 +1079,44 @@ def _build_finance_workbook_preview_for_export(
 def _tenant_uuid(user: UserPrincipal) -> UUID:
     """Return the current tenant UUID, falling back to the UMS default tenant."""
     return UUID(user.tenant_id) if user.tenant_id else UUID(UMS_TENANT_ID)
+
+
+# ============================================================================
+# Purpose: Durably commit prepared artifact metadata before constructing the
+# bodyless response that authorizes the browser to start its independent GET.
+# Database/ORM: Commits ExportJobORM completion and artifact metadata writes.
+# Standards: Fail closed with a safe typed response on commit failure; disable
+# caching so every preparation re-enters authentication and authorization.
+# Blast Radius: Export completion durability, retry behavior, and download auth.
+# Connections:
+#   - File: backend/ums_smart_revenue/api/dependencies.py -> Request-scope commit.
+#   - File: frontend/src/components/srcc/views/ExportsView.tsx -> Native GET start.
+# ============================================================================
+def _prepared_artifact_response(*, session: Session) -> Response:
+    """Commit prepared artifact metadata, then return a non-cacheable 204 response."""
+    try:
+        # FIX: Yield dependencies default to request scope, so their teardown
+        # commit runs after the response is sent. Commit here before the 204 to
+        # prevent the native GET from racing uncommitted artifact metadata.
+        session.commit()
+    except SQLAlchemyError as exc:
+        logger.exception("Export artifact preparation commit failed")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Export artifact persistence unavailable",
+        ) from exc
+    return Response(
+        status_code=status.HTTP_204_NO_CONTENT,
+        headers={"Cache-Control": _ARTIFACT_CACHE_CONTROL},
+    )
+
+
+def _artifact_download_headers(filename: str) -> dict[str, str]:
+    """Return attachment headers that force every protected GET through the gateway."""
+    return {
+        "Cache-Control": _ARTIFACT_CACHE_CONTROL,
+        "Content-Disposition": f'attachment; filename="{filename}"',
+    }
 
 
 # ============================================================================

@@ -284,16 +284,17 @@ export const useApiClient = () => {
      *   throws before any body reaches the caller. X-UMS-Tenant is injected by
      *   buildHeaders from the resolved tenant slug, never from the caller. No
      *   Accept override is forced, so the server may honor its own content type.
-     * Blast Radius: Tenant-scoped artifact access — this is the only download
-     *   path in the client, so the tenant header and non-2xx throw preserve the
-     *   backend boundary. Trusted-gateway authentication is supplied by the
-     *   deployment proxy, not this browser helper. Read-only: no finance math.
-     * Connections: AuditLogPanelHeader.tsx + ExportsView.tsx (Blob callers),
-     *   buildHeaders + ApiError (shared header/failure boundary).
+     * Blast Radius: Tenant-scoped buffered downloads (currently the bounded
+     *   audit CSV). The tenant header and non-2xx throw preserve the backend
+     *   boundary. Trusted-gateway authentication is supplied by the deployment
+     *   proxy, not this browser helper. Read-only: no finance math.
+     * Connections: AuditLogPanelHeader.tsx (Blob caller), buildHeaders +
+     *   ApiError (shared header/failure boundary).
      *   - File: frontend/src/components/srcc/views/AuditLogPanelHeader.tsx ->
      *     saves the CSV blob and reads the truncation header.
-     *   - File: frontend/src/components/srcc/views/ExportsView.tsx -> saves
-     *     generated export artifacts through a temporary object URL.
+     *   - File: frontend/src/components/srcc/views/ExportsView.tsx -> uses the
+     *     JSON client for bodyless preparation, then a native same-origin GET;
+     *     it intentionally does not use this buffering helper.
      *   - File: frontend/src/lib/api/client.ts -> buildHeaders supplies the
      *     tenant header; ApiError is the shared failure boundary.
      */

@@ -5,20 +5,24 @@ from datetime import UTC, date, datetime
 from decimal import Decimal
 from io import BytesIO
 from types import SimpleNamespace
-from typing import NoReturn
+from typing import NoReturn, cast
 from uuid import UUID, uuid4
 
 import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from openpyxl import load_workbook
 from pptx import Presentation
 from pypdf import PdfReader
 from sqlalchemy import create_engine, select
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
+from starlette.responses import Response as StarletteResponse
 
 from ums_smart_revenue.api.exports import (
     _artifact_metadata_audit_details,
     _persist_generated_export_artifact,
+    _prepared_artifact_response,
     _require_persisted_artifact_bytes,
 )
 from ums_smart_revenue.app import create_app
@@ -533,6 +537,103 @@ def test_finance_admin_downloads_generated_finance_workbook_with_audit(tmp_path)
     assert all(event.sensitive for event in audit_events)
 
 
+def test_finance_workbook_prepare_is_bodyless_and_real_get_reauthorizes(
+    tmp_path,
+    monkeypatch,
+):
+    """Prepare without a download audit, then independently authorize the native GET."""
+    artifact_dir = tmp_path / "export-artifacts"
+    monkeypatch.setenv("UMS_EXPORT_ARTIFACT_DIR", str(artifact_dir))
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    client = TestClient(create_app(database_url=database_url))
+    route = f"/exports/{EXPORT_ID}/finance-workbook.xlsx"
+    engine = create_engine(database_url)
+    original_response_call = StarletteResponse.__call__
+    status_when_prepare_response_started: list[str] = []
+
+    async def observe_prepare_commit(response, scope, receive, send):
+        if response.status_code == 204 and scope.get("path") == route:
+            with Session(engine) as observation_session:
+                observed_job = observation_session.get(ExportJobORM, EXPORT_ID)
+                assert observed_job is not None
+                status_when_prepare_response_started.append(observed_job.status)
+        await original_response_call(response, scope, receive, send)
+
+    monkeypatch.setattr(StarletteResponse, "__call__", observe_prepare_commit)
+
+    denied_prepare = client.get(
+        f"{route}?prepare=true",
+        headers=auth_headers("export_operator"),
+    )
+    with Session(engine) as session:
+        denied_job = session.get(ExportJobORM, EXPORT_ID)
+
+    assert denied_prepare.status_code == 403
+    assert denied_prepare.json()["detail"] == "Missing permission: exports.revenue"
+    assert denied_job is not None
+    assert denied_job.status == "QUEUED"
+
+    prepared = client.get(
+        f"{route}?prepare=true",
+        headers=auth_headers("finance_admin"),
+    )
+
+    with Session(engine) as session:
+        prepared_job = session.get(ExportJobORM, EXPORT_ID)
+        preparation_audits = session.scalars(select(AuditLogORM)).all()
+
+    assert prepared.status_code == 204
+    assert prepared.content == b""
+    assert prepared.headers["cache-control"] == "no-store"
+    assert status_when_prepare_response_started == ["COMPLETED"]
+    assert prepared_job is not None
+    assert prepared_job.status == "COMPLETED"
+    assert prepared_job.file_url is not None
+    assert prepared_job.artifact_checksum_sha256 is not None
+    assert preparation_audits == []
+
+    # The bodyless prepare response is not a bearer grant: the ordinary GET
+    # enters the complete route authorization again and still denies a role
+    # without finance-export visibility.
+    denied = client.get(route, headers=auth_headers("export_operator"))
+    assert denied.status_code == 403
+    assert denied.json()["detail"] == "Missing permission: exports.revenue"
+
+    downloaded = client.get(route, headers=auth_headers("finance_admin"))
+    with Session(engine) as session:
+        download_audits = session.scalars(
+            select(AuditLogORM).order_by(AuditLogORM.event_type)
+        ).all()
+
+    assert downloaded.status_code == 200
+    assert downloaded.headers["cache-control"] == "no-store"
+    assert "ums-finance-2026-03-global.xlsx" in downloaded.headers["content-disposition"]
+    assert hashlib.sha256(downloaded.content).hexdigest() == (
+        prepared_job.artifact_checksum_sha256
+    )
+    assert {event.event_type for event in download_audits} == {
+        "BANK_RECONCILIATION_VIEWED",
+        "EXPORT_DOWNLOADED",
+        "PAYMENT_VIEWED",
+        "REVENUE_VIEWED",
+    }
+
+
+def test_prepared_artifact_response_fails_closed_when_commit_fails():
+    """Do not expose the 204 start signal when artifact metadata is not durable."""
+
+    class FailingCommitSession:
+        def commit(self) -> NoReturn:
+            raise SQLAlchemyError("commit failed")
+
+    with pytest.raises(HTTPException) as raised:
+        _prepared_artifact_response(session=cast(Session, FailingCommitSession()))
+
+    assert raised.value.status_code == 503
+    assert raised.value.detail == "Export artifact persistence unavailable"
+
+
 def test_finance_workbook_download_persists_artifact_and_completes_job(
     tmp_path,
     monkeypatch,
@@ -943,17 +1044,32 @@ def test_finance_admin_downloads_generated_executive_pdf_with_audit(
     database_url = build_database_url(tmp_path)
     seed_database(database_url, export_type="EXECUTIVE_PDF")
     client = TestClient(create_app(database_url=database_url))
+    route = f"/exports/{EXPORT_ID}/executive.pdf"
 
-    response = client.get(
-        f"/exports/{EXPORT_ID}/executive.pdf",
+    prepared = client.get(
+        f"{route}?prepare=true",
         headers=auth_headers("finance_admin"),
     )
 
     engine = create_engine(database_url)
     with Session(engine) as session:
+        preparation_audits = session.scalars(select(AuditLogORM)).all()
+
+    assert prepared.status_code == 204
+    assert prepared.content == b""
+    assert prepared.headers["cache-control"] == "no-store"
+    assert preparation_audits == []
+
+    response = client.get(
+        route,
+        headers=auth_headers("finance_admin"),
+    )
+
+    with Session(engine) as session:
         audit_events = session.scalars(select(AuditLogORM).order_by(AuditLogORM.event_type)).all()
 
     assert response.status_code == 200
+    assert response.headers["cache-control"] == "no-store"
     assert response.headers["content-type"] == "application/pdf"
     assert "ums-executive-2026-03-global.pdf" in response.headers["content-disposition"]
     assert response.content.startswith(b"%PDF-")
@@ -1012,17 +1128,32 @@ def test_finance_admin_downloads_generated_branded_slide_pack_with_audit(
     database_url = build_database_url(tmp_path)
     seed_database(database_url, export_type="BRANDED_SLIDE_PACK")
     client = TestClient(create_app(database_url=database_url))
+    route = f"/exports/{EXPORT_ID}/branded-slide-pack.pptx"
 
-    response = client.get(
-        f"/exports/{EXPORT_ID}/branded-slide-pack.pptx",
+    prepared = client.get(
+        f"{route}?prepare=true",
         headers=auth_headers("finance_admin"),
     )
 
     engine = create_engine(database_url)
     with Session(engine) as session:
+        preparation_audits = session.scalars(select(AuditLogORM)).all()
+
+    assert prepared.status_code == 204
+    assert prepared.content == b""
+    assert prepared.headers["cache-control"] == "no-store"
+    assert preparation_audits == []
+
+    response = client.get(
+        route,
+        headers=auth_headers("finance_admin"),
+    )
+
+    with Session(engine) as session:
         audit_events = session.scalars(select(AuditLogORM).order_by(AuditLogORM.event_type)).all()
 
     assert response.status_code == 200
+    assert response.headers["cache-control"] == "no-store"
     assert response.headers["content-type"] == (
         "application/vnd.openxmlformats-officedocument.presentationml.presentation"
     )

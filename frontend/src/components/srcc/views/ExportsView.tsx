@@ -24,23 +24,24 @@ import { describeError } from "./CommandView";
 //   fills a request form (report type + scope + month + currency + reason),
 //   "Generate" POSTs to /exports (creating a QUEUED job + audit event), and the
 //   jobs table reloads from GET /exports. Each QUEUED or COMPLETED job exposes a
-//   download action through the shared API client's Blob path; the client adds
-//   the resolved tenant header, while trusted-gateway identity and cross-origin
-//   CORS/auth remain deployment concerns (VITE_API_BASE_URL is URL-normalization
-//   coverage only). The temporary object URL is revoked after the browser save.
-//   Loading / error / 403 states mirror CommandView and TraceView. The mock Export Guardrails side panel was
+//   two-step download: the shared API client authenticates a prepare request so
+//   typed generation/auth/storage failures stay visible, then a same-origin
+//   native GET re-enters the protected route through the trusted gateway. The
+//   browser download manager consumes that response without buffering the whole
+//   artifact in the SPA heap. Loading / error / 403 states mirror CommandView
+//   and TraceView. The mock Export Guardrails side panel was
 //   DELETED in P1.4: its three rows carried fabricated On/Open/Blocked statuses
 //   that no endpoint reports, and the exports API exposes no guardrail state to
 //   derive them from — the per-job status column is the honest signal.
 // Database/ORM: None (frontend) — consumes GET /exports (list), POST /exports
-//   (create, server-side insert + audit), and the shared client's Blob reads of
-//   binary download routes; downloads are served by the backend.
+//   (create, server-side insert + audit), and protected prepare/native artifact
+//   GETs; downloads are served by the backend.
 // Standards: No client-side export authorization is invented — the backend gate
 //   (EXPORT_REVENUE/ANALYTICS_REPORT + VIEW_* @scope, plus VIEW_FINALIZED_PAYMENTS
 //   @finance_month for finance exports) is authoritative; a 403 surfaces as
-//   no-permission copy. The browser never holds the gateway secret; downloads
-//   use the shared tenant-header path, but this screen does not claim that a
-//   direct API origin supplies trusted-gateway identity or supported CORS.
+//   no-permission copy. The browser never holds the gateway secret. Native file
+//   transfer deliberately uses the same-origin /exports reverse-proxy contract
+//   so both dev and production gateways inject authoritative identity again.
 // Blast Radius: Export create (write path) + artifact download — both via the
 //   backend's own guarded, audited routes only. No source-of-truth finance
 //   number is computed or mutated client-side.
@@ -220,12 +221,11 @@ const effectiveReportType = (
 //   Only one route is valid per type (the backend 422s a mismatched type). The
 //   action verb (Download vs Generate) is derived from job status by the caller;
 //   this returns the route and the format suffix only.
-// Standards: The path is resolved through the SAME base-URL logic the JSON
-//   client uses (resolveUrl inside useApiClient). A configured API origin is
-//   URL-normalization coverage only: getBlob supplies the tenant header, while
-//   trusted-gateway identity and cross-origin CORS/auth remain deployment
-//   concerns. The Blob path is separate from the JSON parser because these
-//   routes return binary content.
+// Standards: The API client resolves the authenticated `?prepare=true` request
+//   through its configured base URL. The subsequent binary GET intentionally
+//   stays relative and same-origin so the production/dev reverse proxy injects
+//   trusted identity and tenant headers while the browser streams to its native
+//   download manager. No secret or bearer grant enters the URL.
 // ============================================================================
 /**
  * Returns the API-relative binary download route and artifact format for a job,
@@ -247,35 +247,32 @@ const downloadFor = (
   return { path: route.path(id), format: route.format };
 };
 
-/** Save a fetched export Blob through a temporary object URL and always revoke it. */
-const saveBlobAsFile = (blob: Blob, filename: string): void => {
-  const objectUrl = URL.createObjectURL(blob);
+/** Start a prepared artifact through the protected same-origin download route. */
+const startNativeDownload = (path: string, filename: string): void => {
   const anchor = document.createElement("a");
   try {
-    anchor.href = objectUrl;
+    anchor.href = path;
     anchor.download = filename;
     document.body.appendChild(anchor);
     anchor.click();
   } finally {
     anchor.remove();
-    URL.revokeObjectURL(objectUrl);
   }
 };
 
 // ============================================================================
-// Purpose: Select a safe local artifact filename from the backend header,
-//   persisted artifact metadata, or a deterministic format fallback.
-// Database/ORM: None (frontend) — reads only the Blob response headers and the
-//   typed ExportJob metadata returned by the backend.
-// Standards: Parse only the quoted filename contract; reject control/path
-//   characters and normalize Windows-invalid filename characters before a value
-//   reaches an anchor download attribute. Never use a response value as a path.
+// Purpose: Select a safe local fallback filename from persisted artifact
+//   metadata or a deterministic job-id/format value. The protected GET's
+//   Content-Disposition remains authoritative when the browser receives it.
+// Database/ORM: None (frontend) — reads only typed ExportJob metadata.
+// Standards: Reject control/path characters and normalize Windows-invalid
+//   filename characters before a value reaches an anchor download attribute.
+//   Never use metadata as a path.
 // Blast Radius: Export artifact presentation only — no finance value,
 //   authorization decision, or backend state is calculated client-side.
 // Connections:
-//   - File: frontend/src/lib/api/client.ts -> getBlob returns the raw Headers.
 //   - File: backend/ums_smart_revenue/api/exports.py -> download routes emit
-//     Content-Disposition and persist artifact_filename for queued jobs.
+//     Content-Disposition and persist artifact_filename during preparation.
 // ============================================================================
 const REJECTED_DOWNLOAD_FILENAMES = new Set(["", ".", ".."]) as ReadonlySet<string>;
 
@@ -321,30 +318,14 @@ const safeDownloadFilename = (
   return REJECTED_DOWNLOAD_FILENAMES.has(sanitized) ? null : sanitized;
 };
 
-/** Read the quoted Content-Disposition filename used by the export routes. */
-const filenameFromContentDisposition = (headers: Headers): string | null => {
-  const contentDisposition = headers.get("Content-Disposition");
-  if (!contentDisposition) return null;
-  const match = contentDisposition.match(
-    /(?:^|;)\s*filename\s*=\s*"([^"]*)"\s*(?:;|$)/i,
-  );
-  return safeDownloadFilename(match?.[1]);
-};
-
-/** Prefer the response filename, then persisted metadata, then a safe fallback. */
+/** Prefer persisted metadata, then a deterministic safe anchor fallback. */
 const downloadFilenameFor = (
-  headers: Headers,
   job: ExportJob,
   format: string,
 ): string => {
-  const responseFilename = filenameFromContentDisposition(headers);
   const artifactFilename = safeDownloadFilename(job.artifact_filename);
   const safeId = job.id.replace(/[^A-Za-z0-9_-]/g, "_");
-  return (
-    responseFilename ??
-    artifactFilename ??
-    `export-${safeId}.${format.toLowerCase()}`
-  );
+  return artifactFilename ?? `export-${safeId}.${format.toLowerCase()}`;
 };
 
 // ============================================================================
@@ -683,25 +664,26 @@ const exportDownloadErrorDetail = (caught: unknown): string => {
 };
 
 // ============================================================================
-// Purpose: Run one authenticated, tenant-scoped artifact download with a
-//   synchronous same-tick latch and an authoritative list reload on success.
-// Database/ORM: None (frontend) — reads a backend-served export Blob only.
-// Standards: Shared API client owns base URL and tenant headers; all failures
-//   become safe UI detail, and the in-flight latch is released in `finally`.
+// Purpose: Prepare one authenticated, tenant-scoped artifact, start its native
+//   same-origin download, and reload authoritative job metadata on success.
+// Database/ORM: None (frontend) — invokes protected backend export routes only.
+// Standards: Shared API client owns prepare auth/base URL/tenant headers; the
+//   native GET re-enters the production gateway and backend authorization. All
+//   prepare/start failures become safe UI detail and the latch always releases.
 // Blast Radius: Export artifact download only; no finance or auth decision is
-//   calculated client-side and temporary object URLs remain always-revoked.
+//   calculated client-side; no artifact bytes are materialized in JavaScript.
 // Connections:
-//   - File: frontend/src/lib/api/client.ts -> getBlob performs the guarded read.
-//   - File: backend/ums_smart_revenue/api/exports.py -> authoritative download.
+//   - File: frontend/src/lib/api/client.ts -> get performs the guarded prepare.
+//   - File: backend/ums_smart_revenue/api/exports.py -> prepare + download.
 // ============================================================================
 const ExportDownloadAction = ({
   job,
   download,
-  onDownloadSuccess,
+  onArtifactPrepared,
 }: {
   job: ExportJob;
   download: ResolvedDownload;
-  onDownloadSuccess: () => void;
+  onArtifactPrepared: () => void;
 }) => {
   const client = useApiClient();
   const [busy, setBusy] = useState(false);
@@ -717,14 +699,25 @@ const ExportDownloadAction = ({
     setBusy(true);
     setErrorDetail(null);
 
-    /** Fetch, save, then reload the authoritative export-job metadata. */
-    const fetchAndSave = async (): Promise<void> => {
-      const { blob, headers } = await client.getBlob(download.path);
-      saveBlobAsFile(blob, downloadFilenameFor(headers, job, download.format));
-      onDownloadSuccess();
+    /** Prepare, start the native transfer, then reload authoritative metadata. */
+    const prepareAndDownload = async (): Promise<void> => {
+      // FIX: Response.blob() retained the complete artifact (up to the backend's
+      // 500 MiB limit) in the SPA heap. Preparation returns no bytes; the actual
+      // protected GET is consumed by the browser's native download manager.
+      await client.get<void>(`${download.path}?prepare=true`, {
+        // A cached 204 would skip generation and authorization on a later click.
+        // The backend also marks both handshake legs no-store; request cache mode
+        // makes the browser-side half of that contract explicit.
+        cache: "no-store",
+      });
+      startNativeDownload(
+        download.path,
+        downloadFilenameFor(job, download.format),
+      );
+      onArtifactPrepared();
     };
 
-    fetchAndSave()
+    prepareAndDownload()
       .catch((caught: unknown) => {
         setErrorDetail(exportDownloadErrorDetail(caught));
       })
@@ -743,7 +736,7 @@ const ExportDownloadAction = ({
         onClick={startDownload}
       >
         {busy
-          ? `Downloading ${download.format}`
+          ? `Preparing ${download.format}`
           : `${downloadVerb(job)} ${download.format}`}
       </button>
       {errorDetail ? (
@@ -769,11 +762,11 @@ const unavailableDownloadLabel = (job: ExportJob): string => {
 const ExportDownloadCell = ({
   job,
   canViewRevenue,
-  onDownloadSuccess,
+  onArtifactPrepared,
 }: {
   job: ExportJob;
   canViewRevenue: boolean;
-  onDownloadSuccess: () => void;
+  onArtifactPrepared: () => void;
 }) => {
   if (!isDownloadable(job)) {
     return <span className="muted">{unavailableDownloadLabel(job)}</span>;
@@ -786,7 +779,7 @@ const ExportDownloadCell = ({
     <ExportDownloadAction
       job={job}
       download={download}
-      onDownloadSuccess={onDownloadSuccess}
+      onArtifactPrepared={onArtifactPrepared}
     />
   );
 };
@@ -795,11 +788,11 @@ const ExportDownloadCell = ({
 const ExportJobRow = ({
   job,
   canViewRevenue,
-  onDownloadSuccess,
+  onArtifactPrepared,
 }: {
   job: ExportJob;
   canViewRevenue: boolean;
-  onDownloadSuccess: () => void;
+  onArtifactPrepared: () => void;
 }) => {
   return (
     <tr>
@@ -815,7 +808,7 @@ const ExportJobRow = ({
         <ExportDownloadCell
           job={job}
           canViewRevenue={canViewRevenue}
-          onDownloadSuccess={onDownloadSuccess}
+          onArtifactPrepared={onArtifactPrepared}
         />
       </td>
     </tr>
@@ -828,13 +821,13 @@ const ExportJobsTableBody = ({
   loading,
   error,
   canViewRevenue,
-  onDownloadSuccess,
+  onArtifactPrepared,
 }: {
   jobs: ExportJob[];
   loading: boolean;
   error: ApiError | Error | null;
   canViewRevenue: boolean;
-  onDownloadSuccess: () => void;
+  onArtifactPrepared: () => void;
 }) => {
   if (error) {
     const { title, detail } = describeError(
@@ -881,7 +874,7 @@ const ExportJobsTableBody = ({
               key={job.id}
               job={job}
               canViewRevenue={canViewRevenue}
-              onDownloadSuccess={onDownloadSuccess}
+              onArtifactPrepared={onArtifactPrepared}
             />
           ))}
         </tbody>
@@ -897,14 +890,14 @@ const ExportJobsTable = ({
   error,
   onRefresh,
   canViewRevenue,
-  onDownloadSuccess,
+  onArtifactPrepared,
 }: {
   jobs: ExportJob[];
   loading: boolean;
   error: ApiError | Error | null;
   onRefresh: () => void;
   canViewRevenue: boolean;
-  onDownloadSuccess: () => void;
+  onArtifactPrepared: () => void;
 }) => {
   return (
     <>
@@ -928,7 +921,7 @@ const ExportJobsTable = ({
         loading={loading}
         error={error}
         canViewRevenue={canViewRevenue}
-        onDownloadSuccess={onDownloadSuccess}
+        onArtifactPrepared={onArtifactPrepared}
       />
     </>
   );
@@ -1069,7 +1062,7 @@ const ExportsView = ({
           error={error}
           onRefresh={reload}
           canViewRevenue={canViewRevenue}
-          onDownloadSuccess={reload}
+          onArtifactPrepared={reload}
         />
       </section>
     </section>

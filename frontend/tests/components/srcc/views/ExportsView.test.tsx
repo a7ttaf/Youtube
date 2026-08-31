@@ -2,7 +2,7 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import ExportsView from "@/components/srcc/views/ExportsView";
-import type { ExportJob, ExportListResponse } from "@/lib/api/types";
+import type { ExportJob, ExportListResponse, ExportType } from "@/lib/api/types";
 import { TenantProvider } from "@/contexts/TenantContext";
 
 const ORIGINAL_FETCH = globalThis.fetch;
@@ -122,18 +122,7 @@ const jsonResponse = (body: unknown, status = 200) => {
   });
 };
 
-const blobResponse = (
-  body = "export bytes",
-  headers: HeadersInit = {},
-) => {
-  return new Response(body, {
-    status: 200,
-    headers: {
-      "Content-Type": "application/octet-stream",
-      ...headers,
-    },
-  });
-};
+const noContentResponse = () => new Response(null, { status: 204 });
 
 const urlOf = (input: unknown): string => {
   if (typeof input === "string") return input;
@@ -204,175 +193,182 @@ describe("ExportsView wired to the exports endpoint", () => {
     expect(button).toBeEnabled();
   });
 
-  it("fetches the relative download route through the shared client with the tenant header", async () => {
-    const createObjectURL = vi.fn(() => "blob:export-relative");
-    const revokeObjectURL = vi.fn();
-    vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => undefined);
-    vi.stubGlobal("URL", { ...URL, createObjectURL, revokeObjectURL });
+  it("authenticates preparation, then starts a same-origin native GET without buffering a Blob", async () => {
+    let clickedHref: string | null = null;
+    const blobSpy = vi.spyOn(Response.prototype, "blob");
+    vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(function (
+      this: HTMLAnchorElement,
+    ) {
+      clickedHref = this.getAttribute("href");
+    });
     vi.stubEnv("VITE_API_BASE_URL", "");
     fetchMock().mockImplementation((input: unknown) =>
-      urlOf(input).includes("finance-workbook.xlsx")
-        ? Promise.resolve(blobResponse())
+      urlOf(input).includes("finance-workbook.xlsx?prepare=true")
+        ? Promise.resolve(noContentResponse())
         : Promise.resolve(jsonResponse(POPULATED_LIST)),
     );
     renderExportsView();
 
     fireEvent.click(await screen.findByRole("button", { name: /download xlsx/i }));
-    await waitFor(() => expect(createObjectURL).toHaveBeenCalledTimes(1));
-    const binaryCall = fetchMock().mock.calls.find(([input]) =>
-      urlOf(input).includes("finance-workbook.xlsx"),
+    await waitFor(() => expect(clickedHref).not.toBeNull());
+    const prepareCall = fetchMock().mock.calls.find(([input]) =>
+      urlOf(input).includes("finance-workbook.xlsx?prepare=true"),
     );
-    expect(binaryCall).toBeDefined();
-    expect(urlOf(binaryCall?.[0])).toBe(
+    expect(prepareCall).toBeDefined();
+    expect(urlOf(prepareCall?.[0])).toBe(
+      "/exports/11111111-1111-1111-1111-111111111111/finance-workbook.xlsx?prepare=true",
+    );
+    const headers = new Headers((prepareCall?.[1] as RequestInit).headers);
+    expect(headers.get("X-UMS-Tenant")).toBe("ums");
+    expect((prepareCall?.[1] as RequestInit).cache).toBe("no-store");
+    expect(clickedHref).toBe(
       "/exports/11111111-1111-1111-1111-111111111111/finance-workbook.xlsx",
     );
-    const headers = new Headers((binaryCall?.[1] as RequestInit).headers);
-    expect(headers.get("X-UMS-Tenant")).toBe("ums");
-    expect(revokeObjectURL).toHaveBeenCalledWith("blob:export-relative");
+    expect(blobSpy).not.toHaveBeenCalled();
   });
 
-  it("normalizes direct-origin download URLs while retaining the tenant header", async () => {
-    const createObjectURL = vi.fn(() => "blob:export-direct");
-    const revokeObjectURL = vi.fn();
-    vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => undefined);
-    vi.stubGlobal("URL", { ...URL, createObjectURL, revokeObjectURL });
-    // This exercises URL normalization only; it does not claim that a browser
-    // direct-origin request supplies trusted-gateway identity or CORS support.
+  it("uses the configured API origin only for preparation and keeps the real GET same-origin", async () => {
+    let clickedHref: string | null = null;
+    vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(function (
+      this: HTMLAnchorElement,
+    ) {
+      clickedHref = this.getAttribute("href");
+    });
     vi.stubEnv("VITE_API_BASE_URL", "https://api.example.com/");
     fetchMock().mockImplementation((input: unknown) =>
-      urlOf(input).includes("finance-workbook.xlsx")
-        ? Promise.resolve(blobResponse())
+      urlOf(input).includes("finance-workbook.xlsx?prepare=true")
+        ? Promise.resolve(noContentResponse())
         : Promise.resolve(jsonResponse(POPULATED_LIST)),
     );
     renderExportsView();
 
     fireEvent.click(await screen.findByRole("button", { name: /download xlsx/i }));
-    await waitFor(() => expect(createObjectURL).toHaveBeenCalledTimes(1));
-    const binaryCall = fetchMock().mock.calls.find(([input]) =>
-      urlOf(input).includes("finance-workbook.xlsx"),
+    await waitFor(() => expect(clickedHref).not.toBeNull());
+    const prepareCall = fetchMock().mock.calls.find(([input]) =>
+      urlOf(input).includes("finance-workbook.xlsx?prepare=true"),
     );
-    expect(binaryCall).toBeDefined();
-    expect(urlOf(binaryCall?.[0])).toBe(
-      "https://api.example.com/exports/11111111-1111-1111-1111-111111111111/finance-workbook.xlsx",
+    expect(prepareCall).toBeDefined();
+    expect(urlOf(prepareCall?.[0])).toBe(
+      "https://api.example.com/exports/11111111-1111-1111-1111-111111111111/finance-workbook.xlsx?prepare=true",
     );
-    const headers = new Headers((binaryCall?.[1] as RequestInit).headers);
+    const headers = new Headers((prepareCall?.[1] as RequestInit).headers);
     expect(headers.get("X-UMS-Tenant")).toBe("ums");
-    expect(revokeObjectURL).toHaveBeenCalledWith("blob:export-direct");
+    expect(clickedHref).toBe(
+      "/exports/11111111-1111-1111-1111-111111111111/finance-workbook.xlsx",
+    );
   });
 
-  it("prefers the safe quoted Content-Disposition filename for a queued artifact", async () => {
-    const createObjectURL = vi.fn(() => "blob:export-header");
-    const revokeObjectURL = vi.fn();
+  it.each([
+    ["EXECUTIVE_PDF", "executive.pdf", "PDF"],
+    ["BRANDED_SLIDE_PACK", "branded-slide-pack.pptx", "PPTX"],
+    ["ANALYTICS_SUMMARY_CSV", "analytics-summary.csv", "CSV"],
+  ] as Array<[ExportType, string, string]>)(
+    "prepares %s through its protected route and starts the matching native GET",
+    async (exportType, routeSuffix, format) => {
+      const list: ExportListResponse = {
+        ...POPULATED_LIST,
+        items: [{ ...READY_JOB, export_type: exportType }],
+      };
+      let clickedHref: string | null = null;
+      vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(function (
+        this: HTMLAnchorElement,
+      ) {
+        clickedHref = this.getAttribute("href");
+      });
+      fetchMock().mockImplementation((input: unknown) =>
+        urlOf(input).includes(`${routeSuffix}?prepare=true`)
+          ? Promise.resolve(noContentResponse())
+          : Promise.resolve(jsonResponse(list)),
+      );
+      renderExportsView();
+
+      fireEvent.click(
+        await screen.findByRole("button", {
+          name: new RegExp(`download ${format}`, "i"),
+        }),
+      );
+      const expectedPath = `/exports/${READY_JOB.id}/${routeSuffix}`;
+      await waitFor(() => expect(clickedHref).toBe(expectedPath));
+      expect(
+        fetchMock().mock.calls.some(
+          ([input]) => urlOf(input) === `${expectedPath}?prepare=true`,
+        ),
+      ).toBe(true);
+    },
+  );
+
+  it("uses a deterministic filename fallback while a queued artifact is prepared", async () => {
     let clickedFilename: string | undefined;
     vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(function (
       this: HTMLAnchorElement,
     ) {
       clickedFilename = this.download;
     });
-    vi.stubGlobal("URL", { ...URL, createObjectURL, revokeObjectURL });
     fetchMock().mockImplementation((input: unknown) =>
-      urlOf(input).includes("finance-workbook.xlsx")
-        ? Promise.resolve(
-            blobResponse("export bytes", {
-              "Content-Disposition":
-                'attachment; filename="ums-finance-2026-08-global.xlsx"',
-            }),
-          )
+      urlOf(input).includes("finance-workbook.xlsx?prepare=true")
+        ? Promise.resolve(noContentResponse())
         : Promise.resolve(jsonResponse(QUEUED_LIST)),
     );
     renderExportsView();
 
     fireEvent.click(await screen.findByRole("button", { name: /generate xlsx/i }));
     await waitFor(() =>
-      expect(clickedFilename).toBe("ums-finance-2026-08-global.xlsx"),
+      expect(clickedFilename).toBe(
+        "export-22222222-2222-2222-2222-222222222222.xlsx",
+      ),
     );
-    expect(revokeObjectURL).toHaveBeenCalledWith("blob:export-header");
   });
 
-  it("falls back to artifact_filename when Content-Disposition is absent", async () => {
-    const createObjectURL = vi.fn(() => "blob:export-metadata");
-    const revokeObjectURL = vi.fn();
+  it("uses safe persisted artifact metadata as the native anchor fallback", async () => {
     let clickedFilename: string | undefined;
     vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(function (
       this: HTMLAnchorElement,
     ) {
       clickedFilename = this.download;
     });
-    vi.stubGlobal("URL", { ...URL, createObjectURL, revokeObjectURL });
     fetchMock().mockImplementation((input: unknown) =>
-      urlOf(input).includes("finance-workbook.xlsx")
-        ? Promise.resolve(blobResponse())
+      urlOf(input).includes("finance-workbook.xlsx?prepare=true")
+        ? Promise.resolve(noContentResponse())
         : Promise.resolve(jsonResponse(POPULATED_LIST)),
     );
     renderExportsView();
 
     fireEvent.click(await screen.findByRole("button", { name: /download xlsx/i }));
     await waitFor(() => expect(clickedFilename).toBe("ums-finance.xlsx"));
-    expect(revokeObjectURL).toHaveBeenCalledWith("blob:export-metadata");
   });
 
   it.each([
-    ["quoted traversal", 'attachment; filename="../../unsafe.xlsx"'],
-    ["C1 lower-bound control", 'attachment; filename="unsafe\u0080.xlsx"'],
-    ["C1 upper-bound control", 'attachment; filename="unsafe\u009f.xlsx"'],
+    ["path traversal", "../../unsafe.xlsx"],
+    ["C1 lower-bound control", "unsafe\u0080.xlsx"],
+    ["C1 upper-bound control", "unsafe\u009f.xlsx"],
   ])(
-    "rejects a %s Content-Disposition filename and prefers safe artifact metadata",
-    async (_caseName, contentDisposition) => {
-      const createObjectURL = vi.fn(() => "blob:export-safe-metadata");
-      const revokeObjectURL = vi.fn();
+    "rejects %s in persisted filename metadata and uses the deterministic fallback",
+    async (_caseName, artifactFilename) => {
       let clickedFilename: string | undefined;
       vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(function (
         this: HTMLAnchorElement,
       ) {
         clickedFilename = this.download;
       });
-      vi.stubGlobal("URL", { ...URL, createObjectURL, revokeObjectURL });
+      const unsafeMetadataList: ExportListResponse = {
+        ...POPULATED_LIST,
+        items: [{ ...READY_JOB, artifact_filename: artifactFilename }],
+      };
       fetchMock().mockImplementation((input: unknown) =>
-        urlOf(input).includes("finance-workbook.xlsx")
-          ? Promise.resolve(
-              blobResponse("export bytes", {
-                "Content-Disposition": contentDisposition,
-              }),
-            )
-          : Promise.resolve(jsonResponse(POPULATED_LIST)),
+        urlOf(input).includes("finance-workbook.xlsx?prepare=true")
+          ? Promise.resolve(noContentResponse())
+          : Promise.resolve(jsonResponse(unsafeMetadataList)),
       );
       renderExportsView();
 
       fireEvent.click(await screen.findByRole("button", { name: /download xlsx/i }));
-      await waitFor(() => expect(clickedFilename).toBe("ums-finance.xlsx"));
-      expect(revokeObjectURL).toHaveBeenCalledWith("blob:export-safe-metadata");
+      await waitFor(() =>
+        expect(clickedFilename).toBe(
+          "export-11111111-1111-1111-1111-111111111111.xlsx",
+        ),
+      );
     },
   );
-
-  it("rejects a malformed Content-Disposition filename before using the generic fallback", async () => {
-    const createObjectURL = vi.fn(() => "blob:export-fallback");
-    const revokeObjectURL = vi.fn();
-    let clickedFilename: string | undefined;
-    vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(function (
-      this: HTMLAnchorElement,
-    ) {
-      clickedFilename = this.download;
-    });
-    vi.stubGlobal("URL", { ...URL, createObjectURL, revokeObjectURL });
-    fetchMock().mockImplementation((input: unknown) =>
-      urlOf(input).includes("finance-workbook.xlsx")
-        ? Promise.resolve(
-            blobResponse("export bytes", {
-              // The backend contract is quoted; this path-shaped unquoted
-              // value must never become an anchor filename.
-              "Content-Disposition": "attachment; filename=../../unsafe.xlsx",
-            }),
-          )
-        : Promise.resolve(jsonResponse(QUEUED_LIST)),
-    );
-    renderExportsView();
-
-    fireEvent.click(await screen.findByRole("button", { name: /generate xlsx/i }));
-    await waitFor(() =>
-      expect(clickedFilename).toBe("export-22222222-2222-2222-2222-222222222222.xlsx"),
-    );
-    expect(revokeObjectURL).toHaveBeenCalledWith("blob:export-fallback");
-  });
 
   it("renders no mock Export Guardrails panel", async () => {
     fetchMock().mockResolvedValue(jsonResponse(POPULATED_LIST));
@@ -407,6 +403,9 @@ describe("ExportsView wired to the exports endpoint", () => {
   });
 
   it("does not fetch a binary route before the operator activates its download action", async () => {
+    const anchorClick = vi
+      .spyOn(HTMLAnchorElement.prototype, "click")
+      .mockImplementation(() => undefined);
     fetchMock().mockResolvedValue(jsonResponse(POPULATED_LIST));
     renderExportsView();
 
@@ -419,6 +418,7 @@ describe("ExportsView wired to the exports endpoint", () => {
         urlOf(input).includes("finance-workbook.xlsx"),
       ),
     ).toBe(false);
+    expect(anchorClick).not.toHaveBeenCalled();
   });
 
   it("submits the request form (POST /exports) and refetches the list on success", async () => {
@@ -536,21 +536,15 @@ describe("ExportsView wired to the exports endpoint", () => {
     ).toBeEnabled();
   });
 
-  it("reloads exactly once after a successful queued binary completion", async () => {
-    const createObjectURL = vi.fn(() => "blob:export-reload");
-    const revokeObjectURL = vi.fn();
+  it("reloads exactly once after a successful queued preparation and native start", async () => {
     let listCallCount = 0;
-    vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => undefined);
-    vi.stubGlobal("URL", { ...URL, createObjectURL, revokeObjectURL });
+    const anchorClick = vi
+      .spyOn(HTMLAnchorElement.prototype, "click")
+      .mockImplementation(() => undefined);
     fetchMock().mockImplementation((input: unknown) => {
       const url = urlOf(input);
-      if (url.includes("finance-workbook.xlsx")) {
-        return Promise.resolve(
-          blobResponse("export bytes", {
-            "Content-Disposition":
-              'attachment; filename="ums-finance-2026-08-global.xlsx"',
-          }),
-        );
+      if (url.includes("finance-workbook.xlsx?prepare=true")) {
+        return Promise.resolve(noContentResponse());
       }
       listCallCount += 1;
       return Promise.resolve(
@@ -568,16 +562,16 @@ describe("ExportsView wired to the exports endpoint", () => {
       ).toBeInTheDocument(),
     );
     expect(listCallCount).toBe(2);
-    expect(createObjectURL).toHaveBeenCalledTimes(1);
-    expect(revokeObjectURL).toHaveBeenCalledWith("blob:export-reload");
+    expect(anchorClick).toHaveBeenCalledTimes(1);
   });
 
-  it("maps a 403 download failure to permission copy without reloading", async () => {
-    const createObjectURL = vi.fn(() => "blob:export-forbidden");
+  it("maps a 403 preparation failure to permission copy without starting or reloading", async () => {
     let listCallCount = 0;
-    vi.stubGlobal("URL", { ...URL, createObjectURL });
+    const anchorClick = vi
+      .spyOn(HTMLAnchorElement.prototype, "click")
+      .mockImplementation(() => undefined);
     fetchMock().mockImplementation((input: unknown) => {
-      if (urlOf(input).includes("finance-workbook.xlsx")) {
+      if (urlOf(input).includes("finance-workbook.xlsx?prepare=true")) {
         return Promise.resolve(
           jsonResponse({ detail: "Missing permission: exports.finance" }, 403),
         );
@@ -596,15 +590,16 @@ describe("ExportsView wired to the exports endpoint", () => {
     expect(screen.queryByText(/net revenue/i)).not.toBeInTheDocument();
     expect(screen.getByRole("alert")).toBeInTheDocument();
     expect(listCallCount).toBe(1);
-    expect(createObjectURL).not.toHaveBeenCalled();
+    expect(anchorClick).not.toHaveBeenCalled();
   });
 
-  it("surfaces a non-403 download failure without reloading", async () => {
-    const createObjectURL = vi.fn(() => "blob:export-unavailable");
+  it("surfaces a non-403 preparation failure without starting or reloading", async () => {
     let listCallCount = 0;
-    vi.stubGlobal("URL", { ...URL, createObjectURL });
+    const anchorClick = vi
+      .spyOn(HTMLAnchorElement.prototype, "click")
+      .mockImplementation(() => undefined);
     fetchMock().mockImplementation((input: unknown) => {
-      if (urlOf(input).includes("finance-workbook.xlsx")) {
+      if (urlOf(input).includes("finance-workbook.xlsx?prepare=true")) {
         return Promise.resolve(
           jsonResponse({ detail: "Artifact is not available" }, 503),
         );
@@ -620,21 +615,20 @@ describe("ExportsView wired to the exports endpoint", () => {
     );
     expect(screen.getByRole("alert")).toBeInTheDocument();
     expect(listCallCount).toBe(1);
-    expect(createObjectURL).not.toHaveBeenCalled();
+    expect(anchorClick).not.toHaveBeenCalled();
   });
 
-  it("deduplicates same-tick download clicks while the binary request is pending", async () => {
-    const createObjectURL = vi.fn(() => "blob:export-concurrent");
-    const revokeObjectURL = vi.fn();
-    let resolveBlob: (response: Response) => void = () => undefined;
-    const pendingBlob = new Promise<Response>((resolve) => {
-      resolveBlob = resolve;
+  it("deduplicates same-tick clicks while preparation is pending", async () => {
+    let resolvePreparation: (response: Response) => void = () => undefined;
+    const pendingPreparation = new Promise<Response>((resolve) => {
+      resolvePreparation = resolve;
     });
-    vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => undefined);
-    vi.stubGlobal("URL", { ...URL, createObjectURL, revokeObjectURL });
+    const anchorClick = vi
+      .spyOn(HTMLAnchorElement.prototype, "click")
+      .mockImplementation(() => undefined);
     fetchMock().mockImplementation((input: unknown) =>
-      urlOf(input).includes("finance-workbook.xlsx")
-        ? pendingBlob
+      urlOf(input).includes("finance-workbook.xlsx?prepare=true")
+        ? pendingPreparation
         : Promise.resolve(jsonResponse(POPULATED_LIST)),
     );
     renderExportsView();
@@ -644,26 +638,22 @@ describe("ExportsView wired to the exports endpoint", () => {
     fireEvent.click(button);
     expect(
       fetchMock().mock.calls.filter(([input]) =>
-        urlOf(input).includes("finance-workbook.xlsx"),
+        urlOf(input).includes("finance-workbook.xlsx?prepare=true"),
       ),
     ).toHaveLength(1);
 
-    resolveBlob(blobResponse());
-    await waitFor(() => expect(createObjectURL).toHaveBeenCalledTimes(1));
-    expect(revokeObjectURL).toHaveBeenCalledWith("blob:export-concurrent");
+    resolvePreparation(noContentResponse());
+    await waitFor(() => expect(anchorClick).toHaveBeenCalledTimes(1));
   });
 
-  it("revokes the object URL and skips reload when the browser save throws", async () => {
-    const createObjectURL = vi.fn(() => "blob:export-click-error");
-    const revokeObjectURL = vi.fn();
+  it("surfaces a native-download start failure and skips reload", async () => {
     let listCallCount = 0;
     vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => {
       throw new Error("Browser refused the download");
     });
-    vi.stubGlobal("URL", { ...URL, createObjectURL, revokeObjectURL });
     fetchMock().mockImplementation((input: unknown) => {
-      if (urlOf(input).includes("finance-workbook.xlsx")) {
-        return Promise.resolve(blobResponse());
+      if (urlOf(input).includes("finance-workbook.xlsx?prepare=true")) {
+        return Promise.resolve(noContentResponse());
       }
       listCallCount += 1;
       return Promise.resolve(jsonResponse(POPULATED_LIST));
@@ -674,7 +664,6 @@ describe("ExportsView wired to the exports endpoint", () => {
     await waitFor(() =>
       expect(screen.getByText("Browser refused the download")).toBeInTheDocument(),
     );
-    expect(revokeObjectURL).toHaveBeenCalledWith("blob:export-click-error");
     expect(listCallCount).toBe(1);
   });
 

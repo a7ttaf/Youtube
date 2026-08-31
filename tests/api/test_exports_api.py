@@ -1805,8 +1805,25 @@ def test_finance_admin_downloads_scoped_analytics_summary_csv(tmp_path, monkeypa
         )
         session.commit()
 
+    route = f"/exports/{export_id}/analytics-summary.csv"
+    prepared = client.get(
+        f"{route}?prepare=true",
+        headers=auth_headers("finance_admin", "company", str(COMPANY_A_ID)),
+    )
+
+    with Session(engine) as session:
+        prepared_job = session.get(ExportJobORM, UUID(export_id))
+        preparation_audits = session.scalars(select(AuditLogORM)).all()
+
+    assert prepared.status_code == 204
+    assert prepared.content == b""
+    assert prepared.headers["cache-control"] == "no-store"
+    assert prepared_job is not None
+    assert prepared_job.status == "COMPLETED"
+    assert {event.event_type for event in preparation_audits} == {"EXPORT_CREATED"}
+
     response = client.get(
-        f"/exports/{export_id}/analytics-summary.csv",
+        route,
         headers=auth_headers("finance_admin", "company", str(COMPANY_A_ID)),
     )
 
@@ -1816,6 +1833,7 @@ def test_finance_admin_downloads_scoped_analytics_summary_csv(tmp_path, monkeypa
 
     assert create_response.status_code == 202
     assert response.status_code == 200
+    assert response.headers["cache-control"] == "no-store"
     assert response.headers["content-type"].startswith("text/csv")
     assert (
         response.headers["content-disposition"]
