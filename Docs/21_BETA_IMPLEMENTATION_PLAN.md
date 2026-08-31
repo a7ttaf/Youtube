@@ -249,6 +249,9 @@ The beta import runner and API boundary must fail closed as one contract:
   manifest hash, report/source ids, status, actor, and completion time inside
   the replacement transaction; stale delayed retries must compare against that
   ledger before they can rewrite facts
+- [ ] The dependency graph and hard gate list include that ledger as part of the
+  manual-import gate; the implementation cannot be marked unblocked by the
+  runner checks alone
 
 **Migration/API impact (P0.2a):** the implementation PR requires a PostgreSQL
 migration for the immutable import-batch ledger described above; no historical
@@ -324,9 +327,15 @@ Creates the first operator user, prints the stored UUID/email, assigns existing
 `finance_admin` at global scope, and — only with an explicit manual-import flag —
 creates an audited direct `connectors.run_jobs` grant at
 `connector:manual-upload`. It must never grant that connector permission globally.
-That direct grant is issued by the local bootstrap path while it is still running with
-setup authority: global `roles.assign` plus either active `connector_admin` or
-`super_owner`, never by the new finance principal granting authority to itself.
+The trust root is the pre-login local process itself, so the bootstrap grants are
+SELF-grants by the just-created account: a fresh database has no prior actor row, so
+`assigned_by` is the account's own id, that same self-actor is stamped on every audit
+row (the first privilege grant is never silent), and an audit-write failure rolls the
+grant back rather than leaving an unaudited privileged write. This self-grant power
+exists only inside the local script's direct tenant-lane database access before any
+login exists — it is reachable through no HTTP route — and the script grants nothing
+the operator did not explicitly request: global `finance_admin`, plus (with the flag)
+the one scoped `connectors.run_jobs` grant, nothing more.
 The returned identity is an output contract: P0-e installs it as
 `VITE_DEV_GATEWAY_USER_ID` / `VITE_DEV_GATEWAY_USER_EMAIL` before database authz or
 any real-revenue write is attempted.

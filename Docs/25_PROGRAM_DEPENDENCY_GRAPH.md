@@ -129,7 +129,7 @@ $markers = @(
   'No migration/backfill required',
   'Final PR #227 SHA is supplied',
   'no environment fallback and no default rate',
-  'global `roles.assign` plus either active `connector_admin` or `super_owner`',
+  'SELF-grants by the just-created account',
   'typed `PAYMENT_NOT_FINALIZED` status',
   'non-partial btree index on the child columns'
 )
