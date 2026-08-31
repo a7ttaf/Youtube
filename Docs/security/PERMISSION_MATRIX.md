@@ -15,7 +15,7 @@
 | `finance.lock_month` | Lock a finance month. | Yes |
 | `finance.unlock_month` | Unlock a finance month. | Yes |
 | `finance.change_allocation_rule` | Change allocation or deduction rules. | Yes |
-| `finance.import_manual_revenue` | Import manual-upload monthly revenue facts; does not run connectors. | Yes |
+| `finance.import_manual_revenue` | Import monthly revenue facts only for the exact `manual-upload` or `manual_upload` connector key paired with `MANUAL_UPLOAD`; does not run connectors. | Yes |
 | `exports.analytics` | Export non-financial analytics reports. | Yes |
 | `exports.revenue` | Export revenue or finance reports. | Yes |
 | `exports.manage_templates` | Manage export templates and branding. | Yes |

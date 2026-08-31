@@ -133,7 +133,9 @@ Sensitive actions include:
 - Month lock/unlock requires `LOCK_FINANCE_MONTH` or `UNLOCK_FINANCE_MONTH` for the month scope.
 - Allocation changes require `CHANGE_ALLOCATION_RULE` for the month scope.
 - Manual revenue-fact upload requires global `finance.import_manual_revenue`, a
-  `manual-upload`/`MANUAL_UPLOAD` payload, and a `REPORT_IMPORTED` audit event.
+  case-sensitive `manual-upload` or `manual_upload` connector key paired with
+  `MANUAL_UPLOAD`, and a `REPORT_IMPORTED` audit event. The submitted alias is
+  preserved as the connector scope and in the audit record.
 - Connector administration requires `MANAGE_CONNECTORS`; running jobs requires `RUN_CONNECTOR_JOBS`.
 - User account creation and updates require `users.manage`, a reason, and a `USER_ACCOUNT_CHANGED` audit event.
 - User account list and access-profile reads require `users.manage`; account lists use bounded cursor pagination and access profiles expose only active role assignments and direct grants for administration workflows.

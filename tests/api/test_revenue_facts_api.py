@@ -1,6 +1,7 @@
 from decimal import Decimal
 from uuid import UUID, uuid4
 
+import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
@@ -142,7 +143,11 @@ def test_system_integration_user_imports_monthly_revenue_fact_with_audit(tmp_pat
     assert audit_log.sensitive is True
 
 
-def test_beta_operator_imports_only_manual_revenue_without_connector_power(tmp_path):
+@pytest.mark.parametrize("manual_connector_key", ["manual-upload", "manual_upload"])
+def test_beta_operator_imports_only_manual_revenue_without_connector_power(
+    tmp_path,
+    manual_connector_key,
+):
     """The beta workflow writes MANUAL_UPLOAD facts under its narrow audit permission."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
@@ -155,7 +160,7 @@ def test_beta_operator_imports_only_manual_revenue_without_connector_power(tmp_p
             "month": "2026-03",
             "youtube_channel_id": "channel-tv-a",
             "source_kind": "MANUAL_UPLOAD",
-            "connector_key": "manual-upload",
+            "connector_key": manual_connector_key,
             "source_report_id": "operator-upload-2026-03",
             "gross_revenue_usd": "1234.56",
             "views": 250000,
@@ -172,8 +177,41 @@ def test_beta_operator_imports_only_manual_revenue_without_connector_power(tmp_p
     assert response.status_code == 201, response.text
     assert fact.source_kind == "MANUAL_UPLOAD"
     assert audit_log.details["permission"] == "finance.import_manual_revenue"
+    assert audit_log.details["connector_key"] == manual_connector_key
     assert audit_log.scope_type == "connector"
-    assert audit_log.scope_id == "manual-upload"
+    assert audit_log.scope_id == manual_connector_key
+
+
+@pytest.mark.parametrize("manual_connector_key", ["manual-upload", "manual_upload"])
+def test_beta_operator_manual_alias_with_non_manual_source_fails_closed(
+    tmp_path,
+    manual_connector_key,
+):
+    """Both aliases require MANUAL_UPLOAD; neither grants generic connector power."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    client = TestClient(create_app(database_url=database_url))
+
+    response = client.post(
+        "/revenue/facts",
+        headers=auth_headers("beta_operator", "global"),
+        json={
+            "month": "2026-03",
+            "youtube_channel_id": "channel-tv-a",
+            "source_kind": "YOUTUBE_CMS",
+            "connector_key": manual_connector_key,
+            "gross_revenue_usd": "1234.56",
+            "reason": "Attempt non-manual import through manual alias",
+        },
+    )
+
+    engine = create_engine(database_url)
+    with Session(engine) as session:
+        assert session.scalars(select(MonthlyChannelRevenueFactORM)).all() == []
+        assert session.scalars(select(AuditLogORM)).all() == []
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Missing permission: connectors.run_jobs"
 
 
 def test_beta_operator_cannot_import_connector_sourced_revenue(tmp_path):

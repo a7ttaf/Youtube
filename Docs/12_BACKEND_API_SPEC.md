@@ -500,8 +500,10 @@ GET /revenue/source-rows/{id}
 revenue facts. Connector/service callers require `connectors.run_jobs` for the
 connector scope. The Google-free beta path instead accepts the global
 `finance.import_manual_revenue` permission only when `connector_key` is
-`manual-upload` (or its supported `manual_upload` alias) and `source_kind` is
-`MANUAL_UPLOAD`. That narrow permission does not authorize connector jobs,
+the exact, case-sensitive `manual-upload` or `manual_upload` value and
+`source_kind` is `MANUAL_UPLOAD`. The submitted alias is preserved as the
+connector scope and in the audit record; the route does not canonicalize one
+alias to the other. That narrow permission does not authorize connector jobs,
 raw-file registration, AdSense/payment sync, exchange-rate sync, or other
 source kinds. The `REPORT_IMPORTED` audit row records whichever permission
 actually authorized the write. The route validates connector/source-kind
@@ -751,9 +753,9 @@ alter previously requested data — the recorded export-determinism rule,
 distinct from the dashboard reads' snapshot-side attribution).
 Responses over OPEN months remain living
 data — two consecutive requests may differ — but within one response the money
-numbers always coexisted in the database. On SQLite (test tier) every lane
-shares one StaticPool connection, so reads are already transaction-consistent
-and the snapshot helper is a no-op there.
+numbers always coexisted in the database. On SQLite (test tier), independent
+sessions serialize checkout through a one-slot QueuePool that retains one
+physical connection; the snapshot helper remains a no-op there.
 
 `GET /revenue/months/{month}/net-revenue` is an implemented read-only net
 revenue foundation for `global`, `sector`, `company`, and `channel` scopes. It
