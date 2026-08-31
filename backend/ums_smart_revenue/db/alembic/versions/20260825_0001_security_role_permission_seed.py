@@ -18,17 +18,18 @@ any role (``user_role_assignments.role_key -> roles.key``,
 
 Source of truth
 ---------------
-The rows were derived from the **live Python registries** at authoring time and
-then frozen in ``db/frozen_security_catalog.py``. A later registry change must
-ship a forward migration instead of redefining this already-stamped revision:
+The rows are derived from the **live Python registries** rather than re-typed as
+literals, so the seeded catalog cannot drift from what the running application
+authorizes against:
 
 * ``auth/roles.py::ROLE_DEFINITIONS``      -> ``roles``
 * ``auth/permissions.py::PERMISSION_DEFINITIONS`` -> ``permissions``
 * ``auth/seed.py::initial_role_permission_rows`` -> ``role_permission_assignments``
 
-This migration imports only the frozen snapshot, never mutable runtime auth
-modules. ``20260825_0002`` is the forward repair that converges the historical
-catalog to the bounded beta-operator authorization contract.
+This follows the precedent set by ``20260608_0001_tenant_rls_enforcement``, which
+imports the live ``db/rls.py`` allowlist instead of freezing a copy. All three
+registry modules are dependency-free (stdlib ``enum``/``dataclasses`` only), so
+importing them here cannot drag application wiring into the migration process.
 
 Idempotency
 -----------
@@ -58,7 +59,7 @@ This revision redefines "a virgin database" (read before editing)
 Seeding rows is not a local act. Before this revision a freshly migrated
 database held 180 rows in three tables, and **zero** rows outside
 ``scripts/backup_database.py::SEED_TABLES``. After it a virgin
-``alembic upgrade head`` measures 38 tables / 344 rows, of which 164 sit in the
+``alembic upgrade head`` measures 38 tables / 328 rows, of which 148 sit in the
 three tables below. That difference is not cosmetic: the backup content gate
 uses "every table outside ``SEED_TABLES`` is empty" as the one signal that tells
 a healthy database from one that was wiped and re-migrated, and it is a

@@ -10,6 +10,14 @@ permissions, and 121 role-permission edges. In particular, it grants
 ``beta_operator`` the broad ``connectors.run_jobs`` permission and does not know
 the bounded ``finance.import_manual_revenue`` permission.
 
+Historical documentation erratum: despite ``20260825_0001`` saying its rows are
+derived from live Python registries, the published code imports the frozen
+``db/frozen_security_catalog.py`` snapshot. Its published counts are also 17
+roles + 26 permissions + 121 edges = 164 catalog rows; with the 180 pre-existing
+rows stated there, the virgin-database total was 344, not 328. The incorrect
+historical prose remains byte-for-byte untouched so its published Git blob stays
+auditable; this forward revision records the correction.
+
 This forward-only repair supports both database states that can exist in the
 field: the original historical seed and a database that ran the briefly amended
 copy of that same revision. Upgrade is idempotent in both cases. It refreshes the
@@ -19,12 +27,12 @@ The immutable snapshot for this revision lives in
 ``db/frozen_security_catalog_20260825_0002.py``; later registry changes require
 another revision and another snapshot.
 
-The three catalog tables are platform-wide and outside tenant RLS. The active
-assignment checks used by downgrade are read-only. Downgrade never restores the
-unsafe connector edge and never deletes catalog rows whose provenance cannot be
-recovered. It refuses active beta-role or direct manual-revenue grants so a
-single Alembic command cannot cross the immutable ``20260825_0001`` boundary and
-leave older application enums unable to deserialize durable authorization data.
+The three catalog tables are platform-wide and outside tenant RLS. This revision
+is an irreversible security floor: downgrading would restore the historical
+beta-role contract that grants broad connector execution, even when no active
+assignment exists. Its downgrade therefore refuses unconditionally before any
+database read or write. Rollback requires a reviewed reset/redeploy plan, not an
+Alembic downgrade across ``20260825_0002``.
 
 Fresh upgrade through both revisions converges to 17 roles, 27 permissions, and
 122 role-permission edges (166 catalog rows). No finance fact, formula, lock,
@@ -64,24 +72,12 @@ _ROLE_PERMISSIONS = sa.table(
     sa.column("role_key", sa.Text()),
     sa.column("permission_key", sa.Text()),
 )
-_USER_ROLE_ASSIGNMENTS = sa.table(
-    "user_role_assignments",
-    sa.column("role_key", sa.Text()),
-    sa.column("active", sa.Boolean()),
-)
-_USER_PERMISSION_GRANTS = sa.table(
-    "user_permission_grants",
-    sa.column("permission_key", sa.Text()),
-    sa.column("active", sa.Boolean()),
-)
-
 _BETA_OPERATOR_ROLE = "beta_operator"
-_IMPORT_MANUAL_REVENUE_PERMISSION = "finance.import_manual_revenue"
 _UNSAFE_BETA_CONNECTOR_PERMISSION = "connectors.run_jobs"
 
 
-class UnsafeAuthorizationDowngradeError(RuntimeError):
-    """Downgrade would cross history with incompatible active assignments."""
+class IrreversibleAuthorizationRepairError(RuntimeError):
+    """Downgrade would restore an authorization contract removed for safety."""
 
 
 def role_seed_rows() -> list[dict[str, object]]:
@@ -109,40 +105,31 @@ def upgrade() -> None:
 
 
 # ============================================================================
-# Purpose: Data-only rollback is non-destructive, but refuses while an active
-#   assignment would make a rollback crossing the immutable 20260825_0001
-#   boundary unsafe. That prior revision knows beta_operator but has a no-op
-#   downgrade, so this is the last safe place to block a multi-revision rollback.
-#   The prior revision does not know the manual-revenue permission. Catalog rows
-#   remain because their provenance cannot be recovered safely.
-#   Upgrade is insert-missing + metadata refresh: on a database that already ran
-#   ``security_seed.sql`` (a state upgrade explicitly supports) it inserts zero
-#   catalog rows. Provenance of any given canonical pair cannot be recovered later,
-#   so deleting ``role_permission_seed_rows()`` on downgrade would destroy
-#   pre-existing authorization catalog state this revision did not create.
-#   Operator-added non-canonical pairs would survive a registry wipe, but the
-#   canonical catalog itself would not. Leaving the catalog in place keeps
-#   PostgreSQL authorization parents intact; re-upgrade remains idempotent.
-# Database/ORM: Reads ``user_role_assignments`` and ``user_permission_grants``;
-#   catalog rows are left unchanged.
-# Standards: Parameterized SQLAlchemy expressions and a typed refusal. The
-#   operator must revoke incompatible active grants before retrying downgrade.
-# Blast Radius: Authorization catalog rows persist after ``alembic downgrade`` of
-#   this revision. No finance numbers, no RLS widening, no permission softening.
+# Purpose: Refuse every downgrade across this irreversible security repair.
+#   Returning to 20260825_0001 restores beta_operator's broad connector-job
+#   authorization contract even on an empty database, so data-dependent guards
+#   cannot make that rollback safe.
+# Database/ORM: None. The refusal occurs before acquiring or mutating a bind.
+# Standards: Typed fail-closed boundary with operator-safe recovery guidance.
+#   The Alembic transaction/version stamp remains at 20260825_0002.
+# Blast Radius: Authorization rollback is intentionally unavailable. No finance
+#   number, RLS posture, catalog row, assignment, or audit row is touched.
 # Connections:
 #   - File: backend/ums_smart_revenue/db/alembic/versions/
 #     20260825_0001_security_role_permission_seed.py -> immutable predecessor.
 #   - File: tests/db/test_security_role_permission_seed_migration.py -> guards.
 # ============================================================================
 def downgrade() -> None:
-    """Refuse incompatible active grants, then leave the catalog in place."""
-    bind = op.get_bind()
-    if _has_incompatible_active_grants(bind):
-        raise UnsafeAuthorizationDowngradeError(
-            "Cannot downgrade 20260825_0002 while active assignments depend on "
-            "beta_operator or finance.import_manual_revenue. Revoke those active "
-            "role/direct-permission grants, then retry the downgrade."
-        )
+    """Refuse rollback across the irreversible beta authorization repair."""
+    # FIX: The historical revision grants beta_operator broad connector-job
+    # execution. Absence of active grants does not make restoring that policy
+    # safe, so downgrade must refuse before any RLS-dependent inspection.
+    raise IrreversibleAuthorizationRepairError(
+        "Cannot downgrade across 20260825_0002: this irreversible security repair "
+        "removed beta_operator's broad connectors.run_jobs authorization. Keep the "
+        "database at 20260825_0002 or later. Rollback requires a reviewed database "
+        "reset/redeploy plan, not an Alembic downgrade."
+    )
 
 
 # ============================================================================
@@ -246,52 +233,6 @@ def _remove_unsafe_beta_connector_edge(bind: sa.engine.Connection) -> None:
             )
         )
     )
-
-
-# ============================================================================
-# Purpose: Detect active assignments that make a rollback across the historical
-#   seed unsafe: beta_operator is incompatible below 20260825_0001, while direct
-#   active grants of the new manual-revenue permission are incompatible with the
-#   immediately preceding application enum. Ordinary roles (including
-#   super_owner) remain compatible because policy derives role permissions from
-#   the old code's registry rather than deserializing catalog edges.
-# Database/ORM: ``user_role_assignments`` and ``user_permission_grants``;
-#   read-only.
-# Standards: Fail closed with parameterized SQLAlchemy expressions. Inactive
-#   historical rows do not block because principal loading ignores them.
-# Blast Radius: Deployment rollback safety for authorization only.
-# Connections:
-#   - File: backend/ums_smart_revenue/auth/roles.py -> beta RoleKey.
-#   - File: backend/ums_smart_revenue/auth/permissions.py -> typed permission.
-# ============================================================================
-def _has_incompatible_active_grants(bind: sa.engine.Connection) -> bool:
-    """Return whether an active grant requires post-revision enum values."""
-    active_beta = bind.execute(
-        sa.select(sa.literal(1))
-        .select_from(_USER_ROLE_ASSIGNMENTS)
-        .where(
-            sa.and_(
-                _USER_ROLE_ASSIGNMENTS.c.active.is_(True),
-                _USER_ROLE_ASSIGNMENTS.c.role_key == _BETA_OPERATOR_ROLE,
-            )
-        )
-        .limit(1)
-    ).first()
-    if active_beta is not None:
-        return True
-
-    active_direct_import = bind.execute(
-        sa.select(sa.literal(1))
-        .select_from(_USER_PERMISSION_GRANTS)
-        .where(
-            sa.and_(
-                _USER_PERMISSION_GRANTS.c.active.is_(True),
-                _USER_PERMISSION_GRANTS.c.permission_key == _IMPORT_MANUAL_REVENUE_PERMISSION,
-            )
-        )
-        .limit(1)
-    ).first()
-    return active_direct_import is not None
 
 
 # ============================================================================

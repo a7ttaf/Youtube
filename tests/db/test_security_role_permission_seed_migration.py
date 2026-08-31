@@ -23,7 +23,6 @@ import importlib.util
 import json
 import re
 from collections.abc import Iterable
-from datetime import UTC, datetime
 from pathlib import Path
 from types import ModuleType
 from uuid import uuid4
@@ -81,7 +80,10 @@ REPAIR_MIGRATION_PATH = (
 HISTORICAL_SNAPSHOT_PATH = PROJECT_ROOT / "backend/ums_smart_revenue/db/frozen_security_catalog.py"
 SEED_SQL_PATH = PROJECT_ROOT / "backend/ums_smart_revenue/db/security_seed.sql"
 
-_HISTORICAL_MIGRATION_SHA256 = "00270996e472ee3429623a6360f0fef4c6e0a6048d7f70e2bdb40d043942fd05"
+_HISTORICAL_MIGRATION_GIT_BLOB = "9df02500cdc0508da211ad51e5d3e0306a67771b"
+_HISTORICAL_MIGRATION_SHA256 = "01a93d377fa9b5c296daffbc0cc600a6949021fa53bddeae546ce7cb6b7766c5"
+_HISTORICAL_SNAPSHOT_GIT_BLOB = "ad37a09cdbddc45e558af6536e09382f7a1fcb8d"
+_HISTORICAL_SNAPSHOT_SHA256 = "b8c1fe5ba2a571873a3bdd60d37961a4dbb471e6594cdf80cdfef2ec78f85ec5"
 _HISTORICAL_SNAPSHOT_SEMANTIC_SHA256 = (
     "376561bbe0f37448800df279d39b161f1f0d9ce03381dfc0c578df3e69704705"
 )
@@ -369,6 +371,12 @@ def _catalog_semantic_digest(
     payload = [role_rows, permission_rows, role_permission_rows]
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
     return hashlib.sha256(encoded).hexdigest()
+
+
+def _git_blob_oid(content: bytes) -> str:
+    """Compute the immutable Git blob identity without reading repository state."""
+    payload = f"blob {len(content)}\0".encode() + content
+    return hashlib.sha1(payload, usedforsecurity=False).hexdigest()
 
 
 def _table_counts(connection: Connection) -> dict[str, int]:
@@ -676,122 +684,24 @@ def test_migration_downgrade_keeps_rows_a_live_assignment_still_needs() -> None:
         assert ("finance_admin", "finance.view_revenue") in _stored_pairs(connection)
 
 
-def test_migration_downgrade_refuses_an_active_beta_operator_assignment() -> None:
-    """The repair blocks a command that could cross below beta-role history."""
-    historical = _historical_migration_module()
-    repair = _repair_migration_module()
-    engine = _security_engine()
-
-    with engine.begin() as connection:
-        _bind_operations(historical, connection)
-        historical.upgrade()
-        _bind_operations(repair, connection)
-        repair.upgrade()
-
-    user_id = uuid4()
-    scope_id = uuid4()
-    with Session(engine) as session:
-        session.add(UserORM(id=user_id, email="beta@example.com", display_name="Beta"))
-        session.add(AccessScopeORM(id=scope_id, scope_type="global", scope_id=None, label="Global"))
-        session.add(
-            UserRoleAssignmentORM(
-                id=uuid4(),
-                user_id=user_id,
-                role_key=RoleKey.BETA_OPERATOR.value,
-                scope_id=scope_id,
-                active=True,
-            )
-        )
-        session.commit()
-
-    with engine.begin() as connection:
-        _bind_operations(repair, connection)
-        with pytest.raises(repair.UnsafeAuthorizationDowngradeError, match="beta_operator"):
-            repair.downgrade()
-
-
-def test_migration_downgrade_refuses_an_active_direct_manual_revenue_grant() -> None:
-    """Old Permission enums cannot deserialize a direct manual-revenue grant."""
-    historical = _historical_migration_module()
-    repair = _repair_migration_module()
-    engine = _security_engine()
-
-    with engine.begin() as connection:
-        _bind_operations(historical, connection)
-        historical.upgrade()
-        _bind_operations(repair, connection)
-        repair.upgrade()
-
-    user_id = uuid4()
-    scope_id = uuid4()
-    with Session(engine) as session:
-        session.add(UserORM(id=user_id, email="direct@example.com", display_name="Direct"))
-        session.add(AccessScopeORM(id=scope_id, scope_type="global", scope_id=None, label="Global"))
-        session.add(
-            UserPermissionGrantORM(
-                id=uuid4(),
-                user_id=user_id,
-                permission_key=Permission.IMPORT_MANUAL_REVENUE.value,
-                scope_id=scope_id,
-                active=True,
-            )
-        )
-        session.commit()
-
-    with engine.begin() as connection:
-        _bind_operations(repair, connection)
-        with pytest.raises(
-            repair.UnsafeAuthorizationDowngradeError,
-            match=Permission.IMPORT_MANUAL_REVENUE.value,
-        ):
-            repair.downgrade()
-
-
-def test_repair_downgrade_allows_inactive_history_and_preserves_catalog() -> None:
-    """Inactive incompatible history is safe; downgrade remains non-destructive."""
+def test_repair_downgrade_is_unconditionally_irreversible() -> None:
+    """Even an empty assignment state cannot restore the unsafe beta contract."""
     repair = _repair_migration_module()
     engine = _security_engine()
 
     with engine.begin() as connection:
         _bind_operations(repair, connection)
         repair.upgrade()
-
-    user_id = uuid4()
-    scope_id = uuid4()
-    revoked_at = datetime.now(UTC)
-    with Session(engine) as session:
-        session.add(UserORM(id=user_id, email="inactive@example.com", display_name="Inactive"))
-        session.add(AccessScopeORM(id=scope_id, scope_type="global", scope_id=None, label="Global"))
-        session.add(
-            UserRoleAssignmentORM(
-                id=uuid4(),
-                user_id=user_id,
-                role_key="beta_operator",
-                scope_id=scope_id,
-                active=False,
-                revoked_at=revoked_at,
-            )
-        )
-        session.add(
-            UserPermissionGrantORM(
-                id=uuid4(),
-                user_id=user_id,
-                permission_key="finance.import_manual_revenue",
-                scope_id=scope_id,
-                active=False,
-                revoked_at=revoked_at,
-            )
-        )
-        session.commit()
-
-    with engine.begin() as connection:
         before = (
             _stored_roles(connection),
             _stored_permissions(connection),
             _stored_pairs(connection),
         )
-        _bind_operations(repair, connection)
-        repair.downgrade()
+        with pytest.raises(
+            repair.IrreversibleAuthorizationRepairError,
+            match="irreversible security repair",
+        ):
+            repair.downgrade()
         assert (
             _stored_roles(connection),
             _stored_permissions(connection),
@@ -811,13 +721,15 @@ def test_beta_operator_catalog_grants_manual_revenue_but_not_connector_execution
 
 
 def test_historical_migration_logic_and_snapshot_semantics_are_immutable() -> None:
-    """Stamped upgrade logic and normalized catalog values remain historical."""
+    """Stamped source bytes, upgrade logic, and catalog values remain historical."""
     module = _historical_migration_module()
-    assert (
-        hashlib.sha256(HISTORICAL_MIGRATION_PATH.read_text(encoding="utf-8").encode()).hexdigest()
-        == _HISTORICAL_MIGRATION_SHA256
-    )
+    migration_bytes = HISTORICAL_MIGRATION_PATH.read_bytes()
+    snapshot_bytes = HISTORICAL_SNAPSHOT_PATH.read_bytes()
+    assert _git_blob_oid(migration_bytes) == _HISTORICAL_MIGRATION_GIT_BLOB
+    assert hashlib.sha256(migration_bytes).hexdigest() == _HISTORICAL_MIGRATION_SHA256
     assert HISTORICAL_SNAPSHOT_PATH.is_file()
+    assert _git_blob_oid(snapshot_bytes) == _HISTORICAL_SNAPSHOT_GIT_BLOB
+    assert hashlib.sha256(snapshot_bytes).hexdigest() == _HISTORICAL_SNAPSHOT_SHA256
     assert (
         _catalog_semantic_digest(
             HISTORICAL_ROLE_ROWS,
