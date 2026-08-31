@@ -255,9 +255,11 @@ docker compose down                     # stop + remove containers, KEEP the dat
 
 > ⚠️ **`.env.example` is not yet a complete template for compose.** It predates the
 > database variables, so `docker compose --env-file .env.example config` exits 1 on
-> `UMS_DB_USER`. The compose file's own header — the paragraph beginning *"Until it
-> does, this file is the authoritative list"* — enumerates the five variables that have
-> no default. Completing the template is plan item P0.3.
+> `UMS_DB_USER`. Until the template is completed, provide all five required,
+> no-default variables: `UMS_DB_USER`, `UMS_DB_PASSWORD`,
+> `UMS_DB_PASSWORD_URLENC`, `UMS_DB_NAME`, and `UMS_TRUSTED_GATEWAY_TOKEN`.
+> The compose file's own header repeats this authoritative list beside the actual
+> interpolations. Completing the template is plan item P0.3.
 
 > **Compose environment boundary:** `docker-compose.yml` passes the database, auth,
 > CORS, rate-limit, forwarding, and Redis settings shown in its `x-app-env` block.

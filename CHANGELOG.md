@@ -16,6 +16,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the latent silent-zero gap where every channel kept `content_owner_id=None`
   and no channel was ever selected for ingestion. No migration — the
   `youtube_channels.content_owner_id` column already existed.
+- Vite development gateway proxy coverage for every tenant-scoped API prefix
+  currently requested by the dashboard, including `/session`, `/users`, and
+  `/audit`. The proxy now strips browser-supplied trusted-identity headers
+  before injecting the configured local principal, keeps
+  `UMS_TRUSTED_GATEWAY_TOKEN` in Node-only configuration, and
+  fails closed for non-loopback `VITE_DEV_BACKEND_URL` targets unless their
+  HTTPS origin is listed in `UMS_DEV_TRUSTED_BACKEND_ORIGINS`. The non-secret
+  local identity knobs are `VITE_DEV_GATEWAY_USER_ID`,
+  `VITE_DEV_GATEWAY_USER_EMAIL`, `VITE_DEV_GATEWAY_ROLE`,
+  `VITE_DEV_GATEWAY_SCOPE_TYPE`, `VITE_DEV_GATEWAY_SCOPE_ID`, and
+  `VITE_DEV_GATEWAY_TENANT_SLUG`.
 - Root governance: `README.md`, `SECURITY.md`, `CONTRIBUTING.md`, `CODEOWNERS`, `CODE_OF_CONDUCT.md`, `.gitignore`.
 
 ### Changed
