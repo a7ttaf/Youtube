@@ -19,6 +19,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 from starlette.responses import Response as StarletteResponse
 
+from ums_smart_revenue.api.dependencies_audit import current_audit_sink
 from ums_smart_revenue.api.exports import (
     _artifact_metadata_audit_details,
     _persist_generated_export_artifact,
@@ -26,6 +27,7 @@ from ums_smart_revenue.api.exports import (
     _require_persisted_artifact_bytes,
 )
 from ums_smart_revenue.app import create_app
+from ums_smart_revenue.auth.audit_service import InMemoryAuditSink
 from ums_smart_revenue.db.finance_models import (
     AdSensePaymentORM,
     BankReconciliationEntryORM,
@@ -57,6 +59,37 @@ USER_ID = UUID("00000000-0000-0000-0000-000000023301")
 EXPORT_ID = UUID("00000000-0000-0000-0000-000000023401")
 GROUP_ID = UUID("00000000-0000-0000-0000-000000023501")
 OTHER_USER_ID = UUID("00000000-0000-0000-0000-000000023601")
+
+
+class _FailingAuditCommitUnitOfWork:
+    """SQL-like audit unit of work that fails at the durability boundary."""
+
+    def __init__(self) -> None:
+        self.commit_attempted = False
+        self.rollback_attempted = False
+        self.expunge_attempted = False
+
+    def commit(self) -> None:
+        """Raise as a SQL audit commit would after audit rows were appended."""
+        self.commit_attempted = True
+        raise SQLAlchemyError("audit commit failed")
+
+    def rollback(self) -> None:
+        """Record rollback after a failed audit commit."""
+        self.rollback_attempted = True
+
+    def expunge_all(self) -> None:
+        """Record identity-map cleanup after rollback."""
+        self.expunge_attempted = True
+
+
+class _FailingAuditCommitSink(InMemoryAuditSink):
+    """Capture requested audit rows, then fail when the route commits them."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.unit_of_work = _FailingAuditCommitUnitOfWork()
+        self.sql_unit_of_work = self.unit_of_work
 
 
 def _utc_timestamp(value: datetime) -> float:
@@ -609,9 +642,7 @@ def test_finance_workbook_prepare_is_bodyless_and_real_get_reauthorizes(
     assert downloaded.status_code == 200
     assert downloaded.headers["cache-control"] == "no-store"
     assert "ums-finance-2026-03-global.xlsx" in downloaded.headers["content-disposition"]
-    assert hashlib.sha256(downloaded.content).hexdigest() == (
-        prepared_job.artifact_checksum_sha256
-    )
+    assert hashlib.sha256(downloaded.content).hexdigest() == (prepared_job.artifact_checksum_sha256)
     assert {event.event_type for event in download_audits} == {
         "BANK_RECONCILIATION_VIEWED",
         "EXPORT_DOWNLOADED",
@@ -632,6 +663,63 @@ def test_prepared_artifact_response_fails_closed_when_commit_fails():
 
     assert raised.value.status_code == 503
     assert raised.value.detail == "Export artifact persistence unavailable"
+
+
+@pytest.mark.parametrize(
+    ("export_type", "route", "artifact_prefix"),
+    [
+        ("FINANCE_EXCEL", f"/exports/{EXPORT_ID}/finance-workbook.xlsx", b"PK"),
+        ("EXECUTIVE_PDF", f"/exports/{EXPORT_ID}/executive.pdf", b"%PDF-"),
+        ("BRANDED_SLIDE_PACK", f"/exports/{EXPORT_ID}/branded-slide-pack.pptx", b"PK"),
+    ],
+)
+def test_finance_artifact_download_fails_closed_when_audit_commit_fails(
+    tmp_path,
+    monkeypatch,
+    export_type,
+    route,
+    artifact_prefix,
+):
+    """Return 503 before finance artifact bytes start when audit commit fails."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url, export_type=export_type)
+    app = create_app(database_url=database_url)
+    audit_sink = _FailingAuditCommitSink()
+    app.dependency_overrides[current_audit_sink] = lambda: audit_sink
+    engine = create_engine(database_url)
+    original_response_call = StarletteResponse.__call__
+    response_starts: list[int] = []
+    response_bodies: list[bytes] = []
+
+    async def observe_response_start(response, scope, receive, send):
+        async def observe_send(message):
+            if message["type"] == "http.response.start":
+                response_starts.append(message["status"])
+            if message["type"] == "http.response.body":
+                response_bodies.append(message.get("body", b""))
+            await send(message)
+
+        await original_response_call(response, scope, receive, observe_send)
+
+    monkeypatch.setattr(StarletteResponse, "__call__", observe_response_start)
+
+    response = TestClient(app).get(route, headers=auth_headers("finance_admin"))
+
+    with Session(engine) as session:
+        export_job = session.get(ExportJobORM, EXPORT_ID)
+        audit_events = session.scalars(select(AuditLogORM)).all()
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == "Export artifact audit unavailable"
+    assert response_starts == [503]
+    assert not any(body.startswith(artifact_prefix) for body in response_bodies)
+    assert audit_sink.unit_of_work.commit_attempted is True
+    assert audit_sink.unit_of_work.rollback_attempted is True
+    assert audit_sink.unit_of_work.expunge_attempted is True
+    assert {record.event_type for record in audit_sink.records} >= {"EXPORT_DOWNLOADED"}
+    assert export_job is not None
+    assert export_job.status == "QUEUED"
+    assert audit_events == []
 
 
 def test_finance_workbook_download_persists_artifact_and_completes_job(

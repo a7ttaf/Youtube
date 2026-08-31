@@ -536,7 +536,7 @@ describe("ExportsView wired to the exports endpoint", () => {
     ).toBeEnabled();
   });
 
-  it("reloads exactly once after a successful queued preparation and native start", async () => {
+  it("reloads exactly once after a successful queued preparation and anchor dispatch", async () => {
     let listCallCount = 0;
     const anchorClick = vi
       .spyOn(HTMLAnchorElement.prototype, "click")
@@ -646,7 +646,7 @@ describe("ExportsView wired to the exports endpoint", () => {
     await waitFor(() => expect(anchorClick).toHaveBeenCalledTimes(1));
   });
 
-  it("surfaces a native-download start failure and skips reload", async () => {
+  it("surfaces a synchronous anchor-dispatch failure and skips reload", async () => {
     let listCallCount = 0;
     vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => {
       throw new Error("Browser refused the download");

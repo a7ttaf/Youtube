@@ -12,6 +12,7 @@
 #   - File: backend/ums_smart_revenue/reports/artifact_storage.py -> Artifact IO.
 # ============================================================================
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Annotated
 from uuid import UUID
@@ -633,12 +634,15 @@ def download_analytics_summary_csv(
     if prepare:
         return _prepared_artifact_response(session=session)
 
-    _record_analytics_export_artifact_audit(
+    _commit_export_download_audit_before_response(
         audit_sink=audit_sink,
-        user=user,
-        export_job=artifact.export_job,
-        group_registry=group_registry,
-        artifact_type="analytics_summary_csv",
+        record_audit=lambda: _record_analytics_export_artifact_audit(
+            audit_sink=audit_sink,
+            user=user,
+            export_job=artifact.export_job,
+            group_registry=group_registry,
+            artifact_type="analytics_summary_csv",
+        ),
     )
     return Response(
         content=artifact.content,
@@ -761,15 +765,18 @@ def download_finance_workbook(
     if prepare:
         return _prepared_artifact_response(session=session)
 
-    _record_finance_export_artifact_audit(
-        context=_FinanceExportAuditContext(
-            audit_sink=audit_sink,
-            user=user,
-            export_job=export_job,
-            group_registry=group_registry,
+    _commit_export_download_audit_before_response(
+        audit_sink=audit_sink,
+        record_audit=lambda: _record_finance_export_artifact_audit(
+            context=_FinanceExportAuditContext(
+                audit_sink=audit_sink,
+                user=user,
+                export_job=export_job,
+                group_registry=group_registry,
+            ),
+            artifact_type="finance_workbook_xlsx",
+            include_download_event=True,
         ),
-        artifact_type="finance_workbook_xlsx",
-        include_download_event=True,
     )
     return Response(
         content=workbook_bytes,
@@ -900,15 +907,18 @@ def download_executive_pdf(
     if prepare:
         return _prepared_artifact_response(session=session)
 
-    _record_finance_export_artifact_audit(
-        context=_FinanceExportAuditContext(
-            audit_sink=audit_sink,
-            user=user,
-            export_job=export_job,
-            group_registry=group_registry,
+    _commit_export_download_audit_before_response(
+        audit_sink=audit_sink,
+        record_audit=lambda: _record_finance_export_artifact_audit(
+            context=_FinanceExportAuditContext(
+                audit_sink=audit_sink,
+                user=user,
+                export_job=export_job,
+                group_registry=group_registry,
+            ),
+            artifact_type="executive_pdf",
+            include_download_event=True,
         ),
-        artifact_type="executive_pdf",
-        include_download_event=True,
     )
     return Response(
         content=pdf_bytes,
@@ -1041,15 +1051,18 @@ def download_branded_slide_pack(
     if prepare:
         return _prepared_artifact_response(session=session)
 
-    _record_finance_export_artifact_audit(
-        context=_FinanceExportAuditContext(
-            audit_sink=audit_sink,
-            user=user,
-            export_job=export_job,
-            group_registry=group_registry,
+    _commit_export_download_audit_before_response(
+        audit_sink=audit_sink,
+        record_audit=lambda: _record_finance_export_artifact_audit(
+            context=_FinanceExportAuditContext(
+                audit_sink=audit_sink,
+                user=user,
+                export_job=export_job,
+                group_registry=group_registry,
+            ),
+            artifact_type="branded_slide_pack_pptx",
+            include_download_event=True,
         ),
-        artifact_type="branded_slide_pack_pptx",
-        include_download_event=True,
     )
     return Response(
         content=pptx_bytes,
@@ -1109,6 +1122,61 @@ def _prepared_artifact_response(*, session: Session) -> Response:
         status_code=status.HTTP_204_NO_CONTENT,
         headers={"Cache-Control": _ARTIFACT_CACHE_CONTROL},
     )
+
+
+# ============================================================================
+# Purpose: Persist every ordinary artifact-download audit row before building
+# the response that carries sensitive export bytes.
+# Database/ORM: Commits the AuditSink SQL unit of work when the sink is SQL
+# backed; in-memory sinks have no durability boundary.
+# Standards: Batch appends sit in the sink transaction, commit failures roll
+# back fail-closed as a safe 503, and no artifact Response is constructed until
+# audit durability succeeds.
+# Blast Radius: Export-download audit durability and response-start ordering.
+# Connections:
+#   - File: backend/ums_smart_revenue/auth/sql_audit_sink.py -> SQL unit of work.
+#   - File: backend/ums_smart_revenue/api/dependencies.py -> Request-scope commit.
+# ============================================================================
+def _commit_export_download_audit_before_response(
+    *,
+    audit_sink: AuditSink,
+    record_audit: Callable[[], object],
+) -> None:
+    """Record and durably commit download audit rows before exposing artifact bytes."""
+    try:
+        with audit_sink.transaction():
+            record_audit()
+        _commit_audit_sink_unit_of_work(audit_sink)
+    except SQLAlchemyError as exc:
+        _rollback_audit_sink_unit_of_work(audit_sink)
+        logger.exception("Export artifact download audit commit failed")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Export artifact audit unavailable",
+        ) from exc
+
+
+def _commit_audit_sink_unit_of_work(audit_sink: AuditSink) -> None:
+    """Commit a SQL-backed audit sink; in-memory sinks need no durability call."""
+    unit_of_work = audit_sink.sql_unit_of_work
+    if unit_of_work is None:
+        return
+    commit = getattr(unit_of_work, "commit", None)
+    if callable(commit):
+        commit()
+
+
+def _rollback_audit_sink_unit_of_work(audit_sink: AuditSink) -> None:
+    """Rollback a failed SQL-backed audit sink before dependency teardown."""
+    unit_of_work = audit_sink.sql_unit_of_work
+    if unit_of_work is None:
+        return
+    rollback = getattr(unit_of_work, "rollback", None)
+    if callable(rollback):
+        rollback()
+    expunge_all = getattr(unit_of_work, "expunge_all", None)
+    if callable(expunge_all):
+        expunge_all()
 
 
 def _artifact_download_headers(filename: str) -> dict[str, str]:

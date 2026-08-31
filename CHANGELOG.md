@@ -62,6 +62,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `.created`, `.updated`, and `.unchanged` for source-row classification.
 
 ### Fixed
+- Export artifact downloads now commit their sensitive read/download audit rows
+  before the HTTP artifact response is constructed. If that audit commit fails,
+  XLSX, PDF, PPTX, and analytics CSV GETs fail closed with `503` and no
+  artifact body is sent.
 - Regenerated the stale `uv.lock`. It still resolved `fastapi==0.136.3` and
   `pytest==9.0.3` while `pyproject.toml` declared `0.137.1` and `9.1.0`, so
   container images silently ran the older packages. `uv lock --check` now

@@ -664,12 +664,13 @@ const exportDownloadErrorDetail = (caught: unknown): string => {
 };
 
 // ============================================================================
-// Purpose: Prepare one authenticated, tenant-scoped artifact, start its native
-//   same-origin download, and reload authoritative job metadata on success.
+// Purpose: Prepare one authenticated, tenant-scoped artifact, dispatch its
+//   same-origin native download, and reload authoritative job metadata.
 // Database/ORM: None (frontend) — invokes protected backend export routes only.
 // Standards: Shared API client owns prepare auth/base URL/tenant headers; the
-//   native GET re-enters the production gateway and backend authorization. All
-//   prepare/start failures become safe UI detail and the latch always releases.
+//   native GET re-enters the production gateway and backend authorization.
+//   Prepare failures and synchronous anchor-dispatch failures become safe UI
+//   detail; the browser owns the independent GET result after dispatch.
 // Blast Radius: Export artifact download only; no finance or auth decision is
 //   calculated client-side; no artifact bytes are materialized in JavaScript.
 // Connections:
@@ -690,7 +691,7 @@ const ExportDownloadAction = ({
   const [errorDetail, setErrorDetail] = useState<string | null>(null);
   const inFlightRef = useRef(false);
 
-  /** Start one download and retain the latch until save/reload settles. */
+  /** Prepare, dispatch one download, and retain the latch until reload settles. */
   const startDownload = (): void => {
     // State updates are asynchronous; the ref closes the same-tick window
     // where two click handlers could otherwise both observe busy === false.
@@ -699,7 +700,7 @@ const ExportDownloadAction = ({
     setBusy(true);
     setErrorDetail(null);
 
-    /** Prepare, start the native transfer, then reload authoritative metadata. */
+    /** Prepare, dispatch the native transfer, then reload authoritative metadata. */
     const prepareAndDownload = async (): Promise<void> => {
       // FIX: Response.blob() retained the complete artifact (up to the backend's
       // 500 MiB limit) in the SPA heap. Preparation returns no bytes; the actual
