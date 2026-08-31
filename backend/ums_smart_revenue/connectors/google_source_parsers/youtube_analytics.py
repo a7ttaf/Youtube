@@ -22,6 +22,11 @@ from ums_smart_revenue.connectors.google_source_parsers.source_row_keys import (
     build_source_row_key,
 )
 from ums_smart_revenue.connectors.google_source_rows import ParsedSourceRow
+from ums_smart_revenue.connectors.google_source_rows.dataclasses import (
+    YOUTUBE_ANALYTICS_COUNTRY_EVIDENCE_REPORT_TYPE,
+    YOUTUBE_ANALYTICS_PROJECTING_REPORT_TYPE,
+    SourceRowProjectionDisposition,
+)
 
 _MONETARY_METRICS: Final[frozenset[str]] = frozenset(
     {
@@ -78,6 +83,8 @@ class _AnalyticsParseContext:
     declared_dimensions: frozenset[str]
     query_signature: str
     filters_key: str | None
+    projection_disposition: SourceRowProjectionDisposition
+    requested_metrics: frozenset[str]
 
 
 # ============================================================================
@@ -96,9 +103,26 @@ def _analytics_parse_context(request: dict[str, object]) -> _AnalyticsParseConte
     period_end = parse_iso_date(require_str(request, "endDate"), field="endDate")
     currency = _analytics_currency(request)
     include_historical = _analytics_include_historical(request)
-    require_str(request, "metrics")
+    metrics_csv = require_str(request, "metrics")
     dimensions_csv = require_str(request, "dimensions")
+    # Strict declaration first: canonical, unique, whitespace-free names. Its
+    # exactness subsumes the legacy "at least one dimension" emptiness guard.
     declared_dimensions = _analytics_declared_dimensions(dimensions_csv)
+    requested_dimensions = declared_dimensions
+    if "country" in requested_dimensions and not requested_dimensions.issubset(
+        {"channel", "country"}
+    ):
+        raise ParserError(
+            "country evidence query_request.dimensions may contain only channel,country"
+        )
+    requested_metrics = frozenset(part.strip() for part in metrics_csv.split(",") if part.strip())
+    if not requested_metrics:
+        raise ParserError("query_request.metrics must name at least one metric")
+    projection_disposition = (
+        SourceRowProjectionDisposition.NON_PROJECTING_EVIDENCE
+        if "country" in requested_dimensions
+        else SourceRowProjectionDisposition.PROJECTING
+    )
     content_owner_id, normalized_ids = _analytics_ids(require_str(request, "ids"))
     filters_key = _analytics_filters_key(request)
     _require_analytics_single_month_range(period_start, period_end)
@@ -116,6 +140,8 @@ def _analytics_parse_context(request: dict[str, object]) -> _AnalyticsParseConte
         declared_dimensions=declared_dimensions,
         query_signature=query_signature,
         filters_key=filters_key,
+        projection_disposition=projection_disposition,
+        requested_metrics=requested_metrics,
     )
 
 
@@ -257,6 +283,37 @@ def _require_matching_dimension_headers(
         )
 
 
+# ============================================================================
+# Purpose: Match the response country dimension to the parser-owned request
+#          classification, including empty responses with headers only.
+# Database/ORM: None.
+# Standards: Typed ParserError and fail-closed request/response validation.
+# Blast Radius: Evidence provenance and finance projection eligibility.
+# Connections:
+#   - File: backend/ums_smart_revenue/connectors/google/
+#     youtube_analytics_client.py -> Builds country-dimensional requests.
+#   - File: backend/ums_smart_revenue/finance/google_source_normalizer.py ->
+#     Independently revalidates persisted provenance before projection.
+# ============================================================================
+def _require_projection_header_contract(
+    header_specs: list[tuple[str, str]],
+    *,
+    disposition: SourceRowProjectionDisposition,
+    requested_metrics: frozenset[str],
+) -> None:
+    """Keep response dimensions consistent with the request's projection class."""
+    dimension_names = {name for column_type, name in header_specs if column_type == "DIMENSION"}
+    metric_names = {name for column_type, name in header_specs if column_type == "METRIC"}
+    has_country = "country" in dimension_names
+    expects_country = disposition is SourceRowProjectionDisposition.NON_PROJECTING_EVIDENCE
+    if has_country != expects_country:
+        raise ParserError(
+            "country response dimension does not match query_request projection contract"
+        )
+    if expects_country and metric_names != requested_metrics:
+        raise ParserError("country response metrics must exactly match query_request.metrics")
+
+
 def _analytics_row_values(
     data_row: object,
     header_specs: list[tuple[str, str]],
@@ -285,6 +342,38 @@ def _normalize_analytics_channel(dim_values: dict[str, object]) -> str:
     channel = channel.strip()
     dim_values["channel"] = channel
     return channel
+
+
+# ============================================================================
+# Purpose: Validate the country attribution token before any evidence source
+#          row is yielded to persistence.
+# Database/ORM: None.
+# Standards: Uppercase two-letter ASCII token; typed ParserError on defects.
+# Blast Radius: Evidence provenance only; malformed rows fail the report.
+# Connections:
+#   - File: backend/ums_smart_revenue/connectors/runs/orchestrator.py -> Marks
+#     parser failures as report-scoped partial outcomes.
+#   - File: backend/ums_smart_revenue/finance/google_source_normalizer.py ->
+#     Revalidates the token at the projection boundary.
+# ============================================================================
+def _normalize_country_evidence_dimension(
+    dim_values: dict[str, object],
+    *,
+    disposition: SourceRowProjectionDisposition,
+) -> str | None:
+    """Validate and preserve the ISO-like country token on evidence-only rows."""
+    if disposition is SourceRowProjectionDisposition.PROJECTING:
+        return None
+    country = dim_values.get("country")
+    if (
+        not isinstance(country, str)
+        or len(country) != 2
+        or not country.isascii()
+        or not country.isalpha()
+        or country.upper() != country
+    ):
+        raise ParserError("dimensions.country must be an uppercase two-letter code")
+    return country
 
 
 def _iter_analytics_source_rows(
@@ -316,7 +405,12 @@ def _iter_analytics_source_rows(
             source_account_id=context.normalized_ids,
             content_owner_id=context.content_owner_id,
             youtube_channel_id=channel,
-            report_type="reports.query",
+            report_type=(
+                YOUTUBE_ANALYTICS_COUNTRY_EVIDENCE_REPORT_TYPE
+                if context.projection_disposition
+                is SourceRowProjectionDisposition.NON_PROJECTING_EVIDENCE
+                else YOUTUBE_ANALYTICS_PROJECTING_REPORT_TYPE
+            ),
             report_month=f"{context.period_start.year:04d}-{context.period_start.month:02d}",
             period_start=context.period_start,
             period_end=context.period_end,
@@ -325,7 +419,12 @@ def _iter_analytics_source_rows(
             amount_native=parse_decimal_amount(raw_value, metric_key=metric_name),
             currency_code=context.currency,
             source_report_id=None,
-            raw_payload={"dimensions": dict(dim_values), "metric": metric_name, "value": raw_value},
+            raw_payload={
+                "dimensions": dict(dim_values),
+                "metric": metric_name,
+                "projection_disposition": context.projection_disposition.value,
+                "value": raw_value,
+            },
         )
 
 
@@ -358,11 +457,20 @@ class YouTubeAnalyticsParser:
             declared_dimensions=context.declared_dimensions,
             header_specs=header_specs,
         )
+        _require_projection_header_contract(
+            header_specs,
+            disposition=context.projection_disposition,
+            requested_metrics=context.requested_metrics,
+        )
         metric_names = [name for column_type, name in header_specs if column_type == "METRIC"]
 
         for data_row in _analytics_rows(payload):
             dim_values, metric_values = _analytics_row_values(data_row, header_specs)
             channel = _normalize_analytics_channel(dim_values)
+            _normalize_country_evidence_dimension(
+                dim_values,
+                disposition=context.projection_disposition,
+            )
             yield from _iter_analytics_source_rows(
                 source_system=self.source_system,
                 context=context,

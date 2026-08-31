@@ -48,6 +48,7 @@ from google.oauth2.credentials import Credentials
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
+from ums_smart_revenue.config.settings import AppSettings
 from ums_smart_revenue.connectors.google import (
     local_secret_resolver,
     secret_resolver,
@@ -66,6 +67,10 @@ from ums_smart_revenue.connectors.google.youtube_analytics_client import (
     _METRICS as _ANALYTICS_METRICS,
 )
 from ums_smart_revenue.connectors.google_source_parsers.base import ParserError
+from ums_smart_revenue.connectors.google_source_rows.dataclasses import (
+    YOUTUBE_ANALYTICS_COUNTRY_EVIDENCE_REPORT_TYPE,
+    YOUTUBE_ANALYTICS_PROJECTING_REPORT_TYPE,
+)
 from ums_smart_revenue.connectors.runs import orchestrator as orchestrator_module
 from ums_smart_revenue.connectors.runs.blob_storage import compute_checksum
 from ums_smart_revenue.connectors.runs.orchestrator import (
@@ -3356,6 +3361,126 @@ def test_run_one_with_youtube_analytics_empty_success_replaces_existing_rows(
         )
     ).all()
     assert final_rows == []
+
+
+def test_country_evidence_survives_a_flag_off_worldwide_rerun(
+    session: Session,
+    _stub_secret_resolver,
+) -> None:
+    """Enabled-to-disabled U2 transition cannot delete retained evidence rows."""
+    channel_id = "UC_country_toggle"
+    report_month = "2026-05"
+    session.add(
+        YouTubeChannelORM(
+            id=uuid4(),
+            tenant_id=TENANT_ID,
+            youtube_channel_id=channel_id,
+            channel_name="Country Toggle",
+            content_owner_id=_ANALYTICS_ACCOUNT_ID,
+            active=True,
+            revenue_required=True,
+            cms_status="INSIDE_CMS",
+        )
+    )
+    session.flush()
+    _make_credential_row(
+        session,
+        tenant_id=TENANT_ID,
+        connector_key=_ANALYTICS_CONNECTOR_KEY,
+        account_id=_ANALYTICS_ACCOUNT_ID,
+    )
+    worldwide_response = _make_analytics_parser_payload(
+        channel_id=channel_id,
+        report_month=report_month,
+    )
+    country_response = {
+        "columnHeaders": [
+            {"columnType": "DIMENSION", "name": "country"},
+            {"columnType": "METRIC", "name": "estimatedRevenue"},
+        ],
+        "rows": [["US", 4.0]],
+    }
+
+    def _run(*, evidence_enabled: bool) -> tuple[ConnectorRunOutcome, object]:
+        """Execute one real orchestration pass with only HTTP/storage faked."""
+        with (
+            patch(
+                "ums_smart_revenue.connectors.runs.orchestrator.load_app_settings",
+                return_value=AppSettings(
+                    youtube_analytics_country_evidence_enabled=evidence_enabled,
+                ),
+            ),
+            patch(
+                "ums_smart_revenue.connectors.runs.orchestrator.YouTubeAnalyticsClient"
+            ) as analytics_cls,
+            patch(
+                "ums_smart_revenue.connectors.runs.orchestrator.LocalFileStoreBackend"
+            ) as local_cls,
+            patch("ums_smart_revenue.connectors.runs.orchestrator.refresh_credentials") as refresh,
+            patch("ums_smart_revenue.connectors.runs.orchestrator.GoogleHttpClient") as http_cls,
+        ):
+            http_cls.return_value.close.return_value = None
+            refresh.return_value = None
+            analytics_client = analytics_cls.return_value
+            analytics_client.fetch_channel_report.return_value = worldwide_response
+            analytics_client.fetch_channel_country_evidence.return_value = country_response
+            backend = local_cls.return_value
+            store: dict[str, bytes] = {}
+            backend.upload.side_effect = lambda *, storage_uri, content: store.__setitem__(
+                storage_uri,
+                content,
+            )
+            backend.get_bytes.side_effect = lambda *, storage_uri: store[storage_uri]
+
+            outcome = run_one(
+                session,
+                tenant_id=TENANT_ID,
+                connector_key=_ANALYTICS_CONNECTOR_KEY,
+                account_id=_ANALYTICS_ACCOUNT_ID,
+                report_month=report_month,
+            )
+        return outcome, analytics_client
+
+    enabled_outcome, enabled_client = _run(evidence_enabled=True)
+    assert enabled_outcome.run is not None
+    assert enabled_outcome.run.status == "SUCCEEDED"
+    enabled_client.fetch_channel_country_evidence.assert_called_once()
+    first_rows = session.scalars(
+        select(GoogleRevenueSourceRowORM).where(
+            GoogleRevenueSourceRowORM.tenant_id == TENANT_ID,
+            GoogleRevenueSourceRowORM.source_system == "youtube_analytics",
+            GoogleRevenueSourceRowORM.report_month == report_month,
+        )
+    ).all()
+    evidence_rows = [
+        row
+        for row in first_rows
+        if row.report_type == YOUTUBE_ANALYTICS_COUNTRY_EVIDENCE_REPORT_TYPE
+    ]
+    assert len(evidence_rows) == 1
+    evidence_key = evidence_rows[0].source_row_key
+    assert {
+        row.report_type
+        for row in first_rows
+        if row.report_type == YOUTUBE_ANALYTICS_PROJECTING_REPORT_TYPE
+    } == {YOUTUBE_ANALYTICS_PROJECTING_REPORT_TYPE}
+
+    disabled_outcome, disabled_client = _run(evidence_enabled=False)
+    assert disabled_outcome.run is not None
+    assert disabled_outcome.run.status == "SUCCEEDED"
+    disabled_client.fetch_channel_country_evidence.assert_not_called()
+    final_rows = session.scalars(
+        select(GoogleRevenueSourceRowORM).where(
+            GoogleRevenueSourceRowORM.tenant_id == TENANT_ID,
+            GoogleRevenueSourceRowORM.source_system == "youtube_analytics",
+            GoogleRevenueSourceRowORM.report_month == report_month,
+        )
+    ).all()
+    assert evidence_key in {
+        row.source_row_key
+        for row in final_rows
+        if row.report_type == YOUTUBE_ANALYTICS_COUNTRY_EVIDENCE_REPORT_TYPE
+    }
 
 
 def test_run_one_with_youtube_analytics_keeps_sibling_cms_rows_on_full_success(

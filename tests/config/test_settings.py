@@ -42,6 +42,7 @@ from ums_smart_revenue.config.settings import (
     GOOGLE_CONNECTOR_SERVICE_ACTOR_ID_ENV,
     GROUP_SYNC_INTERVAL_HOURS_ENV,
     GROUP_SYNC_SCHEDULE_ENABLED_ENV,
+    YOUTUBE_ANALYTICS_COUNTRY_EVIDENCE_ENABLED_ENV,
     AppSettings,
     load_app_settings,
 )
@@ -267,3 +268,31 @@ def test_load_app_settings_rejects_negative_group_sync_interval_hours(
     with pytest.raises(ValueError) as excinfo:
         load_app_settings()
     assert GROUP_SYNC_INTERVAL_HOURS_ENV in str(excinfo.value)
+
+
+def test_country_evidence_collection_defaults_off(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """U2 collection is fail-closed until an operator sequences the rollout."""
+    monkeypatch.delenv(YOUTUBE_ANALYTICS_COUNTRY_EVIDENCE_ENABLED_ENV, raising=False)
+    load_app_settings.cache_clear()
+    assert load_app_settings().youtube_analytics_country_evidence_enabled is False
+
+
+def test_country_evidence_collection_can_be_explicitly_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A recognized truthy token activates only the evidence collection lane."""
+    monkeypatch.setenv(YOUTUBE_ANALYTICS_COUNTRY_EVIDENCE_ENABLED_ENV, "true")
+    load_app_settings.cache_clear()
+    assert load_app_settings().youtube_analytics_country_evidence_enabled is True
+
+
+def test_country_evidence_collection_rejects_ambiguous_flag(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An ambiguous activation value fails closed instead of enabling U2."""
+    monkeypatch.setenv(YOUTUBE_ANALYTICS_COUNTRY_EVIDENCE_ENABLED_ENV, "sometimes")
+    load_app_settings.cache_clear()
+    with pytest.raises(ValueError, match=YOUTUBE_ANALYTICS_COUNTRY_EVIDENCE_ENABLED_ENV):
+        load_app_settings()

@@ -31,6 +31,10 @@ from ums_smart_revenue.auth.audit_service import InMemoryAuditSink
 from ums_smart_revenue.auth.models import PermissionGrant, UserPrincipal
 from ums_smart_revenue.auth.permissions import Permission
 from ums_smart_revenue.auth.scopes import AccessScope, OrgAccessIndex
+from ums_smart_revenue.connectors.google_source_rows.dataclasses import (
+    YOUTUBE_ANALYTICS_COUNTRY_EVIDENCE_REPORT_TYPE,
+    YOUTUBE_ANALYTICS_PROJECTING_REPORT_TYPE,
+)
 from ums_smart_revenue.db.finance_models import FinanceBase, FinanceMonthCloseORM
 from ums_smart_revenue.db.org_models import (
     ChannelGroupMemberORM,
@@ -163,6 +167,8 @@ def _analytics_source_row(
     month: str = "2026-03",
     source_system: str = "youtube_analytics",
     ingested_at: datetime | None = None,
+    report_type: str = YOUTUBE_ANALYTICS_PROJECTING_REPORT_TYPE,
+    raw_payload: dict[str, object] | None = None,
 ) -> GoogleRevenueSourceRowORM:
     """Build one YouTube Analytics source row for export download tests."""
     row_id = uuid4()
@@ -174,7 +180,7 @@ def _analytics_source_row(
         source_account_id="analytics-account-secret",
         content_owner_id="content-owner-secret",
         youtube_channel_id=channel_id,
-        report_type="reports.query",
+        report_type=report_type,
         report_month=month,
         period_start=date(2026, 3, 1),
         period_end=date(2026, 3, 31),
@@ -184,7 +190,7 @@ def _analytics_source_row(
         currency_code=currency_code,
         source_report_id="source-report-secret",
         raw_file_id=None,
-        raw_payload={"secret": "must-not-leak"},
+        raw_payload=({"secret": "must-not-leak"} if raw_payload is None else raw_payload),
         imported_by=None,
         ingested_at=ingested_at or datetime(2026, 4, 1, 12, 0, tzinfo=UTC),
     )
@@ -1771,6 +1777,33 @@ def test_finance_admin_downloads_scoped_analytics_summary_csv(tmp_path, monkeypa
                     channel_id="channel-a",
                     amount=Decimal("7.500000"),
                     ingested_at=base_ingested_at + timedelta(minutes=1),
+                ),
+                _analytics_source_row(
+                    channel_id="channel-a",
+                    amount=Decimal("40.000000"),
+                    report_type=YOUTUBE_ANALYTICS_COUNTRY_EVIDENCE_REPORT_TYPE,
+                    raw_payload={
+                        "dimensions": {"channel": "channel-a", "country": "US"},
+                        "projection_disposition": "NON_PROJECTING_EVIDENCE",
+                    },
+                    ingested_at=base_ingested_at + timedelta(seconds=90),
+                ),
+                _analytics_source_row(
+                    channel_id="channel-a",
+                    amount=Decimal("60.000000"),
+                    raw_payload={
+                        "dimensions": {"channel": "channel-a", "country": None},
+                    },
+                    ingested_at=base_ingested_at + timedelta(seconds=100),
+                ),
+                _analytics_source_row(
+                    channel_id="channel-a",
+                    amount=Decimal("70.000000"),
+                    raw_payload={
+                        "dimensions": {"channel": "channel-a"},
+                        "projection_disposition": "UNKNOWN",
+                    },
+                    ingested_at=base_ingested_at + timedelta(seconds=110),
                 ),
                 _analytics_source_row(
                     channel_id="channel-a",

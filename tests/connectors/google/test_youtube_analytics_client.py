@@ -266,3 +266,32 @@ def test_fetch_channel_report_rejects_empty_channel_id(
             report_month="2026-05",
         )
     assert exc_info.value.field_name == "channel_id"
+
+
+def test_fetch_channel_country_evidence_uses_full_month_and_country_only(
+    mock_credentials,
+) -> None:
+    """U2 requests the smallest country-sliced revenue shape, with no rate math."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        params = dict(request.url.params)
+        assert params == {
+            "ids": "contentOwner==owner-a",
+            "filters": "channel==UC-xyz",
+            "startDate": "2026-05-01",
+            "endDate": "2026-05-31",
+            "metrics": "estimatedRevenue",
+            "dimensions": "country",
+        }
+        return httpx.Response(200, json={"rows": [["US", 12.5]]})
+
+    http = GoogleHttpClient(
+        credentials=mock_credentials,
+        transport=httpx.MockTransport(handler),
+    )
+    client = YouTubeAnalyticsClient(http=http)
+    assert client.fetch_channel_country_evidence(
+        account_id="owner-a",
+        channel_id="UC-xyz",
+        report_month="2026-05",
+    ) == {"rows": [["US", 12.5]]}

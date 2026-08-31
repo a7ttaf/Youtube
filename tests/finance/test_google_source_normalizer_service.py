@@ -10,6 +10,8 @@ from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
 from ums_smart_revenue.connectors.google_source_rows.dataclasses import (
+    YOUTUBE_ANALYTICS_COUNTRY_EVIDENCE_REPORT_TYPE,
+    YOUTUBE_ANALYTICS_PROJECTING_REPORT_TYPE,
     ParsedSourceRow,
 )
 from ums_smart_revenue.connectors.google_source_rows.repository import (
@@ -136,6 +138,47 @@ def _yt_reporting_row(
         currency_code=currency,
         source_report_id="r-1",
         raw_payload={"dimensions": {"country": "US"}},
+    )
+
+
+def _yt_analytics_row(
+    *,
+    channel: str,
+    source_row_key_seed: str,
+    amount: str,
+    country: str | None,
+) -> ParsedSourceRow:
+    """Build either a worldwide projecting row or country evidence row."""
+    dimensions: dict[str, object] = {"channel": channel}
+    disposition = "PROJECTING"
+    if country is not None:
+        dimensions["country"] = country
+        disposition = "NON_PROJECTING_EVIDENCE"
+    return ParsedSourceRow(
+        source_system="youtube_analytics",
+        source_row_key=(source_row_key_seed * 64)[:64],
+        source_account_id="contentOwner==cms-test-1",
+        content_owner_id="cms-test-1",
+        youtube_channel_id=channel,
+        report_type=(
+            YOUTUBE_ANALYTICS_COUNTRY_EVIDENCE_REPORT_TYPE
+            if country is not None
+            else YOUTUBE_ANALYTICS_PROJECTING_REPORT_TYPE
+        ),
+        report_month="2026-04",
+        period_start=date(2026, 4, 1),
+        period_end=date(2026, 4, 30),
+        metric_key="estimatedRevenue",
+        value_kind="estimated",
+        amount_native=Decimal(amount),
+        currency_code="USD",
+        source_report_id=None,
+        raw_payload={
+            "dimensions": dimensions,
+            "metric": "estimatedRevenue",
+            "projection_disposition": disposition,
+            "value": amount,
+        },
     )
 
 
@@ -392,10 +435,15 @@ def test_normalize_month_excludes_country_analytics_and_preserves_worldwide_fact
     assert result.created[0].gross_revenue_usd == Decimal("100.000000")
     assert len(result.skipped) == 2
     source_entry_ids = {entry.source_row_key: entry.id for entry in upsert_result.entries}
+    # A country axis without the parser-owned NON_PROJECTING_EVIDENCE provenance
+    # is rejected (not accepted evidence) under the partition fence.
     assert {(skip.source_row_id, skip.reason.value) for skip in result.skipped} == {
-        (source_entry_ids[country.source_row_key], "non_projecting_evidence"),
+        (source_entry_ids[country.source_row_key], "invalid_non_projecting_evidence"),
         (source_entry_ids[malformed.source_row_key], "malformed_source_payload"),
     }
+    assert [outcome.disposition.value for outcome in result.non_projecting_evidence] == [
+        "rejected"
+    ]
     assert {
         entry.source_row_key for entry in source_repo.list(tenant_id, report_month="2026-04")
     } == {country.source_row_key, malformed.source_row_key, worldwide.source_row_key}
@@ -576,6 +624,85 @@ def test_normalize_month_creates_revenue_facts_for_eligible_USD_rows(session):  
     assert len(result.unchanged) == 0
     assert result.created[0].source_kind == "YOUTUBE_CMS"
     assert result.created[0].gross_revenue_usd == Decimal("123.450000")
+
+
+def test_country_evidence_persists_but_official_fact_uses_worldwide_row_only(session):
+    """U2 evidence cannot alter the existing channel-month finance output."""
+    tenant_id = uuid4()
+    channel = "UC_country_fence"
+    _seed_tenant_and_currencies(session, tenant_id)
+    _seed_active_channel(session, tenant_id, channel)
+    repo = SqlAlchemyGoogleRevenueSourceRowRepository(session)
+    repo.upsert_many(
+        tenant_id,
+        [
+            _yt_analytics_row(
+                channel=channel,
+                source_row_key_seed="w",
+                amount="100.000000",
+                country=None,
+            ),
+            _yt_analytics_row(
+                channel=channel,
+                source_row_key_seed="u",
+                amount="40.000000",
+                country="US",
+            ),
+        ],
+        raw_file_id=None,
+        imported_by=None,
+    )
+    session.commit()
+
+    result = GoogleSourceNormalizer(session, tenant_id=tenant_id).normalize_month(
+        month="2026-04",
+        actor_user_id=ACTOR_USER_ID,
+    )
+
+    assert [fact.gross_revenue_usd for fact in result.created] == [Decimal("100.000000")]
+    assert result.skipped == []
+    assert len(result.non_projecting_evidence) == 1
+    assert result.non_projecting_evidence[0].country_code == "US"
+    persisted = repo.list(
+        tenant_id,
+        report_month="2026-04",
+        source_system="youtube_analytics",
+    )
+    assert len(persisted) == 2
+    country_row = next(
+        row
+        for row in persisted
+        if row.raw_payload.get("projection_disposition") == "NON_PROJECTING_EVIDENCE"
+    )
+    assert country_row.source_system == "youtube_analytics"
+    assert country_row.report_type == YOUTUBE_ANALYTICS_COUNTRY_EVIDENCE_REPORT_TYPE
+    assert country_row.source_account_id == "contentOwner==cms-test-1"
+    assert country_row.raw_payload["dimensions"] == {
+        "channel": channel,
+        "country": "US",
+    }
+
+    # Mutating only the evidence amount never updates the official fact.
+    repo.upsert_many(
+        tenant_id,
+        [
+            _yt_analytics_row(
+                channel=channel,
+                source_row_key_seed="u",
+                amount="99.000000",
+                country="US",
+            )
+        ],
+        raw_file_id=None,
+        imported_by=None,
+    )
+    session.commit()
+    replay = GoogleSourceNormalizer(session, tenant_id=tenant_id).normalize_month(
+        month="2026-04",
+        actor_user_id=ACTOR_USER_ID,
+    )
+    assert replay.updated == []
+    assert [fact.gross_revenue_usd for fact in replay.unchanged] == [Decimal("100.000000")]
 
 
 OTHER_ACTOR_USER_ID = "00000000-0000-0000-0000-000000010002"

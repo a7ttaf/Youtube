@@ -31,7 +31,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from unittest.mock import MagicMock, patch
 from uuid import UUID, uuid4
@@ -52,6 +52,7 @@ SERVICE_ACTOR_ID = "ddddeeee-ffff-0000-1111-2222008a0000"
 REPORT_MONTH = "2026-04"
 CONNECTOR_KEY = "youtube-reporting"
 ACCOUNT_ID = "cms-1"
+COUNTRY_RAW_FILE_ID = UUID("00000000-0000-0000-0000-0000008a0042")
 
 
 @dataclass
@@ -68,6 +69,7 @@ class _StubResult:
     updated: list
     unchanged: list
     skipped: list
+    non_projecting_evidence: list = field(default_factory=list)
 
 
 @pytest.fixture(autouse=True)
@@ -92,12 +94,16 @@ def _service_actor_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[str]:
         load_app_settings.cache_clear()
 
 
-def _run_entry(*, status: str) -> ConnectorRunEntry:
+def _run_entry(
+    *,
+    status: str,
+    connector_key: str = CONNECTOR_KEY,
+) -> ConnectorRunEntry:
     """Build a finished ``ConnectorRunEntry`` stub with the given terminal status."""
     return ConnectorRunEntry(
         id=str(uuid4()),
         tenant_id=str(TENANT_ID),
-        connector_key=CONNECTOR_KEY,
+        connector_key=connector_key,
         account_id=ACCOUNT_ID,
         report_month=REPORT_MONTH,
         triggered_by_user_id=None,
@@ -152,6 +158,7 @@ def _invoke_run_one(
     normalizer: MagicMock | None = None,
     record_projection_failure: MagicMock | None = None,
     get_month_close_status_side_effect: Exception | None = None,
+    country_evidence_raw_file_ids: list[UUID] | None = None,
 ) -> tuple[
     ConnectorRunOutcome,
     MagicMock,
@@ -172,6 +179,7 @@ def _invoke_run_one(
     module so the lazy construction observes the patch.
     """
     session = MagicMock(name="session")
+    session.scalars.return_value.all.return_value = country_evidence_raw_file_ids or []
     normalizer_cls = MagicMock(name="GoogleSourceNormalizer")
     if normalizer is not None:
         normalizer_cls.return_value = normalizer
@@ -598,6 +606,233 @@ def test_skipped_rows_emit_observability_audit_edge(
     assert record.details.get("triggered_by_run_id")
     # Immediate operator visibility for the dropped revenue.
     assert "skipped" in caplog.text.lower()
+
+
+def test_non_projecting_evidence_audit_counts_are_separate_and_private(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Healthy evidence is informational; rejected evidence remains alertable."""
+    from ums_smart_revenue.finance.google_source_normalizer import (
+        EvidenceDisposition,
+        EvidenceReason,
+        NonProjectingEvidenceOutcome,
+        SkippedSourceRow,
+        SkipReason,
+    )
+
+    outcomes = [
+        NonProjectingEvidenceOutcome(
+            source_row_id="private-row-us",
+            source_system="youtube_analytics",
+            source_account_id="contentOwner==cms-1",
+            country_code="US",
+            disposition=EvidenceDisposition.ACCEPTED,
+            reason=EvidenceReason.NON_PROJECTING_EVIDENCE,
+            raw_file_id=str(COUNTRY_RAW_FILE_ID),
+        ),
+        NonProjectingEvidenceOutcome(
+            source_row_id="private-row-eg",
+            source_system="youtube_analytics",
+            source_account_id="contentOwner==cms-1",
+            country_code="EG",
+            disposition=EvidenceDisposition.ACCEPTED,
+            reason=EvidenceReason.NON_PROJECTING_EVIDENCE,
+            raw_file_id=str(COUNTRY_RAW_FILE_ID),
+        ),
+        NonProjectingEvidenceOutcome(
+            source_row_id="private-row-bad",
+            source_system="youtube_analytics",
+            source_account_id="contentOwner==cms-1",
+            country_code=None,
+            disposition=EvidenceDisposition.REJECTED,
+            reason=EvidenceReason.INVALID_PROVENANCE,
+            raw_file_id=str(COUNTRY_RAW_FILE_ID),
+        ),
+        NonProjectingEvidenceOutcome(
+            source_row_id="other-account-row",
+            source_system="youtube_analytics",
+            source_account_id="contentOwner==other-cms",
+            country_code="GB",
+            disposition=EvidenceDisposition.ACCEPTED,
+            reason=EvidenceReason.NON_PROJECTING_EVIDENCE,
+            raw_file_id=str(COUNTRY_RAW_FILE_ID),
+        ),
+        NonProjectingEvidenceOutcome(
+            source_row_id="other-account-rejected",
+            source_system="youtube_analytics",
+            source_account_id="contentOwner==other-cms",
+            country_code=None,
+            disposition=EvidenceDisposition.REJECTED,
+            reason=EvidenceReason.INVALID_PROVENANCE,
+            raw_file_id=str(COUNTRY_RAW_FILE_ID),
+        ),
+    ]
+    normalizer = MagicMock(name="normalizer_instance")
+    normalizer.normalize_month.return_value = _StubResult(
+        created=[],
+        updated=[],
+        unchanged=[],
+        skipped=[
+            SkippedSourceRow(
+                source_row_id="private-row-bad",
+                reason=SkipReason.INVALID_NON_PROJECTING_EVIDENCE,
+            ),
+            SkippedSourceRow(
+                source_row_id="other-account-rejected",
+                reason=SkipReason.INVALID_NON_PROJECTING_EVIDENCE,
+            ),
+        ],
+        non_projecting_evidence=outcomes,
+    )
+    caplog.set_level(logging.INFO, logger=normalization.logger.name)
+    _, _, _, _, audit_sink = _invoke_run_one(
+        outcome=_outcome(
+            run=_run_entry(
+                status="SUCCEEDED",
+                connector_key="youtube-analytics",
+            )
+        ),
+        normalizer=normalizer,
+        country_evidence_raw_file_ids=[COUNTRY_RAW_FILE_ID],
+    )
+
+    records = [call.args[0] for call in audit_sink.append.call_args_list]
+    evidence_record = next(
+        record for record in records if record.details.get("lifecycle") == "NON_PROJECTING_EVIDENCE"
+    )
+    assert evidence_record.details["accepted_count"] == 2
+    assert evidence_record.details["rejected_count"] == 1
+    assert evidence_record.details["accepted_by_country"] == {"EG": 1, "US": 1}
+    assert evidence_record.details["rejected_by_reason"] == {"invalid_provenance": 1}
+    serialized = str(evidence_record.details)
+    assert "private-row" not in serialized
+    assert "private-account" not in serialized
+    assert "other-account" not in serialized
+    assert "GB" not in serialized
+    assert "amount" not in serialized
+    skipped_record = next(
+        record for record in records if record.details.get("lifecycle") == "ROWS_SKIPPED"
+    )
+    assert skipped_record.details["skipped_count"] == 1
+
+
+def test_accepted_evidence_never_emits_rows_skipped_warning(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Intentional U2 fencing cannot trigger the generic skipped-row alert."""
+    from ums_smart_revenue.finance.google_source_normalizer import (
+        EvidenceDisposition,
+        EvidenceReason,
+        NonProjectingEvidenceOutcome,
+    )
+
+    normalizer = MagicMock(name="normalizer_instance")
+    normalizer.normalize_month.return_value = _StubResult(
+        created=[],
+        updated=[],
+        unchanged=[],
+        skipped=[],
+        non_projecting_evidence=[
+            NonProjectingEvidenceOutcome(
+                source_row_id="private-row",
+                source_system="youtube_analytics",
+                source_account_id="contentOwner==cms-1",
+                country_code="US",
+                disposition=EvidenceDisposition.ACCEPTED,
+                reason=EvidenceReason.NON_PROJECTING_EVIDENCE,
+                raw_file_id=str(COUNTRY_RAW_FILE_ID),
+            )
+        ],
+    )
+    caplog.set_level(logging.INFO, logger=normalization.logger.name)
+    _, _, _, _, audit_sink = _invoke_run_one(
+        outcome=_outcome(
+            run=_run_entry(
+                status="SUCCEEDED",
+                connector_key="youtube-analytics",
+            )
+        ),
+        normalizer=normalizer,
+        country_evidence_raw_file_ids=[COUNTRY_RAW_FILE_ID],
+    )
+    lifecycles = [
+        call.args[0].details.get("lifecycle") for call in audit_sink.append.call_args_list
+    ]
+    assert lifecycles == ["NON_PROJECTING_EVIDENCE"]
+    assert "dropped" not in caplog.text.lower()
+
+
+def test_non_analytics_run_does_not_claim_month_wide_evidence_audit() -> None:
+    """A different connector run cannot claim analytics evidence classification."""
+    from ums_smart_revenue.finance.google_source_normalizer import (
+        EvidenceDisposition,
+        EvidenceReason,
+        NonProjectingEvidenceOutcome,
+    )
+
+    normalizer = MagicMock(name="normalizer_instance")
+    normalizer.normalize_month.return_value = _StubResult(
+        created=[],
+        updated=[],
+        unchanged=[],
+        skipped=[],
+        non_projecting_evidence=[
+            NonProjectingEvidenceOutcome(
+                source_row_id="private-row",
+                source_system="youtube_analytics",
+                source_account_id="private-account",
+                country_code="US",
+                disposition=EvidenceDisposition.ACCEPTED,
+                reason=EvidenceReason.NON_PROJECTING_EVIDENCE,
+            )
+        ],
+    )
+    _, _, _, _, audit_sink = _invoke_run_one(
+        outcome=_outcome(run=_run_entry(status="SUCCEEDED")),
+        normalizer=normalizer,
+    )
+
+    assert audit_sink.append.call_args_list == []
+
+
+def test_analytics_run_without_country_raw_file_does_not_claim_evidence() -> None:
+    """A flag-off/retry run cannot audit evidence retained from an older run."""
+    from ums_smart_revenue.finance.google_source_normalizer import (
+        EvidenceDisposition,
+        EvidenceReason,
+        NonProjectingEvidenceOutcome,
+    )
+
+    normalizer = MagicMock(name="normalizer_instance")
+    normalizer.normalize_month.return_value = _StubResult(
+        created=[],
+        updated=[],
+        unchanged=[],
+        skipped=[],
+        non_projecting_evidence=[
+            NonProjectingEvidenceOutcome(
+                source_row_id="older-row",
+                source_system="youtube_analytics",
+                source_account_id="contentOwner==cms-1",
+                country_code="US",
+                disposition=EvidenceDisposition.ACCEPTED,
+                reason=EvidenceReason.NON_PROJECTING_EVIDENCE,
+                raw_file_id=str(COUNTRY_RAW_FILE_ID),
+            )
+        ],
+    )
+    _, _, _, _, audit_sink = _invoke_run_one(
+        outcome=_outcome(
+            run=_run_entry(
+                status="SUCCEEDED",
+                connector_key="youtube-analytics",
+            )
+        ),
+        normalizer=normalizer,
+        country_evidence_raw_file_ids=[],
+    )
+
+    assert audit_sink.append.call_args_list == []
 
 
 def test_no_skipped_rows_emits_no_skip_edge() -> None:

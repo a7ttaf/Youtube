@@ -27,7 +27,10 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ums_smart_revenue.connectors.google_source_rows.dataclasses import (
+    ALLOWED_SOURCE_SYSTEMS,
+    YOUTUBE_ANALYTICS_COUNTRY_EVIDENCE_REPORT_TYPE,
     GoogleRevenueSourceRowEntry,
+    SourceRowProjectionDisposition,
 )
 from ums_smart_revenue.connectors.google_source_rows.repository import (
     SqlAlchemyGoogleRevenueSourceRowRepository,
@@ -64,6 +67,23 @@ class SkipReason(StrEnum):
     MALFORMED_SOURCE_PAYLOAD = "malformed_source_payload"
     UNKNOWN_CHANNEL = "unknown_channel"
     NO_CANONICAL_ROW = "no_canonical_row"
+    INVALID_NON_PROJECTING_EVIDENCE = "invalid_non_projecting_evidence"
+    DUPLICATE_NON_PROJECTING_EVIDENCE = "duplicate_non_projecting_evidence"
+
+
+class EvidenceDisposition(StrEnum):
+    """Audit classification for a row that claims evidence-only treatment."""
+
+    ACCEPTED = "accepted"
+    REJECTED = "rejected"
+
+
+class EvidenceReason(StrEnum):
+    """Stable, non-sensitive reason token for evidence classification."""
+
+    NON_PROJECTING_EVIDENCE = "non_projecting_evidence"
+    INVALID_PROVENANCE = "invalid_provenance"
+    DUPLICATE_PROVENANCE = "duplicate_provenance"
 
 
 @dataclass(frozen=True)
@@ -75,6 +95,19 @@ class SkippedSourceRow:
 
 
 @dataclass(frozen=True)
+class NonProjectingEvidenceOutcome:
+    """Typed U2 provenance decision retained for audit aggregation."""
+
+    source_row_id: str
+    source_system: str
+    source_account_id: str
+    country_code: str | None
+    disposition: EvidenceDisposition
+    reason: EvidenceReason
+    raw_file_id: str | None = None
+
+
+@dataclass(frozen=True)
 class NormalizationResult:
     """Partition the outcomes from one monthly normalization run."""
 
@@ -82,6 +115,7 @@ class NormalizationResult:
     updated: list[RevenueFactEntry]
     unchanged: list[RevenueFactEntry]
     skipped: list[SkippedSourceRow]
+    non_projecting_evidence: list[NonProjectingEvidenceOutcome]
 
 
 SOURCE_SYSTEM_TO_SOURCE_KIND: Mapping[str, RevenueFactSourceKind] = MappingProxyType(
@@ -178,6 +212,7 @@ class _NormalizationWork:
     updated: list[RevenueFactEntry] = field(default_factory=list)
     unchanged: list[RevenueFactEntry] = field(default_factory=list)
     skipped: list[SkippedSourceRow] = field(default_factory=list)
+    non_projecting_evidence: list[NonProjectingEvidenceOutcome] = field(default_factory=list)
     facts_by_channel: dict[str, list[RevenueFactEntry]] = field(default_factory=dict)
 
 
@@ -194,6 +229,215 @@ def _scoped_source_rows(
     if channel_ids is None:
         return rows
     return [row for row in rows if row.youtube_channel_id in channel_ids]
+
+
+# ============================================================================
+# Purpose: Build a typed rejected U2 provenance result for audit aggregation.
+# Database/ORM: None.
+# Standards: Stable reason tokens; raw payload and financial amounts excluded.
+# Blast Radius: Evidence audit counts and skipped-row defect telemetry.
+# Connections:
+#   - File: backend/ums_smart_revenue/connectors/runs/normalization.py -> Emits
+#     aggregate counts without private source identifiers.
+# ============================================================================
+def _invalid_evidence_outcome(
+    row: GoogleRevenueSourceRowEntry,
+    *,
+    country_code: str | None,
+    duplicate: bool = False,
+) -> NonProjectingEvidenceOutcome:
+    """Return a typed rejected outcome without exposing raw payload contents."""
+    return NonProjectingEvidenceOutcome(
+        source_row_id=row.id,
+        source_system=row.source_system,
+        source_account_id=row.source_account_id,
+        country_code=country_code,
+        disposition=EvidenceDisposition.REJECTED,
+        reason=(
+            EvidenceReason.DUPLICATE_PROVENANCE if duplicate else EvidenceReason.INVALID_PROVENANCE
+        ),
+        raw_file_id=row.raw_file_id,
+    )
+
+
+# ============================================================================
+# Purpose: Revalidate the parser-owned evidence fence and preserved account,
+#          channel, and country axes before canonical finance bucketing.
+# Database/ORM: Reads the in-memory representation of persisted
+#               google_revenue_source_rows fields and raw_payload JSON.
+# Standards: Unknown/malformed provenance fails closed into a typed rejection.
+# Blast Radius: Finance projection eligibility and audit defect visibility.
+# Connections:
+#   - File: backend/ums_smart_revenue/connectors/google_source_parsers/
+#     youtube_analytics.py -> Produces the expected disposition and dimensions.
+#   - Function: _partition_projection_rows -> Separates accepted evidence from
+#     projecting rows before active-channel lookup or bucket selection.
+# ============================================================================
+def _country_evidence_outcome(
+    row: GoogleRevenueSourceRowEntry,
+) -> NonProjectingEvidenceOutcome | None:
+    """Classify a source row's parser-owned projection provenance."""
+    raw_payload = row.raw_payload
+    raw_disposition = raw_payload.get("projection_disposition")
+    dimensions = raw_payload.get("dimensions")
+    # Casefold canonical country aliases (`country`, `country_code`, `COUNTRY`,
+    # ...) so drifted legacy keys cannot slip past the evidence fence.
+    country_present = isinstance(dimensions, Mapping) and any(
+        isinstance(key, str) and key.casefold() in _COUNTRY_DIMENSION_KEYS
+        for key in dimensions
+    )
+    evidence_report_type = row.report_type == YOUTUBE_ANALYTICS_COUNTRY_EVIDENCE_REPORT_TYPE
+
+    # Legacy worldwide rows predate the explicit token. A current parser emits
+    # PROJECTING, but absence remains compatible only when no country dimension
+    # exists. Unknown tokens never fall through to canonical projection.
+    if (
+        raw_disposition is None
+        and not evidence_report_type
+        and (row.source_system != "youtube_analytics" or not country_present)
+    ):
+        return None
+    if raw_disposition == SourceRowProjectionDisposition.PROJECTING.value:
+        if not country_present and not evidence_report_type:
+            return None
+        country = dimensions.get("country") if isinstance(dimensions, Mapping) else None
+        return _invalid_evidence_outcome(
+            row,
+            country_code=country if isinstance(country, str) else None,
+        )
+
+    country = dimensions.get("country") if isinstance(dimensions, Mapping) else None
+    channel = dimensions.get("channel") if isinstance(dimensions, Mapping) else None
+    valid_country = (
+        isinstance(country, str)
+        and len(country) == 2
+        and country.isascii()
+        and country.isalpha()
+        and country.upper() == country
+    )
+    valid = (
+        raw_disposition == SourceRowProjectionDisposition.NON_PROJECTING_EVIDENCE.value
+        and row.source_system == "youtube_analytics"
+        and evidence_report_type
+        and isinstance(row.source_account_id, str)
+        and bool(row.source_account_id.strip())
+        and isinstance(row.youtube_channel_id, str)
+        and bool(row.youtube_channel_id.strip())
+        and channel == row.youtube_channel_id
+        and valid_country
+    )
+    if not valid:
+        return _invalid_evidence_outcome(
+            row,
+            country_code=country if isinstance(country, str) else None,
+        )
+    assert isinstance(country, str)
+    return NonProjectingEvidenceOutcome(
+        source_row_id=row.id,
+        source_system=row.source_system,
+        source_account_id=row.source_account_id,
+        country_code=country,
+        disposition=EvidenceDisposition.ACCEPTED,
+        reason=EvidenceReason.NON_PROJECTING_EVIDENCE,
+        raw_file_id=row.raw_file_id,
+    )
+
+
+# ============================================================================
+# Purpose: Preflight every source row before canonical bucketing, separating
+#          explicitly non-projecting country evidence from finance inputs.
+# Database/ORM: None (pure classification of repository entries).
+# Standards: Allowlisted source systems only; typed provenance outcomes;
+#            deterministic duplicate detection; malformed evidence fails closed.
+# Blast Radius: Finance projection fence, connector audit counts, privacy.
+# Connections:
+#   - File: backend/ums_smart_revenue/connectors/google_source_parsers/
+#     youtube_analytics.py -> Emits parser-owned disposition/dimensions.
+#   - File: backend/ums_smart_revenue/connectors/runs/normalization.py -> Emits
+#     accepted/rejected evidence counts without raw payloads or row ids.
+# ============================================================================
+def _partition_projection_rows(
+    rows: list[GoogleRevenueSourceRowEntry],
+) -> tuple[
+    list[GoogleRevenueSourceRowEntry],
+    list[NonProjectingEvidenceOutcome],
+    list[SkippedSourceRow],
+]:
+    """Return projecting rows, evidence outcomes, and rejected evidence skips."""
+    projecting: list[GoogleRevenueSourceRowEntry] = []
+    evidence: list[NonProjectingEvidenceOutcome] = []
+    rejected: list[SkippedSourceRow] = []
+    accepted_groups: dict[
+        tuple[str, str, str, str, str, str, str, str],
+        list[tuple[int, GoogleRevenueSourceRowEntry]],
+    ] = {}
+
+    for row in rows:
+        if row.source_system not in ALLOWED_SOURCE_SYSTEMS:
+            raise RevenueFactValidationError(
+                f"Unsupported source_system for projection preflight: {row.source_system!r}"
+            )
+        malformed_reason = _malformed_analytics_payload_reason(row)
+        if malformed_reason is not None:
+            # Ported fail-closed guards: reject non-Mapping raw_payload before
+            # any .get() call and whitespace-drifted dimension keys (`country `)
+            # so neither can masquerade as a worldwide projecting row.
+            rejected.append(
+                SkippedSourceRow(
+                    source_row_id=row.id,
+                    reason=malformed_reason,
+                )
+            )
+            continue
+        outcome = _country_evidence_outcome(row)
+        if outcome is None:
+            projecting.append(row)
+            continue
+        evidence_index = len(evidence)
+        evidence.append(outcome)
+        if outcome.disposition is EvidenceDisposition.ACCEPTED:
+            assert outcome.country_code is not None
+            identity = (
+                outcome.source_system,
+                outcome.source_account_id,
+                row.youtube_channel_id or "",
+                outcome.country_code,
+                row.metric_key,
+                row.value_kind,
+                row.currency_code,
+                row.report_month,
+            )
+            accepted_groups.setdefault(identity, []).append((evidence_index, row))
+        else:
+            rejected.append(
+                SkippedSourceRow(
+                    source_row_id=row.id,
+                    reason=SkipReason.INVALID_NON_PROJECTING_EVIDENCE,
+                )
+            )
+
+    # A malicious/imported payload can carry two distinct source keys for the
+    # same evidence identity. Keep the lexicographically smallest key as the
+    # accepted telemetry row and reject every sibling deterministically;
+    # repository read order or timestamp ties cannot change the counts.
+    for candidates in accepted_groups.values():
+        for evidence_index, duplicate_row in sorted(
+            candidates,
+            key=lambda candidate: (candidate[1].source_row_key, candidate[1].id),
+        )[1:]:
+            accepted = evidence[evidence_index]
+            evidence[evidence_index] = _invalid_evidence_outcome(
+                duplicate_row,
+                country_code=accepted.country_code,
+                duplicate=True,
+            )
+            rejected.append(
+                SkippedSourceRow(
+                    source_row_id=duplicate_row.id,
+                    reason=SkipReason.DUPLICATE_NON_PROJECTING_EVIDENCE,
+                )
+            )
+    return projecting, evidence, rejected
 
 
 def _active_channel_ids(
@@ -218,14 +462,16 @@ def _active_channel_ids(
 
 
 # ============================================================================
-# Purpose: Classify YouTube Analytics source payloads before they can be
-#          grouped or selected as canonical finance facts.
+# Purpose: Reject malformed YouTube Analytics source payloads before they can
+#          be grouped, selected, or classified as evidence.
 # Database/ORM: None. Reads the parser-owned raw_payload dimensions only.
 # Standards: Keep the persisted youtube_analytics source_system allowlisted;
-#            fail closed for malformed containers; casefold canonical country
-#            aliases without mutating the row.
-# Blast Radius: Prevents malformed or country-dimensional payloads from
-#               changing canonical revenue; all exclusions remain auditable.
+#            fail closed for malformed containers, including non-Mapping
+#            raw_payload (never call .get() on one) and whitespace-drifted
+#            dimension keys such as `country `.
+# Blast Radius: Prevents malformed payloads from changing canonical revenue;
+#               all exclusions remain auditable. Country-dimensional evidence
+#               classification itself is owned by _country_evidence_outcome.
 # Connections:
 #   - File: backend/ums_smart_revenue/connectors/google_source_parsers/youtube_analytics.py
 #     -> Emits country dimensions inside raw_payload while retaining the
@@ -233,8 +479,8 @@ def _active_channel_ids(
 #   - File: backend/ums_smart_revenue/connectors/runs/normalization.py
 #     -> Converts result.skipped into the durable ROWS_SKIPPED audit edge.
 # ============================================================================
-def _analytics_projection_skip_reason(row: GoogleRevenueSourceRowEntry) -> SkipReason | None:
-    """Return a typed exclusion for malformed or country-dimensional Analytics data."""
+def _malformed_analytics_payload_reason(row: GoogleRevenueSourceRowEntry) -> SkipReason | None:
+    """Return the malformed-container exclusion for Analytics data, if any."""
     if row.source_system != "youtube_analytics":
         return None
     if not isinstance(row.raw_payload, Mapping):
@@ -256,8 +502,6 @@ def _analytics_projection_skip_reason(row: GoogleRevenueSourceRowEntry) -> SkipR
         for key in dimensions
     ):
         return SkipReason.MALFORMED_SOURCE_PAYLOAD
-    if any(key.casefold() in _COUNTRY_DIMENSION_KEYS for key in dimensions):
-        return SkipReason.NON_PROJECTING_EVIDENCE
     channel = dimensions.get("channel")
     if not isinstance(channel, str) or not channel.strip():
         return SkipReason.MALFORMED_SOURCE_PAYLOAD
@@ -266,13 +510,14 @@ def _analytics_projection_skip_reason(row: GoogleRevenueSourceRowEntry) -> SkipR
 
 # ============================================================================
 # Purpose: Bucket projectable source rows by normalized fact identity while
-#          excluding malformed and country-dimensional Analytics evidence.
+#          excluding malformed Analytics payload containers.
 # Database/ORM: None. Operates on persisted GoogleRevenueSourceRowEntry values;
 #               no database writes occur here.
-# Standards: Every excluded row is appended to the caller-owned skipped list
-#            before it leaves the pipeline, so normalize/audit cannot silently
-#            discard accepted evidence. Worldwide rows with a valid dimensions
-#            mapping and no country alias remain projectable.
+# Standards: Every malformed exclusion is appended to the caller-owned skipped
+#            list before it leaves the pipeline, so normalize/audit cannot
+#            silently discard accepted evidence. Country-dimensional evidence
+#            separation is owned by _partition_projection_rows upstream; this
+#            fence is the last fail-closed net for direct callers.
 # Blast Radius: Canonical revenue facts and ROWS_SKIPPED audit telemetry.
 # Connections:
 #   - File: backend/ums_smart_revenue/finance/google_source_normalizer.py
@@ -284,10 +529,10 @@ def _source_row_buckets(
     rows: list[GoogleRevenueSourceRowEntry],
     skipped: list[SkippedSourceRow],
 ) -> dict[tuple[str | None, str], list[GoogleRevenueSourceRowEntry]]:
-    """Bucket rows and record malformed/non-projecting exclusions for audit."""
+    """Bucket rows and record malformed-container exclusions for audit."""
     buckets: dict[tuple[str | None, str], list[GoogleRevenueSourceRowEntry]] = {}
     for row in rows:
-        skip_reason = _analytics_projection_skip_reason(row)
+        skip_reason = _malformed_analytics_payload_reason(row)
         if skip_reason is not None:
             skipped.append(
                 SkippedSourceRow(
@@ -507,6 +752,7 @@ def _normalization_result(work: _NormalizationWork) -> NormalizationResult:
         updated=work.updated,
         unchanged=work.unchanged,
         skipped=work.skipped,
+        non_projecting_evidence=work.non_projecting_evidence,
     )
 
 
@@ -518,10 +764,13 @@ def _log_normalization_complete(
 ) -> None:
     """Emit stable completion telemetry without source-row identifiers."""
     reason_counts = Counter(s.reason.value for s in result.skipped)
+    evidence_counts = Counter(
+        outcome.disposition.value for outcome in result.non_projecting_evidence
+    )
     logger.info(
         "normalize_month complete tenant_id=%s month=%s "
         "created=%d updated=%d unchanged=%d skipped=%d "
-        "skipped_by_reason=%s",
+        "skipped_by_reason=%s evidence_accepted=%d evidence_rejected=%d",
         tenant_id,
         month,
         len(result.created),
@@ -529,6 +778,8 @@ def _log_normalization_complete(
         len(result.unchanged),
         len(result.skipped),
         dict(reason_counts),
+        evidence_counts[EvidenceDisposition.ACCEPTED.value],
+        evidence_counts[EvidenceDisposition.REJECTED.value],
     )
 
 
@@ -602,18 +853,23 @@ class GoogleSourceNormalizer:
             source_repo.list(self._tenant_id, report_month=month),
             normalized_channel_ids,
         )
+        projecting_rows, evidence_outcomes, rejected_evidence = _partition_projection_rows(
+            in_scope_rows
+        )
         active_channel_ids = _active_channel_ids(
             self._session,
             tenant_id=self._tenant_id,
-            rows=in_scope_rows,
+            rows=projecting_rows,
         )
         work = _NormalizationWork(
             facts_repo=SqlAlchemyRevenueFactRepository(
                 self._session,
                 tenant_id=self._tenant_id,
-            )
+            ),
+            skipped=rejected_evidence,
+            non_projecting_evidence=evidence_outcomes,
         )
-        buckets = _source_row_buckets(in_scope_rows, work.skipped)
+        buckets = _source_row_buckets(projecting_rows, work.skipped)
 
         for (channel_id, source_system), bucket_rows in buckets.items():
             _process_source_bucket(

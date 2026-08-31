@@ -10,6 +10,10 @@ from ums_smart_revenue.connectors.google_source_parsers import (
     ParserError,
     YouTubeAnalyticsParser,
 )
+from ums_smart_revenue.connectors.google_source_rows.dataclasses import (
+    YOUTUBE_ANALYTICS_COUNTRY_EVIDENCE_REPORT_TYPE,
+    YOUTUBE_ANALYTICS_PROJECTING_REPORT_TYPE,
+)
 
 TENANT_ID = uuid4()
 
@@ -529,3 +533,90 @@ def test_malformed_declared_dimensions_fail_before_rows_are_emitted(
 
     with pytest.raises(ParserError, match="query_request.dimensions"):
         list(YouTubeAnalyticsParser().parse(payload, tenant_id=TENANT_ID))
+
+
+def test_country_rows_preserve_account_channel_country_and_non_projecting_token() -> None:
+    """U2 provenance is explicit and keeps every attribution axis unchanged."""
+    payload = _load_fixture("sample_query_response_2026_04.json")
+    rows = list(YouTubeAnalyticsParser().parse(payload, tenant_id=TENANT_ID))
+
+    assert rows
+    assert {row.source_system for row in rows} == {"youtube_analytics"}
+    assert {row.report_type for row in rows} == {YOUTUBE_ANALYTICS_COUNTRY_EVIDENCE_REPORT_TYPE}
+    assert {row.source_account_id for row in rows} == {"contentOwner==cms-test-1"}
+    assert {row.raw_payload["projection_disposition"] for row in rows} == {
+        "NON_PROJECTING_EVIDENCE"
+    }
+    assert {
+        (
+            row.youtube_channel_id,
+            row.raw_payload["dimensions"]["channel"],
+            row.raw_payload["dimensions"]["country"],
+        )
+        for row in rows
+    } == {
+        ("UC_test_alpha", "UC_test_alpha", "US"),
+        ("UC_test_alpha", "UC_test_alpha", "EG"),
+        ("UC_test_beta", "UC_test_beta", "GB"),
+    }
+
+
+@pytest.mark.parametrize("country", ["us", "USA", " U", "", None, 123])
+def test_country_evidence_rejects_invalid_country_token(country: object) -> None:
+    """Malformed country attribution fails the whole report; no silent row skip."""
+    payload = _load_fixture("sample_query_response_2026_04.json")
+    first = list(payload["rows"][0])
+    first[1] = country
+    bad = {**payload, "rows": [first]}
+    with pytest.raises(ParserError, match="country"):
+        list(YouTubeAnalyticsParser().parse(bad, tenant_id=TENANT_ID))
+
+
+def test_country_request_rejects_response_without_country_dimension() -> None:
+    """A mislabeled country query cannot fall through as projecting revenue."""
+    payload = _load_fixture("sample_query_response_2026_04.json")
+    headers = [header for header in payload["columnHeaders"] if header["name"] != "country"]
+    rows = [[row[0], *row[2:]] for row in payload["rows"]]
+    bad = {**payload, "columnHeaders": headers, "rows": rows}
+    with pytest.raises(ParserError, match="country"):
+        list(YouTubeAnalyticsParser().parse(bad, tenant_id=TENANT_ID))
+
+
+def test_empty_country_response_requires_the_requested_metric_header() -> None:
+    """A malformed empty success cannot authorize stale evidence deletion."""
+    payload = _load_fixture("sample_query_response_2026_04.json")
+    headers = [header for header in payload["columnHeaders"] if header["columnType"] == "DIMENSION"]
+    bad = {
+        **payload,
+        "query_request": {
+            **payload["query_request"],
+            "metrics": "estimatedRevenue",
+        },
+        "columnHeaders": headers,
+        "rows": [],
+    }
+    with pytest.raises(ParserError, match="metrics"):
+        list(YouTubeAnalyticsParser().parse(bad, tenant_id=TENANT_ID))
+
+
+def test_worldwide_row_is_explicitly_projecting() -> None:
+    """The ordinary monthly lane remains distinct from U2 evidence."""
+    payload = _load_fixture("sample_query_response_2026_04.json")
+    headers = [header for header in payload["columnHeaders"] if header["name"] != "country"]
+    rows = [[row[0], *row[2:]] for row in payload["rows"]]
+    worldwide = {
+        **payload,
+        "query_request": {**payload["query_request"], "dimensions": "channel"},
+        "columnHeaders": headers,
+        "rows": rows,
+    }
+    parsed = list(YouTubeAnalyticsParser().parse(worldwide, tenant_id=TENANT_ID))
+    assert parsed
+    assert {row.report_type for row in parsed} == {YOUTUBE_ANALYTICS_PROJECTING_REPORT_TYPE}
+    assert {row.raw_payload["projection_disposition"] for row in parsed} == {"PROJECTING"}
+
+    country_keys = {
+        row.source_row_key for row in YouTubeAnalyticsParser().parse(payload, tenant_id=TENANT_ID)
+    }
+    worldwide_keys = {row.source_row_key for row in parsed}
+    assert country_keys.isdisjoint(worldwide_keys)

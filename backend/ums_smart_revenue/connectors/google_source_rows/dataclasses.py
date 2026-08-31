@@ -9,6 +9,7 @@ recomputed inside the repository.
 from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal
+from enum import StrEnum
 from typing import Final
 
 ALLOWED_SOURCE_SYSTEMS: Final[frozenset[str]] = frozenset(
@@ -18,6 +19,28 @@ ALLOWED_VALUE_KINDS: Final[frozenset[str]] = frozenset(
     {"estimated", "settled", "adjustment", "tax", "deduction"}
 )
 SOURCE_ROW_KEY_LENGTH: Final[int] = 64  # SHA-256 hex digest length
+YOUTUBE_ANALYTICS_PROJECTING_REPORT_TYPE: Final[str] = "reports.query"
+YOUTUBE_ANALYTICS_COUNTRY_EVIDENCE_REPORT_TYPE: Final[str] = "reports.query.country_evidence"
+
+
+# ============================================================================
+# Purpose: Define the parser-owned provenance fence and separate persisted
+#          report scopes consumed before source rows enter projection/cleanup.
+# Database/ORM: Persisted inside google_revenue_source_rows.raw_payload JSON;
+#               no column or enum migration.
+# Standards: Closed string enum; unknown values fail evidence validation.
+# Blast Radius: Finance projection eligibility and evidence audit telemetry.
+# Connections:
+#   - File: backend/ums_smart_revenue/connectors/google_source_parsers/
+#     youtube_analytics.py -> Emits the disposition in each parsed raw payload.
+#   - File: backend/ums_smart_revenue/finance/google_source_normalizer.py ->
+#     Revalidates the disposition before canonical bucketing.
+# ============================================================================
+class SourceRowProjectionDisposition(StrEnum):
+    """Parser-owned declaration of whether evidence may enter finance facts."""
+
+    PROJECTING = "PROJECTING"
+    NON_PROJECTING_EVIDENCE = "NON_PROJECTING_EVIDENCE"
 
 
 @dataclass(frozen=True)

@@ -89,6 +89,7 @@ from ums_smart_revenue.auth.models import UserPrincipal
 from ums_smart_revenue.auth.sql_audit_sink import SqlAlchemyAuditSink
 from ums_smart_revenue.config.settings import (
     GOOGLE_CONNECTOR_SERVICE_ACTOR_ID_ENV,
+    load_app_settings,
 )
 from ums_smart_revenue.connectors.google.adsense_management_client import (
     AdSenseManagementClient,
@@ -130,6 +131,9 @@ from ums_smart_revenue.connectors.google.youtube_analytics_client import (
     list_target_channels,
 )
 from ums_smart_revenue.connectors.google.youtube_analytics_client import (
+    _build_country_evidence_query_request as _build_analytics_country_evidence_query_request,
+)
+from ums_smart_revenue.connectors.google.youtube_analytics_client import (
     _build_query_request as _build_analytics_query_request,
 )
 from ums_smart_revenue.connectors.google.youtube_reporting_client import (
@@ -143,6 +147,10 @@ from ums_smart_revenue.connectors.google_source_parsers import (
 from ums_smart_revenue.connectors.google_source_rows import (
     ParsedSourceRow,
     SqlAlchemyGoogleRevenueSourceRowRepository,
+)
+from ums_smart_revenue.connectors.google_source_rows.dataclasses import (
+    YOUTUBE_ANALYTICS_COUNTRY_EVIDENCE_REPORT_TYPE,
+    YOUTUBE_ANALYTICS_PROJECTING_REPORT_TYPE,
 )
 from ums_smart_revenue.connectors.keys import (
     credential_key_candidates,
@@ -1794,7 +1802,7 @@ def _flush_deferred_stale_cleanup_plans(
 #   - Function: _process_one_report -> provides fallback report_type scopes for
 #     _delete_stale_source_rows.
 #   - File: backend/ums_smart_revenue/connectors/google_source_parsers/
-#     youtube_analytics.py -> emits ParsedSourceRow.report_type="reports.query".
+#     youtube_analytics.py -> emits separate projecting/evidence report types.
 #   - File: backend/ums_smart_revenue/connectors/google_source_parsers/
 #     adsense_management.py -> emits earnings_report and payment_report rows.
 # ============================================================================
@@ -1805,7 +1813,9 @@ def _fallback_source_report_types(
 ) -> tuple[str, ...]:
     """Return persisted report_type labels for empty-success stale cleanup."""
     if isinstance(parser, YouTubeAnalyticsParser):
-        return ("reports.query",)
+        if default_report_type == "youtube_analytics_country_evidence":
+            return (YOUTUBE_ANALYTICS_COUNTRY_EVIDENCE_REPORT_TYPE,)
+        return (YOUTUBE_ANALYTICS_PROJECTING_REPORT_TYPE,)
     if isinstance(parser, AdSenseManagementParser):
         return ("earnings_report", "payment_report")
     return (default_report_type,)
@@ -3307,13 +3317,9 @@ def _analytics_parser_dimension_declaration(query_request: dict[str, str]) -> st
 
 
 # ============================================================================
-# Purpose: B2.5 adapter that fetches YouTube Analytics per-channel reports. One
-#          ``reports.query`` GET per eligible CMS channel for the run's month;
-#          each success is yielded as ``("youtube_analytics", payload, bytes)``
-#          with the ``channel`` dimension synthesised into the response, because
-#          the wire request uses ``dimensions=month`` only (content-owner
-#          reports need a multi-value channel filter to add ``channel``, and
-#          B2.5 issues one single-value request per channel).
+# Purpose: B2.5 adapter that fetches the projecting worldwide Analytics report
+#          per channel and, when explicitly enabled, a second country-sliced
+#          U2 evidence report whose parser payload is non-projecting.
 # Database/ORM: Reads the channel registry through ``list_target_channels``;
 #               writes nothing itself -- the orchestrator owns the blob,
 #               raw_file, and source-row writes. Parsed analytics rows persist
@@ -3328,10 +3334,11 @@ def _analytics_parser_dimension_declaration(query_request: dict[str, str]) -> st
 #            raised per channel (including a query-request validation
 #            rejection) is yielded as a ``ProducedReportFailure`` so the run is
 #            marked PARTIAL and sibling channels still run.
-# Blast Radius: Finance ingestion -- these rows do feed the revenue projection,
-#               unlike the audit-only AdSense path. Tenancy is carried by
-#               ``run.tenant_id`` into ``list_target_channels``, so that value
-#               is what scopes which channels are fetched at all. The explicit
+# Blast Radius: Worldwide rows feed revenue projection; country rows are
+#               fenced before finance bucketing and affect evidence/audit only.
+#               Tenancy is carried by ``run.tenant_id`` into
+#               ``list_target_channels``, so that value scopes which channels
+#               are fetched at all. The explicit
 #               top-level rollback after the channel-list SELECT is
 #               load-bearing: it leaves the orchestrator's per-report
 #               ``platform_lane`` block to open its own transaction, instead of
@@ -3343,21 +3350,21 @@ def _analytics_parser_dimension_declaration(query_request: dict[str, str]) -> st
 #   - File: backend/ums_smart_revenue/connectors/google/youtube_analytics_client.py
 #     -> YouTubeAnalyticsClient.fetch_channel_report and list_target_channels.
 #   - File: backend/ums_smart_revenue/connectors/google_source_parsers/youtube_analytics.py
-#     -> YouTubeAnalyticsParser consumes the yielded triple and keys rows on
-#     (channel, month).
+#     -> YouTubeAnalyticsParser consumes both yielded report shapes and keeps
+#     country in the evidence row's deterministic source key.
 #   - File: Docs/superpowers/specs/2026-05-26-spec-b2-google-live-connector-design.md
 #     §5.5 -> targeted-channel ingestion contract.
 # ============================================================================
 class YouTubeAnalyticsRunner:
     """B2.5 adapter that fetches YouTube Analytics per-channel reports.
 
-    Each yielded success carries the ``"youtube_analytics"`` report type, a
-    parser-friendly payload dict (the raw ``reports.query`` JSON body augmented
-    with the ``query_request`` key the parser needs), and the raw JSON bytes
-    for blob storage and replay. The orchestrator stores each channel's blob
-    separately; it never synthesises a cross-channel bundle. Only channels
-    attached to the current CMS account are fetched here; outside-CMS channels
-    remain out of scope for B2.5.
+    Each worldwide success carries the ``"youtube_analytics"`` report label.
+    When U2 is enabled, each country success carries the distinct
+    ``"youtube_analytics_country_evidence"`` label while retaining the same
+    allowlisted parser source system. Both payloads include ``query_request``
+    metadata and replayable raw JSON bytes. The orchestrator stores each
+    channel/report blob separately; it never synthesises a cross-channel
+    bundle. Only channels attached to the current CMS account are fetched.
 
     The class references ``YouTubeAnalyticsClient`` and ``list_target_channels``
     by bare name so tests that patch
@@ -3376,12 +3383,11 @@ class YouTubeAnalyticsRunner:
     ) -> Iterator[ProducedReport]:
         """Yield one parser-ready payload per eligible CMS channel for ``report_month``.
 
-        Each iteration issues one ``reports.query`` GET via
-        ``YouTubeAnalyticsClient`` for the next ``channel_id`` returned by
-        ``list_target_channels``. A per-channel ``GoogleConnectorError`` (other
-        than ``OAuthRefreshError``, which still escapes for run-level handling)
-        is yielded as a ``ProducedReportFailure`` so the orchestrator marks the
-        run PARTIAL and continues with the remaining channels.
+        Each iteration issues the worldwide ``reports.query`` GET and, when U2
+        is enabled, one country-dimensional evidence GET for the next channel.
+        A per-report ``GoogleConnectorError`` (other than ``OAuthRefreshError``,
+        which escapes for run-level handling) yields ``ProducedReportFailure``
+        so the orchestrator marks the run PARTIAL and continues safely.
         """
         # ``run`` carries the tenant_id we need for list_target_channels.
         # On the T29 dry-run path run is None; the orchestrator still passes
@@ -3398,6 +3404,9 @@ class YouTubeAnalyticsRunner:
                 session,
                 tenant_id=tenant_id,
                 account_id=account_id,
+            )
+            country_evidence_enabled = (
+                load_app_settings().youtube_analytics_country_evidence_enabled
             )
             # FIX: end the read-only channel-list transaction now so the
             # orchestrator's per-report `with platform_lane(session):` block
@@ -3504,6 +3513,62 @@ class YouTubeAnalyticsRunner:
                 # state.
                 raw_bytes = json.dumps(parser_payload, sort_keys=True).encode("utf-8")
                 yield ("youtube_analytics", parser_payload, raw_bytes)
+
+                if not country_evidence_enabled:
+                    continue
+
+                # U2 is a second, explicitly evidence-only query. It keeps the
+                # allowlisted youtube_analytics source_system and carries a
+                # parser-owned NON_PROJECTING_EVIDENCE token; the finance
+                # normalizer independently revalidates that provenance before
+                # any canonical bucket or fact write. A country failure is a
+                # report-scoped PARTIAL outcome, so stale cleanup and monthly
+                # projection stay fail-closed for this run.
+                try:
+                    country_query_request = _build_analytics_country_evidence_query_request(
+                        account_id=account_id,
+                        channel_id=channel_id,
+                        report_month=report_month,
+                    )
+                    country_response = client.fetch_channel_country_evidence(
+                        account_id=account_id,
+                        channel_id=channel_id,
+                        report_month=report_month,
+                    )
+                except OAuthRefreshError:
+                    raise
+                except GoogleConnectorError as exc:
+                    yield ProducedReportFailure(
+                        report_type="youtube_analytics_country_evidence",
+                        error=exc,
+                    )
+                    continue
+                country_augmented_response = _synthesise_analytics_channel_dimension(
+                    response=country_response,
+                    channel_id=channel_id,
+                )
+                country_parser_payload: dict[str, object] = {
+                    **country_augmented_response,
+                    # The parser consumes the post-synthesis response, so its
+                    # metadata must declare the synthesised channel alongside
+                    # the wire-requested ``country``; otherwise the injected
+                    # channel looks like undeclared response drift.
+                    "query_request": {
+                        **country_query_request,
+                        "dimensions": _analytics_parser_dimension_declaration(
+                            country_query_request
+                        ),
+                    },
+                }
+                country_raw_bytes = json.dumps(
+                    country_parser_payload,
+                    sort_keys=True,
+                ).encode("utf-8")
+                yield (
+                    "youtube_analytics_country_evidence",
+                    country_parser_payload,
+                    country_raw_bytes,
+                )
         finally:
             http.close()
 
