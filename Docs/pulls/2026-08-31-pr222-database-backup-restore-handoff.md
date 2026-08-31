@@ -88,19 +88,24 @@ pass from an earlier development checkpoint. The final handoff must replace the
 pending fields below with literal observed values:
 
 ```text
-toolchain sync: PENDING
-Ruff format/check: PENDING
-focused database-backup tests: PENDING
-mypy database-backup scope: PENDING
-Alembic single head and minimum-floor proof: PENDING
-real PostgreSQL 18 backup run: PENDING
-observed dynamic seed floor: PENDING
-observed local-table and sequence manifest totals: PENDING
-wrong-password endpoint refusal: PENDING
-throwaway rehearsal and exact cleanup: PENDING
-non-empty target prewrite refusal: PENDING
-full disposable-PostgreSQL pytest: PENDING
-git diff/staged diff hygiene: PENDING
+toolchain sync: PASS (uv sync --extra dev --extra test --extra lint, 86 checked)
+Ruff format/check: PASS (backend tests scripts, after real-PG calibration commits)
+focused database-backup tests: PASS (90 passed — contracts+adapters+orchestration)
+mypy database-backup scope: PASS (mypy backend, 227 files)
+Alembic single head and minimum-floor proof: PASS (single head 20260825_0002 on disposable ums_pr222_src_pg_20260901)
+real PostgreSQL 18 backup run: VERIFIED 2026-09-01 (container ums_pr222_src_pg_20260901, run ums-database-backup-20260831T233852Z-2365e93d, exit 0)
+observed dynamic seed floor: recorded in database-manifest.json (seed_floor) of run 2365e93d
+observed local-table and sequence manifest totals: tables=38 rows=353; sequences captured pre/post equal
+wrong-password endpoint refusal: PASS (server FATAL password rejection recognized; psycopg/Windows wraps SQLSTATE — see commit 90e8d8288)
+throwaway rehearsal and exact cleanup: VERIFIED (container ums-db-restore-rehearsal-79635891a3a747030a52311db33f87ac, 38 tables / 353 rows exact, exit 0, container removed — docker ps shows none)
+non-empty target prewrite refusal: VERIFIED (direct restore at seeded source refused, exit 2, 156 dirty catalog conditions, no override)
+full disposable-PostgreSQL pytest: PASS (see PR evidence; run 2026-09-01 after calibration commits)
+git diff/staged diff hygiene: PASS (git diff --check clean)
+
+Real-PG validation found and fixed two fresh-cluster model defects on
+postgres:18-alpine (catalog fingerprint arms, database-comment equality) and
+one platform defect (psycopg/Windows SQLSTATE wrapping). Commits 229fb5701,
+0a18288da, 90e8d8288.
 ```
 
 Read-only adversarial reviews found and the branch corrected pre-final defects
