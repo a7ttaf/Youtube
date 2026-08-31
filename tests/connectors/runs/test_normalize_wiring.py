@@ -713,7 +713,13 @@ def test_non_projecting_evidence_audit_counts_are_separate_and_private(
     skipped_record = next(
         record for record in records if record.details.get("lifecycle") == "ROWS_SKIPPED"
     )
-    assert skipped_record.details["skipped_count"] == 1
+    assert skipped_record.details["skipped_count"] == 2
+    assert skipped_record.details["current_or_general_skipped_count"] == 1
+    assert skipped_record.details["retained_evidence_skipped_count"] == 1
+    assert skipped_record.details["attribution_scope"] == "MIXED_MONTH_SNAPSHOT"
+    assert skipped_record.entity_type == "finance_month"
+    assert skipped_record.entity_id == REPORT_MONTH
+    assert "triggered_by_run_id" not in skipped_record.details
 
 
 def test_accepted_evidence_never_emits_rows_skipped_warning(
@@ -833,6 +839,120 @@ def test_analytics_run_without_country_raw_file_does_not_claim_evidence() -> Non
     )
 
     assert audit_sink.append.call_args_list == []
+
+
+def test_retained_invalid_evidence_remains_alertable_without_run_attribution() -> None:
+    """An unlinked legacy defect emits a month snapshot, not a current-run claim."""
+    from ums_smart_revenue.finance.google_source_normalizer import (
+        EvidenceDisposition,
+        EvidenceReason,
+        NonProjectingEvidenceOutcome,
+        SkippedSourceRow,
+        SkipReason,
+    )
+
+    normalizer = MagicMock(name="normalizer_instance")
+    normalizer.normalize_month.return_value = _StubResult(
+        created=[],
+        updated=[],
+        unchanged=[],
+        skipped=[
+            SkippedSourceRow(
+                source_row_id="retained-invalid",
+                reason=SkipReason.INVALID_NON_PROJECTING_EVIDENCE,
+            )
+        ],
+        non_projecting_evidence=[
+            NonProjectingEvidenceOutcome(
+                source_row_id="retained-invalid",
+                source_system="youtube_analytics",
+                source_account_id="contentOwner==older-cms",
+                country_code=None,
+                disposition=EvidenceDisposition.REJECTED,
+                reason=EvidenceReason.INVALID_PROVENANCE,
+                raw_file_id=str(uuid4()),
+            )
+        ],
+    )
+    _, _, _, _, audit_sink = _invoke_run_one(
+        outcome=_outcome(run=_run_entry(status="SUCCEEDED", connector_key="youtube-analytics")),
+        normalizer=normalizer,
+        country_evidence_raw_file_ids=[COUNTRY_RAW_FILE_ID],
+    )
+
+    records = [call.args[0] for call in audit_sink.append.call_args_list]
+    skipped_record = next(
+        record for record in records if record.details.get("lifecycle") == "ROWS_SKIPPED"
+    )
+    assert skipped_record.details["skipped_count"] == 1
+    assert skipped_record.details["retained_evidence_skipped_count"] == 1
+    assert skipped_record.details["attribution_scope"] == "RETAINED_MONTH_SNAPSHOT"
+    assert skipped_record.entity_type == "finance_month"
+    assert skipped_record.entity_id == REPORT_MONTH
+    assert "triggered_by_run_id" not in skipped_record.details
+
+
+def test_cross_run_duplicate_evidence_remains_alertable() -> None:
+    """A retained duplicate loser is reported beside the current accepted row."""
+    from ums_smart_revenue.finance.google_source_normalizer import (
+        EvidenceDisposition,
+        EvidenceReason,
+        NonProjectingEvidenceOutcome,
+        SkippedSourceRow,
+        SkipReason,
+    )
+
+    normalizer = MagicMock(name="normalizer_instance")
+    normalizer.normalize_month.return_value = _StubResult(
+        created=[],
+        updated=[],
+        unchanged=[],
+        skipped=[
+            SkippedSourceRow(
+                source_row_id="older-duplicate",
+                reason=SkipReason.DUPLICATE_NON_PROJECTING_EVIDENCE,
+            )
+        ],
+        non_projecting_evidence=[
+            NonProjectingEvidenceOutcome(
+                source_row_id="current-winner",
+                source_system="youtube_analytics",
+                source_account_id="contentOwner==cms-1",
+                country_code="US",
+                disposition=EvidenceDisposition.ACCEPTED,
+                reason=EvidenceReason.NON_PROJECTING_EVIDENCE,
+                raw_file_id=str(COUNTRY_RAW_FILE_ID),
+            ),
+            NonProjectingEvidenceOutcome(
+                source_row_id="older-duplicate",
+                source_system="youtube_analytics",
+                source_account_id="contentOwner==cms-1",
+                country_code="US",
+                disposition=EvidenceDisposition.REJECTED,
+                reason=EvidenceReason.DUPLICATE_PROVENANCE,
+                raw_file_id=str(uuid4()),
+            ),
+        ],
+    )
+    _, _, _, _, audit_sink = _invoke_run_one(
+        outcome=_outcome(run=_run_entry(status="SUCCEEDED", connector_key="youtube-analytics")),
+        normalizer=normalizer,
+        country_evidence_raw_file_ids=[COUNTRY_RAW_FILE_ID],
+    )
+
+    records = [call.args[0] for call in audit_sink.append.call_args_list]
+    evidence_record = next(
+        record for record in records if record.details.get("lifecycle") == "NON_PROJECTING_EVIDENCE"
+    )
+    assert evidence_record.details["accepted_count"] == 1
+    assert evidence_record.details["rejected_count"] == 0
+    skipped_record = next(
+        record for record in records if record.details.get("lifecycle") == "ROWS_SKIPPED"
+    )
+    assert skipped_record.details["skipped_by_reason"] == {"duplicate_non_projecting_evidence": 1}
+    assert skipped_record.details["retained_evidence_skipped_count"] == 1
+    assert skipped_record.details["attribution_scope"] == "RETAINED_MONTH_SNAPSHOT"
+    assert "triggered_by_run_id" not in skipped_record.details
 
 
 def test_no_skipped_rows_emits_no_skip_edge() -> None:

@@ -130,17 +130,19 @@ class SqlAlchemyIngestedSourceRowNormalizationAdapter:
                         report_month=report_month,
                         outcomes=run_evidence,
                     )
-                audit_skipped = _skipped_rows_for_evidence_run(
+                audit_skipped, retained_evidence_skipped = _partition_skipped_rows_for_evidence_run(
                     skipped=result.skipped,
                     run_evidence=run_evidence,
                 )
-                if audit_skipped:
+                all_alertable_skips = [*audit_skipped, *retained_evidence_skipped]
+                if all_alertable_skips:
                     _emit_skipped_rows_audit(
                         audit_sink=audit_sink,
                         audit_actor=audit_actor,
                         run=run,
                         report_month=report_month,
-                        skipped=audit_skipped,
+                        skipped=all_alertable_skips,
+                        retained_evidence_count=len(retained_evidence_skipped),
                     )
                 self._session.commit()
         except RevenueFactLockedMonthError:
@@ -237,32 +239,36 @@ def _evidence_outcomes_for_analytics_run(
 
 
 # ============================================================================
-# Purpose: Keep generic skipped-row alerts from claiming rejected evidence
-#          owned by a different account or raw-file run.
+# Purpose: Separate current-run skips from retained evidence defects without
+#          suppressing either class from operator alerts.
 # Database/ORM: None.
-# Standards: Stable typed skip reasons and source-row identity matching only.
+# Standards: Stable typed skip reasons and source-row identity matching only;
+#            retained defects remain visible but are never run-attributed.
 # Blast Radius: Connector audit attribution and HIGH skipped-row alerts.
 # Connections:
 #   - Function: _evidence_outcomes_for_analytics_run -> Supplies the exact
 #     account/run-scoped evidence identities.
 #   - Function: _emit_skipped_rows_audit -> Receives the filtered defect set.
 # ============================================================================
-def _skipped_rows_for_evidence_run(
+def _partition_skipped_rows_for_evidence_run(
     *,
     skipped: list[SkippedSourceRow],
     run_evidence: list[NonProjectingEvidenceOutcome],
-) -> list[SkippedSourceRow]:
-    """Remove rejected evidence that is not linked to the triggering run."""
+) -> tuple[list[SkippedSourceRow], list[SkippedSourceRow]]:
+    """Return current/general skips separately from retained evidence defects."""
     run_evidence_ids = {outcome.source_row_id for outcome in run_evidence}
     evidence_skip_reasons = {
         SkipReason.INVALID_NON_PROJECTING_EVIDENCE,
         SkipReason.DUPLICATE_NON_PROJECTING_EVIDENCE,
     }
-    return [
-        row
-        for row in skipped
-        if row.reason not in evidence_skip_reasons or row.source_row_id in run_evidence_ids
-    ]
+    current_or_general: list[SkippedSourceRow] = []
+    retained_evidence: list[SkippedSourceRow] = []
+    for row in skipped:
+        if row.reason in evidence_skip_reasons and row.source_row_id not in run_evidence_ids:
+            retained_evidence.append(row)
+        else:
+            current_or_general.append(row)
+    return current_or_general, retained_evidence
 
 
 # ============================================================================
@@ -410,6 +416,7 @@ def _emit_skipped_rows_audit(
     run: ConnectorRunEntry,
     report_month: str,
     skipped: list[SkippedSourceRow],
+    retained_evidence_count: int = 0,
 ) -> None:
     """Emit one CONNECTOR_JOB_RUN summary edge for projection-skipped source rows."""
     from ums_smart_revenue.auth.audit import AuditEventType
@@ -435,22 +442,45 @@ def _emit_skipped_rows_audit(
         report_month,
         reason_counts,
     )
+    attribution_details: dict[str, object]
+    if retained_evidence_count:
+        current_or_general_count = len(skipped) - retained_evidence_count
+        attribution_details = {
+            "attribution_scope": (
+                "MIXED_MONTH_SNAPSHOT"
+                if current_or_general_count
+                else "RETAINED_MONTH_SNAPSHOT"
+            ),
+            "current_or_general_skipped_count": current_or_general_count,
+            "retained_evidence_skipped_count": retained_evidence_count,
+            "observed_during_run_id": run.id,
+            "observed_during_connector_key": run.connector_key,
+        }
+    else:
+        attribution_details = {
+            "attribution_scope": "CURRENT_RUN",
+            "triggered_by_run_id": run.id,
+            "triggered_by_connector_key": run.connector_key,
+            "triggered_by_account_id": run.account_id,
+        }
     record_audit_event(
         sink=audit_sink,
         actor=audit_actor,
         event_type=AuditEventType.CONNECTOR_JOB_RUN,
-        entity_type="connector_run",
-        entity_id=run.id,
+        entity_type="finance_month" if retained_evidence_count else "connector_run",
+        entity_id=report_month if retained_evidence_count else run.id,
         scope=AccessScope.finance_month(report_month),
-        reason="connector normalize: source rows skipped during projection",
+        reason=(
+            "connector normalize: month snapshot contains retained source-row defects"
+            if retained_evidence_count
+            else "connector normalize: source rows skipped during projection"
+        ),
         details={
             "lifecycle": "ROWS_SKIPPED",
             "skipped_count": len(skipped),
             "skipped_by_reason": reason_counts,
             "month": report_month,
-            "triggered_by_run_id": run.id,
-            "triggered_by_connector_key": run.connector_key,
-            "triggered_by_account_id": run.account_id,
+            **attribution_details,
         },
     )
 

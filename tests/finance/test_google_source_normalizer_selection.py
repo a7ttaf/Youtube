@@ -60,7 +60,7 @@ def _entry(
     currency: str = "USD",
     youtube_channel_id: str | None = "UC_test_1",
     value_kind: str = "estimated",
-    source_account_id: str = "acct-test-1",
+    source_account_id: str = "contentOwner==cms-test-1",
     raw_payload: object | None = None,
     report_type: str = "x",
     source_report_id: str | None = "r-1",
@@ -72,7 +72,11 @@ def _entry(
         source_system=source_system,
         source_row_key=source_row_key,
         source_account_id=source_account_id,
-        content_owner_id=None,
+        content_owner_id=(
+            source_account_id.partition("==")[2]
+            if source_account_id.startswith("contentOwner==")
+            else None
+        ),
         youtube_channel_id=youtube_channel_id,
         report_type=report_type,
         report_month="2026-04",
@@ -96,7 +100,9 @@ def _parsed_country_evidence() -> ParsedSourceRow:
         "query_request": {
             "startDate": "2026-04-01",
             "endDate": "2026-04-30",
-            "ids": "channel==UC_test_1",
+            # Evidence collection runs under the content-owner scope, matching
+            # the runner's `_build_country_evidence_query_request`.
+            "ids": "contentOwner==cms-test-1",
             "metrics": "estimatedRevenue",
             "dimensions": "channel,country",
             "currency": "USD",
@@ -419,7 +425,7 @@ def test_partition_accepts_country_evidence_without_projecting_it() -> None:
     assert evidence[0].disposition is EvidenceDisposition.ACCEPTED
     assert evidence[0].reason is EvidenceReason.NON_PROJECTING_EVIDENCE
     assert evidence[0].source_system == "youtube_analytics"
-    assert evidence[0].source_account_id == "acct-test-1"
+    assert evidence[0].source_account_id == "contentOwner==cms-test-1"
     assert evidence[0].country_code == "US"
 
 
@@ -457,11 +463,12 @@ def test_partition_rejects_legacy_country_row_without_evidence_report_type() -> 
     ("account", "channel", "country", "disposition"),
     [
         ("   ", "UC_test_1", "US", "NON_PROJECTING_EVIDENCE"),
-        ("acct-test-1", "UC-other", "US", "NON_PROJECTING_EVIDENCE"),
-        ("acct-test-1", "UC_test_1", "us", "NON_PROJECTING_EVIDENCE"),
-        ("acct-test-1", "UC_test_1", None, "NON_PROJECTING_EVIDENCE"),
-        ("acct-test-1", "UC_test_1", "US", "UNKNOWN"),
-        ("acct-test-1", "UC_test_1", "US", "PROJECTING"),
+        ("acct-test-1", "UC_test_1", "US", "NON_PROJECTING_EVIDENCE"),
+        ("contentOwner==cms-test-1", "UC-other", "US", "NON_PROJECTING_EVIDENCE"),
+        ("contentOwner==cms-test-1", "UC_test_1", "us", "NON_PROJECTING_EVIDENCE"),
+        ("contentOwner==cms-test-1", "UC_test_1", None, "NON_PROJECTING_EVIDENCE"),
+        ("contentOwner==cms-test-1", "UC_test_1", "US", "UNKNOWN"),
+        ("contentOwner==cms-test-1", "UC_test_1", "US", "PROJECTING"),
     ],
 )
 def test_partition_rejects_invalid_country_provenance_without_projection(
@@ -556,6 +563,37 @@ def test_country_evidence_cannot_win_canonical_result():
     assert rest == []
     assert len(evidence) == 1
     assert evidence[0].disposition is EvidenceDisposition.ACCEPTED
+
+
+@pytest.mark.parametrize(
+    ("metric_key", "value_kind", "currency"),
+    [
+        ("grossRevenue", "estimated", "USD"),
+        ("estimatedRevenue", "tax", "USD"),
+        ("estimatedRevenue", "estimated", "EUR"),
+    ],
+)
+def test_partition_rejects_non_u2_metric_value_or_currency_contract(
+    metric_key: str,
+    value_kind: str,
+    currency: str,
+) -> None:
+    """Malformed evidence metadata stays rejected and outside every consumer."""
+    row = _entry(
+        source_system="youtube_analytics",
+        metric_key=metric_key,
+        source_row_key="m" * 64,
+        value_kind=value_kind,
+        currency=currency,
+        report_type=YOUTUBE_ANALYTICS_COUNTRY_EVIDENCE_REPORT_TYPE,
+        raw_payload={**_country_payload(), "metric": metric_key},
+    )
+
+    projecting, evidence, rejected = _partition_projection_rows([row])
+
+    assert projecting == []
+    assert evidence[0].disposition is EvidenceDisposition.REJECTED
+    assert rejected[0].reason is SkipReason.INVALID_NON_PROJECTING_EVIDENCE
 
 
 def test_partition_rejects_duplicate_country_provenance_deterministically() -> None:

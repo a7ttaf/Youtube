@@ -21,6 +21,9 @@ import pytest
 from sqlalchemy import create_engine, func, select, update
 from sqlalchemy.orm import Session
 
+from ums_smart_revenue.connectors.google_source_rows.dataclasses import (
+    YOUTUBE_ANALYTICS_COUNTRY_EVIDENCE_REPORT_TYPE,
+)
 from ums_smart_revenue.db.finance_models import (
     AdsenseContentOwnerLinkORM,
     ContentOwnerChannelLinkORM,
@@ -349,26 +352,37 @@ def test_list_month_filter_enforces_upper_bound(tmp_path):
     assert feb.total_count == 0
 
 
-def _source_row(session, *, owner, channel, account="pub-x", month="2026-04", key="k1"):
+def _source_row(
+    session,
+    *,
+    owner,
+    channel,
+    account="pub-x",
+    month="2026-04",
+    key="k1",
+    source_system="youtube_reporting",
+    report_type="channel_basic_a2",
+    raw_payload=None,
+):
     """Insert a GoogleRevenueSourceRowORM row for derivation tests."""
     session.add(
         GoogleRevenueSourceRowORM(
             id=uuid4(),
             tenant_id=TENANT,
-            source_system="youtube_reporting",
+            source_system=source_system,
             source_row_key=key.ljust(64, "0"),
             source_account_id=account,
             content_owner_id=owner,
             youtube_channel_id=channel,
             report_month=month,
-            report_type="channel_basic_a2",
+            report_type=report_type,
             period_start=datetime(2026, 4, 1, tzinfo=UTC).date(),
             period_end=datetime(2026, 4, 30, tzinfo=UTC).date(),
             metric_key="estimated_partner_revenue",
             value_kind="estimated",
             amount_native=0,
             currency_code="USD",
-            raw_payload={},
+            raw_payload=raw_payload or {},
         )
     )
 
@@ -392,6 +406,64 @@ def test_derivation_only_uses_rows_with_both_owner_and_channel(tmp_path):
     assert rows[0].provenance_kind == "SOURCE_ROW"
     assert rows[0].effective_month_start == "2026-04"
     assert rows[0].effective_month_end == "2026-04"
+
+
+def test_derivation_excludes_country_evidence_only_rows(tmp_path):
+    """Evidence-only co-occurrence cannot create an allocation graph link."""
+    engine = _engine(tmp_path)
+    with Session(engine) as session:
+        _source_row(
+            session,
+            owner="owner-1",
+            channel="chan-1",
+            key="evidence",
+            source_system="youtube_analytics",
+            report_type=YOUTUBE_ANALYTICS_COUNTRY_EVIDENCE_REPORT_TYPE,
+            raw_payload={
+                "dimensions": {"channel": "chan-1", "country": "US"},
+                "projection_disposition": "NON_PROJECTING_EVIDENCE",
+            },
+        )
+        session.commit()
+        repo = SqlAlchemyChannelAccountLinkRepository(session, tenant_id=TENANT)
+        created = repo.upsert_owner_channel_links_from_source()
+        session.commit()
+        rows = session.scalars(select(ContentOwnerChannelLinkORM)).all()
+
+    assert created == 0
+    assert rows == []
+
+
+def test_derivation_mixed_rows_uses_only_projecting_provenance(tmp_path):
+    """Evidence cannot win the durable provenance key in a mixed source set."""
+    engine = _engine(tmp_path)
+    with Session(engine) as session:
+        _source_row(
+            session,
+            owner="owner-1",
+            channel="chan-1",
+            key="aaa-evidence",
+            source_system="youtube_analytics",
+            report_type=YOUTUBE_ANALYTICS_COUNTRY_EVIDENCE_REPORT_TYPE,
+            raw_payload={
+                "dimensions": {"channel": "chan-1", "country": "EG"},
+                "projection_disposition": "NON_PROJECTING_EVIDENCE",
+            },
+        )
+        _source_row(
+            session,
+            owner="owner-1",
+            channel="chan-1",
+            key="zzz-projecting",
+        )
+        session.commit()
+        repo = SqlAlchemyChannelAccountLinkRepository(session, tenant_id=TENANT)
+        created = repo.upsert_owner_channel_links_from_source()
+        session.commit()
+        row = session.scalars(select(ContentOwnerChannelLinkORM)).one()
+
+    assert created == 1
+    assert row.provenance_source_id.startswith("zzz-projecting")
 
 
 def test_derivation_skips_blank_source_identities(tmp_path):

@@ -1807,6 +1807,12 @@ def test_finance_admin_downloads_scoped_analytics_summary_csv(tmp_path, monkeypa
                 ),
                 _analytics_source_row(
                     channel_id="channel-a",
+                    amount=Decimal("80.000000"),
+                    raw_payload={"dimensions": ["channel-a", "country"]},
+                    ingested_at=base_ingested_at + timedelta(seconds=120),
+                ),
+                _analytics_source_row(
+                    channel_id="channel-a",
                     amount=Decimal("2.250000"),
                     metric_key="estimatedAdRevenue",
                     ingested_at=base_ingested_at + timedelta(minutes=2),

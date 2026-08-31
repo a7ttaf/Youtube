@@ -94,9 +94,18 @@ def _projecting_analytics_source_row_predicate(
 ) -> ColumnElement[bool]:
     """Return the fail-closed SQL predicate for export-eligible Analytics rows."""
     dialect_name = session.get_bind().dialect.name
+    dimensions_are_projecting: ColumnElement[bool]
     country_exists: ColumnElement[bool]
     provenance_is_projecting: ColumnElement[bool]
     if dialect_name == "postgresql":
+        dimensions_exist = sa.func.jsonb_exists(source_row.raw_payload, "dimensions")
+        dimensions_are_projecting = cast(
+            ColumnElement[bool],
+            sa.or_(
+                sa.not_(dimensions_exist),
+                sa.func.jsonb_typeof(source_row.raw_payload["dimensions"]) == "object",
+            ),
+        )
         country_exists = cast(
             ColumnElement[bool],
             sa.func.coalesce(
@@ -117,6 +126,14 @@ def _projecting_analytics_source_row_predicate(
             ),
         )
     elif dialect_name == "sqlite":
+        dimensions_type = sa.func.json_type(
+            source_row.raw_payload,
+            "$.dimensions",
+        )
+        dimensions_are_projecting = cast(
+            ColumnElement[bool],
+            sa.or_(dimensions_type.is_(None), dimensions_type == "object"),
+        )
         country_exists = cast(
             ColumnElement[bool],
             sa.func.json_type(
@@ -150,6 +167,7 @@ def _projecting_analytics_source_row_predicate(
         ColumnElement[bool],
         sa.and_(
             source_row.report_type == YOUTUBE_ANALYTICS_PROJECTING_REPORT_TYPE,
+            dimensions_are_projecting,
             sa.not_(country_exists),
             provenance_is_projecting,
         ),

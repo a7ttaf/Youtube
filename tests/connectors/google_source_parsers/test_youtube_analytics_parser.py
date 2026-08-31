@@ -591,11 +591,57 @@ def test_empty_country_response_requires_the_requested_metric_header() -> None:
         "query_request": {
             **payload["query_request"],
             "metrics": "estimatedRevenue",
+            # Declare the post-synthesis shape (channel is injected into the
+            # response) so the metric-header contract is what this exercises.
+            "dimensions": "channel,country",
         },
         "columnHeaders": headers,
         "rows": [],
     }
     with pytest.raises(ParserError, match="metrics"):
+        list(YouTubeAnalyticsParser().parse(bad, tenant_id=TENANT_ID))
+
+
+def test_empty_country_response_rejects_an_extra_dimension_header() -> None:
+    """An empty response cannot widen U2 identity before stale cleanup."""
+    payload = _load_fixture("sample_query_response_2026_04.json")
+    bad = {
+        **payload,
+        "query_request": {
+            **payload["query_request"],
+            "metrics": "estimatedRevenue",
+            "dimensions": "country",
+        },
+        "columnHeaders": [
+            {"name": "channel", "columnType": "DIMENSION", "dataType": "STRING"},
+            {"name": "country", "columnType": "DIMENSION", "dataType": "STRING"},
+            {"name": "month", "columnType": "DIMENSION", "dataType": "STRING"},
+            {"name": "estimatedRevenue", "columnType": "METRIC", "dataType": "FLOAT"},
+        ],
+        "rows": [],
+    }
+    with pytest.raises(ParserError, match="dimensions"):
+        list(YouTubeAnalyticsParser().parse(bad, tenant_id=TENANT_ID))
+
+
+def test_country_evidence_rejects_an_alternate_requested_metric() -> None:
+    """Only the locked U2 estimatedRevenue metric may authorize persistence."""
+    payload = _load_fixture("sample_query_response_2026_04.json")
+    bad = {
+        **payload,
+        "query_request": {
+            **payload["query_request"],
+            "metrics": "grossRevenue",
+            "dimensions": "country",
+        },
+        "columnHeaders": [
+            {"name": "channel", "columnType": "DIMENSION", "dataType": "STRING"},
+            {"name": "country", "columnType": "DIMENSION", "dataType": "STRING"},
+            {"name": "grossRevenue", "columnType": "METRIC", "dataType": "FLOAT"},
+        ],
+        "rows": [],
+    }
+    with pytest.raises(ParserError, match="exactly estimatedRevenue"):
         list(YouTubeAnalyticsParser().parse(bad, tenant_id=TENANT_ID))
 
 

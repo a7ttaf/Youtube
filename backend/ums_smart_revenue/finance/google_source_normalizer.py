@@ -287,6 +287,18 @@ def _country_evidence_outcome(
         for key in dimensions
     )
     evidence_report_type = row.report_type == YOUTUBE_ANALYTICS_COUNTRY_EVIDENCE_REPORT_TYPE
+    selector_kind, selector_separator, selector_id = (
+        row.source_account_id.partition("==")
+        if isinstance(row.source_account_id, str)
+        else ("", "", "")
+    )
+    valid_content_owner_account = (
+        selector_kind == "contentOwner"
+        and selector_separator == "=="
+        and bool(selector_id)
+        and selector_id.strip() == selector_id
+        and row.content_owner_id == selector_id
+    )
 
     # Legacy worldwide rows predate the explicit token. A current parser emits
     # PROJECTING, but absence remains compatible only when no country dimension
@@ -319,11 +331,16 @@ def _country_evidence_outcome(
         raw_disposition == SourceRowProjectionDisposition.NON_PROJECTING_EVIDENCE.value
         and row.source_system == "youtube_analytics"
         and evidence_report_type
-        and isinstance(row.source_account_id, str)
-        and bool(row.source_account_id.strip())
+        and row.metric_key == "estimatedRevenue"
+        and row.value_kind == "estimated"
+        and row.currency_code == "USD"
+        and valid_content_owner_account
         and isinstance(row.youtube_channel_id, str)
         and bool(row.youtube_channel_id.strip())
+        and isinstance(dimensions, Mapping)
+        and set(dimensions) == {"channel", "country"}
         and channel == row.youtube_channel_id
+        and raw_payload.get("metric") == row.metric_key
         and valid_country
     )
     if not valid:

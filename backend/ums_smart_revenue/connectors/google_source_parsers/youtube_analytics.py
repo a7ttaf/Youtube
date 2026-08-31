@@ -85,6 +85,7 @@ class _AnalyticsParseContext:
     filters_key: str | None
     projection_disposition: SourceRowProjectionDisposition
     requested_metrics: frozenset[str]
+    strict_country_evidence_query: bool
 
 
 # ============================================================================
@@ -118,6 +119,9 @@ def _analytics_parse_context(request: dict[str, object]) -> _AnalyticsParseConte
     requested_metrics = frozenset(part.strip() for part in metrics_csv.split(",") if part.strip())
     if not requested_metrics:
         raise ParserError("query_request.metrics must name at least one metric")
+    strict_country_evidence_query = requested_dimensions == {"country"}
+    if strict_country_evidence_query and requested_metrics != {"estimatedRevenue"}:
+        raise ParserError("country evidence query_request.metrics must be exactly estimatedRevenue")
     projection_disposition = (
         SourceRowProjectionDisposition.NON_PROJECTING_EVIDENCE
         if "country" in requested_dimensions
@@ -142,6 +146,7 @@ def _analytics_parse_context(request: dict[str, object]) -> _AnalyticsParseConte
         filters_key=filters_key,
         projection_disposition=projection_disposition,
         requested_metrics=requested_metrics,
+        strict_country_evidence_query=strict_country_evidence_query,
     )
 
 
@@ -300,6 +305,7 @@ def _require_projection_header_contract(
     *,
     disposition: SourceRowProjectionDisposition,
     requested_metrics: frozenset[str],
+    strict_country_evidence_query: bool,
 ) -> None:
     """Keep response dimensions consistent with the request's projection class."""
     dimension_names = {name for column_type, name in header_specs if column_type == "DIMENSION"}
@@ -312,6 +318,8 @@ def _require_projection_header_contract(
         )
     if expects_country and metric_names != requested_metrics:
         raise ParserError("country response metrics must exactly match query_request.metrics")
+    if strict_country_evidence_query and dimension_names != {"channel", "country"}:
+        raise ParserError("country evidence response dimensions must be exactly channel,country")
 
 
 def _analytics_row_values(
@@ -461,6 +469,7 @@ class YouTubeAnalyticsParser:
             header_specs,
             disposition=context.projection_disposition,
             requested_metrics=context.requested_metrics,
+            strict_country_evidence_query=context.strict_country_evidence_query,
         )
         metric_names = [name for column_type, name in header_specs if column_type == "METRIC"]
 
