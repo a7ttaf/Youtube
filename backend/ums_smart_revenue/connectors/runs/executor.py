@@ -406,6 +406,11 @@ class ConnectorJobExecutor:
         keep the executor object and its late audit thread state reachable until
         they actually finish. Repeated or concurrent close/wait calls are
         serialized by ``_close_lock``.
+
+        Unbounded applies to the settle loop: the first audit join still runs
+        under the shared 30-second budget (``_audit_cancelled_within_budget``
+        caps ``deadline``), and durability is then guaranteed by the re-join
+        loop below rather than by the first phase.
         """
         with self._close_lock:
             self._executor.shutdown(wait=False, cancel_futures=True)
@@ -808,6 +813,15 @@ class ConnectorJobExecutor:
         job_id: UUID,
     ) -> set[str]:
         """Lock one request's lifecycle rows and return their bounded actions."""
+        # PERF follow-up (recorded, not fixed here): ``audit_logs.request_id``
+        # has no index (security_models.py defines user/event/entity/tenant
+        # indexes only; migration 20260510_0001 declares the column bare). On
+        # PostgreSQL this query therefore scans every CONNECTOR_JOB_RUN row of
+        # the tenant under FOR UPDATE on each dispatch, and recovery's
+        # request_id anti-join scans per candidate intent. Adding the index
+        # needs a fresh Alembic revision; chaining it here would fork the graph
+        # (PR #228's 20260828_0001 already parents 20260825_0002), so it lands
+        # as a linear follow-up revision on main once this band merges.
         action = AuditLogORM.details["action"].as_string()
         statement = select(AuditLogORM).where(
             AuditLogORM.tenant_id == tenant_id,
@@ -870,6 +884,18 @@ class ConnectorJobExecutor:
         token = TENANT_CTX.set(placeholder)
         try:
             recovered = 0
+            # KNOWN crash-window (recorded, deliberately not widened here):
+            # ``dispatch_started`` sits in ``_JOB_RECOVERY_TERMINAL_ACTIONS``,
+            # so a process death between the ``dispatch_started`` commit and
+            # the later ``start_run`` commit leaves this anti-join excluding
+            # the intent — no run row is ever created, the client already
+            # holds its 202, and the job silently never runs. The same set
+            # means a crash after ``start_run`` leaves a RUNNING row with no
+            # time-based sweeper (``stale_running_hours`` only feeds
+            # new-submission supersede). Narrowing the terminal set trades a
+            # missed run for a potential double run and needs its own
+            # recovery-contract PR with idempotency proof; it must not be a
+            # tail-end edit of this hardening branch.
             while True:
                 with self._session_factory() as session:
                     intent = aliased(AuditLogORM, name="connector_job_intent")

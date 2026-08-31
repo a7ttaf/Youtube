@@ -60,6 +60,10 @@ def test_app_stop_grace_period_covers_connector_close_budgets() -> None:
     app_dev_command = services["app-dev"]["command"]
     timeout_flag_index = app_dev_command.index("--timeout-graceful-shutdown")
     assert app_dev_command[timeout_flag_index + 1] == "10"
+    # The app service must inherit the Dockerfile CMD: a compose-level command
+    # override (gunicorn, a dropped flag) would silently remove the bounded
+    # drain the stop_grace_period math below depends on.
+    assert "command" not in services["app"]
 
     for service_name in ("app", "app-dev"):
         stop_grace_period = services[service_name]["stop_grace_period"]
