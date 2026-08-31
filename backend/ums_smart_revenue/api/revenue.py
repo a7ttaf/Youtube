@@ -4053,9 +4053,7 @@ def _snapshot_selection_channel_ids(
         group = registry.get_group(target_scope.id or "")
         if group is None or not group.active:
             return set()
-        snapshot_members = set(
-            registry.get_active_member_channels(target_scope.id or "") or ()
-        )
+        snapshot_members = set(registry.get_active_member_channels(target_scope.id or "") or ())
         if authorized_channel_ids is not None:
             snapshot_members &= authorized_channel_ids
         if not snapshot_members:

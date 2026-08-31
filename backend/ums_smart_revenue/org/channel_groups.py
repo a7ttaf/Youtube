@@ -745,9 +745,7 @@ class ChannelGroupRegistry:
             group = self._require_group(group_id)
             # Parity with the SQL store: adopt-only, reassignment raises.
             if content_owner_id is not None:
-                require_adoptable_owner(
-                    group.content_owner_id, content_owner_id, group_id=group_id
-                )
+                require_adoptable_owner(group.content_owner_id, content_owner_id, group_id=group_id)
             updated = replace(
                 group,
                 name=name if name is not None else group.name,

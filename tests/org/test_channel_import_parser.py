@@ -98,9 +98,7 @@ def test_flags_every_copy_of_a_repeated_channel_group_pair() -> None:
 def test_flags_a_repeated_channel_carrying_no_group() -> None:
     """With no group there is no many-to-many justification for the repeat."""
     csv_text = (
-        "youtube_channel_id,channel_name\n"
-        f"{CHANNEL_ID},Alpha News\n"
-        f"{CHANNEL_ID},Alpha News\n"
+        f"youtube_channel_id,channel_name\n{CHANNEL_ID},Alpha News\n{CHANNEL_ID},Alpha News\n"
     )
     parsed = parse_channel_import_csv(csv_text)
     assert parsed.rows == ()
