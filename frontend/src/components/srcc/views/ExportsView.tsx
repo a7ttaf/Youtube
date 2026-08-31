@@ -309,6 +309,7 @@ const normalizeDownloadFilename = (value: string): string => {
   return value.replace(/[<>:"|?*]/g, "_").replace(/[. ]+$/g, "");
 };
 
+/** Select a safe local filename or reject unsafe backend and metadata input. */
 const safeDownloadFilename = (
   value: string | null | undefined,
 ): string | null => {
