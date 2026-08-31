@@ -7,11 +7,11 @@ revenue entering by **manual import**.
 **Method:** every item below was costed against the actual code — file, line, what
 breaks, what it unblocks — not estimated from the finding text.
 
-> ⚠️ **Freshness banner (2026-08-30, post-audit).** P0 **implementation** is tracked by
+> ⚠️ **Freshness banner (2026-08-31, post-audit).** P0 **implementation** is tracked by
 > current successor PRs **#221–#225 (P0-a…P0-e)**. PR #210 is historical: it merged on
 > 2026-08-29 into the non-main `docs/deployment-readiness-audit` branch and is not the
-> source of truth on `main`. At this check, #221 is open/BLOCKED against `main` =
-> `41b4953`, while #222–#225 are open/BEHIND from `d8418cea2`. This copy remains the
+> source of truth on `main`. At this check, #221 and #225 are open/BLOCKED, while
+> #222–#224 are open/BEHIND; none is merged. This copy remains the
 > **costing snapshot** at `main` = `d8418cea2`. Do not schedule open items from the
 > hour tables alone until the successor PRs land on `main`.
 >
@@ -48,9 +48,11 @@ Three things are worth saying plainly before the table:
 1. **Nothing on the critical path is a redesign.** The largest single item is a
    backup script. The second largest is a bootstrap script. The rest is configuration,
    deletion, and one logging call.
-2. **The biggest *visible* problem is one line.** The app looks like a dead mockup
-   largely because the dev identity ships with 2 of **26** permissions. Fixing that
-   costs a minute and changes the entire impression of the product.
+2. **The biggest *visible* problem starts with one line, but the safe fix is ordered.**
+   The app looks like a dead mockup largely because the dev identity ships with 2 of
+   **26** permissions. A finance-only existing role is useful for a read-only smoke;
+   the real manual-import identity must wait for P0-c/P0-e and the two-scope database
+   principal contract below.
 3. **EGP was deferred in this snapshot.** The section
    [The one decision only you can make](#the-one-decision-only-you-can-make) records the
    open question as of `d8418cea2`. The operator decision remains at
@@ -63,7 +65,7 @@ Three things are worth saying plainly before the table:
 
 | | Band | What it buys | Hours |
 | --- | --- | --- | --- |
-| **W0** | [Unblock yourself](#w0--unblock-yourself-1-hour) | You can finally *see* the product | **~1** |
+| **W0** | [Post-bootstrap UI smoke](#w0--post-bootstrap-ui-smoke-1-hour-after-p0-c--p0-e) | You can finally *see* the product | **~1** |
 | **P0** | [Don't lose the data](#p0--dont-lose-the-data) | Real money data is safe to enter | **9–12** |
 | **P0** | [Be able to operate it](#p0--be-able-to-operate-it) | First run works; failures leave a trace | **11–20** |
 | **P1** | [Stop looking like a mockup](#p1--stop-looking-like-a-mockup) | It reads as a product | **10–12** |
@@ -75,37 +77,38 @@ Three things are worth saying plainly before the table:
 
 ---
 
-## W0 — Unblock yourself (1 hour)
+## W0 — Post-bootstrap UI smoke (1 hour; after P0-c + P0-e)
 
-Do this before anything else, including reading the rest of this plan. Every other
-item is easier to judge once you can actually operate the UI.
+Do **not** point `VITE_DEV_GATEWAY_ROLE` at a planned role before its catalog migration
+exists. At this reviewed tree, `RoleKey` has no `beta_operator`; header parsing rejects
+that value with HTTP 400 before any route runs (`auth/roles.py:21-37`,
+`api/dependencies.py:102-108`). An immediate read-only diagnostic may use the existing
+`finance_admin` role, but it cannot prove manual import because `POST /revenue/facts`
+requires `connectors.run_jobs` at `connector:manual-upload` (`api/revenue.py:1027-1028`).
 
-| # | Change | File | Time |
+Run W0 only after P0-c and P0-e deliver this contract:
+
+| # | Change | Owner | Time |
 | --- | --- | --- | --- |
-| W0.1 | Create repo-root `.env`; set `VITE_DEV_GATEWAY_ROLE=beta_operator` and `UMS_TRUSTED_GATEWAY_TOKEN` | `.env` (new, repo root) | 15 min |
-| W0.2 | Add `"/org-units"` and `"/users"` to `TENANT_SCOPED_ROUTES`; A2 adds `"/security"` | `frontend/vite.config.ts:13-32` (P0-e; A2 follow-up) | 5 min (P0-e) |
-| W0.3 | Restart the dev server, click through every view, write down what is still dead | — | 30 min |
+| W0.1 | Bootstrap one database principal with existing `finance_admin` at `global` **and a separate direct** `connectors.run_jobs` grant at `connector:manual-upload`; do not bundle connector authority into a global role | P0-c/#223 successor | prerequisite |
+| W0.2 | Copy the bootstrap-returned UUID/email into repo-root `.env` as `VITE_DEV_GATEWAY_USER_ID` / `VITE_DEV_GATEWAY_USER_EMAIL`, set the gateway token, enable `UMS_AUTHZ_SOURCE=database`, and land the `/org-units` + `/users` proxies | P0-c + P0-e | prerequisite |
+| W0.3 | Restart, verify `/session/me`, run one **fixture-only** `manual-upload` smoke, click through every view, and record what is still dead | runbook | 1 hour |
 
-**W0.1 is the single highest-leverage change in this document.** The shipped default
-role is `assistant_analyst` (`vite.config.ts:69`), which `auth/seed.py` grants exactly
-two permissions — `VIEW_ANALYTICS` and `VIEW_CONFIDENCE` — out of **26**. Every write
-action and most reads are denied before they reach any logic. You have been demoing
-the product through its second-most-restricted role.
-
-> **Beta operator role (P0-c):** `finance_admin` alone **cannot** manual-import — `POST
-> /revenue/facts` requires `connectors.run_jobs` (`api/revenue.py:1028`) and
-> `FINANCE_ADMIN` does not hold it (`auth/seed.py`). The prescribed beta identity is
-> **`beta_operator`**: finance read/write surface **plus** `connectors.run_jobs` scoped
-> to `manual-upload` only (least privilege — no connector scheduler, no Google lanes).
-> Bootstrap: `bootstrap_operator.py --role beta_operator`. Use `corporate_admin` only
-> for user-creation sessions (`users.manage`); use `finance_admin` only when demoing
-> finance UI without import.
+The split grant is mandatory. A role assignment applies every permission in that role at
+the same scope (`auth/policy.py:55-60`). A global role containing
+`connectors.run_jobs` therefore authorizes Google/scheduler connector keys too; it
+cannot mean "manual-upload only." Header mode also carries only one role/scope tuple
+(`api/dependencies.py:110-120`), so it cannot express global finance plus a connector-
+scoped grant. Database principal loading is what combines the global finance assignment
+and scoped direct grant (`auth/principals.py:142-198`).
 
 **Acceptance criteria (W0):**
-- [ ] `.env` at repo root with `VITE_DEV_GATEWAY_ROLE=beta_operator` and gateway token
-- [ ] Manual import (`POST /revenue/facts`, `connector_key=manual-upload`) succeeds (201)
-- [ ] Finance views render real data (not 403) under `beta_operator`
-- [ ] P0-e proxies `/org-units` and `/users`; A2 proxies `/security` (no 404 on Registry / Admin matrix)
+- [ ] No `beta_operator` global bundle: existing `finance_admin@global` plus direct `connectors.run_jobs@connector:manual-upload`
+- [ ] `/session/me` resolves the bootstrap UUID and exposes the stored assignments/grant under `UMS_AUTHZ_SOURCE=database`
+- [ ] Repo-root `.env` uses the exact printed UUID/email; the all-zero Vite fallback is not used
+- [ ] Fixture-only `POST /revenue/facts` with `connector_key=manual-upload` succeeds; a Google connector key under the same principal returns 403
+- [ ] The write's `audit_logs.user_id` equals the bootstrap UUID (not NULL with only `details.actor_user_id` fallback)
+- [ ] Finance views render (not 403); P0-e proxies `/org-units` and `/users`; A2 later proxies `/security`
 
 > ⚠️ **The file is the repo-root `.env`, not `frontend/.env`.** `envDir` is pinned to
 > the repo root (`vite.config.ts:41-51,93,151`) and the comment at `:38` records that
@@ -153,6 +156,9 @@ Fix with one explicit host-to-container contract:
   `UMS_LOCAL_STORE_ROOT=/var/lib/ums/blobs`.
 - Compose mount: host source `./data/ums:/var/lib/ums` on both `app` and `app-dev`;
   mount `migrate` only if it writes artifacts or blobs.
+- Before the first write, anchor `/data/` in repo-root `.gitignore` and exclude `data`
+  from `.dockerignore`. This directory will contain sensitive finance evidence and
+  generated binaries; `git add .` and Docker build context collection must not see it.
 - `./data/ums` is the host-side source path. Never put that relative host path in
   either environment variable inside a container; both values must remain absolute
   container targets. An externally managed Compose volume is an alternative only if
@@ -174,10 +180,61 @@ sentinels remain. Remove the sentinels after the check.
 > simply request the export again. Note this in the runbook.
 
 **Acceptance criteria (P0.2):**
+- [ ] Repo-root `.gitignore` contains anchored `/data/`; `.dockerignore` excludes `data`, before any sentinel or real artifact is written
 - [ ] `app` and `app-dev` use `./data/ums:/var/lib/ums`, with the two absolute container env targets above; `migrate` is mounted only if it writes
 - [ ] `docker compose down` (without `-v`) preserves artifacts across container recreate
 - [ ] Document that `down -v` wipes DB **and** must not be used when artifacts must survive
 - [ ] Permission and persistence smokes pass for both targets under the runtime user
+
+### P0.2a — USD-only, resumable manual-import gate — **required before real data**
+
+`RevenueFactImportRequest` has `gross_revenue_usd` and related `*_usd` fields but no
+source-currency field (`api/revenue.py:386-402`). The endpoint cannot distinguish a USD
+amount from an EGP amount pasted into a USD-named field. "Manual" therefore does not
+make currency provenance disappear.
+
+The beta import runner and API boundary must fail closed as one contract:
+
+1. The source manifest records month, explicit `source_currency=USD`, source report id
+   and file hash, expected row count, expected active `revenue_required` channel ids,
+   and gross control total. Missing, mixed, or non-USD source currency aborts **before
+   the first POST**; no client-side conversion is allowed.
+2. Add a typed `source_currency: Literal["USD"]` request field (or an equivalently
+   strict typed boundary) so direct callers must make the unit assertion too. The
+   runner verifies that assertion against the source report metadata; renaming an EGP
+   column is not verification.
+3. Use one stable `source_report_id` for provenance across the batch. Idempotency comes
+   from the existing tenant + month + channel + source-kind upsert identity
+   (`finance/revenue_facts.py:100-130`; `source_report_id` is **not** part of that key),
+   so a retry replaces the same `MANUAL_UPLOAD` facts instead of duplicating them. A
+   changed report id does not create a second row and must be treated as a provenance
+   mismatch during verification, not as a new batch identity.
+4. On interruption, rerun the complete manifest. A successful single 201 is only a
+   row smoke, never a batch-success signal.
+5. After the loop, take the complete active roster from the current, unpaginated
+   `GET /channels` response and compare its `revenue_required` set with the manifest.
+   Then read `GET /revenue/channels/{channel_id}/months/{month}/facts` for **every active
+   channel**, not only a sample or the manifest members. Require the set of active
+   channels carrying a `MANUAL_UPLOAD` fact to equal the manifest exactly, with one
+   intended fact per channel and matching amounts/report id, row count, and control
+   total. An active non-required channel with a stale manual fact is an extra and fails
+   the batch. Roster drift between preflight and post-check also aborts and restarts the
+   comparison. Any missing/extra/mismatched row exits non-zero; the month is not
+   presented as complete or eligible for close.
+
+**Acceptance criteria (P0.2a):**
+- [ ] Missing/mixed/EGP source metadata turns the preflight RED with zero facts written
+- [ ] Kill-after-N test leaves a partial month; rerun converges to the exact intended set without duplicates
+- [ ] Post-import comparison covers the complete active roster, proves every active
+  `revenue_required` channel is in the manifest, and rejects stale manual facts outside it
+- [ ] The runner reports complete only when the exact set/amount/report-id/control-total
+  comparison passes; absence of `CHANNELS_MISSING_REVENUE_FACTS` alone is never proof
+- [ ] Batch output records source hash/id and the attributed bootstrap UUID without storing secrets
+
+**Migration/API impact (P0.2a):** no database migration or backfill is required. Making
+`source_currency="USD"` a required typed request field is an intentional API-contract
+change; every direct caller, fixture, and generated client must be updated in the same
+implementation PR. Existing USD rows remain valid; no historical currency is guessed.
 
 ### P0.3 — Compose env vars + `.env.example` — **1–2h**
 
@@ -236,12 +293,19 @@ pytest, mypy, and DeepSource and is env-configurable.
 ### P0.7 — Roles/permissions seed as a migration — **2–4h**
 
 `db/security_seed.sql` is maintained and idempotent, but nothing tells you to run it,
-and it is an FK prerequisite for assigning any role.
+and it is an FK prerequisite for assigning any role. Seed the existing catalog; do
+not add a global `beta_operator` role that combines finance and connector authority.
+P0-c must instead support the two-scope bootstrap contract in W0.
 
 ### P0.8 — Bootstrap script (`bootstrap_operator.py`) — **4–8h** ⚠️
 
-Creates the first operator user, and — with `--org-skeleton` — one `SECTOR` plus one
-`COMPANY` beneath it.
+Creates the first operator user, prints the stored UUID/email, assigns existing
+`finance_admin` at global scope, and — only with an explicit manual-import flag —
+creates an audited direct `connectors.run_jobs` grant at
+`connector:manual-upload`. It must never grant that connector permission globally.
+The returned identity is an output contract: P0-e installs it as
+`VITE_DEV_GATEWAY_USER_ID` / `VITE_DEV_GATEWAY_USER_EMAIL` before database authz or
+any real-revenue write is attempted.
 
 > ⚠️ **This is the rabbit hole of the whole plan.** It looks like "insert one row." On
 > Postgres, `SET LOCAL ROLE app_tenant` + `tenant_id = app_current_tenant_id()` will
@@ -249,28 +313,44 @@ Creates the first operator user, and — with `--org-skeleton` — one `SECTOR` 
 > naturally copy from, `seed_demo_month.py`, **does not do it** (it is SQLite-correct
 > only). If this costs you a day, that is why.
 
-### P0.9 — Org-unit skeleton — **+1–2h** (folded into P0.8)
+### P0.9 — Truthful org hierarchy bootstrap — **re-cost after manifest design**
 
-~40 lines lifted almost verbatim from `seed_demo_month.py:414-455`, which is already
-the repo's only org-unit writer and is clean and idempotent.
+A one-sector/one-company skeleton is acceptable for disposable demo data only. It is
+not an executable real-data mapping plan: assigning every UMS channel to one placeholder
+company would make company and sector revenue rollups false.
 
-Two rows seed sector/company org units and unblock `POST /channels`, but **do not**
-clear per-channel registry issues — `_issues_for_channel` still emits `MISSING_COMPANY`
-until each channel has `primary_company_id` set.
+Keep the beta CLI path instead of building a general `POST /org-units`, but add an
+operator-reviewed org manifest containing the real sectors, companies, and
+channel→company relationships. The bootstrap validates parent types, duplicate ids,
+unknown channels, and conflicting re-runs; it creates the real hierarchy idempotently,
+then applies only mappings present in that manifest through the audited mapping path.
+If the operator does not yet know a channel's owner, leave `primary_company_id` NULL,
+keep its `MISSING_COMPANY` issue visible, and exclude/label company and sector rollups
+as incomplete. Never clear an issue by inventing ownership.
 
-> **Do not build `POST /org-units` for the beta.** Router + writer repository +
-> `MANAGE_ORG_MAPPING` gating + audit events + cycle validation + tests + a frontend
-> that does not exist = 8–16h that buys one operator nothing.
->
-> **Mandatory follow-up:** assigning channels to companies is one
-> `PATCH /channels/{id}/mapping` per channel (`api/channels.py:1425`) — no bulk path.
-> **P0.9 acceptance requires the scripted mapping loop**, not just the two-row skeleton.
+> **Do not build a general `POST /org-units` for the beta.** A manifest-driven bootstrap
+> is enough for one operator. The existing per-channel write remains
+> `PATCH /channels/{youtube_channel_id}/mapping` (`api/channels.py:1425`); the script
+> must compare the stored mapping back to the reviewed manifest after the loop.
+
+**Setup authority is temporary and ordered.** The final split-grant finance principal
+does not hold `registry.manage_channels` or `registry.manage_org_mapping`. After
+bootstrap has created the stored user, a local privileged CLI creates the reviewed org
+hierarchy through tenant-scoped repositories and reasoned audit events. Roster and
+mapping writes then use either that CLI or a setup-only `corporate_admin` header carrying
+the exact stored UUID/email, all before database-authz cutover. This setup must not
+persist a `corporate_admin` assignment on the beta finance principal. No real revenue
+is written in temporary header mode; every mapping audit row must resolve
+`audit_logs.user_id` to the stored bootstrap UUID.
 
 **Acceptance criteria (P0.8 + P0.9):**
-- [ ] Bootstrap creates operator + optional org skeleton (sector + company)
-- [ ] Scripted loop maps every imported channel to a company (`PATCH …/mapping`)
-- [ ] Registry shows zero `MISSING_COMPANY` for mapped channels after loop completes
-- [ ] `POST /channels` succeeds for new channels once parent company exists
+- [ ] Bootstrap prints the stored operator UUID/email and creates the split finance/manual-import grants atomically
+- [ ] Repo-root `.env` uses that UUID/email; `/session/me` and a write audit resolve the same non-null actor
+- [ ] The fixture fact's `imported_by` and its audit row's `user_id` both equal that stored UUID
+- [ ] Real data uses an operator-reviewed hierarchy/mapping manifest; the demo skeleton is refused for a real-data run
+- [ ] Script maps only truthfully resolved channels and verifies exact stored channel→company equality
+- [ ] Unresolved channels retain `MISSING_COMPANY`; company/sector totals are visibly incomplete, never silently attributed to a placeholder
+- [ ] `POST /channels` succeeds only when the supplied real parent company exists
 
 ---
 
@@ -279,8 +359,8 @@ until each channel has `primary_company_id` set.
 **10–12 hours** for the entire visible win. This band directly answers *"it's really a
 landing page, but mockup."*
 
-**Re-scope this band after W0.3.** With `beta_operator` instead of `assistant_analyst`,
-some of these panels will already render real data.
+**Re-scope this band after W0.3.** With the database-loaded split-grant operator
+instead of `assistant_analyst`, some of these panels will already render real data.
 
 Roughly **90% of this work is deletion.**
 
@@ -341,9 +421,13 @@ a manual-import beta, but it arms itself the moment anyone widens
 shows no `ums-smart-revenue` volumes. Your hands-on session ran on the Mac. So the
 first beta run *is* the first rehearsal, and should be treated as one.
 
-Must cover: first-run order (seed → bootstrap → import), the reboot recovery path
-(nothing restarts itself), the restore drill, **B1/B2 written down as accepted risks**
-justified by the localhost binding, the per-channel mapping loop, the export-503
+Must cover: first-run order (seed → bootstrap split grants and capture UUID/email →
+setup-only hierarchy/roster/mapping with that stored actor → copy the UUID/email into
+repo-root `.env` → enable database authz → proxy/session + fixture-write attribution
+smoke → USD manifest preflight → resumable import → complete-roster whole-batch
+verification), the reboot recovery path (nothing restarts itself), the
+restore drill, **B1/B2 written down as accepted risks** justified by the localhost
+binding, the truthful hierarchy manifest/unresolved-channel policy, the export-503
 re-request workaround, and a note that a connector-only month cannot be locked at all.
 
 ---
@@ -391,7 +475,7 @@ only and is not the EGP implementation plan.
 | Gross/net summed over different channel sets | 3–5h | Additive fix — expose the population, don't change the sum |
 | Split-brain confidence | 4–6h | 3–4h if bundled with P1.5 |
 | Connector-job startup sweep (orphaned `RUNNING`) | 6–10h | Required for Path A+, not Path A |
-| `UMS_AUTHZ_SOURCE=database` | 2–4h | ⚠️ **not before P0.6** — a wrong `X-User-ID` in database mode is a blank "Access denied" and an empty log |
+| Database-authz rollback/recovery drill | 2–4h | Minimal cutover moved into P0-c/W0 for the split-scope beta principal; rehearse wrong/disabled UUID and storage-failure rollback after P0.6 logging |
 | Scheduler first-tick on a daily-restarted PC | 2–3h | Needs a live Google credential anyway |
 | `request_id` + duration middleware | 3–4h | Skip for one operator with one browser tab |
 | Fix `test_export_preview_api.py:632` | 0.5h | It asserts a rehydration capability the repo does not have |
@@ -413,7 +497,9 @@ Recorded so they are not re-proposed:
   program** (15% treaty copyright royalty; never arm recon from the estimate alone)
   now live in [`24_US_WITHHOLDING_AND_US_REVENUE_PLAN.md`](24_US_WITHHOLDING_AND_US_REVENUE_PLAN.md).
   Keep recon dormant until a separate ruling.
-- **`POST /org-units`** — 8–16h; two seeded rows do the job.
+- **General `POST /org-units` UI/API** — 8–16h; the beta uses an operator-reviewed
+  hierarchy manifest. A two-row placeholder is demo-only and must never stand in for
+  real multi-company ownership.
 - **react-router** — unnecessary for one operator.
 - **Wiring the currency selector** — that is the EGP program wearing a dropdown.
 
@@ -422,13 +508,14 @@ Recorded so they are not re-proposed:
 ## Suggested sequence
 
 ```
-Day 0    W0 (1h)  ─ then re-walk the UI and re-scope P1
+Day 0    Existing `finance_admin` read-only diagnostic only; no manual import
 Day 1    P0.4 → P0.6 → P0.1 (backup + the rehearsed restore)
 Day 2    P0.1 finish → P0.2 + P0.3 + P0.5   (one compose commit)
-Day 3-4  P0.7 → P0.8 → P0.9                  (the TENANT_CTX trap lives here)
-Day 5    P1.5 + P1.6 + P1.1                  (correctness, then the error boundary)
-Day 6-7  P1.2 → P1.3 → P1.4                  (mostly deletion)
-Day 8    P1 runbook + first real compose run on the PC
+Day 3+   P0.7 → P0.8 → P0.9                  (re-cost truthful manifest before dates resume)
+Next     P0-e → W0 (1h)                       (install UUID, database authz, fixture smoke)
+Next     P1.5 + P1.6 + P1.1                  (correctness, then the error boundary)
+Next     P1.2 → P1.3 → P1.4                  (mostly deletion)
+Final    P1 runbook + USD preflight + resumable full import + post-import proof
 ```
 
 Two commits carry most of P0: one for backup/restore, one for compose

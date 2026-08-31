@@ -1,6 +1,6 @@
 # 25 — Program Dependency Graph
 
-*Written 2026-08-30. Supersedes implicit ordering scattered across Docs/20–24.
+*Written 2026-08-30; recertified 2026-08-31. Supersedes implicit ordering scattered across Docs/20–24.
 P0 **implementation** is tracked by current successor PRs **#221–#225 (P0-a…P0-e)**.
 PR #210 is historical: it merged on 2026-08-29 into the non-main
 `docs/deployment-readiness-audit` branch, not into `main`.*
@@ -10,22 +10,24 @@ PR #210 is historical: it merged on 2026-08-29 into the non-main
 ## DAG (execution order)
 
 ```text
-[#220 docs amend]  ← you are here (draft pending final owner review after this cleanup)
+[#220 docs amend]  ← you are here (16 current review threads pending remediated push/review)
         │
         ▼
-[P0-a compose/storage] ──► `./data/ums:/var/lib/ums` on app/app-dev; absolute artifact/blob env targets; PG18; Redis; grace; log rotate; storage smokes
+[P0-a compose/storage] ──► `./data/ums:/var/lib/ums` on app/app-dev; anchored `/data/` gitignore + Docker-context ignore before writes; absolute artifact/blob env targets; PG18; Redis; grace; log rotate; storage smokes
         │
         ▼
 [P0-b backup/restore] ──► roles dump + data dump + artifact backup + rehearsal (Docs/22)
         │
         ▼
-[P0-c bootstrap/authz] ──► seed migration; bootstrap_operator; beta_operator role; org skeleton
+[P0-c bootstrap/authz] ──► seed migration; bootstrap_operator prints UUID/email; `finance_admin@global` + direct `connectors.run_jobs@connector:manual-upload`; truthful org/roster setup attributed to that stored UUID; then database authz (no global beta bundle / placeholder ownership)
         │
         ▼
 [P0-d logging/ops] ──► structured logging; /readyz honesty; credential redaction
         │
         ▼
 [P0-e dev gateway/docs] ──► Vite proxy (/users, /org-units); .env.example; runbook
+        │
+        ├──► [manual-import gate] — source-verified USD manifest; resumable/idempotent loop; complete active roster + exact manual-fact set/report id/totals compared before complete
         │
         ├──► [ci-fast + ci-database + ci-frontend] proposed required gates (see status note)
         │
@@ -36,15 +38,15 @@ PR #210 is historical: it merged on 2026-08-29 into the non-main
         │
         ├──► [U1 probe] (Docs/24) — read-only; no UMS writes
         │
-        ├──► [normalization fence] — BEFORE U2 ingest (country rows non-projecting)
+        ├──► [normalization fence] — BEFORE U2 ingest (country rows non-projecting; intentional evidence excluded from dropped-row WARNING/HIGH signals before reason redaction)
         │
         ├──► [U2 US country ingest] — after fence + EGP sequencing decision
         │
-        ├──► [withholding config service] — effective-dated; no default rate; D-U1 confirmed
+        ├──► [withholding config service] — PostgreSQL account/category effective intervals; no env/default fallback; D-U1 confirmed
         │
         ├──► [U3 estimate display] — backend-emitted only; after config service
         │
-        ├──► [ExternalIdentity + home_org_unit_id] — before A6/A7 external access
+        ├──► [ExternalIdentity enrollment + home_org_unit_id] — audited one-time binding into active-only-unique revision history + global lifecycle fence before A6/A7 external access
         │
         ├──► [A6 delegated admin + read-isolation proof]
         │
@@ -59,7 +61,7 @@ PR #210 is historical: it merged on 2026-08-29 into the non-main
 
 ---
 
-> **CI status (2026-08-30):** `ci-fast`, `ci-database`, and `ci-frontend` are proposed
+> **CI status (2026-08-31):** `ci-fast`, `ci-database`, and `ci-frontend` are proposed
 > by open PR #226; they are **not active required contexts** on current `main`.
 > Branch protection currently requires only `DeepSource: Docker`, `DeepSource: JavaScript`,
 > `DeepSource: Python`, `DeepSource: SQL`, `DeepSource: Secrets`, and `DeepSource: Shell`.
@@ -70,10 +72,11 @@ PR #210 is historical: it merged on 2026-08-29 into the non-main
 
 | Gate | Blocks |
 | --- | --- |
-| All 9 #220 review threads resolved | Satisfied; retain draft until final owner review and current checks |
+| All current #220 review threads resolved | **Not satisfied:** 16 live unresolved threads at the 2026-08-31 repoll; local docs changes are not remote resolution |
 | P0-a…P0-e merged to `main` | A1, beta runbook, living Docs/21 status |
+| USD manifest preflight + resumable import + complete-roster/exact-fact-set comparison green | Any real manual revenue import / claim that a month is complete |
 | Proposed `ci-fast` + `ci-database` + `ci-frontend` gates in #226 | Future review-readiness gate; not active on current `main` |
-| Normalization fence merged | U2 country ingest |
+| Final reviewed PR #227 SHA supplied, exact contract verified, then merged | U2 country ingest; intermediate/open heads are not shipped evidence |
 | D-U1 AdSense rate confirmed + config row written | U3 estimate surfaces |
 | A6 read-isolation matrix green | Any sub-company / competitor account |
 | A5 + A6 + A7 all green | External Google login for delegated users |
@@ -88,9 +91,11 @@ PR #210 is historical: it merged on 2026-08-29 into the non-main
 | #210 (historical; merged 2026-08-29 into non-main `docs/deployment-readiness-audit`) | **#221–#225** (current P0-a … P0-e successors on `main`) |
 | Living schedule | Docs/21 status table on `main` after each P0 split merges |
 
-As of 2026-08-30, #221 is open/BLOCKED against `main` = `41b4953`; #222–#225 are
-open/BEHIND from `d8418cea2`. Treat those live PR states, not this static graph, as
-the source for merge ordering.
+As of the 2026-08-31 live poll, #221 and #225 are open/BLOCKED; #222–#224 are
+open/BEHIND; none is merged. #226 is open/draft/BEHIND with `ci-fast` failing, and
+#227 is open/draft/BLOCKED with no operator-supplied final SHA; its current candidate
+also has an unresolved P1 and unpushed changes. Treat live PR states, not this static
+graph, as the source for merge ordering.
 
 See also: [`20_DEPLOYMENT_READINESS_AUDIT.md`](20_DEPLOYMENT_READINESS_AUDIT.md),
 [`21_BETA_IMPLEMENTATION_PLAN.md`](21_BETA_IMPLEMENTATION_PLAN.md),

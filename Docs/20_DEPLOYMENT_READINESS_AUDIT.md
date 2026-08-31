@@ -8,11 +8,11 @@ localhost only**, operator-run, with **real** YouTube CMS revenue data.
 refute it. Those passes reversed or downgraded findings in every round; the
 corrections are recorded rather than quietly dropped.
 
-> ⚠️ **Freshness banner (2026-08-30).** P0 **implementation** is tracked by current
+> ⚠️ **Freshness banner (2026-08-31).** P0 **implementation** is tracked by current
 > successor PRs **#221–#225 (P0-a…P0-e)**. PR #210 is historical: it merged on
 > 2026-08-29 into the non-main `docs/deployment-readiness-audit` branch and is not
-> the source of truth on `main`. At this check, #221 is open/BLOCKED against
-> `main` = `41b4953`, while #222–#225 are open/BEHIND from `d8418cea2`. This document
+> the source of truth on `main`. At this check, #221 and #225 are open/BLOCKED,
+> while #222–#224 are open/BEHIND; none is merged. This document
 > remains the **pre-execution snapshot** at `main` = `d8418cea2`. Do **not** schedule
 > unchecked open items from this text alone. For scheduling work, use Docs/21 as
 > maintained on `main` after each P0 split merges (see [`25_PROGRAM_DEPENDENCY_GRAPH.md`](25_PROGRAM_DEPENDENCY_GRAPH.md)).
@@ -127,8 +127,10 @@ sizes everything above: *"USD facts, with the EGP bank settlement explained as F
 variance — acceptable for the beta, yes or no?"* The code has assumed "yes" since
 PR #42 without anyone saying so.
 
-**None of D1/D1b/D2 blocks the recommended beta**, which uses manual import (H5) and
-never calls Google.
+**D1/D1b do not block the recommended beta**, which never calls Google. D2 still
+defines the manual boundary: the beta may import only source-verified USD. The current
+request model cannot verify that unit itself, so Docs/21 P0.2a is a hard gate before
+real data; an EGP-only source cannot be pasted into `*_usd` fields and waved through.
 
 ### The deployment verdict (Round 1) still holds
 
@@ -264,6 +266,13 @@ header alone (`api/users.py:337,660-666`), and `create_user` requires no actor r
 Under `UMS_AUTHZ_SOURCE=database`, you must then use *that returned id* as your
 `X-User-ID`, or the principal lookup fails.
 
+**Fix:** order the first run as catalog seed → bootstrap stored user + split grants →
+setup-only truthful org/roster mapping attributed to that stored UUID → copy the UUID/
+email into the repo-root Vite gateway environment → enable database authz → session and
+fixture-write attribution smoke. The smoke proves both the fact's `imported_by` and
+`audit_logs.user_id` equal that UUID. The all-zero Vite fallback is never an actor for
+real-data work, and temporary header-mode setup never writes real revenue.
+
 ### H4 — Live Google ingestion has exactly one implemented secret backend
 Connector credentials are stored as *references only* — never secret material —
 which is the correct design (`db/security_models.py:388-398`;
@@ -284,7 +293,7 @@ Manager project reachable from this PC. **This does not block the beta** — see
 > confirms or contradicts this, and no repo artifact records GCP Secret Manager ever
 > being used. Treat the memory claim as unverified-by-code.
 
-### H5 — Real revenue can be ingested with no Google dependency (this is the beta path)
+### H5 — USD revenue can be ingested with no Google dependency (this is the beta path)
 `POST /revenue/facts` accepts a `connector_key` of `manual-upload` (or
 `manual_upload`) with `source_kind` `MANUAL_UPLOAD`
 (`api/revenue.py:197-206,1016`) — no credential row,
@@ -296,7 +305,13 @@ reconciliation source priority (`finance/reconciliation.py:13`), explanation lab
 (`api/channels.py:666-680`).
 
 **Limitation:** `/revenue/facts` is **one fact per request** — there is no bulk
-revenue CSV endpoint. A beta must script the loop.
+revenue CSV endpoint. A beta must script the loop. More importantly,
+`RevenueFactImportRequest` accepts only `*_usd` amounts and carries no currency field
+or source-unit check (`api/revenue.py:386-402`): it will accept an EGP number and store
+it as USD if the caller lies by accident. Docs/21 P0.2a therefore requires an explicit
+USD source manifest/API assertion, a pre-write currency check, resumable idempotent
+replay, and an all-`revenue_required` post-import comparison. One 201 proves one row,
+not a complete or correctly denominated month.
 
 ---
 
@@ -389,8 +404,10 @@ These were checked and found correct — no action needed:
 ### Path A — Single-operator beta, manual import (recommended first step)
 The only user is the operator, on this PC, at `127.0.0.1`. No gateway is built; the
 Vite dev server injects the fixed operator identity. **Revenue enters by manual
-import, not by connector** — so Google is never called and the currency questions
-(D1/D2) do not arise: the operator supplies the figures directly.
+import, not by connector** — so Google is never called. Currency still matters:
+the source report must explicitly identify USD, the import boundary must reject
+missing/mixed/non-USD units before its first write, and no UMS/client-side conversion
+is allowed. Supplying figures directly is not proof of their unit.
 
 Required before real data: **B3** (backups), **B4** (durable artifact/blob storage —
 note the permanent-503 consequence), and the **logging fix** (one `basicConfig` call, so that
@@ -398,9 +415,12 @@ INFO-level connector progress is recorded and what already prints can be placed 
 time). B1/B2 are *accepted risks* documented in the runbook rather than fixed,
 justified solely by the localhost binding.
 
-Also needed: compose `.env` template, the `security_seed.sql` step (H1), a first-user
-recipe (H3), a reboot runbook (nothing restarts itself), and a written note that a
-connector-only month cannot be locked.
+Also needed: compose `.env` template, the `security_seed.sql` step (H1), the ordered
+stored-UUID/bootstrap/setup/cutover recipe (H3), a reboot runbook (nothing restarts
+itself), and a written note that a connector-only month cannot be locked. The real-data
+import is accepted only after the resumable loop compares the complete active roster,
+every active `revenue_required` channel, and the exact persisted `MANUAL_UPLOAD`
+fact/report-id/control totals (Docs/21 P0.2a).
 
 ### Path A+ — Path A plus live connector ingest
 *No longer blocked on a correctness defect* (see the retraction). Everything in
@@ -566,7 +586,8 @@ question they answer. Severities are the **post-refutation** ones.
 1. An ordinary database interruption becomes an unexplained HTTP 500 with no log
    line explaining it (because of the logging finding).
 2. The container reports healthy while the database is dead (`/livez` checks nothing).
-3. A partially-completed manual import leaves a month that looks complete but isn't.
+3. A wrong-unit or partially-completed manual import leaves a month that looks
+   complete but is materially false/incomplete.
 4. A connector run interrupted by a reboot refuses to re-run for six hours.
 5. Slow burn: nothing is purged, nothing is vacuumed, no log rotation.
 
@@ -600,13 +621,14 @@ export, manage users) is denied, and so is every read gated on `VIEW_REVENUE`,
 `VIEW_FINALIZED_PAYMENTS`, or `VIEW_RAW_FILES`. **The product is being demonstrated
 by its most restricted role.**
 
-**Fix:** set `VITE_DEV_GATEWAY_ROLE` to a role that can actually operate — for the
-finance import loop use **`beta_operator`** (P0-c: finance surface **plus**
-`connectors.run_jobs` for manual upload); use `corporate_admin` for setup
-(including `POST /users` — `finance_admin` holds `roles.assign` but **not**
-`users.manage`; see Docs/23). One line, no code change. This should be the first
-thing any beta runbook says, and its absence from the README is arguably the
-single highest-impact documentation gap here.
+**Fix:** an existing `finance_admin` header is enough for a read-only finance smoke,
+but not import. The least-privilege import identity is database-backed: existing
+`finance_admin@global` plus a separate direct
+`connectors.run_jobs@connector:manual-upload` grant. A global custom role cannot
+express that split, and header mode carries only one role/scope. Bootstrap first,
+copy the returned UUID/email into repo-root `.env`, enable database authz, then smoke;
+use `corporate_admin` only for setup actions requiring `users.manage` (see Docs/21 W0
+and Docs/23). This is an ordered P0-c/P0-e contract, not a one-line pre-bootstrap fix.
 
 > **Correction (Round 4).** An earlier revision of this section said to put that
 > line in `frontend/.env`. **That file is not read.** `vite.config.ts:41-51` pins
@@ -719,8 +741,9 @@ Recorded because they changed conclusions, and because the original wording woul
 have misled:
 
 1. **"Live ingestion is impossible without GCP Secret Manager" — reversed.** True
-   for *Google connectors*, but real revenue enters fine through manual import
-   (H5). The beta is not blocked on GCP.
+   for *Google connectors*, but source-verified USD revenue can enter through manual
+   import (H5). The beta is not blocked on GCP; it is still blocked on the USD and
+   whole-batch gates before real data.
 2. **"`roles`/`permissions` require hand-written SQL" — downgraded.** A maintained,
    idempotent seed file ships in-repo (H1); the defect is that nothing references
    it.

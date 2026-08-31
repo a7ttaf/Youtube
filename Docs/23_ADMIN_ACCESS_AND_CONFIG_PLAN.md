@@ -2,7 +2,7 @@
 
 *Written 2026-08-27, scoped against the merged integration tree (main `d8418cea2` + the
 #211–#217 historical draft band + the former #209/#210 P0 stack). Every "exists today" claim below was
-verified against code, not recalled. Gap-patched 2026-08-30 (triad/status review).*
+verified against code, not recalled. Gap-patched 2026-08-31 (live-thread recertification).*
 
 The operator's question that produced this plan: **"From where do I add the other users?
 From where the permissions? From where can I make full config?"**
@@ -133,21 +133,28 @@ main, and none blocks the beta data path. Hours assume the established view patt
    (scoped to the actor's subtree post-A6; global for HQ until then); **or**
 2. Remove `finance_admin` from the assignment drawer until that endpoint exists.
 
-A ninth view, nav-gated to principals holding `users.manage` (decision D-A1):
+A ninth view, nav-gated when the session reports **either** `can_manage_users` or
+`can_assign_roles` (decision D-A1). Its controls are independently gated:
 
 - User list (`GET /users` or scoped read): email, display name, status, service-account badge.
-- Create user: email + display name + human/service toggle (`POST /users`).
-- Activate / deactivate (`PATCH /users/{id}`) — not a hard delete.
+- Create user: email + display name + human/service toggle (`POST /users`) — visible
+  only with `can_manage_users`.
+- Activate / deactivate (`PATCH /users/{id}`) — not a hard delete; visible only with a
+  separate global-only `can_manage_user_lifecycle` capability. In A1 that derives from
+  the current global `users.manage` gate; A6 must keep it global even when user creation
+  becomes subtree-scoped.
 - Per-user drawer: current roles + assign/revoke with role picker, scope picker, and
   the **required reason field** (the API refuses blank reasons — surface that, don't
-  fight it).
+  fight it) — visible with `can_assign_roles` plus successful scoped user/access reads.
 - Access profile panel (`GET /users/{id}/access`): the user's effective permissions.
 
 **Session capability hole (A1 sub-item):** `GET /session/me` /
-`SessionCapabilities` today has no `can_manage_users` / `can_assign_roles`. The SPA
+`SessionCapabilities` today has no `can_manage_users`, `can_assign_roles`, or
+`can_manage_user_lifecycle`. The SPA
 cannot fail-closed hide the Admin nav from session alone without inventing client-side
 permission parsing. **Preferred:** extend `/session/me` with those two boolean
-capabilities (same pattern as `can_view_audit` / `can_manage_groups`). Alternative:
+nav capabilities plus the global-only lifecycle boolean (same pattern as
+`can_view_audit` / `can_manage_groups`). Alternative:
 document reading raw permission lists from the session payload — weaker and easier to
 drift.
 
@@ -156,8 +163,10 @@ session-capability booleans. The six user write endpoints already exist. New wir
 Admin view in `ViewRouter`/nav + hooks. Do not start until **P0-c** merges.
 
 **Acceptance criteria (A1):**
-- [ ] Admin nav hidden unless session reports `can_manage_users`
-- [ ] `finance_admin` can open assignment drawer **only if** scoped user list returns 200
+- [ ] Admin nav visible iff session reports `can_manage_users || can_assign_roles`; hidden when both are false
+- [ ] `finance_admin` can open the assignment-only surface when `users.read_scoped` returns 200 and `can_assign_roles=true`
+- [ ] `finance_admin` never sees create controls without `can_manage_users`, or
+  activate/deactivate controls without global-only `can_manage_user_lifecycle`
 - [ ] Create/assign/revoke flows require audit reason; blank reason → 422 surfaced in UI
 - [ ] No client-side permission widening beyond session capabilities
 
@@ -200,10 +209,13 @@ is where the operator confirms the flip actually took effect in a deployment.
 
 ### A5 — Database-authz cutover runbook — docs, **2–4h**
 
-The operator story for `UMS_AUTHZ_SOURCE=database`: bootstrap the first
-corporate_admin (CLI) → verify via `GET /users/{id}/access` → flip the env → the
-gateway now supplies identity only. Cross-references Docs/21 P2 — this band documents,
-it does not re-scope.
+Docs/21 W0 now requires the minimal single-operator database-authz cutover so one
+principal can hold `finance_admin@global` plus a separate
+`connectors.run_jobs@connector:manual-upload` grant. A5 owns the hardened external-
+access version: bootstrap the first corporate_admin (CLI) → copy/verify its exact UUID
+via `GET /users/{id}/access` → exercise unknown/disabled/storage-failure cases → flip
+the environment → prove the gateway supplies identity only → rehearse rollback. A5
+does not weaken or postpone the smaller P0-c beta cutover.
 
 **Suggested order: A1 → A2 → (beta ships) → A6 → A7 + A5 → A3 → A4.** A1+A2 are worth
 doing right after the P1 band merges — they are the same "stop looking like a mockup"
@@ -220,9 +232,12 @@ external-access milestone; the first competitor account waits for A5+A6+A7 all g
   migration owned; the anti-drift tests bind the DB to the code registries. An editing
   UI would fight the migration model and reopen the exact drift class the frozen
   catalog work closed. Editing = a code change + migration, by design.
-- **T2 — The UI must never widen access.** Admin surfaces render inside the same
-  fail-closed gates as everything else: no `users.manage` → no Admin nav item, and a
-  403 still renders as a 403. Client-side checks are display sugar only.
+- **T2 — The UI must never widen access.** The Admin nav uses
+  `can_manage_users || can_assign_roles`; each subtree then keeps its narrower gate.
+  No `can_manage_users` means no create controls; no global-only
+  `can_manage_user_lifecycle` means no account-status controls; and no
+  `can_assign_roles`/successful scoped read means no assignment drawer. A 403 still
+  renders as a 403. Client-side checks are display sugar only.
 - **T3 — No secret ever reaches a status panel.** The A4 endpoint is allowlist-only;
   gateway token, DSNs, credential references are permanently out.
 - **T4 — Reasons are load-bearing.** Every admin write API requires an audit reason;
@@ -288,6 +303,15 @@ program. What the code enforces today was verified line by line
 2. **Scope containment.** A delegated admin may act only on users and assignments
    inside their own scope subtree; users they create are born inside it; revocations
    are limited to assignments they could have made.
+   **Account status is different:** `users.status` is account-global while one user may
+   carry assignments in several company/sector subtrees. Therefore delegated admins
+   do **not** activate/deactivate accounts in A6. Account-global lifecycle stays with a
+   global `users.manage` principal, exposed to the SPA through the distinct global-only
+   `can_manage_user_lifecycle` capability; delegated admins may revoke only assignments/
+   grants inside their own subtree. If delegated lifecycle is ever added, it needs one
+   transaction that locks the target plus every active assignment/grant and rejects
+   any global, unknown, or out-of-subtree authority, with a concurrency test against
+   an HQ grant racing the status change.
 3. **The no-amplification invariant** — the operator's "no one can take higher layer":
    an actor may assign a (role, scope) pair or grant a (permission, scope) pair **only
    if its effective permission set at that scope is a subset of the actor's own
@@ -335,6 +359,9 @@ A6 is what makes it safe to hand pieces of it to sub-company people.
 - [ ] Mutation tests RED when home-scope guard removed
 - [ ] Competitor read-isolation matrix green across all views/exports
 - [ ] No-amplification invariant proven for role assign, grant, revoke, self-modification
+- [ ] Only global `users.manage` can change account status; delegated admins can revoke only in-subtree authority
+- [ ] `can_manage_user_lifecycle` stays false for every merely sector/company-scoped admin
+- [ ] A multi-scope target (company X + company Y, or any global grant) cannot be disabled by an X-scoped admin
 
 ## 4c — A7: Google-only sign-in with an operator-owned domain allowlist
 
@@ -347,11 +374,43 @@ password store: identity arrives from a **trusted gateway** that injects
 `X-User-ID` / `X-User-Email` + the gateway token. **`X-User-ID` must remain the
 internal UMS UUID** — Google `sub` and email are **not** valid principal IDs.
 
-**Required persistence (A7 backend):** an **`external_identities`** table mapping
-`(provider, provider_subject, normalized_email) → user_id` with timestamps. The gateway
-adapter resolves Google OIDC claims → UMS UUID **before** trusted headers reach FastAPI
-(`dependencies.py` UUID validation). Unknown allowlisted identity → clean 403; no
-auto-provisioning.
+**Required persistence (A7 backend):** an **`external_identities`** revision table with
+a surrogate id, `(tenant_id, provider_issuer, provider_subject)`, `user_id`, normalized
+verified email, created/revoked timestamps, and actor/reason provenance. Two PostgreSQL
+partial unique indexes apply only where `revoked_at IS NULL`: one prevents a provider
+subject from binding to two users; the other prevents one UMS user from carrying two
+active Google identities for the same issuer. Revoked rows remain as history, so relink
+does not overwrite evidence. The gateway adapter resolves Google OIDC claims → UMS UUID
+**before** trusted headers reach FastAPI (`dependencies.py` UUID validation).
+
+**Enrollment is explicit; account creation alone is not enough.** Add an audited
+operator action such as
+`POST /users/{user_id}/external-identities/google/enrollments` (a CLI may wrap the same
+service) that requires `users.manage`, an existing active human account, an allowed
+Workspace domain or exact-email entry, and a non-blank reason. It creates a short-lived,
+single-use cryptographically random challenge returned once and persisted only as a
+hash in an `external_identity_enrollments` revision (target user/issuer/email, expiry,
+consumed/revoked timestamps, actor, and reason). On first Google sign-in, the
+gateway supplies validated issuer/audience, `sub`, `email_verified=true`, normalized
+email, and that challenge to a transaction which:
+
+1. locks the enrollment and target user plus any existing matching identity rows; the
+   active-only unique indexes close the absent-row race and map conflicts fail-closed;
+2. re-checks expiry/unused state, tenant, domain/exact-email allowlist, and exact target
+   email match;
+3. refuses disabled/service/ambiguous/already-bound accounts and any subject collision;
+4. inserts `external_identities`, consumes the challenge, and writes an audit event in
+   one commit without logging the raw token or Google subject.
+
+The operator delivers the one-time code out of band. The intended user submits it in a
+gateway form whose POST body exchanges it for an HttpOnly, SameSite gateway state cookie
+before the OIDC redirect; it never appears in a URL, reverse-proxy access log, UMS log,
+or audit detail.
+
+Unknown identities or a login without a valid pre-authorized enrollment still receive
+the same clean 403; no user account is auto-provisioned and no account-existence detail
+is leaked. Recovery/relink is a revoke-plus-new-enrollment operation, never an
+overwrite of the old subject binding.
 
 Google SSO is that gateway made real — an OIDC front (Google sign-in) standing where
 the dev proxy stands today, injecting the same headers. Zero change to UMS's internal
@@ -367,22 +426,27 @@ nothing to store.
    domain of its own — allowlisting `gmail.com` would admit every Gmail user in the
    world. Safe model: **allowlist Workspace domains, plus exact email addresses for
    individuals on plain Gmail; never a public mail domain wholesale.**
-2. **Account gate (access).** Passing the domain gate authenticates, it does not
-   authorize: the email must also match an existing UMS account (created by the
-   operator or, post-A6, a delegated admin) with its roles and scopes. Unknown email
-   from an allowed domain → clean 403, no auto-provisioning. "I add X for sub-company
-   X" stays literal: no account, no access, regardless of domain.
+2. **Account + enrollment gate (access).** Passing the domain gate authenticates, it
+   does not authorize: the verified email must match an existing active UMS account
+   and the Google subject must already be bound, or the request must carry the valid
+   one-time enrollment above. Unknown/unapproved email from an allowed domain → clean
+   403, no account auto-provisioning. "I add X for sub-company X" stays literal: no
+   account and explicit enrollment, no access, regardless of domain.
 
 **Build shape:** an off-the-shelf OIDC proxy (e.g. oauth2-proxy) in compose with a
 thin adapter mapping its verified-identity headers onto UMS's trusted-header contract,
 or a small dedicated auth service if the mapping fights the proxy. Allowlist lives in
 gateway config first (deploy-audited); managing it from the Admin UI is a later A1
-extension (D-A8). **Estimate: 10–18h** including compose wiring, the domain/email
-gate tests (mutation-proven: wrong domain RED, allowed-domain-unknown-account RED),
-and the runbook.
+extension (D-A8). **Estimate: re-cost from the former 10–18h**: the durable enrollment,
+revoke/relink, transaction/race tests, and audit contract are required work, not a
+manual database precondition hidden outside the estimate.
 
 **Acceptance criteria (A7):**
 - [ ] `external_identities` migration + repository; Google `sub` maps to UMS UUID
+- [ ] Audited, expiring, single-use enrollment binds only an existing active human account with exact verified email
+- [ ] Active-only uniqueness permits audited revoke/relink history but never two live subject/user bindings
+- [ ] Duplicate subject/user bindings, expired/replayed enrollment, disabled/service users, and storage races fail closed
+- [ ] Revoke/relink preserves the old binding and reason; raw challenge/subject never appears in logs or audit details
 - [ ] Gateway never forwards raw Google subject as `X-User-ID`
 - [ ] Allowlisted unknown email → 403; known mapped user → session with DB authz (post-A5)
 
@@ -400,7 +464,7 @@ gate). None of the three is optional for that step, and the beta needs none of t
 
 | # | Decision | Recommendation |
 | --- | --- | --- |
-| D-A1 | Which roles see the Admin nav | Principals holding `users.manage` (super_owner, corporate_admin); finance_admin sees assignment drawer **only** with `users.read_scoped` (or hide until that gate exists) |
+| D-A1 | Which roles see the Admin nav | `can_manage_users || can_assign_roles`; finance_admin gets assignment-only UI only after `users.read_scoped`; account status additionally requires global-only `can_manage_user_lifecycle` |
 | D-A2 | Gate for the catalog reads (`/security/*`) | Move to `users.manage` alongside the matrix UI; `audit.view` was a placeholder |
 | D-A3 | A4 status endpoint scope | Read-only allowlist, `platform.manage_settings` gate |
 | D-A4 | When A1 lands | Immediately after the P1 band merges, before beta polish |
@@ -425,8 +489,27 @@ gate). None of the three is optional for that step, and the beta needs none of t
 
 ---
 
-*Relationship to Docs/21 (snapshot in this PR; living status on P0 split PRs): this program is additive
-and currency-neutral; it does not touch the P0/P1 bands or the EGP phases. A1/A5 assume
-**P0-c merged**. Only A4's status endpoint (plus the A1 session-capability booleans and
-`users.read_scoped`) adds backend surface, and the status endpoint is read-only. Independent of
+## 7 — Migration and blast-radius statement
+
+- **Confirmed migration required (A1):** add/seed `users.read_scoped` if that new
+  permission key is selected; update the frozen role/permission catalog and anti-drift
+  tests. No existing grant is widened implicitly.
+- **Confirmed migration required (A6):** add the persisted user home-scope relation
+  (or the chosen atomic-equivalent schema) with tenant FK/RLS and an explicit backfill
+  decision before delegated administration is enabled. Account `status` remains global;
+  the lifecycle fence is policy/test work, not a status-column migration.
+- **Confirmed migration required (A7):** add `external_identities` and hashed,
+  expiring enrollment persistence with tenant RLS, active-only subject/user uniqueness,
+  revoke/history, and audit provenance. Existing users are **not** auto-bound or
+  backfilled.
+- PostgreSQL remains the sole source of truth. No finance totals, close state, or
+  withholding calculations change in Docs/23.
+
+---
+
+*Relationship to Docs/21 (snapshot in this PR; living status on P0 split PRs): this
+program is additive and currency-neutral. A1/A5 assume **P0-c merged**. A1 adds scoped
+user reads/session capabilities; A6 adds home-scope and delegation policy; A7 adds
+identity/enrollment persistence and gateway integration; A4 remains an allowlisted
+read-only status endpoint. Independent of
 [`24_US_WITHHOLDING_AND_US_REVENUE_PLAN.md`](24_US_WITHHOLDING_AND_US_REVENUE_PLAN.md).*

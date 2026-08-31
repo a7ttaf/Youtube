@@ -1,6 +1,6 @@
 # Delivery Backlog
 
-## Status (2026-08-30)
+## Status (ledger through 2026-08-30; program plans recertified 2026-08-31)
 
 The detailed marker ledger below was last fully reconciled through PR #170
 (owner-stamp recovery, merged 2026-08-06). Current-main status is separately
@@ -22,7 +22,7 @@ inline entry below is now `✅ PR #171`. PR #211 (rolling month window) merged t
 current `main` on 2026-08-30 as `41b4953`; its inline entry below is now
 `✅ PR #211`. This note does not claim a full review of intervening PRs.
 
-**Program plans note (2026-08-30, branch `docs/program-plans-consolidated`):** consolidates
+**Program plans note (2026-08-31, branch `docs/program-plans-consolidated`):** consolidates
 the five plan documents from former draft plan PRs (#209 Docs/20–21, #218 Docs/23,
 #219 Docs/24, plus Docs/25) into the #220 docs PR after the gap-fix review. See:
 [`20_DEPLOYMENT_READINESS_AUDIT.md`](20_DEPLOYMENT_READINESS_AUDIT.md),
@@ -35,13 +35,15 @@ PR #210 is historical: it merged into the non-main `docs/deployment-readiness-au
 branch and is not the source of truth on `main`. See
 [`25_PROGRAM_DEPENDENCY_GRAPH.md`](25_PROGRAM_DEPENDENCY_GRAPH.md) for the live-status snapshot.
 
-**US-withholding plan note (2026-08-28):** Docs/24 — Egypt–US treaty copyright-royalty
+**US-withholding plan note (2026-08-31):** Docs/24 — Egypt–US treaty copyright-royalty
 withholding is **15%** when confirmed on AdSense tax info (not 16%); no-form defaults:
 **30% on US-source earnings (business)** / **24% on worldwide (individual)**. Program
-U1–U4: probe → additive country-sliced ingest (normalization fence) → backend-emitted
-estimate (**no default rate**; `UMS_US_WITHHOLDING_RATE` unset suppresses UI) → optional
-actual anchor. **Fence:** recon `DEFAULT_US_WITHHOLDING_RATE = 0.30` stays dormant
-(Docs/21 P3). D-U1 (AdSense tax-info confirm + effective-dated config) blocks U3.
+U1–U4: probe → additive country-sliced ingest (normalization fence plus non-alerting
+intentional-evidence telemetry) → backend-emitted estimate from a PostgreSQL
+account/category effective interval (**no env/default fallback**) → optional durable,
+idempotent, payment-linked actual revision. **Fence:** recon
+`DEFAULT_US_WITHHOLDING_RATE = 0.30` stays dormant (Docs/21 P3). D-U1 (AdSense tax-info
+confirmation + persisted effective-dated row) blocks U3.
 
 **Test-harness note (2026-06-11, branch `fix/pg-migration-test-lock-timeout`):** the PG
 migration round-trip tests' `fresh_engine` schema reset now sets `SET LOCAL lock_timeout`
@@ -667,11 +669,13 @@ closed unmerged and superseded by the consolidated batch in #156.
   supersedes draft #218): backend already ships the account/access surface
   (list/create/patch users — no DELETE; scoped role assignment + scoped permission
   grants + catalog reads, audited with required reasons) and NO view exposes it.
-  Program: **prerequisite P0-c**; A1 Admin MVP (+ `users.read_scoped` for assignment drawer;
-  session `can_manage_users` / `can_assign_roles`); A2-owned matrix + `/security` proxy
-  residual; A6 delegated admin with `home_org_unit_id` + no-amplification ceiling +
-  competitor read-isolation (closes role-family hole); A7 Google-only sign-in +
-  `external_identities` mapping; A3–A5. Tripwires: no role editor, no secrets,
+  Program: **prerequisite P0-c**; A1 Admin MVP (+ `users.read_scoped`; Admin nav on
+  `can_manage_users || can_assign_roles`, assignment-only surface independently gated);
+  A2-owned matrix + `/security` proxy residual; A6 delegated admin with
+  `home_org_unit_id` + no-amplification/read-isolation and account-global lifecycle
+  reserved to global admins behind `can_manage_user_lifecycle`; A7 Google-only sign-in
+  + explicit audited, one-time enrollment into active-only-unique
+  `external_identities` revision history; A3–A5. Tripwires: no role editor, no secrets,
   no delegation before A6. Remaining: whole program (plan only).
 - ⏳ Display-only currency conversion foundation — remaining: display-only
   conversion is not started. Note the distinction: bank-side FX + transfer-fee
@@ -2278,7 +2282,12 @@ single P-tier above.
   `CONNECTOR_JOB_RUN` `ROWS_SKIPPED` summary audit edge (counts by reason,
   finance-month scoped) + WARNING log, and the same finance-month audit edges
   feed the `SOURCE_ROWS_SKIPPED` dashboard smart alert. Ingest/finance numbers
-  unchanged; only the silent drop is now observable.
+  unchanged; only the silent drop is now observable. **Planned U2 exception:**
+  `NON_PROJECTING_EVIDENCE` remains in raw audit telemetry but is removed from
+  actionable alert counts before sensitive-reason redaction, so healthy country
+  evidence does not manufacture a dropped-row WARNING or HIGH alert for either
+  dashboard/export audience; every genuinely actionable or unclassified positive skip
+  keeps the existing behavior.
 - ✅ Gate `/security/*` catalog endpoints behind VIEW_AUDIT_LOG (PR #112) —
   `GET /security/roles` and `GET /security/permissions` previously returned
   the full role→permission catalog (including `sensitive`/`auditOnUse` flags)

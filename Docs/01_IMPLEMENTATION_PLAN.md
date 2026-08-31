@@ -1255,9 +1255,11 @@ and the reconciled-net content (Phase 4 allocation/tax) feeding report bodies.
   the compose stack ships no gateway), the default `headers` authz mode lets a
   caller assert their own role, no database backup, ephemeral artifact storage,
   and no non-dev path to serve the browser app. Two viable beta shapes are
-  documented there; real revenue can be ingested without any Google/GCP
-  dependency via the first-class `MANUAL_UPLOAD` import path.
-  **Freshness (2026-08-30):** P0 execution + living Docs/21 status track current successor
+  documented there; source-verified USD revenue can be ingested without any Google/GCP
+  dependency via the first-class `MANUAL_UPLOAD` path, but Docs/21 P0.2a now blocks
+  real data on a USD manifest/preflight plus resumable complete-roster/exact-fact-set
+  verification.
+  **Freshness (2026-08-31):** P0 execution + living Docs/21 status track current successor
   PRs **#221–#225 (P0-a…P0-e)** on main. PR #210 is historical: it merged into the
   non-main `docs/deployment-readiness-audit` branch and is not the mainline source of
   truth. Docs/20–21/23/24/25 ship together on branch
