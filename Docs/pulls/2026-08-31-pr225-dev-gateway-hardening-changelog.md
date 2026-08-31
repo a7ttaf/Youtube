@@ -7,9 +7,14 @@
 - Real HTTP adversarial coverage for hostile identity headers, ordinary and
   `Expect: 100-continue` requests, encoded path confusion, prefix/query/absolute
   request smuggling, Host/Origin misuse, and actual serve-versus-preview behavior.
-- Compiler-AST route discovery that traces typed API-client call arguments,
-  resolves supported immutable concatenations, templates, and path builders,
-  and fails closed when a request root cannot be proven.
+- Compiler-AST route discovery with a deliberately narrow syntax contract:
+  canonical `useApiClient()` results remain direct immutable bindings, calls
+  remain on the six audited methods, and unsupported aliases, wrappers,
+  containers, assignments, destructuring, constructors, getters, callbacks,
+  or method escapes fail closed.
+- Completeness tripwires for raw `fetch` references outside the audited client,
+  future API-client method additions, `.mts`/`.cts` application files, and
+  compiler-loaded frontend imports outside `src`.
 - Startup-fixture coverage distinguishing pre-allocation creation failure and
   proving allocated HTTP servers and file watchers close after listen or port-
   resolution failure.
@@ -19,6 +24,8 @@
 - The proxy fails before listening on blank identity/token configuration,
   contradictory global scope configuration, unsafe backend URL components, or
   an untrusted backend origin.
+- The trusted proxy rechecks Vite's final resolved host after inline and CLI
+  overrides, rejecting wildcard and non-loopback listeners before startup.
 - Loopback targets include canonical localhost, IPv6 loopback, and the IPv4
   `127.0.0.0/8` range. Non-loopback targets require HTTPS and an exact canonical
   origin allowlist match, including IDNA normalization.

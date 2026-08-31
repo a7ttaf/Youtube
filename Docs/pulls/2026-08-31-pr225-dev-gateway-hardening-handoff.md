@@ -11,7 +11,13 @@ The load-bearing implementation is `frontend/devProxy.ts` plus
 only activation, explicit preview exclusion, loopback binding, exact route
 segments, iterative encoded-path rejection, same-origin/Fetch Metadata checks,
 broad gateway-header family scrubbing, blank-token startup refusal, and HTTPS plus
-exact trust for non-loopback backends.
+exact trust for non-loopback backends. Vite's post-merge resolved host is checked
+again so an inline or CLI host override cannot expose the trusted proxy on a
+wildcard or non-loopback listener.
+
+The exact implementation-and-test snapshot validated below is
+`65a0c59a72ca11950384ecc1cec27b1eea086561`. The subsequent documentation-only
+evidence commit changes no runtime or test file.
 
 ## Integration dependency and re-author requirement
 
@@ -45,15 +51,15 @@ required.
 ## Validation
 
 Validation evidence must name the final committed head. At this isolated
-completion snapshot:
+completion snapshot (`65a0c59a72ca11950384ecc1cec27b1eea086561`):
 
 | Gate | Result |
 |---|---|
-| `bun run test --run tests/devProxyRoutes.test.ts tests/devProxySecurity.test.ts` | 81 passed |
-| `bun run test --run` | 611 passed across 46 files; existing React/jsdom warnings only |
+| `bun run test --run tests/devProxyRoutes.test.ts tests/devProxySecurity.test.ts` | 112 passed |
+| `bun run test --run` | 642 passed across 46 files; existing React/jsdom warnings only |
 | `bun run typecheck` | Passed |
 | `bun run build` | Passed |
 | `uv run pytest -q tests/api/test_org_units_api.py -k "missing_gateway_token or invalid_gateway_token or unknown_gateway_role"` | 3 passed, 6 deselected |
 | `uv run ruff check tests/api/test_org_units_api.py` | Passed |
 | `uv run pytest -q -x` | Environment blocker after 122 passed: `RuntimeError: UMS_TEST_DATABASE_URL required for PostgreSQL migration round-trip tests`; rerun with a disposable PostgreSQL test URL |
-| `git diff --check` | Passed before staging; repeat at the committed head |
+| `git diff --check` and `git diff --cached --check` | Passed on the exact staged implementation bytes; `git diff --check HEAD^..HEAD` passed after commit |
