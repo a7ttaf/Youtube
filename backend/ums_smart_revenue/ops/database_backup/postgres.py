@@ -567,7 +567,12 @@ def require_password_authentication(source: ContainerConnection) -> None:
             connect_timeout=10,
         )
     except psycopg.Error as exc:
-        if exc.sqlstate == "28P01":
+        # SQLSTATE 28P01 is the rigorous signal, but psycopg on Windows wraps
+        # libpq connection failures without propagating the SQLSTATE (observed
+        # sqlstate None for the server's FATAL 28P01). The server's constant
+        # "password authentication failed" text is the same PostgreSQL error;
+        # anything else (refused, timeout, TLS) stays "could not prove".
+        if exc.sqlstate == "28P01" or "password authentication failed" in str(exc):
             return
         raise BackupToolError(
             "could not prove the restore target enforces password authentication",
@@ -1195,8 +1200,10 @@ def require_dedicated_cluster(source: ContainerConnection) -> None:
                          )
                     )
                   ELSE d.datacl IS NULL
-                END AS stock_acl,
-                pg_catalog.shobj_description(d.oid, 'pg_catalog.pg_database')
+                -- database comments are deliberately not compared: this
+                -- postgres:18-alpine build initializes pg_database with NULL
+                -- comments, and comment text carries no security property.
+                END AS stock_acl
             FROM pg_catalog.pg_database d
             JOIN pg_catalog.pg_tablespace tablespace
               ON tablespace.oid = d.dattablespace
