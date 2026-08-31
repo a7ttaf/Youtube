@@ -482,8 +482,11 @@ def _seed_storage(repository: Path, safe_root: Path, name: str = "ums") -> Path:
 
 
 def _recovery_members(bundle: Path, archive: Path) -> list[Path]:
-    database_dump = bundle / "ums-database.dump"
-    roles_dump = bundle / "ums-roles.sql"
+    database_run = bundle / "ums-database-backup-20260831T000000Z-1234abcd"
+    database_run.mkdir(exist_ok=True)
+    database_dump = database_run / "database.dump"
+    roles_dump = database_run / "roles.sql"
+    database_manifest = database_run / "database-manifest.json"
     git_revision = bundle / "git-revision.txt"
     service_record = bundle / "running-services.txt"
     database_dump.write_bytes(b"postgres-custom-format")
@@ -491,9 +494,17 @@ def _recovery_members(bundle: Path, archive: Path) -> list[Path]:
         "CREATE ROLE app_tenant;\nCREATE ROLE app_platform;\n",
         encoding="utf-8",
     )
+    database_manifest.write_text('{"schema":"ums-database-backup/v2"}\n', encoding="utf-8")
     git_revision.write_text("26bf0256c64389a77d1b1053ea6aeb1e7c0bc994\n", encoding="utf-8")
     service_record.write_text("postgres\nredis\n", encoding="utf-8")
-    return [archive, database_dump, roles_dump, git_revision, service_record]
+    return [
+        archive,
+        database_dump,
+        roles_dump,
+        database_manifest,
+        git_revision,
+        service_record,
+    ]
 
 
 def test_archive_requires_stopped_writers_and_external_destination(tmp_path):
@@ -535,7 +546,11 @@ def test_archive_manifest_verify_and_empty_target_restore_round_trip(tmp_path):
     )
 
     verified = storage.verify_bundle_manifest(manifest)
-    assert set(verified) == storage.REQUIRED_RECOVERY_MEMBERS
+    assert set(verified) == storage.REQUIRED_RECOVERY_MEMBERS | {
+        "ums-database-backup-20260831T000000Z-1234abcd/database.dump",
+        "ums-database-backup-20260831T000000Z-1234abcd/roles.sql",
+        "ums-database-backup-20260831T000000Z-1234abcd/database-manifest.json",
+    }
     storage.verify_artifact_archive(archive)
 
     restore_target = storage.prepare_storage(
@@ -612,19 +627,22 @@ def test_archive_verifier_requires_directory_typed_storage_roots(tmp_path):
 
 
 def test_compose_recovery_manifest_rejects_incomplete_bundle(tmp_path, monkeypatch):
-    """Recovery cannot be declared complete without all five coordinated records."""
+    """Recovery cannot be complete without outer and structural DB records."""
     repository, _ = _layout(tmp_path)
     bundle = tmp_path / "bundle"
     bundle.mkdir()
-    for name in ("ums-database.dump", "ums-roles.sql", "ums-app-data.tgz"):
-        (bundle / name).write_bytes(name.encode())
+    database_run = bundle / "ums-database-backup-20260831T000000Z-1234abcd"
+    database_run.mkdir()
+    for name in ("database.dump", "roles.sql"):
+        (database_run / name).write_bytes(name.encode())
+    (bundle / "ums-app-data.tgz").write_bytes(b"archive")
 
-    with pytest.raises(storage.StorageContractError, match="git-revision.txt"):
+    with pytest.raises(storage.StorageContractError, match="structural database.*incomplete"):
         storage.create_bundle_manifest(
             bundle / "SHA256SUMS.json",
             [
-                bundle / "ums-database.dump",
-                bundle / "ums-roles.sql",
+                database_run / "database.dump",
+                database_run / "roles.sql",
                 bundle / "ums-app-data.tgz",
             ],
             repository_root=repository,
@@ -632,7 +650,7 @@ def test_compose_recovery_manifest_rejects_incomplete_bundle(tmp_path, monkeypat
 
     generic = storage.create_bundle_manifest(
         bundle / "generic.json",
-        [bundle / "ums-database.dump"],
+        [database_run / "database.dump"],
         profile=storage.GENERIC_BACKUP_PROFILE,
         repository_root=repository,
     )
@@ -1708,7 +1726,12 @@ def test_runbook_seals_roles_database_and_bind_as_one_recovery_set():
     runbook = (PROJECT_ROOT / "Docs" / "20_COMPOSE_STORAGE_RUNBOOK.md").read_text(encoding="utf-8")
     roles_sql = (PROJECT_ROOT / "scripts" / "compose_restore_roles.sql").read_text(encoding="utf-8")
 
-    assert "pg_dumpall --roles-only --no-role-passwords" in runbook
+    assert "scripts/backup_database.py" in runbook
+    assert "database-manifest.json" in runbook
+    assert "pg_dumpall --roles-only --no-role-passwords" not in runbook
+    assert "scripts/restore_database.py" in runbook
+    assert "--confirm-clean-target" in runbook
+    assert "pg_restore --exit-on-error --clean" not in runbook
     assert "umask 077" in runbook
     assert "SetAccessRuleProtection($true, $false)" in runbook
     assert "SHA256SUMS.json" in runbook

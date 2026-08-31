@@ -152,32 +152,26 @@ docker compose stop app app-dev
 Assert-NativeSuccess 'stop app and app-dev writers'
 ```
 
-Create both PostgreSQL files inside the container with `umask 077`, suppress
-role password verifiers, validate required roles, then copy files without using
-PowerShell redirection:
+Create one atomic semantic database package. The database tool counts/locks
+every table in an exported PostgreSQL snapshot before `pg_dump`, copies only the
+tracked password-free role SQL, and refuses a seed-only install. The explicit
+bundle mode requires the owner-only P0-a directory created above:
 
 ```powershell
-docker compose exec -T postgres sh -euc '
-  umask 077
-  rm -f /tmp/ums-roles.sql /tmp/ums-database.dump
-  pg_dumpall --roles-only --no-role-passwords -U "$POSTGRES_USER" > /tmp/ums-roles.sql
-  pg_dump --format=custom --no-owner -U "$POSTGRES_USER" -d "$POSTGRES_DB" -f /tmp/ums-database.dump
-  test -s /tmp/ums-roles.sql
-  test -s /tmp/ums-database.dump
-  grep -q "CREATE ROLE app_tenant" /tmp/ums-roles.sql
-  grep -q "CREATE ROLE app_platform" /tmp/ums-roles.sql
-  chmod 600 /tmp/ums-roles.sql /tmp/ums-database.dump
-'
-Assert-NativeSuccess 'create database and roles dumps'
-docker compose cp postgres:/tmp/ums-roles.sql `
-  (Join-Path $bundle 'ums-roles.sql')
-Assert-NativeSuccess 'copy roles dump'
-docker compose cp postgres:/tmp/ums-database.dump `
-  (Join-Path $bundle 'ums-database.dump')
-Assert-NativeSuccess 'copy database dump'
-docker compose exec -T postgres rm -f `
-  /tmp/ums-roles.sql /tmp/ums-database.dump
-Assert-NativeSuccess 'remove container dump staging files'
+$dbContainer = (docker compose ps -q postgres).Trim()
+if (-not $dbContainer) { throw 'Compose postgres container is not running' }
+uv run python scripts/backup_database.py `
+  --container $dbContainer `
+  --out-dir $bundle `
+  --coordinated-bundle `
+  --confirm-writers-quiesced
+Assert-NativeSuccess 'create database backup package'
+$dbRuns = @(Get-ChildItem -LiteralPath $bundle -Directory |
+  Where-Object { $_.Name -match '^ums-database-backup-\d{8}T\d{6}Z-[0-9a-f]{8}$' })
+if ($dbRuns.Count -ne 1) {
+  throw "Expected exactly one database package, found $($dbRuns.Count)"
+}
+$dbRun = $dbRuns[0].FullName
 ```
 
 Archive the stopped bind using Python rather than `tar`, `date`, or binary
@@ -195,7 +189,7 @@ Reapply an owner-only file ACL after Docker copies the dumps, then seal every
 data member into one SHA-256 manifest:
 
 ```powershell
-Get-ChildItem -LiteralPath $bundle -File | ForEach-Object {
+Get-ChildItem -LiteralPath $bundle -File -Recurse | ForEach-Object {
   $fileAcl = New-Object Security.AccessControl.FileSecurity
   $fileAcl.SetOwner($ownerSid)
   $fileAcl.SetAccessRuleProtection($true, $false)
@@ -211,8 +205,9 @@ Get-ChildItem -LiteralPath $bundle -File | ForEach-Object {
 uv run python scripts/compose_storage.py manifest `
   --output (Join-Path $bundle 'SHA256SUMS.json') `
   --profile compose-recovery `
-  (Join-Path $bundle 'ums-roles.sql') `
-  (Join-Path $bundle 'ums-database.dump') `
+  (Join-Path $dbRun 'roles.sql') `
+  (Join-Path $dbRun 'database.dump') `
+  (Join-Path $dbRun 'database-manifest.json') `
   (Join-Path $bundle 'ums-app-data.tgz') `
   (Join-Path $bundle 'running-services.txt') `
   (Join-Path $bundle 'git-revision.txt')
@@ -235,7 +230,7 @@ $fileRule = [Security.AccessControl.FileSystemAccessRule]::new(
 $fileAcl.AddAccessRule($fileRule)
 Set-Acl -LiteralPath $manifest -AclObject $fileAcl
 
-Get-ChildItem -LiteralPath $bundle -File | ForEach-Object {
+Get-ChildItem -LiteralPath $bundle -File -Recurse | ForEach-Object {
   $acl = Get-Acl -LiteralPath $_.FullName
   if (-not $acl.AreAccessRulesProtected) {
     throw "Inherited ACL remains on $($_.FullName)"
@@ -274,21 +269,18 @@ docker compose ps --status running --services > "$bundle/running-services.txt"
 git rev-parse HEAD > "$bundle/git-revision.txt"
 docker compose stop app app-dev
 
-docker compose exec -T postgres sh -euc '
-  umask 077
-  rm -f /tmp/ums-roles.sql /tmp/ums-database.dump
-  pg_dumpall --roles-only --no-role-passwords -U "$POSTGRES_USER" > /tmp/ums-roles.sql
-  pg_dump --format=custom --no-owner -U "$POSTGRES_USER" -d "$POSTGRES_DB" -f /tmp/ums-database.dump
-  test -s /tmp/ums-roles.sql
-  test -s /tmp/ums-database.dump
-  grep -q "CREATE ROLE app_tenant" /tmp/ums-roles.sql
-  grep -q "CREATE ROLE app_platform" /tmp/ums-roles.sql
-  chmod 600 /tmp/ums-roles.sql /tmp/ums-database.dump
-'
-docker compose cp postgres:/tmp/ums-roles.sql "$bundle/ums-roles.sql"
-docker compose cp postgres:/tmp/ums-database.dump "$bundle/ums-database.dump"
-docker compose exec -T postgres rm -f \
-  /tmp/ums-roles.sql /tmp/ums-database.dump
+db_container="$(docker compose ps -q postgres)"
+test -n "$db_container"
+uv run python scripts/backup_database.py \
+  --container "$db_container" \
+  --out-dir "$bundle" \
+  --coordinated-bundle \
+  --confirm-writers-quiesced
+database_runs="$(find "$bundle" -mindepth 1 -maxdepth 1 -type d \
+  -name 'ums-database-backup-????????T??????Z-????????' -print)"
+test -n "$database_runs"
+test "$(printf '%s\n' "$database_runs" | wc -l)" -eq 1
+database_run="$database_runs"
 
 host_uid="$(id -u)"
 host_gid="$(id -g)"
@@ -303,12 +295,14 @@ uv run python scripts/compose_storage.py compose \
     --output-uid "$host_uid" \
     --output-gid "$host_gid"
 
-chmod 600 "$bundle"/*
+find "$bundle" -type d -exec chmod 700 {} \;
+find "$bundle" -type f -exec chmod 600 {} \;
 uv run python scripts/compose_storage.py manifest \
   --output "$bundle/SHA256SUMS.json" \
   --profile compose-recovery \
-  "$bundle/ums-roles.sql" \
-  "$bundle/ums-database.dump" \
+  "$database_run/roles.sql" \
+  "$database_run/database.dump" \
+  "$database_run/database-manifest.json" \
   "$bundle/ums-app-data.tgz" \
   "$bundle/running-services.txt" \
   "$bundle/git-revision.txt"
@@ -347,8 +341,9 @@ uv run python scripts/compose_storage.py manifest \
   --profile compose-recovery \
   --blob-backend gcs \
   --gcs-bucket "$UMS_GCS_BUCKET" \
-  "$bundle/ums-roles.sql" \
-  "$bundle/ums-database.dump" \
+  "$database_run/roles.sql" \
+  "$database_run/database.dump" \
+  "$database_run/database-manifest.json" \
   "$bundle/ums-app-data.tgz" \
   "$bundle/running-services.txt" \
   "$bundle/git-revision.txt" \
@@ -377,9 +372,13 @@ target. Never reuse the default project name or live bind.
 2. Check out the exact commit recorded in `git-revision.txt`, then prepare a new
    empty bind under the same approved safe root.
 3. Start only the recovery project's PostgreSQL service.
-4. Pre-create and validate the two NOLOGIN RLS roles with
-   `scripts/compose_restore_roles.sql`.
-5. Restore the custom-format database with `--exit-on-error`.
+4. Run `scripts/restore_database.py` against the clean PostgreSQL container.
+   It verifies owner-only provenance and pinned artifact identities, the
+   semantic manifest, current canonical NOLOGIN role SQL, archive TOC, exact
+   image/bootstrap user, dedicated cluster, version/locale, zero-user-object
+   target, table counts, and Alembic head. It applies roles before the
+   single-transaction dump.
+5. Treat any database verification difference as a failed rehearsal.
 6. Restore the artifact archive into the empty marked bind.
 7. For GCS, restore or prove every exact object generation and CRC32C from
    `gcs-snapshot.json` before any application service starts.
@@ -430,24 +429,25 @@ uv run python scripts/compose_storage.py verify `
   --blob-backend $env:UMS_BLOB_BACKEND `
   --gcs-bucket $env:UMS_GCS_BUCKET
 Assert-NativeSuccess 'verify recovery bundle'
+$dbRuns = @(Get-ChildItem -LiteralPath $bundle -Directory |
+  Where-Object { $_.Name -match '^ums-database-backup-\d{8}T\d{6}Z-[0-9a-f]{8}$' })
+if ($dbRuns.Count -ne 1) {
+  throw "Expected exactly one database package, found $($dbRuns.Count)"
+}
+$dbRun = $dbRuns[0].FullName
 uv run python scripts/compose_storage.py prepare `
   --path $env:UMS_APP_DATA_HOST
 Assert-NativeSuccess 'prepare empty recovery bind'
 
 docker compose -p $project up -d --wait --wait-timeout 120 postgres
 Assert-NativeSuccess 'start recovery PostgreSQL'
-docker compose -p $project cp scripts/compose_restore_roles.sql `
-  postgres:/tmp/compose_restore_roles.sql
-Assert-NativeSuccess 'copy required-role bootstrap SQL'
-docker compose -p $project exec -T postgres sh -euc `
-  'psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d postgres -f /tmp/compose_restore_roles.sql'
-Assert-NativeSuccess 'restore and validate required roles'
-docker compose -p $project cp (Join-Path $bundle 'ums-database.dump') `
-  postgres:/tmp/ums-database.dump
-Assert-NativeSuccess 'copy recovery database dump'
-docker compose -p $project exec -T postgres sh -euc `
-  'pg_restore --exit-on-error --clean --if-exists --no-owner -U "$POSTGRES_USER" -d "$POSTGRES_DB" /tmp/ums-database.dump'
-Assert-NativeSuccess 'restore recovery database'
+$recoveryDbContainer = (docker compose -p $project ps -q postgres).Trim()
+if (-not $recoveryDbContainer) { throw 'Recovery postgres container is unavailable' }
+uv run python scripts/restore_database.py `
+  --backup-dir $dbRun `
+  --target-container $recoveryDbContainer `
+  --confirm-clean-target
+Assert-NativeSuccess 'restore and verify recovery database'
 
 uv run python scripts/compose_storage.py restore-artifacts `
   --path $env:UMS_APP_DATA_HOST `
@@ -489,16 +489,19 @@ uv run python scripts/compose_storage.py verify \
   --blob-backend "$UMS_BLOB_BACKEND" \
   --gcs-bucket "$UMS_GCS_BUCKET"
 uv run python scripts/compose_storage.py prepare --path "$UMS_APP_DATA_HOST"
+database_runs="$(find "$bundle" -mindepth 1 -maxdepth 1 -type d \
+  -name 'ums-database-backup-????????T??????Z-????????' -print)"
+test -n "$database_runs"
+test "$(printf '%s\n' "$database_runs" | wc -l)" -eq 1
+database_run="$database_runs"
 
 docker compose -p "$project" up -d --wait --wait-timeout 120 postgres
-docker compose -p "$project" cp scripts/compose_restore_roles.sql \
-  postgres:/tmp/compose_restore_roles.sql
-docker compose -p "$project" exec -T postgres sh -euc \
-  'psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d postgres -f /tmp/compose_restore_roles.sql'
-docker compose -p "$project" cp "$bundle/ums-database.dump" \
-  postgres:/tmp/ums-database.dump
-docker compose -p "$project" exec -T postgres sh -euc \
-  'pg_restore --exit-on-error --clean --if-exists --no-owner -U "$POSTGRES_USER" -d "$POSTGRES_DB" /tmp/ums-database.dump'
+recovery_db_container="$(docker compose -p "$project" ps -q postgres)"
+test -n "$recovery_db_container"
+uv run python scripts/restore_database.py \
+  --backup-dir "$database_run" \
+  --target-container "$recovery_db_container" \
+  --confirm-clean-target
 
 uv run python scripts/compose_storage.py restore-artifacts \
   --path "$UMS_APP_DATA_HOST" \
@@ -535,12 +538,12 @@ Validate at minimum:
 - Missing auth, insufficient permission, and tenant-scoped reads still fail
   closed.
 
-The roles-only dump is a sealed cluster-role inventory. Do not blindly replay it
-into Compose: the bootstrap `UMS_DB_USER` already exists on a fresh cluster.
-The tracked SQL script restores the two roles referenced by database grants and
-RLS policies idempotently. If `ums-roles.sql` contains additional application
-login roles or memberships, stop and obtain a DBA-reviewed replay plan instead
-of ignoring duplicate-role or grant errors.
+The database package's `roles.sql` must remain byte-identical to the tracked
+`scripts/compose_restore_roles.sql`. It restores only the two NOLOGIN roles
+referenced by database grants and RLS policies, idempotently and with privileged
+attribute drift checks. A cluster-wide `pg_dumpall --roles-only` inventory is
+deliberately not accepted: it could replay unrelated logins, memberships, or
+password verifiers.
 
 After the rehearsal, `docker compose -p <unique-project> down -v` removes only
 that recovery project's named volumes. The recovery bind still remains by

@@ -1202,13 +1202,15 @@ and the reconciled-net content (Phase 4 allocation/tax) feeding report bodies.
   (PR #8) plus the `CHANNELS_MISSING_REVENUE_FACTS` per-channel coverage check
   (PR #98, active+revenue_required channels with no monthly fact); broader
   quality checks not built.
-- ⏳ Backup/export retention — remaining: not started. **Audited 2026-08-24 and
-  raised to a beta BLOCKER** (`Docs/20_DEPLOYMENT_READINESS_AUDIT.md`, B3): no
-  `pg_dump` script exists anywhere in the repo, while `docker-compose.yml:7`
-  documents `docker compose down -v` as an ordinary teardown — that deletes the
-  `postgres-data` volume and every revenue fact in it. Must be fixed before real
-  CMS data is ingested. Export artifacts are separately at risk (B4): they default
-  to the container temp dir with no volume mounted.
+- ⏳ Backup/export retention — P0-a/P0-b implementation now exists on the
+  corrected integration stack: `scripts/compose_storage.py` owns the coordinated
+  artifact/blob bundle, while `scripts/backup_database.py` and
+  `scripts/restore_database.py` own an atomic semantic PostgreSQL package and
+  clean-target rehearsal (`Docs/20_COMPOSE_STORAGE_RUNBOOK.md`,
+  `Docs/22_BACKUP_RESTORE_AND_REHEARSAL.md`). There is intentionally no automated
+  deletion/retention command. The beta blocker remains open until these changes
+  land on `main` and the exact operational backup passes one real disposable
+  PostgreSQL restore rehearsal.
 - ✅ **RETRACTED 2026-08-25 — "Analytics revenue currency is fabricated as USD."**
   This entry previously carried a 🔴 blocker claiming live ingest would record EGP
   amounts as USD. **That was wrong.** `currency` on YouTube Analytics `reports.query`

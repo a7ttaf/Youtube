@@ -174,18 +174,21 @@ from SQL and takes only identity from the header (`app.py:332`;
 **Fix:** set `UMS_AUTHZ_SOURCE=database` for the beta. This has a prerequisite —
 see H1 (the roles/permissions seed) — which is why it is not a one-line change.
 
-### B3 — Real revenue data has no backup, and a documented command destroys it
-No backup mechanism exists anywhere in the repo: `pg_dump` appears **only** as
-prose in `Docs/17_MULTI_TENANT_ARCHITECTURE.md` (a manual tenant-slice procedure) —
-there is no script in `scripts/`, `ci/`, or the `Makefile`.
-`Docs/01_IMPLEMENTATION_PLAN.md:1205` states it plainly: *"Backup/export retention —
-remaining: not started."* Meanwhile `docker-compose.yml:7` documents
-`docker compose down -v` as an ordinary teardown command — that deletes the
-`postgres-data` volume and every revenue fact in it, unrecoverably.
+### B3 — Real revenue data requires a landed and rehearsed backup contract
+The audit baseline had no backup mechanism. The corrected P0-b stack adds a
+snapshot-consistent custom-format dump, strict semantic manifest, canonical
+NOLOGIN role SQL, identity-bound atomic publication, clean-target restore, and a
+throwaway rehearsal in `scripts/backup_database.py`,
+`scripts/restore_database.py`, and
+`Docs/22_BACKUP_RESTORE_AND_REHEARSAL.md`. P0-a's
+`scripts/compose_storage.py` remains the owner of the coordinated artifact/blob
+bundle and its outer checksum manifest.
 
-**Fix before any real data is ingested:** a scheduled `pg_dump -Fc` writing to a
-**host** directory (not a container volume), plus one rehearsed restore. Until that
-exists, treat the beta database as disposable and re-importable.
+This finding is not closed merely because the files exist on a branch. Before
+real data is ingested, land the corrected stack and retain evidence from one
+real migrated PostgreSQL backup and full throwaway restore. There is no
+non-empty-target override and no retention/prune automation; operator scheduling
+and retention policy remain explicit deployment work.
 
 ### B4 — Export artifacts and connector blobs live on ephemeral container paths
 Generated workbooks/PDFs/slide packs default to the container's temp directory
@@ -769,11 +772,12 @@ invalidates published *advice*; two are new findings the earlier rounds missed.
 
 Two further items worth carrying, found while costing but not defects in the audit:
 
-- **`pg_dump` does not dump roles.** A restore into a fresh container fails on the
-  RLS policies referencing `app_tenant`/`app_platform`
-  (`20260608_0001_tenant_rls_enforcement.py:92-113`). Without an accompanying
-  `pg_dumpall --roles-only`, backups look fine and are **unrestorable** — the worst
-  possible failure shape for B3.
+- **The baseline `pg_dump` idea did not include roles.** A restore into a fresh
+  container would fail on RLS policies referencing `app_tenant`/`app_platform`
+  (`20260608_0001_tenant_rls_enforcement.py:92-113`). The corrected P0-b design
+  resolves that historical finding with the tracked, password-free, two-role
+  `scripts/compose_restore_roles.sql`; broad `pg_dumpall --roles-only` capture is
+  deliberately prohibited.
 - **A test asserts a capability that does not exist.**
   `test_export_preview_api.py:632` promises the operator "can rehydrate the artifact
   out of band"; the artifact store has exactly one writer (`api/exports.py:245`).
@@ -788,7 +792,7 @@ Two further items worth carrying, found while costing but not defects in the aud
 | Gateway-asserted identity | `api/dependencies.py:77-120,139-158,181-189` |
 | Authz mode default | `config/settings.py:27,87-91`; `docker-compose.yml:23` |
 | No local auth | `db/security_models.py:38-78` (no password column) |
-| Backups absent | `Docs/01_IMPLEMENTATION_PLAN.md:1205`; `docker-compose.yml:7` |
+| Baseline backups absent (superseded by B3 above) | `Docs/01_IMPLEMENTATION_PLAN.md:1205`; `docker-compose.yml:7` |
 | Ephemeral artifacts | `reports/artifact_storage.py:13`; `orchestrator.py:3125`; `Dockerfile:109` |
 | Frontend serving | `frontend/vite.config.ts` (`server.proxy` only, routes `:13-32`) |
 | Roles seed | `backend/ums_smart_revenue/db/security_seed.sql` |

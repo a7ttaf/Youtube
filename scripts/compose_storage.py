@@ -10,6 +10,7 @@ import json
 import logging
 import os
 import posixpath
+import re
 import secrets
 import shutil
 import stat
@@ -31,14 +32,10 @@ RESTORE_STAGE_PREFIX = ".ums-restore-stage-"
 READY_FILENAME = ".ums-storage-ready.json"
 STORAGE_DIRECTORIES = ("artifacts", "blobs")
 REQUIRED_RECOVERY_MEMBERS = frozenset(
-    {
-        "git-revision.txt",
-        "running-services.txt",
-        "ums-app-data.tgz",
-        "ums-database.dump",
-        "ums-roles.sql",
-    }
+    {"git-revision.txt", "running-services.txt", "ums-app-data.tgz"}
 )
+DATABASE_RECOVERY_MEMBERS = frozenset({"database.dump", "roles.sql", "database-manifest.json"})
+DATABASE_RUN_NAME_RE = re.compile(r"^ums-database-backup-\d{8}T\d{6}Z-[0-9a-f]{8}$")
 GCS_SNAPSHOT_MEMBER = "gcs-snapshot.json"
 DEFAULT_GCS_BUCKET = "ums-smart-revenue-raw"
 CHUNK_SIZE = 1024 * 1024
@@ -858,6 +855,31 @@ def _validate_gcs_snapshot_payload(
         names.add(name)
 
 
+def _required_compose_recovery_members(record_names: set[str]) -> set[str]:
+    """Return the fixed outer members plus one structurally complete DB package."""
+    database_packages: dict[str, set[str]] = {}
+    for name in record_names:
+        relative = PurePosixPath(name)
+        if len(relative.parts) != 2 or relative.name not in DATABASE_RECOVERY_MEMBERS:
+            continue
+        parent = relative.parts[0]
+        if DATABASE_RUN_NAME_RE.fullmatch(parent):
+            database_packages.setdefault(parent, set()).add(relative.name)
+    if len(database_packages) != 1:
+        raise StorageContractError(
+            "compose recovery manifest requires exactly one structural database backup package"
+        )
+    run_name, members = next(iter(database_packages.items()))
+    if members != DATABASE_RECOVERY_MEMBERS:
+        missing = sorted(DATABASE_RECOVERY_MEMBERS - members)
+        raise StorageContractError(
+            "structural database backup package is incomplete; missing: " + ", ".join(missing)
+        )
+    return set(REQUIRED_RECOVERY_MEMBERS) | {
+        f"{run_name}/{member}" for member in DATABASE_RECOVERY_MEMBERS
+    }
+
+
 # ============================================================================
 # Purpose: Seal database, role, and artifact backups into one checksum manifest.
 # Database/ORM: PostgreSQL dumps are opaque files; no live database is accessed.
@@ -925,7 +947,8 @@ def create_bundle_manifest(
     if profile == COMPOSE_RECOVERY_PROFILE:
         # FIX: A partial set could previously be sealed and described as a
         # complete coordinated recovery bundle.
-        missing = sorted(REQUIRED_RECOVERY_MEMBERS - record_names)
+        required_recovery_members = _required_compose_recovery_members(record_names)
+        missing = sorted(required_recovery_members - record_names)
         if missing:
             raise StorageContractError(
                 "compose recovery manifest is incomplete; missing: " + ", ".join(missing)
@@ -933,7 +956,7 @@ def create_bundle_manifest(
         empty = sorted(
             record["path"]
             for record in records
-            if record["path"] in REQUIRED_RECOVERY_MEMBERS and not record["size"]
+            if record["path"] in required_recovery_members and not record["size"]
         )
         if empty:
             raise StorageContractError(
@@ -1076,12 +1099,13 @@ def verify_bundle_manifest(
         if _verified_digests_out is not None:
             _verified_digests_out[name] = actual_digest
     if profile == COMPOSE_RECOVERY_PROFILE:
-        missing = sorted(REQUIRED_RECOVERY_MEMBERS - verified.keys())
+        required_recovery_members = _required_compose_recovery_members(set(verified))
+        missing = sorted(required_recovery_members - verified.keys())
         if missing:
             raise StorageContractError(
                 "compose recovery manifest is incomplete; missing: " + ", ".join(missing)
             )
-        empty = sorted(name for name in REQUIRED_RECOVERY_MEMBERS if verified_sizes[name] == 0)
+        empty = sorted(name for name in required_recovery_members if verified_sizes[name] == 0)
         if empty:
             raise StorageContractError(
                 "compose recovery manifest has empty required members: " + ", ".join(empty)

@@ -161,15 +161,17 @@ no backup of any kind.
 
 The only item in this plan I would refuse to skip.
 
-- `pg_dump -Fc` to a **host** directory (not a container path), on Task Scheduler.
-- A restore script, and **one rehearsed restore into a throwaway container.**
+- `scripts/backup_database.py` writes a snapshot-consistent custom-format dump
+  and semantic manifest to an atomic **host** directory package.
+- `scripts/restore_database.py` restores only into a proven-clean target and
+  performs **one full rehearsal in a throwaway container.**
 
-> ⚠️ **`pg_dump` does not dump roles.** A restore into a fresh container fails on the
-> RLS policies and grants that reference `app_tenant` / `app_platform`
-> (`db/alembic/versions/20260608_0001_tenant_rls_enforcement.py:92-113`). Add
-> `pg_dumpall --roles-only` alongside. **Without it your backups look perfect and are
-> unrestorable** — the worst possible shape for this failure, and the reason the
-> rehearsal is part of the estimate rather than optional.
+> ⚠️ **`pg_dump` does not create cluster roles.** The package therefore seals the
+> tracked `scripts/compose_restore_roles.sql` and restore proves it remains
+> byte-identical before applying the two required NOLOGIN roles. A broad
+> `pg_dumpall --roles-only` replay is deliberately rejected because it can carry
+> unrelated logins, memberships, and password verifiers. Without the canonical
+> roles step the RLS grants are unrestorable, which is why rehearsal is mandatory.
 
 **Skippable?** No.
 

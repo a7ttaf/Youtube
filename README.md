@@ -205,6 +205,7 @@ For the full role/permission matrix, see [Docs/security/PERMISSION_MATRIX.md](Do
 | [Docs/15_DELIVERY_BACKLOG.md](Docs/15_DELIVERY_BACKLOG.md) | P0/P1/P2/P3 backlog |
 | [Docs/16_OPEN_DECISIONS.md](Docs/16_OPEN_DECISIONS.md) | Unresolved questions |
 | [Docs/20_COMPOSE_STORAGE_RUNBOOK.md](Docs/20_COMPOSE_STORAGE_RUNBOOK.md) | Compose bind preparation, coordinated backup, verification, and recovery |
+| [Docs/22_BACKUP_RESTORE_AND_REHEARSAL.md](Docs/22_BACKUP_RESTORE_AND_REHEARSAL.md) | Atomic database backup, clean restore, and throwaway rehearsal |
 | [SECURITY.md](SECURITY.md) | Reporting vulnerabilities |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | Contribution flow |
 | [CHANGELOG.md](CHANGELOG.md) | Notable changes |
