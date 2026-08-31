@@ -1,5 +1,5 @@
 -- Initial UMS security seed data.
--- Safe to re-run after security_schema.sql.
+-- Safe to re-run against a database migrated to Alembic head.
 --
 -- RUNTIME CONTRACT (Track-E, post-FORCE migration 20260612_0002):
 -- After migration 20260612_0002 the tenant-scoped tables carry FORCE ROW LEVEL
@@ -9,24 +9,30 @@
 -- reference writes (roles, permissions, role_permission_assignments) are NOT
 -- in TENANT_SCOPED_TABLES and are unaffected by FORCE.
 --
--- Run this raw reseed as one of:
---   (a) a superuser or BYPASSRLS role -- both bypass FORCE; this is what the
---       current deployment uses (the postgres superuser), OR
---   (b) the non-superuser table owner AFTER establishing a real tenant context
---       with the privileged setter, e.g.
---         SELECT set_app_current_tenant_id('<tenant-uuid>');
---       so the FORCEd policies match a concrete tenant instead of seeing NULL.
+-- Run this raw reseed only as a privileged catalog-maintenance role (the
+-- application app_tenant/app_platform lanes deliberately cannot mutate the
+-- roles/permissions catalogs) and only after establishing the target tenant on
+-- the SAME database backend with the privileged, parameterized setter, e.g.
+--     SELECT set_app_current_tenant_id('<validated-tenant-uuid>'::uuid);
+-- The access_scopes INSERT below reads that trusted backend context instead of
+-- the transitional UMS tenant server default. Missing context therefore fails
+-- closed at the tenant_id NOT NULL boundary, including for a superuser whose
+-- RLS bypass would otherwise hide the mistake.
 --
 -- NOTE: `SET row_security = OFF` is NOT a bypass -- PostgreSQL raises an error
 -- instead of filtering when a policy would otherwise apply, and `SET LOCAL` is
 -- a no-op outside an explicit transaction block, so neither helps an owner
--- reseed FORCEd tables. The tenant-aware in-repo source of truth is the Python
--- seed path (backend/ums_smart_revenue/auth/seed.py); prefer it for
--- tenant-scoped seeding.
+-- reseed FORCEd tables. Run the setter + this file in one transaction with the
+-- client configured to stop on the first error; otherwise a statement failure
+-- can leave a partial catalog refresh. For tenant bootstrap, prefer
+-- scripts/bootstrap_operator.py, which validates --tenant and creates the
+-- global scope on demand through the tenant-aware role repository.
 
-INSERT INTO access_scopes (scope_type, scope_id, label)
-VALUES ('global', NULL, 'Global')
-ON CONFLICT DO NOTHING;
+INSERT INTO access_scopes (tenant_id, scope_type, scope_id, label)
+VALUES (app_current_tenant_id(), 'global', NULL, 'Global')
+ON CONFLICT (tenant_id, scope_type)
+    WHERE scope_type = 'global' AND scope_id IS NULL
+DO UPDATE SET label = EXCLUDED.label;
 
 DELETE FROM user_role_assignments
 WHERE scope_id IN (SELECT id FROM access_scopes WHERE scope_type = 'graph-read');
