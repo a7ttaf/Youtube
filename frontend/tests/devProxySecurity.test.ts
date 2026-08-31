@@ -26,6 +26,7 @@ import viteConfig from "../vite.config";
 import {
   TENANT_SCOPED_ROUTES,
   buildTenantScopedProxy,
+  isLoopbackDevServerHost,
   proxyContextForRoute,
   resolveDevBackendTarget,
   resolveDevGatewayProxy,
@@ -419,6 +420,40 @@ describe("development gateway config", () => {
 });
 
 describe("actual Vite serve and preview activation", () => {
+  it.each(["0.0.0.0", "::", "192.168.50.12", true] as const)(
+    "rejects the final inline/CLI-equivalent host override %s before listen",
+    async (host) => {
+      for (const [key, value] of Object.entries(BASE_ENV)) {
+        vi.stubEnv(key, value);
+      }
+      try {
+        await expect(
+          createViteServer({
+            configFile: path.resolve(FRONTEND_ROOT, "vite.config.ts"),
+            logLevel: "silent",
+            mode: "development",
+            root: FRONTEND_ROOT,
+            server: { host, strictPort: false },
+          }),
+        ).rejects.toThrow(/requires an explicit loopback Vite host/iu);
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    },
+  );
+
+  it("accepts only explicit loopback bind hosts", () => {
+    expect(isLoopbackDevServerHost("127.0.0.1")).toBe(true);
+    expect(isLoopbackDevServerHost("127.42.17.9")).toBe(true);
+    expect(isLoopbackDevServerHost("localhost.")).toBe(true);
+    expect(isLoopbackDevServerHost("::1")).toBe(true);
+    expect(isLoopbackDevServerHost("0.0.0.0")).toBe(false);
+    expect(isLoopbackDevServerHost("::")).toBe(false);
+    expect(isLoopbackDevServerHost("api.example.test")).toBe(false);
+    expect(isLoopbackDevServerHost(true)).toBe(false);
+    expect(isLoopbackDevServerHost(undefined)).toBe(false);
+  });
+
   it("proxies adversarial development traffic but keeps development-mode preview inert", async () => {
     const hits: BackendHit[] = [];
     const backend = createHttpServer((request, response) => {

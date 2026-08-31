@@ -3,7 +3,7 @@ import { fileURLToPath } from "node:url";
 
 import tailwindcss from "@tailwindcss/vite";
 import react from "@vitejs/plugin-react";
-import { defineConfig, loadEnv } from "vite";
+import { defineConfig, loadEnv, type Plugin } from "vite";
 
 import {
   DEFAULT_BACKEND_TARGET,
@@ -43,6 +43,53 @@ export const shouldEnableDevGateway = (
   mode: string,
   isPreview = false,
 ): boolean => command === "serve" && mode === "development" && !isPreview;
+
+/** True only for explicit loopback bind hosts; wildcard/network binds are unsafe. */
+export const isLoopbackDevServerHost = (host: string | boolean | undefined): boolean => {
+  if (typeof host !== "string") {
+    return false;
+  }
+  const normalized = host.trim().replace(/^\[|\]$/gu, "").replace(/\.$/u, "")
+    .toLowerCase();
+  if (normalized === "localhost" || normalized === "::1") {
+    return true;
+  }
+  const octets = normalized.split(".");
+  return octets.length === 4 &&
+    octets[0] === "127" &&
+    octets.every((octet) => /^\d{1,3}$/u.test(octet) && Number(octet) <= 255);
+};
+
+// ============================================================================
+// Purpose: Recheck Vite's final resolved bind host after CLI/inline overrides.
+// Database/ORM: None.
+// Standards: Fail closed before listen whenever the trusted dev proxy would be
+//   reachable through a wildcard or non-loopback interface.
+// Blast Radius: Development server startup and trusted-header proxy exposure.
+// Connections:
+//   - File: frontend/devProxy.ts -> proxy injects trusted gateway claims.
+//   - File: frontend/tests/devProxySecurity.test.ts -> real override probes.
+// ============================================================================
+const resolvedDevGatewayHostGuard = (): Plugin => {
+  const assertLoopback = (host: string | boolean | undefined): void => {
+    if (!isLoopbackDevServerHost(host)) {
+      throw new Error(
+        `trusted development gateway requires an explicit loopback Vite host; received ${String(host)}`,
+      );
+    }
+  };
+  return {
+    name: "ums-dev-gateway-loopback-host-guard",
+    configResolved(config) {
+      // FIX: Inline/CLI host overrides win after the file's server.host value;
+      // validate the resolved value before an externally reachable listener exists.
+      assertLoopback(config.server.host);
+    },
+    configureServer(server) {
+      assertLoopback(server.config.server.host);
+    },
+  };
+};
 
 // ============================================================================
 // Purpose: Resolve the complete development proxy only for Vite's development
@@ -102,7 +149,11 @@ export default defineConfig(({ command, mode, isPreview }) => {
     : undefined;
 
   return {
-    plugins: [react(), tailwindcss()],
+    plugins: [
+      ...(devProxy ? [resolvedDevGatewayHostGuard()] : []),
+      react(),
+      tailwindcss(),
+    ],
     envDir: REPO_ROOT,
     resolve: {
       alias: {

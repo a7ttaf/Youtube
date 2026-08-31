@@ -28,7 +28,7 @@ import {
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const FRONTEND_ROOT = path.resolve(HERE, "..");
 const SRC_DIR = path.join(FRONTEND_ROOT, "src");
-const SOURCE_SUFFIXES = [".ts", ".tsx"];
+const SOURCE_SUFFIXES = [".cts", ".mts", ".ts", ".tsx"];
 
 // Change-detector only; the compiler-derived assertion is the coverage proof.
 const EXPECTED_ROUTES = [
@@ -64,14 +64,17 @@ const SCANNER_HEALTH_PREFIXES = [
   "/tenants",
 ];
 
-/** Every .ts/.tsx file under frontend/src, recursively. */
+/** Every supported TypeScript application file under frontend/src, recursively. */
+const hasApplicationSourceSuffix = (fileName: string): boolean =>
+  SOURCE_SUFFIXES.some((suffix) => fileName.endsWith(suffix));
+
 const sourceFiles = (dir: string): string[] =>
   readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
     const full = path.join(dir, entry.name);
     if (entry.isDirectory()) {
       return sourceFiles(full);
     }
-    return SOURCE_SUFFIXES.some((suffix) => entry.name.endsWith(suffix)) ? [full] : [];
+    return hasApplicationSourceSuffix(entry.name) ? [full] : [];
   });
 
 const API_CLIENT_METHOD_NAMES = [
@@ -386,12 +389,11 @@ const inspectableFunctionsForExpression = (
   }
   const nestedVisiting = new Set([...visiting, symbol]);
   const functions: InspectableFunction[] = [];
-  let propertyBacked = false;
   for (const declaration of symbol.declarations ?? []) {
     if (ts.isFunctionDeclaration(declaration) && declaration.body) {
-      functions.push(declaration);
+      throw new Error("function-declaration request path builders are unsupported");
     } else if (ts.isMethodDeclaration(declaration) && declaration.body) {
-      functions.push(declaration);
+      throw new Error("method-backed request path builders are unsupported");
     } else if (
       ts.isVariableDeclaration(declaration) &&
       declaration.initializer
@@ -409,69 +411,9 @@ const inspectableFunctionsForExpression = (
         functions.push(...nested);
       }
     } else if (ts.isPropertyAssignment(declaration)) {
-      propertyBacked = true;
-      functions.push(
-        ...inspectableFunctionsForExpression(
-          declaration.initializer,
-          checker,
-          nestedVisiting,
-        ),
-      );
+      throw new Error("property-backed request path builders are unsupported");
     } else if (ts.isShorthandPropertyAssignment(declaration)) {
-      propertyBacked = true;
-      const valueSymbol = checker.getShorthandAssignmentValueSymbol(declaration);
-      const valueName = valueSymbol?.declarations
-        ?.map((valueDeclaration) => {
-          if (ts.isFunctionDeclaration(valueDeclaration)) {
-            return valueDeclaration.name;
-          }
-          if (
-            ts.isVariableDeclaration(valueDeclaration) &&
-            ts.isIdentifier(valueDeclaration.name)
-          ) {
-            return valueDeclaration.name;
-          }
-          return undefined;
-        })
-        .find((name): name is ts.Identifier => name !== undefined);
-      if (valueName) {
-        functions.push(
-          ...inspectableFunctionsForExpression(
-            valueName,
-            checker,
-            nestedVisiting,
-          ),
-        );
-      }
-    }
-  }
-  if (
-    functions.length > 0 &&
-    (functions.some(ts.isMethodDeclaration) || propertyBacked) &&
-    (ts.isPropertyAccessExpression(expression) ||
-      ts.isElementAccessExpression(expression))
-  ) {
-    const receiver = unwrapExpression(expression.expression);
-    if (ts.isIdentifier(receiver)) {
-      const receiverSymbol = resolvedSymbolAt(receiver, checker);
-      const declaration = receiverSymbol?.declarations?.find(ts.isVariableDeclaration);
-      const list = declaration && declarationListFor(declaration);
-      if (
-        !receiverSymbol ||
-        !declaration?.initializer ||
-        !list ||
-        (list.flags & ts.NodeFlags.Const) === 0 ||
-        !objectContainerIsStable(receiver, receiverSymbol, checker)
-      ) {
-        throw new Error(
-          `called method container ${receiver.text} is mutable or escapes`,
-        );
-      }
-    } else if (
-      !ts.isObjectLiteralExpression(receiver) &&
-      !ts.isNewExpression(receiver)
-    ) {
-      throw new Error("called method container provenance is unsupported");
+      throw new Error("property-backed request path builders are unsupported");
     }
   }
   return [...new Set(functions)];
@@ -567,6 +509,237 @@ const isApiClientType = (
   return API_CLIENT_METHOD_NAMES.every(
     (method) => checker.getPropertyOfType(receiverType, method) !== undefined,
   );
+};
+
+const REACT_DEPENDENCY_HOOKS = new Set([
+  "useCallback",
+  "useEffect",
+  "useImperativeHandle",
+  "useLayoutEffect",
+  "useMemo",
+]);
+
+/** Return the static name selected by a property or element access. */
+const staticAccessName = (
+  access: ts.PropertyAccessExpression | ts.ElementAccessExpression,
+  checker: ts.TypeChecker,
+): string | undefined => {
+  if (ts.isPropertyAccessExpression(access)) {
+    return access.name.text;
+  }
+  if (!access.argumentExpression) {
+    return undefined;
+  }
+  const argument = unwrapExpression(access.argumentExpression);
+  return ts.isNumericLiteral(argument)
+    ? argument.text
+    : knownString(argument, {
+        checker,
+        substitutions: new Map(),
+        visiting: new Set(),
+      });
+};
+
+/** True only for a direct call to the audited API-client hook symbol. */
+const isUseApiClientCall = (
+  call: ts.CallExpression,
+  checker: ts.TypeChecker,
+  hookSymbols: ReadonlySet<ts.Symbol>,
+): boolean => {
+  const callee = unwrapExpression(call.expression);
+  const symbol = ts.isIdentifier(callee)
+    ? resolvedSymbolAt(callee, checker)
+    : undefined;
+  return Boolean(
+    symbol &&
+    hookSymbols.has(symbol) &&
+    isApiClientType(checker.getTypeAtLocation(call), checker),
+  );
+};
+
+/** Allow client identity only in React dependency arrays, never data transport. */
+const isAllowedDependencyReference = (
+  identifier: ts.Identifier,
+  checker: ts.TypeChecker,
+): boolean => {
+  const array = identifier.parent;
+  if (!ts.isArrayLiteralExpression(array) || !array.elements.includes(identifier)) {
+    return false;
+  }
+  const call = array.parent;
+  if (!ts.isCallExpression(call) || !call.arguments.includes(array)) {
+    return false;
+  }
+  const callee = unwrapExpression(call.expression);
+  if (!ts.isIdentifier(callee) || !REACT_DEPENDENCY_HOOKS.has(callee.text)) {
+    return false;
+  }
+  const rawSymbol = checker.getSymbolAtLocation(callee);
+  return Boolean(
+    rawSymbol?.declarations?.some((declaration) => {
+      if (!ts.isImportSpecifier(declaration)) {
+        return false;
+      }
+      const importDeclaration = declaration.parent.parent.parent;
+      return ts.isImportDeclaration(importDeclaration) &&
+        ts.isStringLiteral(importDeclaration.moduleSpecifier) &&
+        importDeclaration.moduleSpecifier.text === "react";
+    }),
+  );
+};
+
+/** Identify the canonical hook declaration before auditing any of its references. */
+const apiClientHookSymbols = (
+  programSourceFiles: readonly ts.SourceFile[],
+  checker: ts.TypeChecker,
+): ReadonlySet<ts.Symbol> => {
+  const symbols = new Set<ts.Symbol>();
+  const visit = (node: ts.Node): void => {
+    if (ts.isIdentifier(node)) {
+      const symbol = resolvedSymbolAt(node, checker);
+      if (symbol?.getName() === "useApiClient") {
+        const hookType = checker.getTypeOfSymbolAtLocation(symbol, node);
+        if (
+          hookType.getCallSignatures().some((signature) =>
+            isApiClientType(signature.getReturnType(), checker),
+          )
+        ) {
+          symbols.add(symbol);
+        }
+      }
+    }
+    ts.forEachChild(node, visit);
+  };
+  programSourceFiles.forEach(visit);
+  if (symbols.size === 0) {
+    throw new Error("canonical useApiClient hook symbol is missing");
+  }
+  return symbols;
+};
+
+/** Hook declarations/imports are metadata; every value reference must be a direct origin. */
+const isHookDeclarationReference = (identifier: ts.Identifier): boolean => {
+  const parent = identifier.parent;
+  return (
+    ((ts.isVariableDeclaration(parent) ||
+      ts.isFunctionDeclaration(parent) ||
+      ts.isFunctionExpression(parent)) &&
+      parent.name === identifier) ||
+    ts.isImportSpecifier(parent) ||
+    ts.isExportSpecifier(parent)
+  );
+};
+
+/** Enforce the deliberately small direct-client syntax before route discovery. */
+const validateDirectApiClientContract = (
+  programSourceFiles: readonly ts.SourceFile[],
+  checker: ts.TypeChecker,
+): ReadonlySet<ts.Symbol> => {
+  const bindings = new Set<ts.Symbol>();
+  const origins: ts.CallExpression[] = [];
+  const hookSymbols = apiClientHookSymbols(programSourceFiles, checker);
+  const visitOrigins = (node: ts.Node): void => {
+    if (
+      ts.isCallExpression(node) &&
+      isUseApiClientCall(node, checker, hookSymbols)
+    ) {
+      origins.push(node);
+      const declaration = node.parent;
+      if (
+        !ts.isVariableDeclaration(declaration) ||
+        declaration.initializer !== node ||
+        !ts.isIdentifier(declaration.name) ||
+        declaration.type ||
+        !ts.isVariableDeclarationList(declaration.parent) ||
+        (declaration.parent.flags & ts.NodeFlags.Const) === 0
+      ) {
+        throw new Error(
+          "useApiClient() must initialize one unannotated const identifier directly",
+        );
+      }
+      const symbol = resolvedSymbolAt(declaration.name, checker);
+      if (!symbol) {
+        throw new Error("useApiClient() direct binding symbol is unresolved");
+      }
+      bindings.add(symbol);
+    }
+    ts.forEachChild(node, visitOrigins);
+  };
+  programSourceFiles.forEach(visitOrigins);
+  const originSet = new Set(origins);
+
+  for (const origin of origins) {
+    const methodNames = checker
+      .getPropertiesOfType(checker.getNonNullableType(checker.getTypeAtLocation(origin)))
+      .map((property) => property.getName())
+      .sort();
+    const expected = [...API_CLIENT_METHOD_NAMES].sort();
+    if (
+      methodNames.length !== expected.length ||
+      methodNames.some((method, index) => method !== expected[index])
+    ) {
+      throw new Error(
+        `API-client method surface changed: ${methodNames.join(", ") || "empty"}`,
+      );
+    }
+  }
+
+  const visitUses = (node: ts.Node): void => {
+    const normalizedFile = node.getSourceFile().fileName.replaceAll("\\", "/");
+    const rawFetchReference =
+      (ts.isIdentifier(node) && node.text === "fetch") ||
+      ((ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node)) &&
+        staticAccessName(node, checker) === "fetch");
+    if (
+      rawFetchReference &&
+      !normalizedFile.endsWith("/src/lib/api/client.ts")
+    ) {
+      throw new Error(`raw fetch is forbidden outside API client: ${normalizedFile}`);
+    }
+    if (ts.isIdentifier(node)) {
+      const symbol = resolvedSymbolAt(node, checker);
+      if (symbol && hookSymbols.has(symbol)) {
+        if (isHookDeclarationReference(node)) {
+          return;
+        }
+        if (
+          ts.isCallExpression(node.parent) &&
+          node.parent.expression === node &&
+          originSet.has(node.parent)
+        ) {
+          return;
+        }
+        throw new Error(
+          `useApiClient hook reference ${node.text} escapes direct origin syntax`,
+        );
+      }
+      if (symbol && bindings.has(symbol)) {
+        if (ts.isVariableDeclaration(node.parent) && node.parent.name === node) {
+          return;
+        }
+        const access = node.parent;
+        if (
+          (ts.isPropertyAccessExpression(access) ||
+            ts.isElementAccessExpression(access)) &&
+          access.expression === node &&
+          API_CLIENT_METHODS.has(staticAccessName(access, checker) ?? "") &&
+          ts.isCallExpression(access.parent) &&
+          access.parent.expression === access
+        ) {
+          return;
+        }
+        if (isAllowedDependencyReference(node, checker)) {
+          return;
+        }
+        throw new Error(
+          `API-client binding ${node.text} escapes direct method-call syntax`,
+        );
+      }
+    }
+    ts.forEachChild(node, visitUses);
+  };
+  programSourceFiles.forEach(visitUses);
+  return bindings;
 };
 
 /** Cheap guard before attempting provenance on arbitrary call arguments. */
@@ -1435,52 +1608,22 @@ const isNonValueIdentifier = (identifier: ts.Identifier): boolean => {
 const requestRootsInSourceFile = (
   sourceFile: ts.SourceFile,
   checker: ts.TypeChecker,
-  clientParameters: ReadonlySet<ts.Symbol>,
+  directClientBindings: ReadonlySet<ts.Symbol>,
 ): string[] => {
   const roots = new Set<string>();
   const visit = (node: ts.Node): void => {
-    if (ts.isIdentifier(node) && !isNonValueIdentifier(node)) {
-      try {
-        if (
-          identifierTargetsApiClientMethod(
-            node,
-            checker,
-            new Set(),
-            clientParameters,
-          )
-        ) {
-          assertSupportedApiClientMethodUse(node);
-        }
-      } catch (error) {
-        const position = sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile));
-        const detail = error instanceof Error ? error.message : String(error);
-        throw new Error(
-          `Cannot inspect API-client method alias at ${sourceFile.fileName}:${position.line + 1}: ${detail}`,
-        );
-      }
-    }
-    if (ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node)) {
-      try {
-        if (isApiClientMethodAccess(node, checker, clientParameters)) {
-          assertSupportedApiClientMethodUse(node);
-        }
-      } catch (error) {
-        const position = sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile));
-        const detail = error instanceof Error ? error.message : String(error);
-        throw new Error(
-          `Cannot inspect API-client method use at ${sourceFile.fileName}:${position.line + 1}: ${detail}`,
-        );
-      }
-    }
     let apiClientCall = false;
     if (ts.isCallExpression(node)) {
-      try {
-        apiClientCall = isApiClientCall(node, checker, clientParameters);
-      } catch (error) {
-        const position = sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile));
-        const detail = error instanceof Error ? error.message : String(error);
-        throw new Error(
-          `Cannot inspect API-client call at ${sourceFile.fileName}:${position.line + 1}: ${detail}`,
+      const callee = unwrapExpression(node.expression);
+      if (ts.isPropertyAccessExpression(callee) || ts.isElementAccessExpression(callee)) {
+        const receiver = unwrapExpression(callee.expression);
+        const receiverSymbol = ts.isIdentifier(receiver)
+          ? resolvedSymbolAt(receiver, checker)
+          : undefined;
+        apiClientCall = Boolean(
+          receiverSymbol &&
+          directClientBindings.has(receiverSymbol) &&
+          API_CLIENT_METHODS.has(staticAccessName(callee, checker) ?? ""),
         );
       }
     }
@@ -1514,17 +1657,20 @@ const requestRootsInSourceFile = (
 };
 
 /** Build a compiler-bound single-file fixture for adversarial scanner tests. */
-export const discoverRequestedPrefixesInSource = (source: string): string[] => {
+export const discoverRequestedPrefixesInSource = (
+  source: string,
+  extraClientMethods: readonly string[] = [],
+): string[] => {
   const fileName = path.join(FRONTEND_ROOT, "tests", "virtual-route-scanner.ts");
   const fixturePrelude = [
     "type ReturnType<T> = T extends (...args: never[]) => infer R ? R : never;",
     "interface RouteScannerApiClient {",
-    ...API_CLIENT_METHOD_NAMES.map(
+    ...[...API_CLIENT_METHOD_NAMES, ...extraClientMethods].map(
       (method) => `  ${method}(path: string, ...rest: unknown[]): unknown;`,
     ),
     "}",
-    "declare const client: RouteScannerApiClient;",
     "declare function useApiClient(): RouteScannerApiClient;",
+    "const client = useApiClient();",
   ].join("\n");
   const compilerSource = `${fixturePrelude}\n${source}`;
   const options: ts.CompilerOptions = {
@@ -1555,9 +1701,21 @@ export const discoverRequestedPrefixesInSource = (source: string): string[] => {
   };
   const program = ts.createProgram({ host, options, rootNames: [fileName] });
   const checker = program.getTypeChecker();
-  const clientParameters = discoverApiClientParameters([sourceFile], checker);
-  return requestRootsInSourceFile(sourceFile, checker, clientParameters);
+  const directClientBindings = validateDirectApiClientContract([sourceFile], checker);
+  return requestRootsInSourceFile(sourceFile, checker, directClientBindings);
 };
+
+/** Keep every compiler-loaded application file under frontend, including imports outside src. */
+const applicationProgramSourceFiles = (program: ts.Program): ts.SourceFile[] =>
+  program.getSourceFiles().filter((sourceFile) => {
+    const relative = path.relative(FRONTEND_ROOT, sourceFile.fileName);
+    return !sourceFile.isDeclarationFile &&
+      relative !== "" &&
+      !relative.startsWith("..") &&
+      !path.isAbsolute(relative) &&
+      !relative.split(path.sep).includes("node_modules") &&
+      hasApplicationSourceSuffix(sourceFile.fileName);
+  });
 
 // ============================================================================
 // Purpose: Derive the backend prefixes the frontend actually requests.
@@ -1586,20 +1744,22 @@ export const discoverRequestedPrefixes = (): string[] => {
   const files = sourceFiles(SRC_DIR);
   const program = ts.createProgram({ options: parsed.options, rootNames: files });
   const checker = program.getTypeChecker();
-  const programSourceFiles = files.map((file) => {
-    const sourceFile = program.getSourceFile(file);
-    if (!sourceFile) {
+  const programSourceFiles = applicationProgramSourceFiles(program);
+  for (const file of files) {
+    if (!program.getSourceFile(file)) {
       throw new Error(`TypeScript program omitted ${file}`);
     }
-    return sourceFile;
-  });
-  const clientParameters = discoverApiClientParameters(programSourceFiles, checker);
+  }
+  const directClientBindings = validateDirectApiClientContract(
+    programSourceFiles,
+    checker,
+  );
   const found = new Set<string>();
   for (const sourceFile of programSourceFiles) {
     for (const root of requestRootsInSourceFile(
       sourceFile,
       checker,
-      clientParameters,
+      directClientBindings,
     )) {
       found.add(root);
     }
@@ -1678,6 +1838,38 @@ const headerMutations = (
 };
 
 describe("dev proxy route coverage (derived from frontend/src)", () => {
+  it("audits compiler-loaded .mts/.cts and application imports outside src", () => {
+    const names = [
+      path.join(FRONTEND_ROOT, "src", "entry.ts"),
+      path.join(FRONTEND_ROOT, "shared", "outside.mts"),
+      path.join(FRONTEND_ROOT, "shared", "worker.cts"),
+    ];
+    const sources = new Map(
+      names.map((name) => [
+        path.resolve(name).toLowerCase(),
+        ts.createSourceFile(name, "export {};", ts.ScriptTarget.ES2022, true),
+      ]),
+    );
+    const options: ts.CompilerOptions = { noLib: true, noResolve: true };
+    const host: ts.CompilerHost = {
+      fileExists: (candidate) => sources.has(path.resolve(candidate).toLowerCase()),
+      getCanonicalFileName: (candidate) => candidate.toLowerCase(),
+      getCurrentDirectory: () => FRONTEND_ROOT,
+      getDefaultLibFileName: () => "lib.d.ts",
+      getNewLine: () => "\n",
+      getSourceFile: (candidate) => sources.get(path.resolve(candidate).toLowerCase()),
+      readFile: () => undefined,
+      useCaseSensitiveFileNames: () => false,
+      writeFile: () => undefined,
+    };
+    const program = ts.createProgram({ host, options, rootNames: names });
+    expect(
+      applicationProgramSourceFiles(program)
+        .map((sourceFile) => path.extname(sourceFile.fileName))
+        .sort(),
+    ).toEqual([".cts", ".mts", ".ts"]);
+  });
+
   it("still finds the API calls we know exist, so the scan cannot pass vacuously", () => {
     for (const prefix of SCANNER_HEALTH_PREFIXES) {
       expect(REQUESTED_PREFIXES, `scanner lost ${prefix}`).toContain(prefix);
@@ -1700,25 +1892,40 @@ describe("dev proxy route coverage (derived from frontend/src)", () => {
     expect(uncoveredPrefixes(prefixes, TENANT_SCOPED_ROUTES)).toEqual(["/reports"]);
   });
 
-  it("tracks client identity through a narrowed const receiver", () => {
+  it("fails closed when the canonical API-client hook itself is aliased", () => {
+    const source = [
+      "const factory = useApiClient;",
+      "const api = factory();",
+      'api.get("/reports/raw-files");',
+    ].join("\n");
+    expect(() => discoverRequestedPrefixesInSource(source)).toThrow(
+      /useApiClient hook reference useApiClient escapes direct origin syntax/iu,
+    );
+  });
+
+  it("fails closed when a client origin is hidden by a type annotation", () => {
     const source = [
       "const api: { get(path: string): unknown } = useApiClient();",
       'api.get("/reports/raw-files");',
     ].join("\n");
-    expect(discoverRequestedPrefixesInSource(source)).toEqual(["/reports"]);
+    expect(() => discoverRequestedPrefixesInSource(source)).toThrow(
+      /useApiClient\(\) must initialize one unannotated const identifier directly/iu,
+    );
   });
 
-  it("tracks a narrowed receiver parameter from its API-client call site", () => {
+  it("fails closed when the client crosses a receiver-parameter boundary", () => {
     const source = [
       "function load(api: { get(path: string): unknown }) {",
       '  api.get("/reports/raw-files");',
       "}",
       "load(useApiClient());",
     ].join("\n");
-    expect(discoverRequestedPrefixesInSource(source)).toEqual(["/reports"]);
+    expect(() => discoverRequestedPrefixesInSource(source)).toThrow(
+      /useApiClient\(\) must initialize one unannotated const identifier directly/iu,
+    );
   });
 
-  it("tracks parameter provenance through a const function alias", () => {
+  it("fails closed when the client crosses a function-alias boundary", () => {
     const source = [
       "function load(api: { get(path: string): unknown }) {",
       '  api.get("/reports/raw-files");',
@@ -1726,10 +1933,12 @@ describe("dev proxy route coverage (derived from frontend/src)", () => {
       "const runner = load;",
       "runner(useApiClient());",
     ].join("\n");
-    expect(discoverRequestedPrefixesInSource(source)).toEqual(["/reports"]);
+    expect(() => discoverRequestedPrefixesInSource(source)).toThrow(
+      /useApiClient\(\) must initialize one unannotated const identifier directly/iu,
+    );
   });
 
-  it("tracks parameter provenance through a stable object method", () => {
+  it("fails closed when the client crosses an object-method boundary", () => {
     const source = [
       "const loaders = {",
       "  load(api: { get(path: string): unknown }) {",
@@ -1738,10 +1947,12 @@ describe("dev proxy route coverage (derived from frontend/src)", () => {
       "};",
       "loaders.load(useApiClient());",
     ].join("\n");
-    expect(discoverRequestedPrefixesInSource(source)).toEqual(["/reports"]);
+    expect(() => discoverRequestedPrefixesInSource(source)).toThrow(
+      /useApiClient\(\) must initialize one unannotated const identifier directly/iu,
+    );
   });
 
-  it("tracks parameter provenance through a function-valued object property", () => {
+  it("fails closed when the client crosses a function-valued property", () => {
     const source = [
       "const loaders = {",
       "  load: (api: { get(path: string): unknown }) => {",
@@ -1750,10 +1961,12 @@ describe("dev proxy route coverage (derived from frontend/src)", () => {
       "};",
       "loaders.load(useApiClient());",
     ].join("\n");
-    expect(discoverRequestedPrefixesInSource(source)).toEqual(["/reports"]);
+    expect(() => discoverRequestedPrefixesInSource(source)).toThrow(
+      /useApiClient\(\) must initialize one unannotated const identifier directly/iu,
+    );
   });
 
-  it("tracks parameter provenance through a shorthand function property", () => {
+  it("fails closed when the client crosses a shorthand-property function", () => {
     const source = [
       "function load(api: { get(path: string): unknown }) {",
       '  api.get("/reports/raw-files");',
@@ -1761,7 +1974,9 @@ describe("dev proxy route coverage (derived from frontend/src)", () => {
       "const loaders = { load };",
       "loaders.load(useApiClient());",
     ].join("\n");
-    expect(discoverRequestedPrefixesInSource(source)).toEqual(["/reports"]);
+    expect(() => discoverRequestedPrefixesInSource(source)).toThrow(
+      /useApiClient\(\) must initialize one unannotated const identifier directly/iu,
+    );
   });
 
   it("fails closed when a client argument escapes an unsupported call", () => {
@@ -1770,7 +1985,7 @@ describe("dev proxy route coverage (derived from frontend/src)", () => {
       "opaque(useApiClient());",
     ].join("\n");
     expect(() => discoverRequestedPrefixesInSource(source)).toThrow(
-      /API-client argument escapes an unsupported call/,
+      /useApiClient\(\) must initialize one unannotated const identifier directly/iu,
     );
   });
 
@@ -1781,7 +1996,7 @@ describe("dev proxy route coverage (derived from frontend/src)", () => {
       "forward(erased);",
     ].join("\n");
     expect(() => discoverRequestedPrefixesInSource(source)).toThrow(
-      /API-client argument escapes an unsupported call/,
+      /useApiClient\(\) must initialize one unannotated const identifier directly/iu,
     );
   });
 
@@ -1792,7 +2007,7 @@ describe("dev proxy route coverage (derived from frontend/src)", () => {
       "forward(clients[0]);",
     ].join("\n");
     expect(() => discoverRequestedPrefixesInSource(source)).toThrow(
-      /API-client argument escapes an unsupported call/,
+      /useApiClient\(\) must initialize one unannotated const identifier directly/iu,
     );
   });
 
@@ -1803,7 +2018,7 @@ describe("dev proxy route coverage (derived from frontend/src)", () => {
       "forward(erased);",
     ].join("\n");
     expect(() => discoverRequestedPrefixesInSource(source)).toThrow(
-      /API-client argument escapes an unsupported call/,
+      /useApiClient\(\) must initialize one unannotated const identifier directly/iu,
     );
   });
 
@@ -1814,36 +2029,42 @@ describe("dev proxy route coverage (derived from frontend/src)", () => {
       "forward(api);",
     ].join("\n");
     expect(() => discoverRequestedPrefixesInSource(source)).toThrow(
-      /API-client argument escapes an unsupported call through a binding default/,
+      /useApiClient\(\) must initialize one unannotated const identifier directly/iu,
     );
   });
 
-  it("tracks a narrowed client through a const object-literal property", () => {
+  it("fails closed when the client is stored in an object literal", () => {
     const source = [
       "const holder: { api: { get(path: string): unknown } } = {",
       "  api: useApiClient(),",
       "};",
       'holder.api.get("/reports/raw-files");',
     ].join("\n");
-    expect(discoverRequestedPrefixesInSource(source)).toEqual(["/reports"]);
+    expect(() => discoverRequestedPrefixesInSource(source)).toThrow(
+      /useApiClient\(\) must initialize one unannotated const identifier directly/iu,
+    );
   });
 
-  it("tracks a narrowed client supplied by a statically known object spread", () => {
+  it("fails closed when the client is transported through an object spread", () => {
     const source = [
       "const source = { api: useApiClient() };",
       "const holder: { api: { get(path: string): unknown } } = { ...source };",
       'holder.api.get("/reports/raw-files");',
     ].join("\n");
-    expect(discoverRequestedPrefixesInSource(source)).toEqual(["/reports"]);
+    expect(() => discoverRequestedPrefixesInSource(source)).toThrow(
+      /useApiClient\(\) must initialize one unannotated const identifier directly/iu,
+    );
   });
 
-  it("tracks a narrowed client selected by const object destructuring", () => {
+  it("fails closed when the client is selected by object destructuring", () => {
     const source = [
       "const source = { api: useApiClient() };",
       "const { api }: { api: { get(path: string): unknown } } = source;",
       'api.get("/reports/raw-files");',
     ].join("\n");
-    expect(discoverRequestedPrefixesInSource(source)).toEqual(["/reports"]);
+    expect(() => discoverRequestedPrefixesInSource(source)).toThrow(
+      /useApiClient\(\) must initialize one unannotated const identifier directly/iu,
+    );
   });
 
   it("fails closed when a narrowed client container property is overwritten", () => {
@@ -1855,16 +2076,18 @@ describe("dev proxy route coverage (derived from frontend/src)", () => {
       'holder.api.get("/reports/raw-files");',
     ].join("\n");
     expect(() => discoverRequestedPrefixesInSource(source)).toThrow(
-      /object container holder is mutable or escapes/,
+      /useApiClient\(\) must initialize one unannotated const identifier directly/iu,
     );
   });
 
-  it("tracks a nullable typed client invoked through optional chaining", () => {
+  it("fails closed on a nullable annotated client binding", () => {
     const source = [
-      "declare const api: ReturnType<typeof useApiClient> | undefined;",
+      "const api: ReturnType<typeof useApiClient> | undefined = useApiClient();",
       'api?.get("/reports/raw-files");',
     ].join("\n");
-    expect(discoverRequestedPrefixesInSource(source)).toEqual(["/reports"]);
+    expect(() => discoverRequestedPrefixesInSource(source)).toThrow(
+      /useApiClient\(\) must initialize one unannotated const identifier directly/iu,
+    );
   });
 
   it("tracks a literal computed method on the typed API-client surface", () => {
@@ -1875,22 +2098,37 @@ describe("dev proxy route coverage (derived from frontend/src)", () => {
     expect(discoverRequestedPrefixesInSource(source)).toEqual(["/reports"]);
   });
 
-  it("tracks a destructured API-client method alias", () => {
+  it("fails closed on a destructured API-client method alias", () => {
     const source = [
       "const api = useApiClient();",
       "const { post } = api;",
       'post("/reports/jobs");',
     ].join("\n");
-    expect(discoverRequestedPrefixesInSource(source)).toEqual(["/reports"]);
+    expect(() => discoverRequestedPrefixesInSource(source)).toThrow(
+      /API-client binding api escapes direct method-call syntax/iu,
+    );
   });
 
-  it("tracks an API-client method through nested object destructuring", () => {
+  it("fails closed on the narrowed-method destructuring counterexample", () => {
+    const source = [
+      "const api: { get(path: string): unknown } = useApiClient();",
+      "const { get } = api;",
+      'get("/reports/raw-files");',
+    ].join("\n");
+    expect(() => discoverRequestedPrefixesInSource(source)).toThrow(
+      /useApiClient\(\) must initialize one unannotated const identifier directly/iu,
+    );
+  });
+
+  it("fails closed on a client hidden by nested object destructuring", () => {
     const source = [
       "const holder = { api: useApiClient() };",
       "const { api: { get } } = holder;",
       'get("/reports/raw-files");',
     ].join("\n");
-    expect(discoverRequestedPrefixesInSource(source)).toEqual(["/reports"]);
+    expect(() => discoverRequestedPrefixesInSource(source)).toThrow(
+      /useApiClient\(\) must initialize one unannotated const identifier directly/iu,
+    );
   });
 
   it("fails closed on a destructured API-client parameter alias", () => {
@@ -1901,7 +2139,7 @@ describe("dev proxy route coverage (derived from frontend/src)", () => {
       "load(useApiClient());",
     ].join("\n");
     expect(() => discoverRequestedPrefixesInSource(source)).toThrow(
-      /destructured API-client parameter alias get is unsupported/iu,
+      /useApiClient\(\) must initialize one unannotated const identifier directly/iu,
     );
   });
 
@@ -1942,7 +2180,148 @@ describe("dev proxy route coverage (derived from frontend/src)", () => {
     ],
   ])("fails closed on unsupported API-client method escape through %s", (_label, source) => {
     expect(() => discoverRequestedPrefixesInSource(source)).toThrow(
-      /API-client (argument escapes an unsupported call|method escapes the supported direct-call or const-alias forms)/iu,
+      /API-client binding api escapes direct method-call syntax/iu,
+    );
+  });
+
+  it.each([
+    [
+      "identity-return wrapper",
+      [
+        "function identity<T>(value: T): T { return value; }",
+        "const erased = identity<unknown>(useApiClient());",
+      ].join("\n"),
+    ],
+    [
+      "function alias returning the client",
+      [
+        "function erase(value: RouteScannerApiClient): unknown { return value; }",
+        "const alias = erase;",
+        "const erased = alias(useApiClient());",
+      ].join("\n"),
+    ],
+    [
+      "object-return wrapper",
+      "const holder = { api: useApiClient() };",
+    ],
+    [
+      "tuple transport",
+      "const tuple = [useApiClient()] as const;",
+    ],
+    [
+      "constructor transport",
+      [
+        "class Box { constructor(readonly value: unknown) {} }",
+        "const box = new Box(useApiClient());",
+      ].join("\n"),
+    ],
+    [
+      "zero-argument closure",
+      "const make = (): unknown => useApiClient();",
+    ],
+    [
+      "class getter",
+      "class Holder { get api(): unknown { return useApiClient(); } }",
+    ],
+    [
+      "logical expression",
+      [
+        "declare const enabled: boolean;",
+        "const erased = enabled && useApiClient();",
+      ].join("\n"),
+    ],
+    [
+      "later assignment",
+      [
+        "let erased: unknown;",
+        "erased = useApiClient();",
+      ].join("\n"),
+    ],
+    [
+      "destructuring assignment",
+      [
+        "let erased: unknown;",
+        "({ api: erased } = { api: useApiClient() });",
+      ].join("\n"),
+    ],
+    [
+      "object rest",
+      "const { keep, ...rest } = { keep: true, api: useApiClient() };",
+    ],
+  ])("fails closed when useApiClient is laundered through %s", (_label, source) => {
+    expect(() => discoverRequestedPrefixesInSource(source)).toThrow(
+      /useApiClient\(\) must initialize one unannotated const identifier directly/iu,
+    );
+  });
+
+  it.each([
+    [
+      "wrapper argument",
+      [
+        "const api = useApiClient();",
+        "declare function erase(value: unknown): unknown;",
+        "const erased = erase(api);",
+      ].join("\n"),
+    ],
+    [
+      "mutable object holder",
+      [
+        "const api = useApiClient();",
+        "const holder: { value: unknown } = { value: undefined };",
+        "holder.value = api;",
+      ].join("\n"),
+    ],
+    [
+      "mutable tuple holder",
+      [
+        "const api = useApiClient();",
+        "const tuple: unknown[] = [];",
+        "tuple[0] = api;",
+      ].join("\n"),
+    ],
+    [
+      "higher-order callback",
+      [
+        "const api = useApiClient();",
+        "declare function later(callback: () => unknown): void;",
+        "later(() => api);",
+      ].join("\n"),
+    ],
+  ])("fails closed when a direct client binding escapes through %s", (_label, source) => {
+    expect(() => discoverRequestedPrefixesInSource(source)).toThrow(
+      /API-client binding api escapes direct method-call syntax/iu,
+    );
+  });
+
+  it.each([
+    ["direct", 'fetch("/reports/raw-files");'],
+    [
+      "aliased computed member",
+      [
+        'const send = globalThis["fetch"];',
+        'send("/reports/raw-files");',
+      ].join("\n"),
+    ],
+  ])("fails closed on %s raw fetch outside the audited API client", (_label, source) => {
+    expect(() => discoverRequestedPrefixesInSource(source)).toThrow(
+      /raw fetch is forbidden outside API client/iu,
+    );
+  });
+
+  it("fails closed when the API-client method surface gains an unscanned transport", () => {
+    expect(() => discoverRequestedPrefixesInSource("", ["trace"])).toThrow(
+      /API-client method surface changed:.*trace/iu,
+    );
+  });
+
+  it("does not mistake a local hook lookalike for an approved React dependency sink", () => {
+    const source = [
+      "declare function useEffect(effect: () => void, dependencies: unknown[]): void;",
+      "const api = useApiClient();",
+      "useEffect(() => undefined, [api]);",
+    ].join("\n");
+    expect(() => discoverRequestedPrefixesInSource(source)).toThrow(
+      /API-client binding api escapes direct method-call syntax/iu,
     );
   });
 
@@ -1975,10 +2354,10 @@ describe("dev proxy route coverage (derived from frontend/src)", () => {
     const interpolation = String.fromCharCode(36, 123);
     const source = [
       "declare function runtimeResource(): string;",
-      "function build(root: string) {",
+      "const build = (root: string) => {",
       "  root = runtimeResource();",
       ["  return `/", interpolation, "root}/daily`;"].join(""),
-      "}",
+      "};",
       'client.get(build("reports"));',
     ].join("\n");
     expect(() => discoverRequestedPrefixesInSource(source)).toThrow(
@@ -1990,12 +2369,12 @@ describe("dev proxy route coverage (derived from frontend/src)", () => {
     const interpolation = String.fromCharCode(36, 123);
     const source = [
       "declare function runtimeResource(): string;",
-      "function build(",
+      "const build = (",
       "  root: string,",
       "  ignored = (root = runtimeResource()),",
-      ") {",
+      ") => {",
       ["  return `/", interpolation, "root}/daily`;"].join(""),
-      "}",
+      "};",
       'client.get(build("reports"));',
     ].join("\n");
     expect(() => discoverRequestedPrefixesInSource(source)).toThrow(
@@ -2015,14 +2394,55 @@ describe("dev proxy route coverage (derived from frontend/src)", () => {
     );
   });
 
+  it("fails closed when a function-declaration path builder is reassigned", () => {
+    const source = [
+      "declare const runtimeBuilder: (path: string) => string;",
+      "function route(path: string) { return path; }",
+      "route = runtimeBuilder;",
+      'client.get(route("/reports"));',
+    ].join("\n");
+    expect(() => discoverRequestedPrefixesInSource(source)).toThrow(
+      /function-declaration request path builders are unsupported/iu,
+    );
+  });
+
+  it.each([
+    [
+      "new receiver",
+      [
+        "class Routes { route(path: string) { return path; } }",
+        'client.get(new Routes().route("/reports"));',
+      ].join("\n"),
+    ],
+    [
+      "const instance receiver",
+      [
+        "class Routes { route(path: string) { return path; } }",
+        "const routes = new Routes();",
+        'client.get(routes.route("/reports"));',
+      ].join("\n"),
+    ],
+    [
+      "object-property builder",
+      [
+        "const builders = { route: (path: string) => path };",
+        'client.get(builders.route("/reports"));',
+      ].join("\n"),
+    ],
+  ])("fails closed on a method/property path builder through %s", (_label, source) => {
+    expect(() => discoverRequestedPrefixesInSource(source)).toThrow(
+      /method-backed request path builders are unsupported|property-backed request path builders are unsupported/iu,
+    );
+  });
+
   it("fails closed when for-of overwrites a substituted builder parameter", () => {
     const interpolation = String.fromCharCode(36, 123);
     const source = [
       "declare function runtimeRoots(): string[];",
-      "function build(root: string) {",
+      "const build = (root: string) => {",
       "  for (root of runtimeRoots()) {}",
       ["  return `/", interpolation, "root}/daily`;"].join(""),
-      "}",
+      "};",
       'client.get(build("reports"));',
     ].join("\n");
     expect(() => discoverRequestedPrefixesInSource(source)).toThrow(
