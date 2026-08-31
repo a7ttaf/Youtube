@@ -1,3 +1,4 @@
+import { once as onceEvent } from "node:events";
 import { readFileSync, readdirSync } from "node:fs";
 import {
   createServer as createHttpServer,
@@ -314,31 +315,20 @@ type HttpResponse = {
   body: string;
 };
 
-const listenOnLoopback = (server: Server): Promise<number> =>
-  new Promise((resolve, reject) => {
-    let onError: (error: Error) => void;
+const portOf = (server: { address: () => string | AddressInfo | null }): number => {
+  const address = server.address();
+  if (!address || typeof address === "string") {
+    throw new Error("expected a listening TCP address");
+  }
+  return address.port;
+};
 
-    /** Resolve the ephemeral port and detach the failure listener. */
-    const onListening = (): void => {
-      server.off("error", onError);
-      const address = server.address();
-      if (!address || typeof address === "string") {
-        reject(new Error("expected an ephemeral TCP address"));
-        return;
-      }
-      resolve((address as AddressInfo).port);
-    };
-
-    /** Reject a failed listen attempt and detach the success listener. */
-    onError = (error: Error): void => {
-      server.off("listening", onListening);
-      reject(error);
-    };
-
-    server.once("error", onError);
-    server.once("listening", onListening);
-    server.listen(0, "127.0.0.1");
-  });
+const listenOnLoopback = async (server: Server): Promise<number> => {
+  const listening = onceEvent(server, "listening");
+  server.listen(0, "127.0.0.1");
+  await listening;
+  return portOf(server);
+};
 
 const closeHttpServer = (server: Server): Promise<void> =>
   new Promise((resolve, reject) => {
@@ -348,14 +338,6 @@ const closeHttpServer = (server: Server): Promise<void> =>
     }
     server.close((error) => (error ? reject(error) : resolve()));
   });
-
-const portOf = (server: { address: () => string | AddressInfo | null }): number => {
-  const address = server.address();
-  if (!address || typeof address === "string") {
-    throw new Error("expected a listening TCP address");
-  }
-  return address.port;
-};
 
 // ============================================================================
 // Purpose: Exercise the real Vite proxy and an HTTP backend across normal and
@@ -580,8 +562,8 @@ describe("dev proxy route coverage (derived from frontend/src)", () => {
   it("treats a + concatenated fragment as a fragment, not a backend prefix", () => {
     const source = [
       "const p =",
-      `  \`/revenue/channels/\${encodeURIComponent(id)}\` +`,
-      `  \`/months/\${encodeURIComponent(month)}/explain\`;`,
+      ["  `/revenue/channels/$", "{encodeURIComponent(id)}` +"].join(""),
+      ["  `/months/$", "{encodeURIComponent(month)}/explain`;"].join(""),
     ].join("\n");
     const scanned = scanStringLiterals(source);
     expect(scanned.map((literal) => literal.continuesExpression)).toEqual([false, true]);
@@ -737,9 +719,7 @@ describe("dev proxy trust and header contracts", () => {
 
   it("preserves a Vite creation error when no server was returned to close", async () => {
     const startupError = new Error("synthetic Vite creation failure");
-    const createServer = vi.fn(async () => {
-      throw startupError;
-    });
+    const createServer = vi.fn(() => Promise.reject(startupError));
     const resolvePort = vi.fn(portOf);
 
     await expect(
@@ -750,15 +730,13 @@ describe("dev proxy trust and header contracts", () => {
 
   it("closes the Vite server and watcher when listen fails before handoff", async () => {
     const startupError = new Error("synthetic Vite listen failure");
-    const close = vi.fn(async () => undefined);
+    const close = vi.fn(() => Promise.resolve());
     const server = {
       close,
       httpServer: null,
-      listen: vi.fn(async () => {
-        throw startupError;
-      }),
+      listen: vi.fn(() => Promise.reject(startupError)),
     } as unknown as ViteServer;
-    const createServer = vi.fn(async () => server);
+    const createServer = vi.fn(() => Promise.resolve(server));
 
     await expect(
       startRealViteProxy(8000, ALL_GATEWAY_HEADERS, { createServer, resolvePort: portOf }),
