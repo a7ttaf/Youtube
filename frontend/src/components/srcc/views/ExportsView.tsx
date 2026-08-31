@@ -705,7 +705,9 @@ const ExportDownloadAction = ({
       // FIX: Response.blob() retained the complete artifact (up to the backend's
       // 500 MiB limit) in the SPA heap. Preparation returns no bytes; the actual
       // protected GET is consumed by the browser's native download manager.
-      await client.get<void>(`${download.path}?prepare=true`, {
+      // Typed as undefined, not void: the prepare leg answers 204 and the
+      // client's parseBody maps bodyless statuses to undefined.
+      await client.get<undefined>(`${download.path}?prepare=true`, {
         // A cached 204 would skip generation and authorization on a later click.
         // The backend also marks both handshake legs no-store; request cache mode
         // makes the browser-side half of that contract explicit.
