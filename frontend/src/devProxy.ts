@@ -99,6 +99,7 @@ type IncomingProxyRequest = {
   headers: Record<string, string | string[] | undefined>;
 };
 
+/** Return whether a header belongs to the gateway-controlled identity namespace. */
 const isTrustedGatewayHeader = (header: string): boolean =>
   TRUSTED_GATEWAY_HEADER_PATTERNS.some((pattern) => pattern.test(header));
 
@@ -142,16 +143,15 @@ const applyTrustedGatewayHeaders = (
   request: IncomingProxyRequest,
   gatewayHeaders: readonly [string, string][],
 ): void => {
-  for (const header of Object.keys(request.headers)) {
-    if (isTrustedGatewayHeader(header)) {
-      delete request.headers[header];
-    }
-  }
+  request.headers = Object.fromEntries(
+    Object.entries(request.headers).filter(([header]) => !isTrustedGatewayHeader(header)),
+  );
   for (const [header, value] of gatewayHeaders) {
     request.headers[header.toLowerCase()] = value;
   }
 };
 
+/** Return whether a URL hostname resolves syntactically to a loopback name or address. */
 const isLoopbackHostname = (hostname: string): boolean => {
   const normalized = hostname.replace(/^\[|\]$/gu, "").replace(/\.$/u, "").toLowerCase();
   if (normalized === "localhost" || normalized === "::1") {
@@ -164,6 +164,76 @@ const isLoopbackHostname = (hostname: string): boolean => {
     octets.every((octet) => /^\d{1,3}$/u.test(octet) && Number(octet) <= 255)
   );
 };
+
+/** Return whether a parsed URL uses one of the proxy's supported protocols. */
+const isHttpProtocol = (target: URL): boolean =>
+  ["http:", "https:"].includes(target.protocol);
+
+/** Return whether a parsed URL embeds credentials that could leak through proxying. */
+const hasUrlCredentials = (target: URL): boolean =>
+  [target.username, target.password].some(Boolean);
+
+/** Return whether a trusted-origin entry contains path, query, or fragment data. */
+const hasNonOriginComponents = (target: URL): boolean =>
+  [target.pathname !== "/", target.search !== "", target.hash !== ""].some(Boolean);
+
+/** Return whether a non-loopback origin would receive gateway data over plaintext HTTP. */
+const isInsecureRemoteOrigin = (target: URL): boolean =>
+  !isLoopbackHostname(target.hostname) && target.protocol !== "https:";
+
+/** Parse an absolute URL or raise the caller's fail-closed configuration error. */
+const parseAbsoluteUrl = (rawValue: string, invalidMessage: string): URL => {
+  try {
+    return new URL(rawValue.trim());
+  } catch {
+    throw new Error(invalidMessage);
+  }
+};
+
+/** Parse and validate the configured backend target before any token forwarding. */
+const parseBackendTarget = (backendTarget: string): URL => {
+  const target = parseAbsoluteUrl(
+    backendTarget,
+    "VITE_DEV_BACKEND_URL must be an absolute http(s) URL",
+  );
+  if (!isHttpProtocol(target)) {
+    throw new Error("VITE_DEV_BACKEND_URL must use http or https");
+  }
+  if (hasUrlCredentials(target)) {
+    throw new Error("VITE_DEV_BACKEND_URL must not include URL credentials");
+  }
+  return target;
+};
+
+/** Parse one exact trusted origin and reject unsafe or non-origin URL components. */
+const parseTrustedBackendOrigin = (origin: string): string => {
+  const parsed = parseAbsoluteUrl(
+    origin,
+    `${TRUSTED_BACKEND_ORIGINS_ENV} contains an invalid origin`,
+  );
+  const hasInvalidShape = [
+    !isHttpProtocol(parsed),
+    hasUrlCredentials(parsed),
+    hasNonOriginComponents(parsed),
+    isInsecureRemoteOrigin(parsed),
+  ].some(Boolean);
+  if (hasInvalidShape) {
+    throw new Error(
+      `${TRUSTED_BACKEND_ORIGINS_ENV} contains an invalid origin; ` +
+        "non-loopback origins must use HTTPS",
+    );
+  }
+  return parsed.origin;
+};
+
+/** Normalize configured trusted origins for exact canonical-origin matching. */
+const normalizeTrustedBackendOrigins = (trustedOrigins: readonly string[]): Set<string> =>
+  new Set(
+    trustedOrigins
+      .map((origin) => origin.trim())
+      .filter(Boolean)
+      .map(parseTrustedBackendOrigin),
+  );
 
 // ============================================================================
 // Purpose: Decide whether a backend origin is safe to receive the trusted
@@ -183,56 +253,15 @@ export const resolveDevBackendTarget = (
   backendTarget: string,
   trustedOrigins: readonly string[] = [],
 ): string => {
-  let target: URL;
-  try {
-    target = new URL(backendTarget.trim());
-  } catch {
-    throw new Error("VITE_DEV_BACKEND_URL must be an absolute http(s) URL");
-  }
-
-  if (!(target.protocol === "http:" || target.protocol === "https:")) {
-    throw new Error("VITE_DEV_BACKEND_URL must use http or https");
-  }
-  if (target.username || target.password) {
-    throw new Error("VITE_DEV_BACKEND_URL must not include URL credentials");
-  }
-  const targetIsLoopback = isLoopbackHostname(target.hostname);
-  if (targetIsLoopback) {
+  const target = parseBackendTarget(backendTarget);
+  if (isLoopbackHostname(target.hostname)) {
     return target.href.replace(/\/$/u, "");
   }
   if (target.protocol !== "https:") {
     throw new Error("Non-loopback VITE_DEV_BACKEND_URL targets must use HTTPS");
   }
 
-  const trustedOriginSet = new Set(
-    trustedOrigins
-      .map((origin) => origin.trim())
-      .filter(Boolean)
-      .map((origin) => {
-        let parsed: URL;
-        try {
-          parsed = new URL(origin);
-        } catch {
-          throw new Error(`${TRUSTED_BACKEND_ORIGINS_ENV} contains an invalid origin`);
-        }
-        const parsedIsLoopback = isLoopbackHostname(parsed.hostname);
-        if (
-          !(parsed.protocol === "http:" || parsed.protocol === "https:") ||
-          (!parsedIsLoopback && parsed.protocol !== "https:") ||
-          parsed.username ||
-          parsed.password ||
-          parsed.pathname !== "/" ||
-          parsed.search ||
-          parsed.hash
-        ) {
-          throw new Error(
-            `${TRUSTED_BACKEND_ORIGINS_ENV} contains an invalid origin; ` +
-              "non-loopback origins must use HTTPS",
-          );
-        }
-        return parsed.origin;
-      }),
-  );
+  const trustedOriginSet = normalizeTrustedBackendOrigins(trustedOrigins);
   if (!trustedOriginSet.has(target.origin)) {
     throw new Error(
       "VITE_DEV_BACKEND_URL must target loopback or an origin listed in " +

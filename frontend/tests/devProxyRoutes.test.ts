@@ -316,11 +316,14 @@ type HttpResponse = {
 
 const listenOnLoopback = (server: Server): Promise<number> =>
   new Promise((resolve, reject) => {
-    const onError = (error: Error) => {
+    /** Reject a failed listen attempt and detach the success listener. */
+    function onError(error: Error): void {
       server.off("listening", onListening);
       reject(error);
-    };
-    const onListening = () => {
+    }
+
+    /** Resolve the ephemeral port and detach the failure listener. */
+    function onListening(): void {
       server.off("error", onError);
       const address = server.address();
       if (!address || typeof address === "string") {
@@ -328,7 +331,8 @@ const listenOnLoopback = (server: Server): Promise<number> =>
         return;
       }
       resolve((address as AddressInfo).port);
-    };
+    }
+
     server.once("error", onError);
     server.once("listening", onListening);
     server.listen(0, "127.0.0.1");
@@ -407,6 +411,123 @@ const requestThroughVite = (
     }
   });
 
+type ProxyBoundaryCase = {
+  route: string;
+  expectContinue: boolean;
+};
+
+type RunningViteProxy = {
+  server: Awaited<ReturnType<typeof createViteServer>>;
+  port: number;
+};
+
+/** Create the real HTTP backend fixture that records forwarded request metadata. */
+const createRecordingBackend = (backendRequests: BackendRequest[]): Server =>
+  createHttpServer((request, response) => {
+    request.resume();
+    request.once("end", () => {
+      backendRequests.push({
+        method: request.method,
+        url: request.url,
+        headers: { ...request.headers },
+      });
+      response.writeHead(200, { "Content-Type": "application/json" });
+      response.end(JSON.stringify({ ok: true }));
+    });
+  });
+
+/** Start a real Vite proxy on loopback and return its verified listening port. */
+const startRealViteProxy = async (
+  backendPort: number,
+  gatewayHeaders: [string, string][],
+): Promise<RunningViteProxy> => {
+  const server = await createViteServer({
+    root: path.resolve(HERE, ".."),
+    configFile: false,
+    logLevel: "silent",
+    resolve: {
+      alias: {
+        "@": path.resolve(HERE, "..", "src"),
+      },
+    },
+    server: {
+      host: "127.0.0.1",
+      port: 0,
+      strictPort: true,
+      proxy: buildTenantScopedProxy(
+        TENANT_SCOPED_ROUTES,
+        `http://127.0.0.1:${backendPort}`,
+        gatewayHeaders,
+      ),
+    },
+  });
+  await server.listen();
+  if (!server.httpServer) {
+    await server.close();
+    throw new Error("expected Vite to expose its listening HTTP server");
+  }
+  return { server, port: portOf(server.httpServer) };
+};
+
+/** Assert that every configured gateway value replaced the browser's value. */
+const expectConfiguredGatewayHeaders = (
+  forwarded: BackendRequest | undefined,
+  gatewayHeaders: readonly [string, string][],
+  route: string,
+): void => {
+  for (const [header, value] of gatewayHeaders) {
+    expect(forwarded?.headers[header.toLowerCase()], `${route} ${header}`).toBe(value);
+  }
+};
+
+/** Assert that unrelated headers survive while every attacker claim is scrubbed. */
+const expectAttackerHeadersScrubbed = (forwarded: BackendRequest | undefined): void => {
+  for (const [header, attackerValue] of ATTACKER_PRELOADED_HEADERS) {
+    if (header === "X-Unrelated-Header") {
+      expect(forwarded?.headers[header.toLowerCase()]).toBe("preserve-me");
+    } else {
+      expect(forwarded?.headers[header.toLowerCase()]).not.toBe(attackerValue);
+    }
+  }
+};
+
+/** Assert the complete backend observation for one normal or Expect request. */
+const expectForwardedRequest = (
+  forwarded: BackendRequest | undefined,
+  testCase: ProxyBoundaryCase,
+  gatewayHeaders: readonly [string, string][],
+): void => {
+  expect(forwarded?.method, testCase.route).toBe(testCase.expectContinue ? "POST" : "GET");
+  expect(forwarded?.url, testCase.route).toBe(testCase.route);
+  expect(forwarded?.headers.expect, testCase.route).toBe(
+    testCase.expectContinue ? "100-continue" : undefined,
+  );
+  expectConfiguredGatewayHeaders(forwarded, gatewayHeaders, testCase.route);
+  expectAttackerHeadersScrubbed(forwarded);
+};
+
+/** Send every real-boundary case and verify the backend received one safe request. */
+const exerciseRealProxyCases = async (
+  vitePort: number,
+  cases: readonly ProxyBoundaryCase[],
+  backendRequests: BackendRequest[],
+  gatewayHeaders: readonly [string, string][],
+): Promise<void> => {
+  for (const [index, testCase] of cases.entries()) {
+    const result = await requestThroughVite(vitePort, testCase.route, testCase.expectContinue);
+    expect(result.statusCode, testCase.route).toBe(200);
+    expect(backendRequests).toHaveLength(index + 1);
+    expectForwardedRequest(backendRequests.at(-1), testCase, gatewayHeaders);
+  }
+};
+
+/** Close a Vite fixture only when startup completed successfully. */
+const closeViteProxy = async (vite: RunningViteProxy | undefined): Promise<void> => {
+  if (vite) {
+    await vite.server.close();
+  }
+};
+
 describe("dev proxy route coverage (derived from frontend/src)", () => {
   it("still finds the API calls we know exist, so the scan cannot pass vacuously", () => {
     for (const prefix of SCANNER_HEALTH_PREFIXES) {
@@ -417,8 +538,8 @@ describe("dev proxy route coverage (derived from frontend/src)", () => {
   it("treats a + concatenated fragment as a fragment, not a backend prefix", () => {
     const source = [
       "const p =",
-      "  `/revenue/channels/${encodeURIComponent(id)}` +",
-      "  `/months/${encodeURIComponent(month)}/explain`;",
+      `  \`/revenue/channels/\${encodeURIComponent(id)}\` +`,
+      `  \`/months/\${encodeURIComponent(month)}/explain\`;`,
     ].join("\n");
     const scanned = scanStringLiterals(source);
     expect(scanned.map((literal) => literal.continuesExpression)).toEqual([false, true]);
@@ -574,18 +695,7 @@ describe("dev proxy trust and header contracts", () => {
 
   it("scrubs Expect requests at the real Vite/backend boundary", async () => {
     const backendRequests: BackendRequest[] = [];
-    const backend = createHttpServer((request, response) => {
-      request.resume();
-      request.once("end", () => {
-        backendRequests.push({
-          method: request.method,
-          url: request.url,
-          headers: { ...request.headers },
-        });
-        response.writeHead(200, { "Content-Type": "application/json" });
-        response.end(JSON.stringify({ ok: true }));
-      });
-    });
+    const backend = createRecordingBackend(backendRequests);
     const backendPort = await listenOnLoopback(backend);
     const gatewayToken = "real-vite-server-only-secret";
     const gatewayHeaders: [string, string][] = [
@@ -597,72 +707,22 @@ describe("dev proxy trust and header contracts", () => {
       ["X-UMS-Tenant", "ums"],
       ["X-Scope-ID", "company-tv"],
     ];
-    let vite: Awaited<ReturnType<typeof createViteServer>> | undefined;
+    const cases: ProxyBoundaryCase[] = [
+      { route: "/tenants", expectContinue: false },
+      { route: "/revenue", expectContinue: false },
+      { route: "/connectors", expectContinue: true },
+      { route: "/finance-close", expectContinue: true },
+    ];
+    let vite: RunningViteProxy | undefined;
     try {
-      const startedVite = await createViteServer({
-        root: path.resolve(HERE, ".."),
-        configFile: false,
-        logLevel: "silent",
-        resolve: {
-          alias: {
-            "@": path.resolve(HERE, "..", "src"),
-          },
-        },
-        server: {
-          host: "127.0.0.1",
-          port: 0,
-          strictPort: true,
-          proxy: buildTenantScopedProxy(
-            TENANT_SCOPED_ROUTES,
-            `http://127.0.0.1:${backendPort}`,
-            gatewayHeaders,
-          ),
-        },
-      });
-      vite = startedVite;
-      await startedVite.listen();
-      if (!startedVite.httpServer) {
-        throw new Error("expected Vite to expose its listening HTTP server");
-      }
-      const vitePort = portOf(startedVite.httpServer);
-      const cases = [
-        { route: "/tenants", expectContinue: false },
-        { route: "/revenue", expectContinue: false },
-        { route: "/connectors", expectContinue: true },
-        { route: "/finance-close", expectContinue: true },
-      ];
+      vite = await startRealViteProxy(backendPort, gatewayHeaders);
+      await exerciseRealProxyCases(vite.port, cases, backendRequests, gatewayHeaders);
 
-      for (const [index, testCase] of cases.entries()) {
-        const result = await requestThroughVite(vitePort, testCase.route, testCase.expectContinue);
-        expect(result.statusCode, testCase.route).toBe(200);
-        expect(backendRequests).toHaveLength(index + 1);
-        const forwarded = backendRequests.at(-1);
-        expect(forwarded?.method, testCase.route).toBe(testCase.expectContinue ? "POST" : "GET");
-        expect(forwarded?.url, testCase.route).toBe(testCase.route);
-        expect(forwarded?.headers.expect, testCase.route).toBe(
-          testCase.expectContinue ? "100-continue" : undefined,
-        );
-        for (const [header, value] of gatewayHeaders) {
-          expect(forwarded?.headers[header.toLowerCase()], `${testCase.route} ${header}`).toBe(
-            value,
-          );
-        }
-        for (const [header, attackerValue] of ATTACKER_PRELOADED_HEADERS) {
-          if (header === "X-Unrelated-Header") {
-            expect(forwarded?.headers[header.toLowerCase()]).toBe("preserve-me");
-          } else {
-            expect(forwarded?.headers[header.toLowerCase()]).not.toBe(attackerValue);
-          }
-        }
-      }
-
-      const browserModule = await requestThroughVite(vitePort, "/src/main.tsx", false);
+      const browserModule = await requestThroughVite(vite.port, "/src/main.tsx", false);
       expect(browserModule.statusCode).toBe(200);
       expect(browserModule.body).not.toContain(gatewayToken);
     } finally {
-      if (vite) {
-        await vite.close();
-      }
+      await closeViteProxy(vite);
       await closeHttpServer(backend);
     }
   }, 15_000);

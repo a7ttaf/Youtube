@@ -32,6 +32,12 @@ const REPO_ROOT = path.resolve(
   "..",
 );
 
+const DEV_PROXY_ENV_DEFAULTS = {
+  [TRUSTED_BACKEND_ORIGINS_ENV]: "",
+  UMS_TRUSTED_GATEWAY_TOKEN: "",
+  VITE_DEV_BACKEND_URL: DEFAULT_BACKEND_TARGET,
+};
+
 // ============================================================================
 // Purpose: Load repo-root env and derive the dev-proxy target, trust allowlist,
 //   and injected trusted-principal headers.
@@ -45,14 +51,11 @@ const REPO_ROOT = path.resolve(
 //   - File: README.md -> documents the repo-root environment contract.
 // ============================================================================
 const loadDevProxy = (mode: string) => {
-  const env = loadEnv(mode, REPO_ROOT, "");
-  const trustedOrigins = (env[TRUSTED_BACKEND_ORIGINS_ENV] ?? "").split(",");
-  const backendTarget = resolveDevBackendTarget(
-    env.VITE_DEV_BACKEND_URL ?? DEFAULT_BACKEND_TARGET,
-    trustedOrigins,
-  );
+  const env = { ...DEV_PROXY_ENV_DEFAULTS, ...loadEnv(mode, REPO_ROOT, "") };
+  const trustedOrigins = env[TRUSTED_BACKEND_ORIGINS_ENV].split(",");
+  const backendTarget = resolveDevBackendTarget(env.VITE_DEV_BACKEND_URL, trustedOrigins);
   const gatewayHeaders = resolveGatewayHeaders(env);
-  const gatewayToken = env.UMS_TRUSTED_GATEWAY_TOKEN ?? "";
+  const gatewayToken = env.UMS_TRUSTED_GATEWAY_TOKEN;
 
   if (mode === "development" && !gatewayToken) {
     console.warn(

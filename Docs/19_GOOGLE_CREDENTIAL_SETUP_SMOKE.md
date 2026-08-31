@@ -374,8 +374,9 @@ $headers = @{
   "X-UMS-Trusted-Gateway-Token" = $env:UMS_TRUSTED_GATEWAY_TOKEN
   "X-UMS-Tenant" = "<tenant-slug>"
 }
+$youtubeAnalyticsConnector = "youtube-analytics"
 $payload = @{
-  connector_key = "youtube-analytics"
+  connector_key = $youtubeAnalyticsConnector
   account_id = "<content-owner-or-account-id>"
   encrypted_secret_ref = "secret-manager://projects/<project>/secrets/ums-google-oauth/versions/latest"
   reason = "Register owner-approved Google credential reference for smoke"
