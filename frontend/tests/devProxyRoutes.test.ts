@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -92,6 +92,20 @@ const isWithinDirectory = (fileName: string, directory: string): boolean => {
 const viteHtmlModuleEntries = (html: string): string[] => {
   const entries: string[] = [];
   const document = new DOMParser().parseFromString(html, "text/html");
+  for (const element of document.querySelectorAll("*")) {
+    if (["embed", "iframe", "object"].includes(element.tagName.toLowerCase())) {
+      throw new Error("embedded executable HTML content is unsupported by route coverage");
+    }
+    for (const attribute of element.attributes) {
+      if (
+        attribute.name.toLowerCase().startsWith("on") ||
+        attribute.name.toLowerCase() === "srcdoc" ||
+        attribute.value.trim().toLowerCase().startsWith("javascript:")
+      ) {
+        throw new Error("inline executable HTML attributes are unsupported by route coverage");
+      }
+    }
+  }
   for (const script of document.querySelectorAll("script")) {
     if (script.getAttribute("type")?.trim().toLowerCase() !== "module") {
       throw new Error("non-module executable scripts are unsupported by route coverage");
@@ -147,6 +161,47 @@ const canonicalViteBuildEntries = (input: unknown): string[] => {
     throw new Error("alternate Vite/Rollup build inputs are unsupported by route coverage");
   }
   return resolved;
+};
+
+/** Enumerate every HTML page Vite could serve from the frontend root. */
+const viteHtmlFiles = (directory = FRONTEND_ROOT): string[] => {
+  const files: string[] = [];
+  for (const entry of readdirSync(directory, { withFileTypes: true })) {
+    if ([".git", "coverage", "dist", "node_modules"].includes(entry.name)) {
+      continue;
+    }
+    const resolved = path.join(directory, entry.name);
+    if (entry.isDirectory()) {
+      files.push(...viteHtmlFiles(resolved));
+    } else if (entry.isFile() && entry.name.toLowerCase().endsWith(".html")) {
+      files.push(canonicalFileIdentity(resolved));
+    }
+  }
+  return files.sort();
+};
+
+/** Keep Vite on the one HTML page whose module graph is audited below. */
+const assertCanonicalViteHtmlFiles = (files: readonly string[]): string => {
+  const canonicalHtml = canonicalFileIdentity(path.join(FRONTEND_ROOT, "index.html"));
+  if (files.length !== 1 || files[0] !== canonicalHtml) {
+    throw new Error("additional Vite-served HTML pages are unsupported by route coverage");
+  }
+  return canonicalHtml;
+};
+
+/** Reject Vite library/SSR entry modes that bypass the audited HTML root. */
+const assertCanonicalViteBuildConfig = (build: {
+  lib?: unknown;
+  rollupOptions: { input?: unknown };
+  ssr?: unknown;
+}): string[] => {
+  if (build.lib) {
+    throw new Error("Vite library build entries are unsupported by route coverage");
+  }
+  if (build.ssr !== false) {
+    throw new Error("Vite SSR build entries are unsupported by route coverage");
+  }
+  return canonicalViteBuildEntries(build.rollupOptions.input);
 };
 
 const API_CLIENT_METHOD_NAMES = [
@@ -658,10 +713,15 @@ const RAW_NETWORK_NAMES = new Set([
   "fetch",
   "sendBeacon",
 ]);
-const DYNAMIC_CODE_NAMES = new Set(["Function", "eval", "require"]);
+const DYNAMIC_CODE_NAMES = new Set(["Function", "Reflect", "eval", "require"]);
 const DYNAMIC_SOURCE_NAMES = new Set(["importScripts", "serviceWorker"]);
 const WORKER_CONSTRUCTOR_NAMES = new Set(["SharedWorker", "Worker"]);
 const STRING_TIMER_NAMES = new Set(["setInterval", "setTimeout"]);
+const FORBIDDEN_REFLECTION_NAMES = new Set([
+  "getOwnPropertyDescriptor",
+  "getOwnPropertyDescriptors",
+  "getPrototypeOf",
+]);
 const FORBIDDEN_RUNTIME_NAMES = new Set([
   ...RAW_NETWORK_NAMES,
   ...DYNAMIC_CODE_NAMES,
@@ -720,7 +780,9 @@ const isReflectiveRawNetworkReference = (
     substitutions: new Map(),
     visiting: new Set(),
   });
-  return name === undefined || FORBIDDEN_RUNTIME_NAMES.has(name);
+  return name === undefined ||
+    FORBIDDEN_RUNTIME_NAMES.has(name) ||
+    WORKER_CONSTRUCTOR_NAMES.has(name);
 };
 
 /** Reject aliases/dynamic indexing of browser-global containers. */
@@ -1084,6 +1146,21 @@ const validateDirectApiClientContract = (
       );
     }
     if (
+      (ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) &&
+      node.moduleSpecifier &&
+      ts.isStringLiteral(node.moduleSpecifier)
+    ) {
+      const specifier = node.moduleSpecifier.text;
+      if (
+        /[?&](?:shared)?worker(?:&|$)/iu.test(specifier) ||
+        /\.(?:c|m)?jsx?(?:[?#]|$)/iu.test(specifier)
+      ) {
+        throw new Error(
+          `unscanned executable module import is forbidden: ${specifier}`,
+        );
+      }
+    }
+    if (
       ts.isIdentifier(node) &&
       DYNAMIC_CODE_NAMES.has(node.text)
     ) {
@@ -1108,6 +1185,9 @@ const validateDirectApiClientContract = (
       ts.isPropertyAccessExpression(node.parent) &&
       node.parent.name === node;
     if (workerName && WORKER_CONSTRUCTOR_NAMES.has(workerName) && !workerPropertyName) {
+      if (!ts.isIdentifier(node)) {
+        throw new Error("worker constructors must use a direct audited identifier");
+      }
       const parent = node.parent;
       if (
         ts.isTypeReferenceNode(parent) ||
@@ -1127,6 +1207,7 @@ const validateDirectApiClientContract = (
       (ts.isIdentifier(node) && FORBIDDEN_RUNTIME_NAMES.has(node.text)) ||
       ((ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node)) &&
         (FORBIDDEN_RUNTIME_NAMES.has(staticAccessName(node, checker) ?? "") ||
+          FORBIDDEN_REFLECTION_NAMES.has(staticAccessName(node, checker) ?? "") ||
           staticAccessName(node, checker) === "constructor")) ||
       isReflectiveRawNetworkReference(node, checker) ||
       isUnscannedImportMetaLoader(node, checker) ||
@@ -2239,9 +2320,8 @@ export const discoverRequestedPrefixes = (): string[] => {
   const configuredRoots = new Set(
     files.map((fileName) => canonicalFileIdentity(fileName)),
   );
-  const htmlEntries = viteHtmlModuleEntries(
-    readFileSync(path.join(FRONTEND_ROOT, "index.html"), "utf8"),
-  );
+  const htmlFile = assertCanonicalViteHtmlFiles(viteHtmlFiles());
+  const htmlEntries = viteHtmlModuleEntries(readFileSync(htmlFile, "utf8"));
   for (const entry of htmlEntries) {
     if (
       !isWithinDirectory(entry, SRC_DIR) ||
@@ -2389,11 +2469,49 @@ describe("dev proxy route coverage (derived from frontend/src)", () => {
     ].join(""))).toThrow(/non-module executable scripts are unsupported/iu);
   });
 
+  it.each([
+    '<body onload="fetch(\'/reports/raw-files\')"></body>',
+    '<iframe srcdoc="<script>fetch(\'/reports/raw-files\')</script>"></iframe>',
+    '<a href="javascript:fetch(\'/reports/raw-files\')">load</a>',
+  ])("fails closed on executable non-module HTML: %s", (html) => {
+    expect(() => viteHtmlModuleEntries([
+      '<script type="module" src="/src/main.tsx"></script>',
+      html,
+    ].join(""))).toThrow(/executable HTML/iu);
+  });
+
   it("rejects alternate Vite/Rollup build inputs", () => {
     expect(() => canonicalViteBuildEntries({
       app: "index.html",
       hidden: "../shared/hidden.ts",
     })).toThrow(/alternate Vite\/Rollup build inputs are unsupported/iu);
+  });
+
+  it("rejects any additional Vite-served HTML page", () => {
+    expect(() => assertCanonicalViteHtmlFiles([
+      canonicalFileIdentity(path.join(FRONTEND_ROOT, "index.html")),
+      canonicalFileIdentity(path.join(FRONTEND_ROOT, "admin.html")),
+    ])).toThrow(/additional Vite-served HTML pages are unsupported/iu);
+    expect(assertCanonicalViteHtmlFiles(viteHtmlFiles())).toBe(
+      canonicalFileIdentity(path.join(FRONTEND_ROOT, "index.html")),
+    );
+  });
+
+  it.each([
+    {
+      lib: { entry: "../shared/hidden.ts" },
+      rollupOptions: {},
+      ssr: false,
+    },
+    {
+      lib: false,
+      rollupOptions: {},
+      ssr: "../shared/hidden.ts",
+    },
+  ])("rejects alternate Vite library/SSR build entry modes", (build) => {
+    expect(() => assertCanonicalViteBuildConfig(build)).toThrow(
+      /Vite (?:library|SSR) build entries are unsupported/iu,
+    );
   });
 
   it("keeps the resolved production build on the one audited HTML entry", async () => {
@@ -2406,7 +2524,7 @@ describe("dev proxy route coverage (derived from frontend/src)", () => {
       "build",
       "production",
     );
-    expect(canonicalViteBuildEntries(config.build.rollupOptions.input)).toEqual([
+    expect(assertCanonicalViteBuildConfig(config.build)).toEqual([
       canonicalFileIdentity(path.join(FRONTEND_ROOT, "index.html")),
     ]);
   });
@@ -2514,9 +2632,35 @@ describe("dev proxy route coverage (derived from frontend/src)", () => {
       "computed global Worker URL",
       'new globalThis["Worker"](new URL("../shared/hidden.ts", import.meta.url));',
     ],
+    [
+      "computed global Worker string",
+      'new globalThis["Worker"]("/raw.js");',
+    ],
+    [
+      "computed global SharedWorker string",
+      'new globalThis["SharedWorker"]("/raw.js");',
+    ],
   ])("fails closed on %s outside the compiler source graph", (_label, source) => {
     expect(() => discoverRequestedPrefixesInSource(source)).toThrow(
-      /unaudited network or dynamic-code access is forbidden outside canonical client transports|worker source is outside compiler-scanned src/iu,
+      /unaudited network or dynamic-code access is forbidden outside canonical client transports|worker source is outside compiler-scanned src|worker constructors must use a direct audited identifier/iu,
+    );
+  });
+
+  it.each([
+    'import "./raw.js";',
+    'import HiddenWorker from "../shared/hidden.ts?worker"; void HiddenWorker;',
+  ])("fails closed on an unscanned executable import: %s", (source) => {
+    expect(() => discoverRequestedPrefixesInSource(source)).toThrow(
+      /unscanned executable module import is forbidden/iu,
+    );
+  });
+
+  it.each([
+    'new (Reflect.get(globalThis, "Worker"))("/raw.js");',
+    'new (Reflect.get(globalThis, "SharedWorker"))("/raw.js");',
+  ])("fails closed on a reflected worker constructor: %s", (source) => {
+    expect(() => discoverRequestedPrefixesInSource(source)).toThrow(
+      /unaudited network or dynamic-code access is forbidden outside canonical client transports|dynamic code execution is forbidden/iu,
     );
   });
 
@@ -2948,6 +3092,14 @@ describe("dev proxy route coverage (derived from frontend/src)", () => {
       'Reflect.get(document.defaultView!, "fetch")("/reports/raw-files");',
     ],
     [
+      "Object.getOwnPropertyDescriptor through document.defaultView",
+      'Object.getOwnPropertyDescriptor(document.defaultView!, "fetch")!.value("/reports/raw-files");',
+    ],
+    [
+      "aliased Reflect.get",
+      'const read = Reflect.get; read(document.defaultView!, "fetch")("/reports/raw-files");',
+    ],
+    [
       "Function constructor chain",
       '((() => {}).constructor as FunctionConstructor)("return fetch(\\\"/reports/raw-files\\\")")();',
     ],
@@ -2969,12 +3121,14 @@ describe("dev proxy route coverage (derived from frontend/src)", () => {
     ],
   ])("fails closed on %s raw network access", (_label, source) => {
     expect(() => discoverRequestedPrefixesInSource(source)).toThrow(
-      /unaudited network or dynamic-code access is forbidden outside canonical client transports/iu,
+      /unaudited network or dynamic-code access is forbidden outside canonical client transports|dynamic code execution is forbidden/iu,
     );
   });
 
   it.each([
     'setTimeout("fetch(\\\"/hidden\\\")", 0);',
+    'setTimeout(atob("ZmV0Y2goJy9oaWRkZW4nKQ=="), 0);',
+    'setTimeout(window.name, 0);',
     'const timer = setTimeout; timer("fetch(\\\"/hidden\\\")", 0);',
     '(0, setTimeout)("fetch(\\\"/hidden\\\")", 0);',
   ])("fails closed when a string timer escapes direct-call syntax: %s", (source) => {
