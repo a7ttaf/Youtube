@@ -29,10 +29,9 @@ def require_postgres_url() -> str:
     # connection error instead of this fail-fast setup contract.
     url = os.environ.get("UMS_TEST_DATABASE_URL")
     if url is None or not url.strip():
-        # FIX: State the database-name rule exactly as the fixtures apply it
-        # (startswith("test_") or endswith("_test")) instead of the ambiguous
-        # glob "test_*/*_test", and drop the claim that fixtures refuse resets
-        # on other names — only one fixture enforces that guard today.
+        # FIX: State the database-name rule exactly as the shared destructive
+        # reset boundary enforces it (startswith("test_") or endswith("_test"))
+        # instead of the ambiguous glob "test_*/*_test".
         raise RuntimeError(
             "UMS_TEST_DATABASE_URL required for PostgreSQL migration round-trip tests. "
             "Spin up disposable Postgres: "
