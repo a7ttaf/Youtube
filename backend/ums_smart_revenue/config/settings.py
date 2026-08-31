@@ -264,12 +264,9 @@ def _load_int(env_name: str, *, default: int) -> int:
 #               level on the `ums_smart_revenue` logger and holds the root
 #               logger at THIRD_PARTY_LOG_LEVEL, so no setting of this dial
 #               changes what a dependency prints. No authorization, finance,
-#               audit, or export behavior. One operator-visible side effect
-#               remains, and it is first-party: at DEBUG/INFO the connector
-#               scheduler prints the YouTube CMS content-owner id
-#               (connectors/runs/executor.py:755), so container logs carry a
-#               real infrastructure identifier while the group-sync scheduler
-#               is enabled.
+#               audit, or export behavior. Guarded CMS owner identifiers are
+#               fingerprinted at scheduler call sites and redacted from Google
+#               query/exception shapes by logging_config before handlers run.
 # Connections:
 #   - File: backend/ums_smart_revenue/config/logging_config.py ->
 #     configure_logging maps this name to its logging int, installs the single
@@ -277,7 +274,7 @@ def _load_int(env_name: str, *, default: int) -> int:
 #   - File: backend/ums_smart_revenue/app.py -> the ASGI lifespan calls
 #     configure_logging with this value at startup.
 #   - File: docker-compose.yml -> x-app-env forwards UMS_LOG_LEVEL to `app`,
-#     `app-dev` and `migrate` as a null pass-through.
+#     `app-dev` and `migrate` with an explicit INFO default.
 # ============================================================================
 def _load_log_level() -> str:
     """Parse ``UMS_LOG_LEVEL``, failing fast on an unrecognised level name.

@@ -463,18 +463,13 @@ def test_worker_fetch_failure_audits_failure(
     fake = _FakeGroupsClient(
         [("cms-a", "News", (CHANNEL_ONE,), 0)],
         groups_error=GoogleApiResponseError(
-            url=(
-                "https://alice:password@example.test/groups"
-                "?X-Goog-Signature=signed-secret"
-            ),
+            url=("https://alice:password@example.test/groups?X-Goog-Signature=signed-secret"),
             reason="Authorization: Bearer bearer-secret",
         ),
     )
     executor = _executor(factory, client_factory=lambda _c: fake)
     try:
-        with caplog.at_level(
-            "ERROR", logger="ums_smart_revenue.connectors.runs.executor"
-        ):
+        with caplog.at_level("ERROR", logger="ums_smart_revenue.connectors.runs.executor"):
             executor._run_group_sync_job(
                 tenant_id=TENANT, content_owner_id=CONTENT_OWNER, actor_identity=ACTOR
             )
@@ -482,9 +477,7 @@ def test_worker_fetch_failure_audits_failure(
         executor.close()
     assert _one_failure_row(factory).details["error_class"] == "GroupSyncFetchError"
     expected = [
-        record
-        for record in caplog.records
-        if "Scheduled group sync failed" in record.getMessage()
+        record for record in caplog.records if "Scheduled group sync failed" in record.getMessage()
     ]
     assert len(expected) == 1
     assert expected[0].exc_info is None
@@ -699,7 +692,7 @@ def test_failure_audits_swallow_actor_construction_error(tmp_path: Path) -> None
                 error_class="GroupSyncFetchError",
                 actor_identity=ACTOR,
             )
-            # ... its pull-job sibling via the public after_commit hook ...
+            # ... its pull-job sibling via the public activation-failure hook ...
             executor.audit_failed_before_start(
                 tenant_id=TENANT,
                 connector_key="youtube_reporting",

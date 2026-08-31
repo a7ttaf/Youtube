@@ -120,4 +120,5 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
 ENTRYPOINT ["/usr/bin/tini", "--"]
 CMD ["python", "-m", "uvicorn", "ums_smart_revenue.app:app", \
      "--host", "0.0.0.0", "--port", "8000", \
+     "--timeout-graceful-shutdown", "10", \
      "--proxy-headers"]

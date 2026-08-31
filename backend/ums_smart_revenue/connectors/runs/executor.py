@@ -16,7 +16,7 @@
 #   worker. No finance math.
 # Connections:
 #   - File: backend/ums_smart_revenue/api/connectors.py -> the route's
-#     submit_if_absent + after_commit.activate / after_rollback.cancel flow.
+#     submit_if_absent + outer-transaction activation/cancellation flow.
 #   - File: backend/ums_smart_revenue/connectors/runs/scheduler.py -> the only
 #     scheduled submitter of the group-sync job kind.
 #   - File: backend/ums_smart_revenue/app.py -> lifespan close() wiring.
@@ -34,7 +34,7 @@ from dataclasses import dataclass
 from uuid import UUID, uuid4
 
 from sqlalchemy import select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, aliased
 
 from ums_smart_revenue.auth.audit import AuditEventType
 from ums_smart_revenue.auth.audit_service import AuditSink, record_audit_event
@@ -141,6 +141,7 @@ _JOB_ACTION_FAILED_BEFORE_START = "job_failed_before_start"
 _JOB_RECOVERY_TERMINAL_ACTIONS = frozenset(
     {_JOB_ACTION_DISPATCH_STARTED, _JOB_ACTION_FAILED_BEFORE_START}
 )
+_JOB_RECOVERY_BATCH_SIZE = 100
 
 # Expected failures are mapped to this source-controlled allowlist before they
 # reach logs. Exception messages and subclass names are deliberately excluded:
@@ -293,7 +294,7 @@ class _ShutdownAuditTask:
 #     HTTP-free sync core the group-sync worker drives (Sched 1).
 #   - File: scripts/run_google_connector.py -> the CLI pattern this reuses.
 #   - File: backend/ums_smart_revenue/api/connectors.py -> the route uses
-#     submit_if_absent + after_commit.activate / after_rollback.cancel_reservation.
+#     submit_if_absent + outer-transaction finalization for activate/cancel.
 # ============================================================================
 class ConnectorJobExecutor:
     """Bounded in-process runner for connector pull jobs with a dup registry.
@@ -375,9 +376,7 @@ class ConnectorJobExecutor:
         with self._close_lock:
             deadline = time.monotonic() + CLOSE_DRAIN_TIMEOUT_SECONDS
             self._executor.shutdown(wait=False, cancel_futures=True)
-            running_futures, current_audits_durable = self._audit_pending_on_shutdown(
-                deadline
-            )
+            running_futures, current_audits_durable = self._audit_pending_on_shutdown(deadline)
             self._shutdown_pending_futures.update(running_futures)
 
             pending = set(self._shutdown_pending_futures)
@@ -395,10 +394,7 @@ class ConnectorJobExecutor:
                     )
                     return False
 
-            audits_durable = (
-                current_audits_durable
-                and self._shutdown_audits_complete_and_durable()
-            )
+            audits_durable = current_audits_durable and self._shutdown_audits_complete_and_durable()
             self._finalizer.detach()
             return audits_durable
 
@@ -482,10 +478,10 @@ class ConnectorJobExecutor:
         """Reserve a slot for the scope; return None if a slot is already held.
 
         The reservation is NOT yet a Future -- the worker is enqueued only
-        after the caller invokes :meth:`activate` (typically from an
-        SQLAlchemy ``after_commit`` hook). A failed commit drops the
-        reservation via :meth:`cancel_reservation`, so the registry can
-        never deadlock on a half-committed submission.
+        after the caller invokes :meth:`activate` (the HTTP route does so only
+        after the committed outer transaction releases its checkout). A failed
+        commit drops the reservation via :meth:`cancel_reservation`, so the
+        registry can never deadlock on a half-committed submission.
 
         Returns ``None`` when the scope is already held (either a pending
         reservation or an active Future). Holding the lock across the
@@ -769,8 +765,18 @@ class ConnectorJobExecutor:
         report_month: str,
         actor_identity: ConnectorJobActor,
         job_id: UUID,
-    ) -> None:
-        """Append the durable edge proving a queued job entered its worker."""
+    ) -> bool:
+        """Claim and append the durable edge proving a worker entered dispatch."""
+        existing_actions = self._lock_job_lifecycle_actions(
+            session=session,
+            tenant_id=tenant_id,
+            job_id=job_id,
+        )
+        if existing_actions & _JOB_RECOVERY_TERMINAL_ACTIONS:
+            # FIX: Startup recovery and dispatch can race in multi-process
+            # deployments. Both lock the same submitted intent; if recovery
+            # already won, this worker must not mutate domain state afterward.
+            return False
         actor = self._build_audit_actor(
             tenant_id=tenant_id,
             actor_identity=actor_identity,
@@ -792,15 +798,49 @@ class ConnectorJobExecutor:
                 "report_month": report_month,
             },
         )
+        return True
+
+    def _lock_job_lifecycle_actions(
+        self,
+        *,
+        session: Session,
+        tenant_id: UUID,
+        job_id: UUID,
+    ) -> set[str]:
+        """Lock one request's lifecycle rows and return their bounded actions."""
+        action = AuditLogORM.details["action"].as_string()
+        statement = select(AuditLogORM).where(
+            AuditLogORM.tenant_id == tenant_id,
+            AuditLogORM.event_type == AuditEventType.CONNECTOR_JOB_RUN.value,
+            AuditLogORM.request_id == str(job_id),
+            action.in_(
+                {
+                    _JOB_ACTION_SUBMITTED,
+                    _JOB_ACTION_DISPATCH_STARTED,
+                    _JOB_ACTION_FAILED_BEFORE_START,
+                }
+            ),
+        )
+        if session.get_bind().dialect.name == "postgresql":
+            statement = statement.with_for_update(of=AuditLogORM)
+        with platform_lane(session):
+            rows = list(session.scalars(statement).all())
+        return {
+            str((row.details or {}).get("action"))
+            for row in rows
+            if (row.details or {}).get("action") is not None
+        }
 
     # ========================================================================
     # Purpose: Reconcile a prior process's committed submission intents that
     #   never reached dispatch into exactly one durable pre-start failure edge.
-    # Database/ORM: TenantORM read; AuditLogORM SELECT FOR UPDATE + INSERT.
+    # Database/ORM: TenantORM read; batched AuditLogORM NOT EXISTS anti-query,
+    #   SELECT FOR UPDATE SKIP LOCKED, and INSERT.
     # Standards: Runs before scheduler start/request acceptance. PostgreSQL
-    #   locks each intent and rechecks request_id edges in the same transaction;
-    #   SQLite is the documented single-process test/dev deployment. Existing
-    #   rows with NULL request_id are ignored because they cannot be correlated.
+    #   locks only the bounded unmatched batch and rechecks terminal request_id
+    #   edges server-side in the same statement; SQLite is the documented
+    #   single-process test/dev deployment. Existing rows with NULL request_id
+    #   are ignored because they cannot be correlated.
     # Blast Radius: Additive audit recovery only. RLS remains fail-closed via a
     #   per-tenant placeholder TENANT_CTX plus the existing platform lane.
     # Connections:
@@ -821,7 +861,7 @@ class ConnectorJobExecutor:
         return recovered
 
     def _recover_tenant_submission_intents(self, *, tenant_id: UUID) -> int:
-        """Reconcile unmatched request_ids for one tenant in one transaction."""
+        """Reconcile one tenant's unmatched request_ids in bounded batches."""
         placeholder = make_placeholder_tenant(
             tenant_id=tenant_id,
             slug=f"connector-job-recovery:{tenant_id}",
@@ -829,79 +869,104 @@ class ConnectorJobExecutor:
         )
         token = TENANT_CTX.set(placeholder)
         try:
-            with self._session_factory() as session:
-                action = AuditLogORM.details["action"].as_string()
-                intent_statement = select(AuditLogORM).where(
-                    AuditLogORM.tenant_id == tenant_id,
-                    AuditLogORM.event_type == AuditEventType.CONNECTOR_JOB_RUN.value,
-                    AuditLogORM.request_id.is_not(None),
-                    action == _JOB_ACTION_SUBMITTED,
-                )
-                if session.get_bind().dialect.name == "postgresql":
-                    intent_statement = intent_statement.with_for_update(skip_locked=True)
-                # app_tenant cannot lock audit_logs; use the sanctioned
-                # platform lane for the lock acquisition, then return to the
-                # tenant lane while retaining the row locks in this transaction.
-                with platform_lane(session):
-                    intents = list(session.scalars(intent_statement).all())
-                request_ids = [row.request_id for row in intents if row.request_id is not None]
-                if not request_ids:
-                    session.rollback()
-                    return 0
+            recovered = 0
+            while True:
+                with self._session_factory() as session:
+                    intent = aliased(AuditLogORM, name="connector_job_intent")
+                    terminal = aliased(AuditLogORM, name="connector_job_terminal")
+                    intent_action = intent.details["action"].as_string()
+                    terminal_action = terminal.details["action"].as_string()
+                    terminal_exists = (
+                        select(terminal.id)
+                        .where(
+                            terminal.tenant_id == intent.tenant_id,
+                            terminal.event_type == AuditEventType.CONNECTOR_JOB_RUN.value,
+                            terminal.request_id == intent.request_id,
+                            terminal_action.in_(_JOB_RECOVERY_TERMINAL_ACTIONS),
+                        )
+                        .exists()
+                    )
+                    intent_statement = (
+                        select(intent)
+                        .where(
+                            intent.tenant_id == tenant_id,
+                            intent.event_type == AuditEventType.CONNECTOR_JOB_RUN.value,
+                            intent.request_id.is_not(None),
+                            intent_action == _JOB_ACTION_SUBMITTED,
+                            ~terminal_exists,
+                        )
+                        .order_by(intent.created_at, intent.id)
+                        .limit(_JOB_RECOVERY_BATCH_SIZE)
+                    )
+                    if session.get_bind().dialect.name == "postgresql":
+                        intent_statement = intent_statement.with_for_update(
+                            of=intent,
+                            skip_locked=True,
+                        )
+                    # app_tenant cannot lock audit_logs; use the sanctioned
+                    # platform lane for the bounded lock acquisition, then
+                    # retain those exact locks through the batch commit.
+                    with platform_lane(session):
+                        intents = list(session.scalars(intent_statement).all())
+                    if not intents:
+                        session.rollback()
+                        return recovered
 
-                completed_ids = set(
-                    session.scalars(
-                        select(AuditLogORM.request_id).where(
-                            AuditLogORM.tenant_id == tenant_id,
-                            AuditLogORM.event_type == AuditEventType.CONNECTOR_JOB_RUN.value,
-                            AuditLogORM.request_id.in_(request_ids),
-                            action.in_(_JOB_RECOVERY_TERMINAL_ACTIONS),
+                    sink = PlatformLaneAuditSink(session, tenant_id=tenant_id)
+                    recovered_request_ids: set[str] = set()
+                    for intent_row in intents:
+                        request_id = intent_row.request_id
+                        if request_id is None:
+                            # Defensive parity with the SQL predicate: a row
+                            # without correlation cannot be recovered safely.
+                            continue
+                        if request_id in recovered_request_ids:
+                            # FIX: Historical audit rows predate the stable
+                            # lifecycle contract and may contain duplicate
+                            # submissions. Reconcile one logical request once;
+                            # the committed terminal edge excludes every copy
+                            # from subsequent batches without deleting audit.
+                            continue
+                        recovered_request_ids.add(request_id)
+                        details = dict(intent_row.details or {})
+                        actor_user_id = intent_row.user_id or details.get("actor_user_id")
+                        if actor_user_id is None:
+                            raise RuntimeError(
+                                "connector job intent is missing its durable actor identity"
+                            )
+                        connector_key = str(
+                            details.get("connector_key") or intent_row.scope_id or ""
                         )
-                    ).all()
-                )
-                sink = PlatformLaneAuditSink(session, tenant_id=tenant_id)
-                recovered = 0
-                for intent in intents:
-                    if intent.request_id in completed_ids:
-                        continue
-                    details = dict(intent.details or {})
-                    actor_user_id = intent.user_id or details.get("actor_user_id")
-                    if actor_user_id is None:
-                        raise RuntimeError(
-                            "connector job intent is missing its durable actor identity"
+                        account_id = str(details.get("account_id") or "")
+                        report_month = str(details.get("report_month") or "")
+                        if not connector_key or not account_id or not report_month:
+                            raise RuntimeError(
+                                "connector job intent is missing recovery scope metadata"
+                            )
+                        actor = self._build_audit_actor(
+                            tenant_id=tenant_id,
+                            actor_identity=ConnectorJobActor(
+                                user_id=str(actor_user_id),
+                                email="connector-job-recovery@service.ums.local",
+                            ),
                         )
-                    connector_key = str(details.get("connector_key") or intent.scope_id or "")
-                    account_id = str(details.get("account_id") or "")
-                    report_month = str(details.get("report_month") or "")
-                    if not connector_key or not account_id or not report_month:
-                        raise RuntimeError(
-                            "connector job intent is missing recovery scope metadata"
+                        record_audit_event(
+                            sink=sink,
+                            actor=actor,
+                            event_type=AuditEventType.CONNECTOR_JOB_RUN,
+                            entity_type="api_connector",
+                            entity_id=f"{connector_key}:{account_id}",
+                            scope=AccessScope.connector(connector_key),
+                            reason="recovered abandoned connector job submission",
+                            request_id=request_id,
+                            details={
+                                "action": _JOB_ACTION_FAILED_BEFORE_START,
+                                "report_month": report_month,
+                                "error_class": "ExecutorShutdownRecovery",
+                            },
                         )
-                    actor = self._build_audit_actor(
-                        tenant_id=tenant_id,
-                        actor_identity=ConnectorJobActor(
-                            user_id=str(actor_user_id),
-                            email="connector-job-recovery@service.ums.local",
-                        ),
-                    )
-                    record_audit_event(
-                        sink=sink,
-                        actor=actor,
-                        event_type=AuditEventType.CONNECTOR_JOB_RUN,
-                        entity_type="api_connector",
-                        entity_id=f"{connector_key}:{account_id}",
-                        scope=AccessScope.connector(connector_key),
-                        reason="recovered abandoned connector job submission",
-                        request_id=intent.request_id,
-                        details={
-                            "action": _JOB_ACTION_FAILED_BEFORE_START,
-                            "report_month": report_month,
-                            "error_class": "ExecutorShutdownRecovery",
-                        },
-                    )
-                    recovered += 1
-                session.commit()
-                return recovered
+                    session.commit()
+                    recovered += len(recovered_request_ids)
         finally:
             TENANT_CTX.reset(token)
 
@@ -959,15 +1024,18 @@ class ConnectorJobExecutor:
         durable = True
         for job_key, actor_identity, job_id in cancelled:
             tenant_id, connector_key, account_id, report_month = job_key
-            durable = self._audit_failed_before_start(
-                tenant_id=tenant_id,
-                connector_key=connector_key,
-                account_id=account_id,
-                report_month=report_month,
-                error_class="ExecutorShutdown",
-                actor_identity=actor_identity,
-                job_id=job_id,
-            ) and durable
+            durable = (
+                self._audit_failed_before_start(
+                    tenant_id=tenant_id,
+                    connector_key=connector_key,
+                    account_id=account_id,
+                    report_month=report_month,
+                    error_class="ExecutorShutdown",
+                    actor_identity=actor_identity,
+                    job_id=job_id,
+                )
+                and durable
+            )
         return durable
 
     def _audit_cancelled_within_budget(
@@ -1006,9 +1074,7 @@ class ConnectorJobExecutor:
         # FIX: Retain the daemon thread and its result after the bounded join.
         # The previous local-only reference let a timed-out close forget an
         # in-flight audit and falsely report a later close as clean.
-        self._shutdown_audit_tasks.append(
-            _ShutdownAuditTask(thread=audit_thread, result=result)
-        )
+        self._shutdown_audit_tasks.append(_ShutdownAuditTask(thread=audit_thread, result=result))
         audit_thread.start()
         audit_thread.join(timeout=audit_budget)
         if audit_thread.is_alive():
@@ -1045,7 +1111,7 @@ class ConnectorJobExecutor:
                 connector_tenant_context(tenant_id, session=session),
             ):
                 if job_id is not None:
-                    self._record_dispatch_started(
+                    dispatch_claimed = self._record_dispatch_started(
                         session=session,
                         tenant_id=tenant_id,
                         connector_key=connector_key,
@@ -1054,6 +1120,9 @@ class ConnectorJobExecutor:
                         actor_identity=actor_identity,
                         job_id=job_id,
                     )
+                    if not dispatch_claimed:
+                        session.rollback()
+                        return
                     session.commit()
                 outcome = run_one(
                     session,
@@ -1151,7 +1220,7 @@ class ConnectorJobExecutor:
                 # a pre-start failure -- never a swallowed ValueError.
                 actor = self._build_group_sync_actor(tenant_id=tenant_id)
                 if job_id is not None:
-                    self._record_dispatch_started(
+                    dispatch_claimed = self._record_dispatch_started(
                         session=session,
                         tenant_id=tenant_id,
                         connector_key=GROUP_SYNC_JOB_CONNECTOR_SLUG,
@@ -1160,6 +1229,9 @@ class ConnectorJobExecutor:
                         actor_identity=actor_identity,
                         job_id=job_id,
                     )
+                    if not dispatch_claimed:
+                        session.rollback()
+                        return
                     session.commit()
                 # The SAME SQL stores + atomic sink the api dependencies build,
                 # imported directly (connectors.runs must never import api.*). One
@@ -1463,26 +1535,36 @@ class ConnectorJobExecutor:
                 display_name="connector job failed-audit",
             )
             token = TENANT_CTX.set(minimal_tenant)
-            with self._session_factory() as session, platform_lane(session):
+            with self._session_factory() as session:
+                if job_id is not None:
+                    existing_actions = self._lock_job_lifecycle_actions(
+                        session=session,
+                        tenant_id=tenant_id,
+                        job_id=job_id,
+                    )
+                    if _JOB_ACTION_FAILED_BEFORE_START in existing_actions:
+                        session.rollback()
+                        return True
                 # audit_logs is platform-only-write: elevate to app_platform for
                 # this standalone audit (run_one does its own elevation; this
                 # audit runs OUTSIDE run_one). No-op off Postgres.
-                sink = SqlAlchemyAuditSink(session, tenant_id=tenant_id)
-                record_audit_event(
-                    sink=sink,
-                    actor=actor,
-                    event_type=AuditEventType.CONNECTOR_JOB_RUN,
-                    entity_type="api_connector",
-                    entity_id=f"{connector_key}:{account_id}",
-                    scope=AccessScope.connector(connector_key),
-                    reason="connector job failed before start",
-                    request_id=str(job_id) if job_id is not None else None,
-                    details={
-                        "action": _JOB_ACTION_FAILED_BEFORE_START,
-                        "report_month": report_month,
-                        "error_class": error_class,
-                    },
-                )
+                with platform_lane(session):
+                    sink = SqlAlchemyAuditSink(session, tenant_id=tenant_id)
+                    record_audit_event(
+                        sink=sink,
+                        actor=actor,
+                        event_type=AuditEventType.CONNECTOR_JOB_RUN,
+                        entity_type="api_connector",
+                        entity_id=f"{connector_key}:{account_id}",
+                        scope=AccessScope.connector(connector_key),
+                        reason="connector job failed before start",
+                        request_id=str(job_id) if job_id is not None else None,
+                        details={
+                            "action": _JOB_ACTION_FAILED_BEFORE_START,
+                            "report_month": report_month,
+                            "error_class": error_class,
+                        },
+                    )
                 session.commit()
             return True
         except Exception:  # noqa: BLE001 — best-effort audit, never escape

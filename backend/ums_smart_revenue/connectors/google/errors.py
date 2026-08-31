@@ -207,8 +207,11 @@ class CredentialNotFoundError(GoogleConnectorError):
     """Raised when no credential row matches the requested connector + account."""
 
     def __init__(self, *, connector_key: str, account_id: str) -> None:
-        """Carry the looked-up ``connector_key`` and ``account_id``."""
-        super().__init__(f"no credential for {connector_key}/{account_id}")
+        """Carry lookup fields programmatically without rendering guarded ids."""
+        # FIX: CLI and unexpected exception surfaces render ``str(exc)``. The
+        # account may be a guarded CMS content-owner id, so retain both typed
+        # attributes but keep the human-readable message canned.
+        super().__init__("connector credential not found")
         self.connector_key = connector_key
         self.account_id = account_id
 

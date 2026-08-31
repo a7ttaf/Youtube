@@ -135,12 +135,12 @@ def isolated_logging_state() -> Iterator[None]:
     logging.getLogger(FIRST_PARTY_LOGGER_NAME)
     saved_logger_dict = dict(manager.loggerDict)
     saved_disable = manager.disable
+    saved_call_handlers = logging.Logger.callHandlers
     root = logging.getLogger()
     saved_root_level = root.level
     saved_root_handlers = root.handlers[:]
     saved_handler_filters = {
-        handler: handler.filters[:]
-        for handler in logging_config._configured_handlers(root)
+        handler: handler.filters[:] for handler in logging_config._configured_handlers(root)
     }
     saved_states = {
         name: _LoggerState(
@@ -156,6 +156,11 @@ def isolated_logging_state() -> Iterator[None]:
     try:
         yield
     finally:
+        # FIX: The process-level redaction dispatcher intentionally survives
+        # output release while a safety lease remains. Tests that exercise an
+        # unclean shutdown can therefore omit restore_logging(); restore the
+        # exact pre-test dispatcher here just like the handler/filter tree.
+        logging.Logger.callHandlers = saved_call_handlers
         logging_config._logging_state = logging_config._LoggingLeaseState()
         # configure_logging installs safety at the front of every current
         # handler, including pytest capture and logging.lastResort. Restore the
@@ -766,6 +771,129 @@ def test_configured_handler_redacts_google_signing_values_from_traceback():
         assert safe_text in output
 
 
+@pytest.mark.parametrize(
+    ("unsafe", "safe_fragment"),
+    [
+        (
+            "https://youtube.test/v2/jobs?onBehalfOfContentOwner=GuardedOwner123&safe=kept",
+            "onBehalfOfContentOwner=[REDACTED]&safe=kept",
+        ),
+        (
+            "https://youtube.test/v2/reports?ids=contentOwner%3D%3DGuardedOwner123&safe=kept",
+            "ids=contentOwner%3D%3D[REDACTED]&safe=kept",
+        ),
+        (
+            "ids=contentOwner%253D%253DGuardedOwner123",
+            "ids=contentOwner%253D%253D[REDACTED]",
+        ),
+        ("ids=contentOwner==GuardedOwner123", "ids=contentOwner==[REDACTED]"),
+        (
+            "{'ids': 'contentOwner==GuardedOwner123'}",
+            "{'ids': 'contentOwner==[REDACTED]'}",
+        ),
+        (
+            "{'onBehalfOfContentOwner': 'GuardedOwner123'}",
+            "{'onBehalfOfContentOwner': '[REDACTED]'}",
+        ),
+        (
+            "[('onBehalfOfContentOwner', 'GuardedOwner123')]",
+            "[('onBehalfOfContentOwner', '[REDACTED]')]",
+        ),
+        ("contentOwner=GuardedOwner123", "contentOwner=[REDACTED]"),
+        ("content_owner_id=GuardedOwner123", "content_owner_id=[REDACTED]"),
+        ("contentOwnerId=GuardedOwner123", "contentOwnerId=[REDACTED]"),
+        (
+            "on_behalf_of_content_owner=GuardedOwner123",
+            "on_behalf_of_content_owner=[REDACTED]",
+        ),
+    ],
+)
+def test_logging_redacts_guarded_content_owner_query_forms(
+    unsafe: str,
+    safe_fragment: str,
+) -> None:
+    """Every live Google owner alias is redacted idempotently."""
+    sanitized = redact_sensitive_text(unsafe)
+    assert "GuardedOwner123" not in sanitized
+    assert safe_fragment in sanitized
+    assert redact_sensitive_text(sanitized) == sanitized
+
+
+def test_logging_preserves_non_owner_selectors_and_counts() -> None:
+    """Owner redaction does not erase generic owners, channels, or counts."""
+    safe = "owner=operator ids=channel==UC-safe content_owner_count=3"
+    assert redact_sensitive_text(safe) == safe
+
+
+def test_configured_handler_redacts_content_owner_from_exception_chain() -> None:
+    """Raw and encoded CMS owner query forms never survive traceback rendering."""
+    stream = io.StringIO()
+    owner_id = "GuardedOwnerTraceback123"
+
+    with production_shaped_root():
+        configure_logging(level="INFO", stream=stream)
+        try:
+            raise RuntimeError(
+                "https://youtube.test/reports?"
+                f"onBehalfOfContentOwner={owner_id}&"
+                f"ids=contentOwner%3D%3D{owner_id}&safe=kept"
+            )
+        except RuntimeError:
+            _probe().exception("unexpected Google request failure")
+
+    output = stream.getvalue()
+    assert owner_id not in output
+    assert "onBehalfOfContentOwner=[REDACTED]" in output
+    assert "ids=contentOwner%3D%3D[REDACTED]" in output
+    assert "safe=kept" in output
+
+
+def test_handlers_added_after_configuration_and_output_release_are_redacted() -> None:
+    """The safety lease covers runtime handler additions before first dispatch."""
+    first_stream = io.StringIO()
+    second_stream = io.StringIO()
+    first_handler = logging.StreamHandler(first_stream)
+    second_handler = logging.StreamHandler(second_stream)
+    formatter = logging.Formatter("%(message)s owner=%(onBehalfOfContentOwner)s nested=%(context)s")
+    first_handler.setFormatter(formatter)
+    second_handler.setFormatter(formatter)
+    late_logger = logging.getLogger("ums_smart_revenue.late_handler_probe")
+    late_logger.setLevel(logging.ERROR)
+    late_logger.propagate = False
+    original_dispatch = logging.Logger.callHandlers
+    configuration = configure_logging(level="ERROR", stream=io.StringIO())
+    try:
+        late_logger.addHandler(first_handler)
+        try:
+            raise RuntimeError("https://youtube.test/x?ids=contentOwner%3D%3DLateOwnerOne")
+        except RuntimeError:
+            late_logger.exception(
+                "late handler exception",
+                extra={
+                    "onBehalfOfContentOwner": "LateOwnerOne",
+                    "context": {"contentOwnerId": "LateOwnerOne"},
+                },
+            )
+        assert "LateOwnerOne" not in first_stream.getvalue()
+        assert first_stream.getvalue().count("[REDACTED]") >= 3
+
+        release_logging_output(configuration)
+        late_logger.addHandler(second_handler)
+        late_logger.error(
+            "after output release content_owner_id=LateOwnerTwo",
+            extra={
+                "onBehalfOfContentOwner": "LateOwnerTwo",
+                "context": {"ids": "contentOwner==LateOwnerTwo"},
+            },
+        )
+        assert "LateOwnerTwo" not in second_stream.getvalue()
+        assert "[REDACTED]" in second_stream.getvalue()
+    finally:
+        restore_logging(configuration)
+
+    assert logging.Logger.callHandlers is original_dispatch
+
+
 def test_formatter_replaces_a_precached_raw_exception_and_is_idempotent():
     """A formatter that ran first cannot leave raw credentials in exc_text."""
     try:
@@ -1232,9 +1360,7 @@ def test_output_release_keeps_production_last_resort_redacted(monkeypatch) -> No
         release_logging_output(configuration)
         assert root.handlers == []
 
-        logging.getLogger(FIRST_PARTY_LOGGER_NAME).warning(
-            "late audit password=last-resort-secret"
-        )
+        logging.getLogger(FIRST_PARTY_LOGGER_NAME).warning("late audit password=last-resort-secret")
         emitted = late_output.getvalue()
         assert "last-resort-secret" not in emitted
         assert "password=[REDACTED]" in emitted
@@ -1376,9 +1502,7 @@ def test_concurrent_duplicate_release_preserves_and_finally_closes_live_lease(
         assert handler in root.handlers
         assert close_calls == 0
 
-        logging.getLogger(FIRST_PARTY_LOGGER_NAME).info(
-            "surviving concurrent lease still logging"
-        )
+        logging.getLogger(FIRST_PARTY_LOGGER_NAME).info("surviving concurrent lease still logging")
         assert "surviving concurrent lease still logging" in shared_stream.getvalue()
 
         restore_logging(second)

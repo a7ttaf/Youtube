@@ -338,7 +338,10 @@ def test_cli_main_returns_2_when_credential_missing(
     )
 
     assert exit_code == 2
-    assert "CredentialNotFoundError" in captured_err.getvalue()
+    stderr = captured_err.getvalue()
+    assert "CredentialNotFoundError" in stderr
+    assert "connector credential not found" in stderr
+    assert "missing-account" not in stderr
 
 
 def test_cli_main_returns_2_when_live_credential_smoke_missing(

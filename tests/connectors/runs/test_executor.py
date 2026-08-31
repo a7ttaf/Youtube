@@ -10,13 +10,17 @@
 
 from __future__ import annotations
 
+import io
 from datetime import UTC, datetime
 from unittest.mock import patch
 from uuid import UUID, uuid4
 
-from sqlalchemy import create_engine, select
+import pytest
+from sqlalchemy import create_engine, event, select
 from sqlalchemy.orm import Session, sessionmaker
 
+import ums_smart_revenue.connectors.runs.executor as executor_module
+from ums_smart_revenue.config.logging_config import configure_logging, restore_logging
 from ums_smart_revenue.connectors.google.errors import OAuthRefreshError
 from ums_smart_revenue.connectors.runs.executor import (
     ConnectorJobActor,
@@ -146,9 +150,7 @@ def test_run_job_removes_registry_entry_on_success(tmp_path) -> None:
         executor.close()
 
 
-def test_run_job_bucket_a_failure_writes_audit_and_does_not_propagate(
-    tmp_path, caplog
-) -> None:
+def test_run_job_bucket_a_failure_writes_audit_and_does_not_propagate(tmp_path, caplog) -> None:
     """A Bucket-A GoogleConnectorError is caught, audited, never re-raised."""
     factory = _factory(tmp_path)
     executor = ConnectorJobExecutor(session_factory=factory, max_workers=1, stale_running_hours=6)
@@ -165,9 +167,7 @@ def test_run_job_bucket_a_failure_writes_audit_and_does_not_propagate(
     try:
         with (
             patch("ums_smart_revenue.connectors.runs.executor.run_one", _boom),
-            caplog.at_level(
-                "ERROR", logger="ums_smart_revenue.connectors.runs.executor"
-            ),
+            caplog.at_level("ERROR", logger="ums_smart_revenue.connectors.runs.executor"),
         ):
             executor._register(key)
             # Must NOT raise out of the worker body.
@@ -200,9 +200,7 @@ def test_run_job_bucket_a_failure_writes_audit_and_does_not_propagate(
     # Canned class name only — never the exception text.
     assert "signed-secret" not in str(row.details)
     expected = [
-        record
-        for record in caplog.records
-        if "Connector job failed" in record.getMessage()
+        record for record in caplog.records if "Connector job failed" in record.getMessage()
     ]
     assert len(expected) == 1
     assert expected[0].exc_info is None
@@ -245,6 +243,43 @@ def test_run_job_unexpected_exception_swallowed_and_registry_cleared(
         )
     finally:
         executor.close()
+
+
+def test_run_job_unexpected_exception_redacts_guarded_owner_traceback(tmp_path) -> None:
+    """The real unexpected-worker logger cannot publish CMS owner URL forms."""
+    factory = _factory(tmp_path)
+    executor = ConnectorJobExecutor(session_factory=factory, max_workers=1, stale_running_hours=6)
+    stream = io.StringIO()
+    logging_configuration = configure_logging(level="ERROR", stream=stream)
+    owner_id = "GuardedOwnerUnexpectedWorker123"
+
+    def _boom(_session, **_kwargs):
+        raise RuntimeError(
+            "https://youtube.test/reports?"
+            f"onBehalfOfContentOwner={owner_id}&"
+            f"ids=contentOwner%3D%3D{owner_id}&safe=kept"
+        )
+
+    try:
+        with patch("ums_smart_revenue.connectors.runs.executor.run_one", _boom):
+            executor._run_job(
+                tenant_id=TENANT,
+                connector_key="youtube_reporting",
+                account_id="acct-1",
+                report_month="2026-03",
+                dry_run=False,
+                triggered_by_user_id=None,
+                actor_identity=ACTOR,
+            )
+    finally:
+        executor.close()
+        restore_logging(logging_configuration)
+
+    output = stream.getvalue()
+    assert owner_id not in output
+    assert "onBehalfOfContentOwner=[REDACTED]" in output
+    assert "ids=contentOwner%3D%3D[REDACTED]" in output
+    assert "safe=kept" in output
 
     # An unexpected (non-Bucket-A) error logs but writes NO job_failed audit.
     with factory() as session:
@@ -782,9 +817,7 @@ def test_close_retains_hung_worker_until_it_really_settles(tmp_path, monkeypatch
         executor.wait_for_shutdown_completion()
 
 
-def test_wait_for_shutdown_completion_retains_timed_out_audit_thread(
-    tmp_path, monkeypatch
-) -> None:
+def test_wait_for_shutdown_completion_retains_timed_out_audit_thread(tmp_path, monkeypatch) -> None:
     """The unbounded waiter keeps a timed-out shutdown audit reachable."""
     import threading
     import time
@@ -917,6 +950,133 @@ def test_abandoned_durable_intent_recovers_exactly_once(tmp_path) -> None:
     assert set(actions) == {"job_submitted", "job_failed_before_start"}
     failure = next(row for row in rows if row.details["action"] == "job_failed_before_start")
     assert failure.details["error_class"] == "ExecutorShutdownRecovery"
+
+
+def test_abandoned_intent_recovery_is_batched_server_side(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Recovery uses bounded NOT EXISTS queries instead of a historical IN list."""
+    factory = _factory(tmp_path)
+    executor = ConnectorJobExecutor(session_factory=factory, max_workers=1, stale_running_hours=6)
+    monkeypatch.setattr(executor_module, "_JOB_RECOVERY_BATCH_SIZE", 2)
+    reservations = []
+    for index in range(5):
+        reservation = executor.submit_if_absent(
+            tenant_id=TENANT,
+            connector_key="youtube_reporting",
+            account_id=f"acct-recovery-batch-{index}",
+            report_month="2026-03",
+            dry_run=False,
+            triggered_by_user_id=UUID(ACTOR.user_id),
+            actor_identity=ACTOR,
+        )
+        assert reservation is not None
+        reservations.append(reservation)
+        with factory() as session:
+            executor.persist_submission_intent(
+                session=session,
+                reservation=reservation,
+                reason="batched recovery test submission",
+            )
+            session.commit()
+            if index >= 3:
+                assert executor._record_dispatch_started(
+                    session=session,
+                    tenant_id=reservation.tenant_id,
+                    connector_key=reservation.connector_key,
+                    account_id=reservation.account_id,
+                    report_month=reservation.report_month,
+                    actor_identity=reservation.actor_identity,
+                    job_id=reservation.job_id,
+                )
+                session.commit()
+        assert executor.cancel_reservation(reservation) is True
+
+    statements: list[str] = []
+    engine = factory.kw["bind"]
+
+    def _capture_sql(
+        _connection,
+        _cursor,
+        statement: str,
+        _parameters,
+        _context,
+        _executemany,
+    ) -> None:
+        if "audit_logs" in statement.lower():
+            statements.append(" ".join(statement.lower().split()))
+
+    event.listen(engine, "before_cursor_execute", _capture_sql)
+    try:
+        assert executor.recover_abandoned_submission_intents() == 3
+        assert executor.recover_abandoned_submission_intents() == 0
+    finally:
+        event.remove(engine, "before_cursor_execute", _capture_sql)
+        executor.close()
+
+    recovery_selects = [
+        statement
+        for statement in statements
+        if statement.startswith("select")
+        and "connector_job_intent" in statement
+        and "not (exists" in statement
+    ]
+    assert len(recovery_selects) >= 3
+    assert all(" limit ? offset ?" in statement for statement in recovery_selects)
+    assert all(
+        "connector_job_intent.request_id in" not in statement for statement in recovery_selects
+    )
+
+    with factory() as session:
+        lifecycle = list(
+            session.scalars(
+                select(AuditLogORM).where(AuditLogORM.event_type == "CONNECTOR_JOB_RUN")
+            ).all()
+        )
+    failures = [row for row in lifecycle if row.details["action"] == "job_failed_before_start"]
+    dispatches = [row for row in lifecycle if row.details["action"] == "job_dispatch_started"]
+    assert len(failures) == 3
+    assert len(dispatches) == 2
+
+
+def test_abandoned_duplicate_submission_intents_recover_one_logical_job(tmp_path) -> None:
+    """Historical duplicate submission rows produce one terminal audit edge."""
+    factory = _factory(tmp_path)
+    executor = ConnectorJobExecutor(session_factory=factory, max_workers=1, stale_running_hours=6)
+    reservation = executor.submit_if_absent(
+        tenant_id=TENANT,
+        connector_key="youtube_reporting",
+        account_id="acct-duplicate-intent",
+        report_month="2026-03",
+        dry_run=False,
+        triggered_by_user_id=UUID(ACTOR.user_id),
+        actor_identity=ACTOR,
+    )
+    assert reservation is not None
+    with factory() as session:
+        for reason in ("first historical intent", "duplicate historical intent"):
+            executor.persist_submission_intent(
+                session=session,
+                reservation=reservation,
+                reason=reason,
+            )
+        session.commit()
+    assert executor.cancel_reservation(reservation) is True
+
+    try:
+        assert executor.recover_abandoned_submission_intents() == 1
+        assert executor.recover_abandoned_submission_intents() == 0
+    finally:
+        executor.close()
+
+    with factory() as session:
+        rows = session.scalars(
+            select(AuditLogORM).where(AuditLogORM.request_id == str(reservation.job_id))
+        ).all()
+    actions = [str(row.details["action"]) for row in rows]
+    assert actions.count("job_submitted") == 2
+    assert actions.count("job_failed_before_start") == 1
 
 
 def test_dispatch_started_edge_prevents_false_shutdown_recovery(tmp_path) -> None:

@@ -70,6 +70,9 @@ _HANDLER_FLOOR_BINDINGS_ATTR = "_ums_smart_revenue_floor_bindings"
 _FILTER_ID_ATTR = "_ums_smart_revenue_filter_id"
 _FLOOR_FILTER_ID = "third-party-floor-v2"
 _REDACTION_FILTER_ID = "redaction-v2"
+_CALL_HANDLERS_ID_ATTR = "_ums_smart_revenue_dispatch_id"
+_CALL_HANDLERS_ORIGINAL_ATTR = "_ums_smart_revenue_original_dispatch"
+_CALL_HANDLERS_ID_VALUE = "redacting-call-handlers-v1"
 _LOG_FINGERPRINT_KEY = secrets.token_bytes(32)
 
 # The three fields P0.6 exists to add -- timestamp, level, logger name -- plus
@@ -136,11 +139,27 @@ THIRD_PARTY_LOG_LEVEL = logging.WARNING
 # while an unlabeled statement must begin a line with a strong SQL shape.
 _REDACTED = "[REDACTED]"
 _CONTROL_CHARACTER_RE = re.compile(r"[\x00-\x1f\x7f-\x9f\u2028\u2029]")
+_GUARDED_CONTENT_OWNER_NAME = (
+    r"(?:on[_-]?behalf[_-]?of[_-]?content[_-]?owner(?:[_-]?id)?|"
+    r"content[_-]?owner(?:[_-]?id)?)"
+)
+# Google renders the guarded CMS owner through both decoded selector syntax
+# and URL-encoded equality operators. This recognizer intentionally excludes
+# generic ``owner`` and channel selectors to avoid erasing safe diagnostics.
+_CONTENT_OWNER_SELECTOR_RE = re.compile(
+    r"(?i)(?P<prefix>\bcontent[_-]?owner(?:==|%3d%3d|%253d%253d))"
+    r"(?!\[REDACTED\])(?P<value>[^&#\s,;\"'}\]]+)"
+)
 _AUTHORIZATION_ASSIGNMENT_RE = re.compile(
     r"(?i)(?P<prefix>authorization\s*[:=]\s*"
     r"(?!(?:(?:bearer|basic|digest)\s+)?\[REDACTED\])"
     r"(?:(?:bearer|basic|digest)\s+)?)(?P<quote>[\"']?)"
     r"(?!\[REDACTED\])(?P<value>[^\s,;&\"'}]+)(?P=quote)"
+)
+_GUARDED_IDENTIFIER_ASSIGNMENT_RE = re.compile(
+    rf"(?i)(?P<prefix>{_GUARDED_CONTENT_OWNER_NAME}\s*[\"']?\s*"
+    r"(?:[:]|=(?!=))\s*)(?P<quote>[\"']?)(?!\[REDACTED\])"
+    r"(?P<value>[^\s,;&\"'}]+)(?P=quote)"
 )
 _SECRET_ASSIGNMENT_RE = re.compile(
     r"(?i)(?P<prefix>"
@@ -165,7 +184,8 @@ _SECRET_TUPLE_RE = re.compile(
     r"set-cookie|x-api-key|api-key|x-auth-token|"
     r"x-(?:amz|goog|google)-(?:credential|signature|security-token)|"
     r"access[_-]?token|refresh[_-]?token|client[_-]?secret|password|"
-    r"secret|credential|signature|private[_-]?key)[\"']\s*,\s*)"
+    rf"secret|credential|signature|private[_-]?key|"
+    rf"{_GUARDED_CONTENT_OWNER_NAME})[\"']\s*,\s*)"
     r"(?P<quote>[\"'])(?!\[REDACTED\])(?P<value>.*?)(?P=quote)"
 )
 _URL_SECRET_RE = re.compile(
@@ -180,9 +200,7 @@ _URL_USERINFO_RE = re.compile(
     r"(?i)(?P<scheme>\b[a-z][a-z0-9+.-]*://)"
     r"(?!\[REDACTED\]@)(?P<userinfo>[^/@\s]+@)"
 )
-_JWT_RE = re.compile(
-    r"\b[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\b"
-)
+_JWT_RE = re.compile(r"\b[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\b")
 _PRIVATE_KEY_BLOCK_RE = re.compile(
     r"(?is)-----BEGIN (?P<label>(?:ENCRYPTED |RSA |EC |OPENSSH )?PRIVATE KEY)-----"
     r".*?-----END (?P=label)-----"
@@ -241,12 +259,14 @@ _SECRET_STRUCTURED_KEYS = frozenset(
         "setcookie",
         "session",
         "csrf",
+        "contentowner",
+        "contentownerid",
+        "onbehalfofcontentowner",
+        "onbehalfofcontentownerid",
     }
 )
 _SQL_STRUCTURED_KEYS = frozenset({"sql", "statement", "query", "params", "parameters"})
-_STANDARD_LOG_RECORD_FIELDS = frozenset(
-    logging.LogRecord("", 0, "", 0, "", (), None).__dict__
-)
+_STANDARD_LOG_RECORD_FIELDS = frozenset(logging.LogRecord("", 0, "", 0, "", (), None).__dict__)
 
 
 @dataclass
@@ -410,31 +430,37 @@ def _redact_log_text(value: object) -> str:
         text = str(value)
     except Exception:
         text = "<unrenderable log value>"
+    text = _CONTENT_OWNER_SELECTOR_RE.sub(
+        lambda match: f"{match.group('prefix')}[REDACTED]",
+        text,
+    )
+    text = _GUARDED_IDENTIFIER_ASSIGNMENT_RE.sub(
+        lambda match: (
+            f"{match.group('prefix')}{match.group('quote')}[REDACTED]{match.group('quote')}"
+        ),
+        text,
+    )
     text = _AUTHORIZATION_ASSIGNMENT_RE.sub(
         lambda match: (
-            f"{match.group('prefix')}{match.group('quote')}[REDACTED]"
-            f"{match.group('quote')}"
+            f"{match.group('prefix')}{match.group('quote')}[REDACTED]{match.group('quote')}"
         ),
         text,
     )
     text = _QUOTED_SECRET_ASSIGNMENT_RE.sub(
         lambda match: (
-            f"{match.group('prefix')}{match.group('quote')}[REDACTED]"
-            f"{match.group('quote')}"
+            f"{match.group('prefix')}{match.group('quote')}[REDACTED]{match.group('quote')}"
         ),
         text,
     )
     text = _SECRET_ASSIGNMENT_RE.sub(
         lambda match: (
-            f"{match.group('prefix')}{match.group('quote')}[REDACTED]"
-            f"{match.group('quote')}"
+            f"{match.group('prefix')}{match.group('quote')}[REDACTED]{match.group('quote')}"
         ),
         text,
     )
     text = _SECRET_TUPLE_RE.sub(
         lambda match: (
-            f"{match.group('prefix')}{match.group('quote')}[REDACTED]"
-            f"{match.group('quote')}"
+            f"{match.group('prefix')}{match.group('quote')}[REDACTED]{match.group('quote')}"
         ),
         text,
     )
@@ -573,9 +599,7 @@ def fingerprint_log_identifier(value: str) -> str:
 
 def _is_first_party_logger(name: str) -> bool:
     """Return whether a record belongs to the UMS package."""
-    return name == FIRST_PARTY_LOGGER_NAME or name.startswith(
-        FIRST_PARTY_LOGGER_NAME + "."
-    )
+    return name == FIRST_PARTY_LOGGER_NAME or name.startswith(FIRST_PARTY_LOGGER_NAME + ".")
 
 
 class _RedactionFilter(logging.Filter):
@@ -633,6 +657,51 @@ class _RedactionFilter(logging.Filter):
         # incoming value: callers can spoof extra={"_ums_log_redacted": True}.
         setattr(record, "_ums_log_redacted", True)
         return True
+
+
+def _install_process_redaction_dispatch() -> None:
+    """Sanitize records before any current or future handler can observe them."""
+    current_dispatch = logging.Logger.callHandlers
+    if getattr(current_dispatch, _CALL_HANDLERS_ID_ATTR, None) == _CALL_HANDLERS_ID_VALUE:
+        return
+
+    def _redacting_call_handlers(
+        target_logger: logging.Logger,
+        record: logging.LogRecord,
+    ) -> None:
+        """Apply the safety boundary before stdlib dispatch walks handlers."""
+        _RedactionFilter().filter(record)
+        current_dispatch(target_logger, record)
+
+    setattr(
+        _redacting_call_handlers,
+        _CALL_HANDLERS_ID_ATTR,
+        _CALL_HANDLERS_ID_VALUE,
+    )
+    setattr(
+        _redacting_call_handlers,
+        _CALL_HANDLERS_ORIGINAL_ATTR,
+        current_dispatch,
+    )
+    # FIX: Handler snapshots cannot cover a handler added after configuration
+    # or after output release while a worker still owns a redaction-safety
+    # lease. Dispatch-level sanitization covers every handler present at emit
+    # time, including new non-propagating child handlers and lastResort.
+    setattr(logging.Logger, "callHandlers", _redacting_call_handlers)
+
+
+def _remove_process_redaction_dispatch() -> None:
+    """Restore the exact prior dispatcher after the final safety lease ends."""
+    current_dispatch = logging.Logger.callHandlers
+    if getattr(current_dispatch, _CALL_HANDLERS_ID_ATTR, None) != _CALL_HANDLERS_ID_VALUE:
+        return
+    original_dispatch = getattr(
+        current_dispatch,
+        _CALL_HANDLERS_ORIGINAL_ATTR,
+        None,
+    )
+    if callable(original_dispatch):
+        setattr(logging.Logger, "callHandlers", original_dispatch)
 
 
 class _ThirdPartyFloorFilter(logging.Filter):
@@ -727,9 +796,10 @@ def build_log_formatter() -> logging.Formatter:
 #   operator-supplied --log-config survive. No third-party logger's own level
 #   is ever written to, so an operator --log-config that deliberately raises
 #   one library to INFO keeps that setting.
-# Blast Radius: Root/child handler filters, the shared UMS root handler, root
-#   level, and the `ums_smart_revenue` logger level. Log records are sanitized
-#   for credentials, private SQL, structured keys, and line-breaking controls.
+# Blast Radius: Root/child handler filters, safety-lease-scoped LogRecord
+#   dispatch, the shared UMS root handler, root level, and the
+#   `ums_smart_revenue` logger level. Log records are sanitized for credentials,
+#   guarded CMS ids, private SQL, structured keys, and line-breaking controls.
 #   No authorization, finance, audit persistence, or export behavior changes.
 # Connections:
 #   - File: backend/ums_smart_revenue/app.py -> called from the ASGI lifespan.
@@ -877,6 +947,7 @@ def configure_logging(
         setattr(handler, _HANDLER_LEVELS_ATTR, dict(_logging_state.lease_levels))
         setattr(handler, _HANDLER_SAFETY_COUNT_ATTR, _logging_state.safety_refcount)
         setattr(handler, _HANDLER_SAFETY_LEASES_ATTR, set(_logging_state.safety_leases))
+        _install_process_redaction_dispatch()
 
         effective_level = min(_logging_state.lease_levels.values())
         root_level = max(effective_level, THIRD_PARTY_LOG_LEVEL)
@@ -994,9 +1065,7 @@ def release_logging_safety(configuration: LoggingConfiguration) -> None:
                 _HANDLER_SAFETY_LEASES_ATTR,
                 set(_logging_state.safety_leases),
             )
-        configuration.released = (
-            configuration.output_released and configuration.safety_released
-        )
+        configuration.released = configuration.output_released and configuration.safety_released
         if _logging_state.safety_refcount > 0:
             return
         if handler is not None:
@@ -1006,6 +1075,7 @@ def release_logging_safety(configuration: LoggingConfiguration) -> None:
                 if handler in root.handlers:
                     root.removeHandler(handler)
                 handler.close()
+        _remove_process_redaction_dispatch()
 
 
 def restore_logging(configuration: LoggingConfiguration) -> None:
