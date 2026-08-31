@@ -7,8 +7,9 @@
 - Real HTTP adversarial coverage for hostile identity headers, ordinary and
   `Expect: 100-continue` requests, encoded path confusion, prefix/query/absolute
   request smuggling, Host/Origin misuse, and actual serve-versus-preview behavior.
-- Compiler-AST route discovery so new frontend API prefixes fail coverage unless
-  the proxy trust boundary is deliberately updated.
+- Compiler-AST route discovery that traces typed API-client call arguments,
+  resolves supported immutable concatenations, templates, and path builders,
+  and fails closed when a request root cannot be proven.
 - Startup-fixture coverage distinguishing pre-allocation creation failure and
   proving allocated HTTP servers and file watchers close after listen or port-
   resolution failure.

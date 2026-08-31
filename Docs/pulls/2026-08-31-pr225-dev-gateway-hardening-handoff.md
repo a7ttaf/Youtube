@@ -49,8 +49,8 @@ completion snapshot:
 
 | Gate | Result |
 |---|---|
-| `bun run test --run tests/devProxyRoutes.test.ts tests/devProxySecurity.test.ts` | 51 passed |
-| `bun run test --run` | 581 passed across 46 files; existing React/jsdom warnings only |
+| `bun run test --run tests/devProxyRoutes.test.ts tests/devProxySecurity.test.ts` | 81 passed |
+| `bun run test --run` | 611 passed across 46 files; existing React/jsdom warnings only |
 | `bun run typecheck` | Passed |
 | `bun run build` | Passed |
 | `uv run pytest -q tests/api/test_org_units_api.py -k "missing_gateway_token or invalid_gateway_token or unknown_gateway_role"` | 3 passed, 6 deselected |
