@@ -21,8 +21,8 @@
 //   - Files: views/{Command,Close,Trace,Exports,Connectors}View.tsx -> their
 //     controlled selectors render the same MONTH_OPTIONS.
 //   - File: frontend/src/components/srcc/views/ConnectorsView.tsx -> formatDate
-//     documents the UTC-shift trap this module avoids; its month state seeds
-//     from lastCompleteMonthKey (the ingest/payment WRITE default).
+//     documents the UTC-shift trap this module avoids; its write-oriented month
+//     state seeds from the shared WRITE_DEFAULT_MONTH snapshot.
 //   - File: frontend/src/components/srcc/views/RegistryView.tsx -> the account-
 //     link proposal's effective month seeds from currentMonthKey.
 // ============================================================================
@@ -136,7 +136,7 @@ export const rollingMonthWindow = (
   );
 
 /**
- * Render a "YYYY-MM" key as the short human label used in the chrome selector
+ * Render a "YYYY-MM" key as short operator-facing month copy
  * ("2026-03" -> "Mar 2026"). The Date is built from local components, so it
  * cannot slip to the previous month; an unrecognised key is echoed unchanged
  * rather than rendered as "Invalid Date".

@@ -4,10 +4,10 @@ import type { Severity } from "@/types/domain";
 import { rollingMonthWindow } from "@/lib/months";
 
 // ============================================================================
-// Purpose: Shared presentational helpers for the SRCC shell views. Extracted
-//   from AppShell so the wired CommandView (and future wired views) reuse the
-//   exact same design-system primitives (Badge/Dot/ItemRow/SummaryTile) and the
-//   single RESTRICTED_FINANCE_VALUE / finance-formatting contract.
+// Purpose: Shared presentational helpers for the SRCC shell views. Kept in one
+//   module so the wired CommandView (and future wired views) reuse the exact
+//   same design-system primitives (Badge/Dot/ItemRow/SummaryTile) and the single
+//   RESTRICTED_FINANCE_VALUE / finance-formatting contract.
 // Database/ORM: None (presentation only).
 // Standards: No business logic; money formatting takes API strings (never float
 //   math) and renders RESTRICTED_FINANCE_VALUE when the viewer lacks finance
