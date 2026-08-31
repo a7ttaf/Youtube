@@ -99,6 +99,7 @@ import traceback
 import uuid
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -2365,6 +2366,250 @@ def _protected_role_setting_declarations(body: str) -> dict[str, set[str]]:
     return declared
 
 
+def _role_sql_database_scope(tokens: list[tuple[str, str]]) -> str:
+    """Return the database named by an exact ``IN DATABASE <name>`` clause."""
+    for index in range(len(tokens) - 2):
+        first, second = tokens[index], tokens[index + 1]
+        if (
+            first[0] == "word"
+            and first[1].upper() == "IN"
+            and second[0] == "word"
+            and second[1].upper() == "DATABASE"
+        ):
+            return _role_sql_identifier(tokens[index + 2])
+    return ""
+
+
+def _protected_database_role_setting_declarations(
+    body: str, database: str
+) -> dict[str, set[str]]:
+    """Return protected-role GUC keys explicitly SET for one database."""
+    declared: dict[str, set[str]] = {}
+    for statement in _scan_role_sql(body):
+        if statement.startswith("\\"):
+            continue
+        tokens = _role_sql_tokens(statement)
+        if len(tokens) < 3:
+            continue
+        if tokens[0][0] != "word" or tokens[0][1].upper() != "ALTER":
+            continue
+        if tokens[1][0] != "word" or tokens[1][1].upper() not in _ROLE_SQL_ROLE_NOUNS:
+            continue
+        if _role_sql_database_scope(tokens) != database:
+            continue
+        role = _role_sql_identifier(tokens[2])
+        if role not in _PROTECTED_APP_ROLES:
+            continue
+        # RESET declarations intentionally produce no desired row. The final
+        # transaction starts with RESET ALL, then applies SET declarations.
+        if _role_sql_word_index(tokens, "SET") is None:
+            continue
+        setting = _role_sql_setting_name(tokens)
+        if setting:
+            declared.setdefault(role, set()).add(setting)
+    return declared
+
+
+# ============================================================================
+# Purpose: Read exact protected-role settings for one database from the live
+#          catalog, preserving values for transactional final-name replay.
+# Database/ORM: pg_db_role_setting, pg_roles, and pg_database; no ORM.
+# Standards: Independent psql -X control connection; JSON rows; strict shapes;
+#            never log setting values because custom GUCs may be sensitive.
+# Blast Radius: Database-scoped authorization/runtime settings only.
+# Connections:
+#   - File: scripts/restore_database.py -> _desired_database_role_settings and
+#     _apply_database_role_settings_transactionally.
+# ============================================================================
+def _database_role_settings(
+    container: str, database: str, *, timeout: int
+) -> dict[str, dict[str, str]]:
+    """Return ``{role: {guc: value}}`` for protected roles in ``database``."""
+    role_literals = ", ".join(_quote_literal(role) for role in REQUIRED_ROLES)
+    sql = (
+        "SELECT json_build_object('role', r.rolname, 'settings', s.setconfig)::text "
+        "FROM pg_catalog.pg_db_role_setting s "
+        "JOIN pg_catalog.pg_roles r ON r.oid = s.setrole "
+        "JOIN pg_catalog.pg_database d ON d.oid = s.setdatabase "
+        f"WHERE d.datname = {_quote_literal(database)} "
+        f"AND r.rolname IN ({role_literals}) ORDER BY r.rolname;"
+    )
+    settings: dict[str, dict[str, str]] = {}
+    raw = _psql(container, sql, timeout=timeout, dbname="postgres")
+    for line in raw.splitlines():
+        if not line.strip():
+            continue
+        try:
+            document = json.loads(line)
+        except ValueError as exc:
+            raise RestoreError(
+                EXIT_ROLES_FAILED,
+                f"could not parse database role-setting catalog JSON: {exc}",
+            ) from exc
+        if not isinstance(document, dict):
+            raise RestoreError(
+                EXIT_ROLES_FAILED,
+                "database role-setting catalog row is not a JSON object",
+            )
+        role = document.get("role")
+        entries = document.get("settings")
+        if (
+            not isinstance(role, str)
+            or role not in REQUIRED_ROLES
+            or not isinstance(entries, list)
+        ):
+            raise RestoreError(
+                EXIT_ROLES_FAILED,
+                "database role-setting catalog row has an invalid role/settings shape",
+            )
+        role_settings: dict[str, str] = {}
+        for entry in entries:
+            if not isinstance(entry, str) or "=" not in entry:
+                raise RestoreError(
+                    EXIT_ROLES_FAILED,
+                    "database role-setting catalog contains a malformed setting",
+                )
+            key, value = entry.split("=", 1)
+            if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.]*", key) or key in role_settings:
+                raise RestoreError(
+                    EXIT_ROLES_FAILED,
+                    "database role-setting catalog contains an invalid or duplicate key",
+                )
+            role_settings[key] = value
+        if role in settings:
+            raise RestoreError(
+                EXIT_ROLES_FAILED,
+                f"database role-setting catalog returned duplicate rows for {role}",
+            )
+        settings[role] = role_settings
+    return settings
+
+
+def _desired_database_role_settings(
+    container: str,
+    roles_path: Path,
+    database: str,
+    *,
+    timeout: int,
+) -> dict[str, dict[str, str]]:
+    """Capture only per-database settings explicitly declared by roles.sql."""
+    body = roles_path.read_text(encoding="utf-8", errors="replace")
+    declared = _protected_database_role_setting_declarations(body, database)
+    if not declared:
+        return {}
+    live = _database_role_settings(container, database, timeout=timeout)
+    desired: dict[str, dict[str, str]] = {}
+    missing: list[str] = []
+    for role, keys in sorted(declared.items()):
+        for key in sorted(keys):
+            value = live.get(role, {}).get(key)
+            if value is None:
+                missing.append(f"{role} SET {key}")
+            else:
+                desired.setdefault(role, {})[key] = value
+    if missing:
+        raise RestoreError(
+            EXIT_ROLES_FAILED,
+            "roles.sql declared database-scoped settings that did not land on "
+            f"{database!r}: {', '.join(missing)}",
+        )
+    return desired
+
+
+def _database_role_settings_transaction_sql(
+    database: str, desired: dict[str, dict[str, str]]
+) -> str:
+    """Build one all-or-nothing replacement of protected per-database GUCs."""
+    statements = ["BEGIN;"]
+    for role in REQUIRED_ROLES:
+        statements.append(
+            f"ALTER ROLE {_quote_identifier(role)} IN DATABASE "
+            f"{_quote_identifier(database)} RESET ALL;"
+        )
+    for role in sorted(desired):
+        for key, value in sorted(desired[role].items()):
+            statements.append(
+                f"ALTER ROLE {_quote_identifier(role)} IN DATABASE "
+                f"{_quote_identifier(database)} SET {_quote_identifier(key)} "
+                f"TO {_quote_literal(value)};"
+            )
+    statements.append("COMMIT;")
+    return "\n".join(statements) + "\n"
+
+
+def _role_settings_shape(settings: dict[str, dict[str, str]]) -> str:
+    """Describe role/key names without exposing configuration values."""
+    return json.dumps(
+        {role: sorted(values) for role, values in sorted(settings.items())},
+        sort_keys=True,
+    )
+
+
+# ============================================================================
+# Purpose: Finalize only database-scoped protected-role settings after the
+#          verified replacement receives its final database name.
+# Database/ORM: ALTER ROLE ... IN DATABASE and pg_db_role_setting.
+# Standards: One BEGIN/COMMIT transaction with ON_ERROR_STOP; independent
+#            before/after catalog reads reconcile commit-then-timeout outcomes;
+#            no cluster-global RESET or full roles.sql replay at cutover.
+# Blast Radius: Settings on the promoted replacement database only.
+# Connections:
+#   - File: scripts/restore_database.py -> _execute_restore finalizer callback.
+#   - File: Docs/22_BACKUP_RESTORE_AND_REHEARSAL.md -> role atomicity boundary.
+# ============================================================================
+def _apply_database_role_settings_transactionally(
+    container: str,
+    database: str,
+    desired: dict[str, dict[str, str]],
+    *,
+    timeout: int,
+) -> None:
+    """Replace protected per-database settings and reconcile ambiguous commit."""
+    before = _database_role_settings(container, database, timeout=timeout)
+    if before == desired:
+        return
+    sql = _database_role_settings_transaction_sql(database, desired)
+    try:
+        _psql(container, sql, timeout=timeout, dbname="postgres")
+    except Exception as exc:
+        try:
+            observed = _database_role_settings(container, database, timeout=timeout)
+        except Exception as observe_exc:
+            raise RestoreError(
+                EXIT_ROLES_FAILED,
+                "database role-setting transaction failed and its commit state "
+                f"could not be reconciled: {exc}; catalog query failed: {observe_exc}",
+            ) from exc
+        if observed == desired:
+            print(
+                "WARNING: database role-setting apply reported failure, but an "
+                "independent catalog read proves the complete transaction committed",
+                file=sys.stderr,
+            )
+            return
+        if observed == before:
+            raise RestoreError(
+                EXIT_ROLES_FAILED,
+                f"database role-setting transaction did not commit; prior state "
+                f"was preserved: {exc}",
+            ) from exc
+        raise RestoreError(
+            EXIT_ROLES_FAILED,
+            "database role-setting transaction ended in an unexpected catalog "
+            f"state (before keys={_role_settings_shape(before)}, desired keys="
+            f"{_role_settings_shape(desired)}, observed keys="
+            f"{_role_settings_shape(observed)}); refusing connection admission",
+        ) from exc
+    observed = _database_role_settings(container, database, timeout=timeout)
+    if observed != desired:
+        raise RestoreError(
+            EXIT_ROLES_FAILED,
+            "database role-setting transaction returned success but the catalog "
+            f"does not match the desired keys (desired={_role_settings_shape(desired)}, "
+            f"observed={_role_settings_shape(observed)})",
+        )
+
+
 def _bootstrap_password_reset_problem(body: str, superuser: str) -> str | None:
     """Refuse roles.sql that rewrites the bootstrap role's PASSWORD.
 
@@ -3488,13 +3733,447 @@ def _drop_generated_database(container: str, database: str, *, timeout: int) -> 
     )
 
 
+@dataclass(frozen=True)
+class _DatabaseCatalogRow:
+    """One independently observed pg_database identity/name/admission row."""
+
+    oid: int
+    name: str
+    allow_connections: bool
+
+
+# ============================================================================
+# Purpose: Observe cutover databases by immutable OID as well as mutable name,
+#          including any unexpected occupant of a reserved cutover name.
+# Database/ORM: pg_database through a fresh maintenance-database psql -X call.
+# Standards: JSON rows, strict types, duplicate rejection, and quoted filters;
+#            each call is an independent control connection after ambiguity.
+# Blast Radius: Restore cutover reconciliation and operator recovery commands.
+# Connections:
+#   - File: scripts/restore_database.py -> _capture_cutover_database_identities
+#     and _reconcile_cutover_rollback.
+# ============================================================================
+def _database_catalog_rows(
+    container: str,
+    *,
+    timeout: int,
+    names: tuple[str, ...] = (),
+    oids: tuple[int, ...] = (),
+) -> dict[int, _DatabaseCatalogRow]:
+    """Read matching pg_database rows through an independent control query."""
+    clauses: list[str] = []
+    if names:
+        clauses.append(
+            "d.datname IN (" + ", ".join(_quote_literal(name) for name in names) + ")"
+        )
+    if oids:
+        if any(isinstance(oid, bool) or not isinstance(oid, int) or oid <= 0 for oid in oids):
+            raise RestoreError(EXIT_INTERNAL, "invalid database OID in cutover state")
+        clauses.append("d.oid IN (" + ", ".join(str(oid) for oid in oids) + ")")
+    if not clauses:
+        raise RestoreError(EXIT_INTERNAL, "cutover catalog query has no identity filter")
+    sql = (
+        "SELECT json_build_object('oid', d.oid::text, 'name', d.datname, "
+        "'allow_connections', d.datallowconn)::text "
+        "FROM pg_catalog.pg_database d WHERE "
+        + " OR ".join(f"({clause})" for clause in clauses)
+        + " ORDER BY d.oid;"
+    )
+    rows: dict[int, _DatabaseCatalogRow] = {}
+    names_seen: set[str] = set()
+    raw = _psql(container, sql, timeout=timeout, dbname="postgres")
+    for line in raw.splitlines():
+        if not line.strip():
+            continue
+        try:
+            document = json.loads(line)
+        except ValueError as exc:
+            raise RestoreError(
+                EXIT_RESTORE_FAILED,
+                f"could not parse pg_database cutover JSON: {exc}",
+            ) from exc
+        if not isinstance(document, dict):
+            raise RestoreError(
+                EXIT_RESTORE_FAILED, "pg_database cutover row is not a JSON object"
+            )
+        raw_oid = document.get("oid")
+        name = document.get("name")
+        allow = document.get("allow_connections")
+        try:
+            oid = int(raw_oid) if isinstance(raw_oid, str) else -1
+        except ValueError as exc:
+            raise RestoreError(
+                EXIT_RESTORE_FAILED, "pg_database cutover row has an invalid OID"
+            ) from exc
+        if oid <= 0 or not isinstance(name, str) or not isinstance(allow, bool):
+            raise RestoreError(
+                EXIT_RESTORE_FAILED,
+                "pg_database cutover row has an invalid identity/name/admission shape",
+            )
+        if oid in rows or name in names_seen:
+            raise RestoreError(
+                EXIT_RESTORE_FAILED,
+                "pg_database cutover query returned duplicate OID or database name",
+            )
+        rows[oid] = _DatabaseCatalogRow(oid, name, allow)
+        names_seen.add(name)
+    return rows
+
+
+def _capture_cutover_database_identities(
+    container: str,
+    target_db: str,
+    replacement: str,
+    previous: str,
+    *,
+    timeout: int,
+) -> tuple[int, int]:
+    """Capture immutable OIDs and prove the generated previous name is free."""
+    rows = _database_catalog_rows(
+        container,
+        timeout=timeout,
+        names=(target_db, replacement, previous),
+    )
+    by_name = {row.name: row for row in rows.values()}
+    if previous in by_name:
+        raise RestoreError(
+            EXIT_RESTORE_FAILED,
+            f"generated rollback database name {previous!r} is already occupied",
+        )
+    if target_db not in by_name or replacement not in by_name:
+        missing = [
+            name for name in (target_db, replacement) if name not in by_name
+        ]
+        raise RestoreError(
+            EXIT_RESTORE_FAILED,
+            "cutover identity capture could not find database(s): " + ", ".join(missing),
+        )
+    target_oid = by_name[target_db].oid
+    replacement_oid = by_name[replacement].oid
+    if target_oid == replacement_oid:
+        raise RestoreError(
+            EXIT_INTERNAL, "target and replacement resolved to the same database OID"
+        )
+    return target_oid, replacement_oid
+
+
+def _observe_cutover_database_state(
+    container: str,
+    target_db: str,
+    replacement: str,
+    previous: str,
+    target_oid: int,
+    replacement_oid: int,
+    *,
+    timeout: int,
+) -> dict[int, _DatabaseCatalogRow]:
+    """Observe both identities plus all reserved names after an ambiguous call."""
+    return _database_catalog_rows(
+        container,
+        timeout=timeout,
+        names=(target_db, replacement, previous),
+        oids=(target_oid, replacement_oid),
+    )
+
+
+def _cutover_state_summary(
+    rows: dict[int, _DatabaseCatalogRow] | None,
+    target_oid: int,
+    replacement_oid: int,
+) -> str:
+    """Render exact identity/name/admission state without inferring success."""
+    if rows is None:
+        return "UNAVAILABLE (the independent pg_database query failed)"
+
+    def describe(label: str, oid: int) -> str:
+        row = rows.get(oid)
+        if row is None:
+            return f"{label}_oid={oid}:MISSING"
+        return (
+            f"{label}_oid={oid}:name={row.name!r},"
+            f"allow_connections={row.allow_connections}"
+        )
+
+    known_oids = {target_oid, replacement_oid}
+    unexpected = sorted(
+        f"oid={row.oid}:name={row.name!r},allow_connections={row.allow_connections}"
+        for oid, row in rows.items()
+        if oid not in known_oids
+    )
+    suffix = f", unexpected=[{'; '.join(unexpected)}]" if unexpected else ""
+    return (
+        describe("previous_live", target_oid)
+        + "; "
+        + describe("verified_replacement", replacement_oid)
+        + suffix
+    )
+
+
+def _cutover_recovery_commands(
+    rows: dict[int, _DatabaseCatalogRow] | None,
+    target_db: str,
+    replacement: str,
+    previous: str,
+    target_oid: int,
+    replacement_oid: int,
+) -> str:
+    """Build commands valid for the last independently observed catalog state."""
+    query = (
+        "SELECT oid, datname, datallowconn FROM pg_catalog.pg_database WHERE oid IN "
+        f"({target_oid}, {replacement_oid}) OR datname IN "
+        f"({_quote_literal(target_db)}, {_quote_literal(replacement)}, "
+        f"{_quote_literal(previous)});"
+    )
+    if rows is None:
+        return (
+            "re-query first: "
+            + query
+            + " No ALTER DATABASE recovery command can be derived until that query "
+            "succeeds and both captured OIDs are identified."
+        )
+    old = rows.get(target_oid)
+    new = rows.get(replacement_oid)
+    by_name = {row.name: row for row in rows.values()}
+    steps: list[str] = []
+    safe_identity_shape = bool(
+        old
+        and new
+        and (
+            (old.name == target_db and new.name == replacement)
+            or (old.name == previous and new.name == replacement)
+            or (old.name == previous and new.name == target_db)
+        )
+    )
+    if not safe_identity_shape:
+        return (
+            "re-query first: "
+            + query
+            + " Observed-state recovery: -- captured OIDs are not in a known "
+            "cutover shape; do not rename any database"
+        )
+    old_will_be_target = old is not None and old.name == target_db
+    if new is not None and new.name == target_db and replacement not in by_name:
+        steps.extend(
+            [
+                f"ALTER DATABASE {_quote_identifier(target_db)} WITH ALLOW_CONNECTIONS false;",
+                "SELECT pg_catalog.pg_terminate_backend(pid) FROM "
+                "pg_catalog.pg_stat_activity WHERE datname = "
+                f"{_quote_literal(target_db)} AND pid <> pg_catalog.pg_backend_pid();",
+                f"ALTER DATABASE {_quote_identifier(target_db)} RENAME TO "
+                f"{_quote_identifier(replacement)};",
+            ]
+        )
+        by_name.pop(target_db, None)
+        by_name[replacement] = new
+    if old is not None and old.name == previous and target_db not in by_name:
+        steps.append(
+            f"ALTER DATABASE {_quote_identifier(previous)} RENAME TO "
+            f"{_quote_identifier(target_db)};"
+        )
+        by_name[target_db] = old
+        old_will_be_target = True
+    if old_will_be_target:
+        steps.append(
+            f"ALTER DATABASE {_quote_identifier(target_db)} WITH ALLOW_CONNECTIONS true;"
+        )
+    if new is not None and new.name == replacement:
+        steps.append(
+            f"ALTER DATABASE {_quote_identifier(replacement)} WITH ALLOW_CONNECTIONS false;"
+        )
+    if not steps:
+        steps.append(
+            "-- observed identities are not in a safe automatic rename shape; "
+            "do not rename an unknown occupant"
+        )
+    return "re-query first: " + query + " Observed-state recovery: " + " ".join(steps)
+
+
+def _reconcile_cutover_rollback(
+    container: str,
+    target_db: str,
+    replacement: str,
+    previous: str,
+    target_oid: int,
+    replacement_oid: int,
+    *,
+    timeout: int,
+) -> tuple[bool, dict[int, _DatabaseCatalogRow] | None, list[str]]:
+    """Restore canonical names/admission using catalog observations, not flags."""
+    notes: list[str] = []
+    attempts: dict[tuple[str, str], int] = {}
+
+    def observe() -> dict[int, _DatabaseCatalogRow] | None:
+        try:
+            return _observe_cutover_database_state(
+                container,
+                target_db,
+                replacement,
+                previous,
+                target_oid,
+                replacement_oid,
+                timeout=timeout,
+            )
+        except Exception as exc:
+            notes.append(f"independent pg_database reconciliation query failed: {exc}")
+            return None
+
+    rows = observe()
+    if rows is None:
+        return False, None, notes
+    for _step in range(10):
+        old = rows.get(target_oid)
+        new = rows.get(replacement_oid)
+        if old is None or new is None:
+            notes.append("one or both captured database OIDs disappeared")
+            return False, rows, notes
+        by_name = {row.name: row for row in rows.values()}
+
+        if new.name == target_db:
+            if new.allow_connections:
+                action_key = (f"allow:{target_db}", "False")
+                attempts[action_key] = attempts.get(action_key, 0) + 1
+                if attempts[action_key] > 2:
+                    notes.append(
+                        "bounded rollback exhausted disabling connections on "
+                        f"promoted database {target_db!r}"
+                    )
+                    return False, rows, notes
+                try:
+                    _set_database_allow_connections(
+                        container, target_db, allow=False, timeout=timeout
+                    )
+                except Exception as exc:
+                    notes.append(
+                        f"ALLOW_CONNECTIONS=False on {target_db!r} reported failure: {exc}"
+                    )
+                refreshed = observe()
+                if refreshed is None:
+                    return False, None, notes
+                rows = refreshed
+                continue
+            try:
+                _drain_database_sessions(container, target_db, timeout=timeout)
+            except Exception as exc:
+                notes.append(
+                    f"could not drain promoted database {target_db!r} before rollback: {exc}"
+                )
+                refreshed = observe()
+                return False, refreshed, notes
+
+        if old.name not in {target_db, previous}:
+            notes.append(
+                f"previous-live OID {target_oid} has unexpected name {old.name!r}"
+            )
+            return False, rows, notes
+        if new.name not in {target_db, replacement}:
+            notes.append(
+                f"verified replacement OID {replacement_oid} has unexpected name {new.name!r}"
+            )
+            return False, rows, notes
+        if (new.name == target_db and old.name != previous) or (
+            old.name == target_db and new.name != replacement
+        ):
+            notes.append("captured database OIDs are not in a known cutover name shape")
+            return False, rows, notes
+
+        action: tuple[str, str] | None = None
+        if new.name == target_db:
+            occupant = by_name.get(replacement)
+            if occupant is not None and occupant.oid != replacement_oid:
+                notes.append(
+                    f"cannot move verified OID {replacement_oid} back: {replacement!r} "
+                    f"is occupied by unexpected OID {occupant.oid}"
+                )
+                return False, rows, notes
+            action = (target_db, replacement)
+        elif old.name == previous:
+            occupant = by_name.get(target_db)
+            if occupant is not None and occupant.oid != target_oid:
+                notes.append(
+                    f"cannot restore previous-live OID {target_oid}: {target_db!r} "
+                    f"is occupied by unexpected OID {occupant.oid}"
+                )
+                return False, rows, notes
+            action = (previous, target_db)
+
+        if action is not None:
+            attempts[action] = attempts.get(action, 0) + 1
+            if attempts[action] > 2:
+                notes.append(
+                    f"bounded rollback exhausted for rename {action[0]!r} -> {action[1]!r}"
+                )
+                return False, rows, notes
+            try:
+                _rename_database(
+                    container, action[0], action[1], timeout=timeout
+                )
+            except Exception as exc:
+                notes.append(
+                    f"rename {action[0]!r} -> {action[1]!r} reported failure: {exc}"
+                )
+            refreshed = observe()
+            if refreshed is None:
+                return False, None, notes
+            rows = refreshed
+            continue
+
+        # Canonical names are restored. Reconcile both admission flags even if
+        # the ALTER DATABASE client previously timed out after server commit.
+        desired_allow = ((replacement, replacement_oid, False), (target_db, target_oid, True))
+        changed = False
+        for name, oid, desired in desired_allow:
+            row = rows.get(oid)
+            if row is None or row.name != name or row.allow_connections == desired:
+                continue
+            action_key = (f"allow:{name}", str(desired))
+            attempts[action_key] = attempts.get(action_key, 0) + 1
+            if attempts[action_key] > 2:
+                notes.append(
+                    f"bounded rollback exhausted setting ALLOW_CONNECTIONS={desired} "
+                    f"on {name!r}"
+                )
+                return False, rows, notes
+            try:
+                _set_database_allow_connections(
+                    container, name, allow=desired, timeout=timeout
+                )
+            except Exception as exc:
+                notes.append(
+                    f"ALLOW_CONNECTIONS={desired} on {name!r} reported failure: {exc}"
+                )
+            refreshed = observe()
+            if refreshed is None:
+                return False, None, notes
+            rows = refreshed
+            changed = True
+            break
+        if changed:
+            continue
+        old = rows.get(target_oid)
+        new = rows.get(replacement_oid)
+        complete = bool(
+            old
+            and new
+            and old.name == target_db
+            and old.allow_connections
+            and new.name == replacement
+            and not new.allow_connections
+        )
+        if complete:
+            return True, rows, notes
+        notes.append("catalog state did not converge to the rollback invariant")
+        return False, rows, notes
+    notes.append("bounded catalog reconciliation exceeded ten state transitions")
+    return False, rows, notes
+
+
 # ============================================================================
 # Purpose: Cut over a fully verified replacement while retaining the previous
 #          database under a unique rollback name.
 # Database/ORM: PostgreSQL database admission, sessions, and ALTER DATABASE.
-# Standards: Advisory lock held by caller; disable connections before draining;
-#            one bounded rename per psql call; best-effort automatic rollback;
-#            never DROP either verified replacement or previous live database.
+# Standards: Advisory lock held by caller; capture immutable database OIDs;
+#            disable connections before draining; re-query name/admission state
+#            after every ambiguity; bounded rollback; never DROP either database.
 # Blast Radius: Short non-atomic name cutover. Failure reports exact names and
 #               recovery SQL instead of deleting the last-good database.
 # Connections:
@@ -3511,23 +4190,24 @@ def _cutover_verified_database(
 ) -> str:
     """Swap verified ``replacement`` into ``target_db`` and retain the old DB."""
     previous = f"ums_previous_{uuid.uuid4().hex[:24]}"
+    target_oid, replacement_oid = _capture_cutover_database_identities(
+        container,
+        target_db,
+        replacement,
+        previous,
+        timeout=timeout,
+    )
     stage = "disable target connections"
-    target_disabled = False
-    replacement_disabled = False
-    old_renamed = False
-    new_renamed = False
     try:
         _set_database_allow_connections(
             container, target_db, allow=False, timeout=timeout
         )
-        target_disabled = True
         stage = "drain target connections"
         _drain_database_sessions(container, target_db, timeout=timeout)
         stage = "disable replacement connections"
         _set_database_allow_connections(
             container, replacement, allow=False, timeout=timeout
         )
-        replacement_disabled = True
         stage = "drain replacement connections"
         _drain_database_sessions(container, replacement, timeout=timeout)
         # Recheck both names immediately before the first non-atomic rename.
@@ -3542,75 +4222,80 @@ def _cutover_verified_database(
             )
         stage = f"rename {target_db!r} to {previous!r}"
         _rename_database(container, target_db, previous, timeout=timeout)
-        old_renamed = True
         stage = f"rename {replacement!r} to {target_db!r}"
         _rename_database(container, replacement, target_db, timeout=timeout)
-        new_renamed = True
         if finalize is not None:
-            stage = "finalize cluster roles against the cut-over database name"
+            stage = "finalize database-scoped role settings on the promoted database"
             finalize()
         stage = f"enable connections on {target_db!r}"
         _set_database_allow_connections(
             container, target_db, allow=True, timeout=timeout
         )
-        target_disabled = False
+        stage = "verify promoted database identities and admission state"
+        observed = _observe_cutover_database_state(
+            container,
+            target_db,
+            replacement,
+            previous,
+            target_oid,
+            replacement_oid,
+            timeout=timeout,
+        )
+        old = observed.get(target_oid)
+        new = observed.get(replacement_oid)
+        if not (
+            old
+            and new
+            and old.name == previous
+            and not old.allow_connections
+            and new.name == target_db
+            and new.allow_connections
+        ):
+            raise RestoreError(
+                EXIT_RESTORE_FAILED,
+                "post-cutover catalog state does not match captured database OIDs: "
+                + _cutover_state_summary(observed, target_oid, replacement_oid),
+            )
         return previous
     # This boundary deliberately catches unexpected callback/helper failures:
     # once the first rename succeeds, even an internal bug must attempt the
     # same reverse-name recovery before main maps it to exit 9.
     except Exception as exc:
-        rollback_notes: list[str] = []
-        if new_renamed:
-            try:
-                _rename_database(container, target_db, replacement, timeout=timeout)
-            except Exception as rollback_exc:
-                rollback_notes.append(
-                    f"could not move the verified replacement back to {replacement!r}: "
-                    f"{rollback_exc}"
-                )
-            else:
-                new_renamed = False
-        if old_renamed and not new_renamed:
-            try:
-                _rename_database(container, previous, target_db, timeout=timeout)
-            except Exception as rollback_exc:
-                rollback_notes.append(
-                    f"could not restore the previous database name from {previous!r}: "
-                    f"{rollback_exc}"
-                )
-            else:
-                old_renamed = False
-        if not old_renamed and not new_renamed:
-            try:
-                _set_database_allow_connections(
-                    container, target_db, allow=True, timeout=timeout
-                )
-                target_disabled = False
-            except Exception as rollback_exc:
-                rollback_notes.append(
-                    f"could not re-enable connections on {target_db!r}: {rollback_exc}"
-                )
+        rollback_complete, rollback_observed, rollback_notes = (
+            _reconcile_cutover_rollback(
+                container,
+                target_db,
+                replacement,
+                previous,
+                target_oid,
+                replacement_oid,
+                timeout=timeout,
+            )
+        )
         code = exc.code if isinstance(exc, RestoreError) else EXIT_INTERNAL
-        state = (
-            f"target={target_db!r}, verified_replacement={replacement!r}, "
-            f"previous={previous!r}, old_renamed={old_renamed}, "
-            f"new_renamed={new_renamed}, target_disabled={target_disabled}, "
-            f"replacement_disabled={replacement_disabled}"
+        state = _cutover_state_summary(
+            rollback_observed, target_oid, replacement_oid
         )
-        recovery = (
-            "inspect pg_database first. Intended rollback SQL from database postgres: "
-            f"ALTER DATABASE {_quote_identifier(target_db)} WITH ALLOW_CONNECTIONS false; "
-            f"ALTER DATABASE {_quote_identifier(target_db)} RENAME TO "
-            f"{_quote_identifier(replacement)}; "
-            f"ALTER DATABASE {_quote_identifier(previous)} RENAME TO "
-            f"{_quote_identifier(target_db)}; "
-            f"ALTER DATABASE {_quote_identifier(target_db)} WITH ALLOW_CONNECTIONS true"
+        recovery = _cutover_recovery_commands(
+            rollback_observed,
+            target_db,
+            replacement,
+            previous,
+            target_oid,
+            replacement_oid,
         )
-        notes = "; ".join(rollback_notes) or "automatic rollback completed"
+        notes = "; ".join(rollback_notes)
+        outcome = (
+            "automatic catalog-reconciled rollback completed"
+            if rollback_complete
+            else "automatic catalog-reconciled rollback is INCOMPLETE"
+        )
         raise RestoreError(
             code,
-            f"verified-database cutover failed during {stage}: {exc}; {state}; "
-            f"{notes}. {recovery}. Neither database was dropped.",
+            f"verified-database cutover failed during {stage}: {exc}; {outcome}; "
+            f"observed {state}"
+            + (f"; reconciliation notes: {notes}" if notes else "")
+            + f". {recovery}. Neither database was dropped.",
         ) from exc
 
 
@@ -3671,7 +4356,8 @@ def _prepare_restore_target(
 #               container only.
 # Standards: Emptiness/session checks before roles; roles before data so RLS
 #            grants have parents; content/seed/large-object verification before
-#            cutover; automatic rename rollback; fail closed via RestoreError.
+#            cutover; OID-reconciled rename rollback; transactional database-role
+#            finalization; fail closed via RestoreError.
 # Blast Radius: Cluster-global role replay plus a short live-name cutover;
 #               previous database retained. Rehearsal uses a throwaway only.
 # Connections:
@@ -3759,6 +4445,12 @@ def _execute_restore(
                 roles = _restore_roles(
                     container, backup_dir / ROLES_NAME, timeout=args.timeout
                 )
+                database_role_settings = _desired_database_role_settings(
+                    container,
+                    backup_dir / ROLES_NAME,
+                    target_db,
+                    timeout=args.timeout,
+                )
             except (RestoreError, OSError, subprocess.SubprocessError) as exc:
                 code = exc.code if isinstance(exc, RestoreError) else EXIT_ROLES_FAILED
                 raise RestoreError(
@@ -3817,17 +4509,22 @@ def _execute_restore(
             # drops either the verified replacement or the previous target.
             preserve_replacement = True
 
-            def _finalize_roles() -> None:
-                """Replay per-database role settings after the new target has its final name."""
+            def _finalize_database_role_settings() -> None:
+                """Apply only database-scoped settings after final-name promotion."""
                 _verify_backup_artifact_digests(backup_dir, manifest)
-                _restore_roles(container, backup_dir / ROLES_NAME, timeout=args.timeout)
+                _apply_database_role_settings_transactionally(
+                    container,
+                    target_db,
+                    database_role_settings,
+                    timeout=args.timeout,
+                )
 
             previous = _cutover_verified_database(
                 container,
                 target_db,
                 replacement,
                 timeout=args.timeout,
-                finalize=_finalize_roles,
+                finalize=_finalize_database_role_settings,
             )
             print(
                 f"cutover complete: previous database preserved as {previous!r} "

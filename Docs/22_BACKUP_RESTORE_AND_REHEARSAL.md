@@ -1065,22 +1065,32 @@ database, serializes restore operators. Immediately before cutover the script al
 3. rechecks both session counts;
 4. renames the target to `ums_previous_<id>`;
 5. renames the verified `ums_restore_<id>` database to the target name;
-6. replays role settings that are scoped to the final database name; and
+6. applies the protected roles' settings scoped to the final database name in one
+   `BEGIN`/`COMMIT` transaction; and
 7. enables connections on the promoted target.
 
 PostgreSQL cannot make steps 4 and 5 one transaction. That is the exact short
 non-atomic cutover window. Failure at or after either rename triggers automatic reverse
-renames while connections remain disabled. The error names the target, replacement and
-previous databases and reports whether rollback completed; neither database is dropped.
+renames while connections remain disabled. Before changing admission, the script records
+the target and replacement databases' immutable `pg_database.oid` values. After **every**
+rename exception — including a client timeout after the server already committed — and
+after every rollback attempt, it opens a fresh `psql -X` maintenance connection and
+re-reads each OID's current name and `datallowconn`. Recovery decisions come from that
+observed state, not from whether the client call returned. The error prints both captured
+OIDs, their exact last-observed names/admission flags, any unexpected occupant of a
+reserved name, and whether catalog-reconciled rollback completed. If the independent
+query itself fails, state is explicitly `UNAVAILABLE` and no speculative rename command
+is printed; neither database is dropped.
 
 If automatic rollback also fails, connect to the maintenance database with `psql -X`,
 inspect `pg_database` first, keep application traffic stopped, and recover according to
 the names printed by the error. The post-promotion recovery shape is:
 
 ```sql
-SELECT datname, datallowconn
+SELECT oid, datname, datallowconn
 FROM pg_catalog.pg_database
-WHERE datname IN ('<target>', 'ums_restore_<id>', 'ums_previous_<id>');
+WHERE oid IN (<previous-live-oid>, <verified-replacement-oid>)
+   OR datname IN ('<target>', 'ums_restore_<id>', 'ums_previous_<id>');
 
 ALTER DATABASE "<target>" WITH ALLOW_CONNECTIONS false;
 SELECT pg_catalog.pg_terminate_backend(pid)
@@ -1093,8 +1103,10 @@ ALTER DATABASE "<target>" WITH ALLOW_CONNECTIONS true;
 
 If the second rename never succeeded, `<target>` is absent and the verified replacement
 still has its `ums_restore_<id>` name; skip the first rename and rename only
-`ums_previous_<id>` back to `<target>`. Do not guess names—use the failure's state line
-and the catalog query.
+`ums_previous_<id>` back to `<target>`. A timeout is not proof that a rename failed: run
+the OID query first, then use only the observed-state recovery commands printed by the
+error. If an expected OID is missing or a reserved name has an unexpected occupant, do
+not rename anything until that discrepancy is understood.
 
 On success, the previous database remains under `ums_previous_<id>` with connections
 disabled. Keep it until the promoted database has passed application acceptance and a
@@ -1102,12 +1114,22 @@ fresh accepted backup has been published. Only then may an operator explicitly d
 that exact previous name from the maintenance database. Restore never prunes or drops
 it automatically.
 
-`roles.sql` is validated before apply, but PostgreSQL role creation, membership and
-role-setting replay are cluster operations and are **not transactionally coupled** to
-the database renames. A role replay failure is fail-closed and leaves the live database
-name unchanged or automatically rolled back, but the error may still require inspection
-and cleanup of partially applied cluster role state before retrying. Do not describe the
-database-plus-roles operation as atomic.
+`roles.sql` is validated before apply, but the initial PostgreSQL role creation,
+membership and cluster-global role-setting replay is **not transactionally coupled** to
+the database renames. A failure there is fail-closed before cutover, but may still require
+inspection and cleanup of partially applied cluster role state before retrying. Do not
+describe the database-plus-roles operation as atomic.
+
+The finalizer deliberately does **not** replay the full `roles.sql` a second time. After
+the initial replay, the script records only the protected-role settings explicitly scoped
+to the target database. Once the verified replacement has the target name, it replaces
+those database-scoped settings with `RESET ALL` plus the recorded `SET` statements inside
+one transaction. A fresh catalog read follows both success and failure: a lost COMMIT
+response is accepted only when the complete desired state is observed; the unchanged
+prior state proves a pre-commit failure; any other state refuses connection admission and
+triggers the OID-based database rollback. Thus a cutover finalizer cannot leave a bare
+cluster-global `RESET ALL` side effect, but this does not make the earlier full role replay
+atomic.
 
 The two host artifacts are copied into an owner-only temporary directory and re-hashed
 there before Docker is contacted and again at each point of use. All `psql` calls use
@@ -1148,7 +1170,7 @@ that a live two-rename cutover was rehearsed on this final snapshot.
 | `uv sync --extra dev --extra test --extra lint` | success — 89 packages resolved, 86 checked |
 | `uv run ruff check backend tests scripts` | `All checks passed!` |
 | `uv run mypy scripts/backup_database.py scripts/restore_database.py` | `Success: no issues found in 2 source files` |
-| `uv run pytest -q tests/scripts/test_backup_content_gate.py` | **299 passed** — includes missing/empty stacked-seed refusal, rejected-run retention isolation, private restore staging, replacement-before-cutover ordering, second-rename rollback, unexpected finalizer rollback, ACL/locale/roles and large-object gates |
+| `uv run pytest -q tests/scripts/test_backup_content_gate.py` | **307 passed** — includes missing/empty stacked-seed refusal, rejected-run retention isolation, private restore staging, replacement-before-cutover ordering, first- and second-rename commit-then-timeout reconciliation by database OID, query-only guidance when identity cannot be observed, ambiguous rollback after a finalizer failure, transactional role-setting COMMIT reconciliation, ACL/locale/roles and large-object gates |
 | `git diff --check` | success |
 | `uv run pytest -q` | **not a pass** — `UMS_TEST_DATABASE_URL` was unset, the suite reached its explicit real-Postgres setup errors, and the non-actionable run was stopped at 65% when the repair owner requested immediate closeout |
 

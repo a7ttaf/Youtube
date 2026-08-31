@@ -5097,6 +5097,16 @@ def test_execute_restore_verifies_replacement_before_cutover_on_every_path(
     )
     monkeypatch.setattr(
         restore,
+        "_desired_database_role_settings",
+        lambda *a, **k: order.append("capture-db-role-settings") or {},
+    )
+    monkeypatch.setattr(
+        restore,
+        "_apply_database_role_settings_transactionally",
+        lambda *a, **k: order.append("finalize-db-role-settings"),
+    )
+    monkeypatch.setattr(
+        restore,
         "_restore_data",
         lambda *_a, dbname=None, **_k: order.append(f"data:{dbname}"),
     )
@@ -5117,7 +5127,7 @@ def test_execute_restore_verifies_replacement_before_cutover_on_every_path(
         timeout: int,
         finalize: Callable[[], None] | None = None,
     ) -> str:
-        """Model the rename boundary and its final role replay."""
+        """Model the rename boundary and database-scoped role finalizer."""
         _ = timeout
         order.append(f"cutover:{target_db}<-{replacement}")
         if finalize is not None:
@@ -5151,15 +5161,18 @@ def test_execute_restore_verifies_replacement_before_cutover_on_every_path(
         < order.index("preflight")
         < order.index("create:appdb")
         < order.index("roles")
+        < order.index("capture-db-role-settings")
         < order.index("acl:staging-db")
         < order.index("data:staging-db")
         < order.index("verify:staging-db")
         < order.index("cutover:appdb<-staging-db")
+        < order.index("finalize-db-role-settings")
         < order.index("unlock")
     ), (
         "preflights must precede staging, and the verified replacement must "
         "precede the only live-name cutover"
     )
+    assert order.count("roles") == 1, "full roles.sql must not replay during cutover"
 
     assert _run(allow_nonempty=False) is True
     assert "create:appdb" in order and "dbname" in order
@@ -5172,6 +5185,7 @@ def test_execute_restore_verifies_replacement_before_cutover_on_every_path(
         "the probe must refuse before roles.sql is applied, not after"
     )
     assert order.index("preflight") < order.index("locale:staging-db") < order.index("roles")
+    assert order.count("roles") == 1, "full roles.sql must not replay during cutover"
 
 
 def test_preflight_dump_readable_fails_closed_on_a_nonzero_listing(
@@ -6312,6 +6326,99 @@ def test_role_settings_sql_reads_only_cluster_level_rows() -> None:
     assert "pg_db_role_setting" in restore.ROLE_SETTINGS_KEYS_SQL
 
 
+def test_database_role_setting_declarations_are_exactly_target_scoped() -> None:
+    """Only protected-role SET declarations for the final target are replayed."""
+    declared = restore._protected_database_role_setting_declarations(
+        "ALTER ROLE app_tenant IN DATABASE appdb SET statement_timeout TO '2min';\n"
+        'ALTER ROLE app_platform IN DATABASE "appdb" SET work_mem TO \'64MB\';\n'
+        "ALTER ROLE app_tenant IN DATABASE other SET work_mem TO '1MB';\n"
+        "ALTER ROLE app_tenant IN DATABASE appdb RESET search_path;\n"
+        "ALTER ROLE app_tenant SET idle_in_transaction_session_timeout TO '1min';\n"
+        "ALTER ROLE postgres IN DATABASE appdb SET work_mem TO '1GB';\n",
+        "appdb",
+    )
+    assert declared == {
+        "app_tenant": {"statement_timeout"},
+        "app_platform": {"work_mem"},
+    }
+
+
+def test_database_role_finalizer_reconciles_commit_then_timeout(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A lost COMMIT response is success only when a fresh catalog proves all effects."""
+    before = {"app_tenant": {"search_path": "legacy"}}
+    desired = {
+        "app_tenant": {"statement_timeout": "2min"},
+        "app_platform": {"work_mem": "64MB"},
+    }
+    current = {role: dict(settings) for role, settings in before.items()}
+    issued: list[str] = []
+
+    def catalog(*_args: object, **_kwargs: object) -> dict[str, dict[str, str]]:
+        """Return an independent copy of the modeled pg_db_role_setting state."""
+        return {role: dict(settings) for role, settings in current.items()}
+
+    def committed_timeout(
+        _container: str, sql: str, *, timeout: int, dbname: str | None = None
+    ) -> str:
+        """Model PostgreSQL committing the whole transaction before transport loss."""
+        _ = timeout
+        assert dbname == "postgres"
+        issued.append(sql)
+        current.clear()
+        current.update({role: dict(settings) for role, settings in desired.items()})
+        raise restore.RestoreError(
+            restore.EXIT_ROLES_FAILED, "client timed out after COMMIT"
+        )
+
+    monkeypatch.setattr(restore, "_database_role_settings", catalog)
+    monkeypatch.setattr(restore, "_psql", committed_timeout)
+    restore._apply_database_role_settings_transactionally(
+        "container", "appdb", desired, timeout=5
+    )
+
+    assert current == desired
+    assert len(issued) == 1
+    assert issued[0].startswith("BEGIN;\n") and issued[0].endswith("COMMIT;\n")
+    assert all(
+        " IN DATABASE \"appdb\" " in statement
+        for statement in issued[0].splitlines()
+        if statement.startswith("ALTER ROLE")
+    )
+    assert "proves the complete transaction committed" in capsys.readouterr().err
+
+
+def test_database_role_finalizer_timeout_before_commit_preserves_prior_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A transaction transport failure cannot expose RESET ALL without its replay."""
+    before = {"app_tenant": {"search_path": "legacy"}}
+    desired = {"app_tenant": {"statement_timeout": "2min"}}
+    current = {role: dict(settings) for role, settings in before.items()}
+
+    monkeypatch.setattr(
+        restore,
+        "_database_role_settings",
+        lambda *_a, **_k: {
+            role: dict(settings) for role, settings in current.items()
+        },
+    )
+
+    def timeout_before_commit(*_args: object, **_kwargs: object) -> str:
+        """Model loss before the server commits the all-or-nothing transaction."""
+        raise restore.RestoreError(restore.EXIT_ROLES_FAILED, "connection lost")
+
+    monkeypatch.setattr(restore, "_psql", timeout_before_commit)
+    with pytest.raises(restore.RestoreError) as caught:
+        restore._apply_database_role_settings_transactionally(
+            "container", "appdb", desired, timeout=5
+        )
+
+    assert "prior state was preserved" in str(caught.value)
+    assert current == before
+
+
 def test_owner_roles_sql_covers_every_dumped_owner_catalog() -> None:
     """Owner collection must span every owner catalog pg_dump archives.
 
@@ -6572,6 +6679,16 @@ def _patched_execute_restore(monkeypatch: pytest.MonkeyPatch, order: list[str]):
         "_restore_roles",
         lambda container, path, timeout: order.append("roles") or set(),
     )
+    monkeypatch.setattr(
+        restore,
+        "_desired_database_role_settings",
+        lambda *a, **k: order.append("capture-db-role-settings") or {},
+    )
+    monkeypatch.setattr(
+        restore,
+        "_apply_database_role_settings_transactionally",
+        lambda *a, **k: order.append("finalize-db-role-settings"),
+    )
     monkeypatch.setattr(restore, "_restore_data", lambda *a, **k: order.append("data"))
     monkeypatch.setattr(restore, "_verify", lambda *a, **k: True)
     monkeypatch.setattr(
@@ -6588,7 +6705,7 @@ def _patched_execute_restore(monkeypatch: pytest.MonkeyPatch, order: list[str]):
         timeout: int,
         finalize: Callable[[], None] | None = None,
     ) -> str:
-        """Model a successful cutover including the final role replay."""
+        """Model a successful cutover including the database-scoped finalizer."""
         _ = timeout
         order.append(f"cutover:{target_db}<-{replacement}")
         if finalize is not None:
@@ -7359,93 +7476,346 @@ def test_replacement_create_failure_never_touches_the_live_target(
     assert "appdb" not in calls[0], "CREATE must name only the random staging database"
 
 
-def test_cutover_failure_between_renames_restores_the_previous_target(
+def test_cutover_catalog_query_reads_identity_name_and_admission_independently(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Injected second-rename failure rolls the preserved old DB name back."""
-    renames: list[tuple[str, str]] = []
-    connection_changes: list[tuple[str, bool]] = []
+    """Each ambiguity probe targets postgres and binds both OIDs and reserved names."""
+    seen: list[tuple[str, str | None]] = []
 
-    monkeypatch.setattr(restore, "_drain_database_sessions", lambda *a, **k: None)
-    monkeypatch.setattr(restore, "_foreign_writer_session_count", lambda *a, **k: 0)
+    def fake_psql(
+        _container: str, sql: str, *, timeout: int, dbname: str | None = None
+    ) -> str:
+        """Return the same JSON shape emitted by the pg_database control query."""
+        _ = timeout
+        seen.append((sql, dbname))
+        return (
+            '{"oid" : "41001", "name" : "appdb", '
+            '"allow_connections" : true}\n'
+            '{"oid" : "41002", "name" : "staging-db", '
+            '"allow_connections" : false}\n'
+        )
+
+    monkeypatch.setattr(restore, "_psql", fake_psql)
+    rows = restore._database_catalog_rows(
+        "container",
+        timeout=5,
+        names=("appdb", "staging-db", "previous-db"),
+        oids=(41001, 41002),
+    )
+
+    assert rows == {
+        41001: restore._DatabaseCatalogRow(41001, "appdb", True),
+        41002: restore._DatabaseCatalogRow(41002, "staging-db", False),
+    }
+    assert len(seen) == 1 and seen[0][1] == "postgres"
+    assert "d.oid IN (41001, 41002)" in seen[0][0]
+    assert "d.datname IN ('appdb', 'staging-db', 'previous-db')" in seen[0][0]
+
+
+def test_cutover_reconciliation_never_renames_an_unknown_identity_shape(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A concurrently moved captured OID yields query-only operator guidance."""
+    drains: list[str] = []
+    rows = {
+        41001: restore._DatabaseCatalogRow(41001, "operator-moved", False),
+        41002: restore._DatabaseCatalogRow(41002, "appdb", False),
+    }
+    monkeypatch.setattr(
+        restore, "_observe_cutover_database_state", lambda *a, **k: rows
+    )
+    monkeypatch.setattr(
+        restore,
+        "_rename_database",
+        lambda *a, **k: pytest.fail("an unknown identity shape must never be renamed"),
+    )
     monkeypatch.setattr(
         restore,
         "_set_database_allow_connections",
-        lambda _c, database, *, allow, timeout: connection_changes.append(
-            (database, allow)
-        ),
+        lambda *a, **k: pytest.fail("an unknown identity shape must not be admitted"),
+    )
+    monkeypatch.setattr(
+        restore,
+        "_drain_database_sessions",
+        lambda _c, database, *, timeout: drains.append(database),
     )
 
-    def fake_rename(
-        _container: str, source: str, destination: str, *, timeout: int
-    ) -> None:
-        """Fail exactly between old->previous and staging->target."""
-        _ = timeout
-        renames.append((source, destination))
-        if source == "staging-db" and destination == "appdb":
-            raise restore.RestoreError(restore.EXIT_RESTORE_FAILED, "rename refused")
+    complete, observed, notes = restore._reconcile_cutover_rollback(
+        "container",
+        "appdb",
+        "staging-db",
+        "previous-db",
+        41001,
+        41002,
+        timeout=5,
+    )
+    recovery = restore._cutover_recovery_commands(
+        observed,
+        "appdb",
+        "staging-db",
+        "previous-db",
+        41001,
+        41002,
+    )
 
-    monkeypatch.setattr(restore, "_rename_database", fake_rename)
+    assert complete is False and observed == rows
+    assert "unexpected name 'operator-moved'" in "; ".join(notes)
+    assert "do not rename any database" in recovery
+    assert " RENAME TO " not in recovery
+    assert drains == ["appdb"], "the captured promoted OID must fail closed first"
+
+
+class _CutoverCatalogModel:
+    """Small pg_database model for rename/timeout reconciliation tests."""
+
+    OLD_OID = 41001
+    REPLACEMENT_OID = 41002
+
+    def __init__(self) -> None:
+        self.names = {self.OLD_OID: "appdb", self.REPLACEMENT_OID: "staging-db"}
+        self.allow = {self.OLD_OID: True, self.REPLACEMENT_OID: True}
+        self.previous = ""
+        self.rename_attempts: list[tuple[str, str]] = []
+        self.events: list[str] = []
+        self.observations = 0
+        self.fail_before_commit: Callable[[str, str, int], bool] = (
+            lambda _source, _destination, _attempt: False
+        )
+        self.timeout_after_commit: Callable[[str, str, int], bool] = (
+            lambda _source, _destination, _attempt: False
+        )
+
+    def capture(
+        self,
+        _container: str,
+        target: str,
+        replacement: str,
+        previous: str,
+        *,
+        timeout: int,
+    ) -> tuple[int, int]:
+        """Capture the two immutable identities before any admission change."""
+        _ = timeout
+        assert self.names == {
+            self.OLD_OID: target,
+            self.REPLACEMENT_OID: replacement,
+        }
+        self.previous = previous
+        self.events.append("capture")
+        return self.OLD_OID, self.REPLACEMENT_OID
+
+    def observe(
+        self,
+        _container: str,
+        _target: str,
+        _replacement: str,
+        _previous: str,
+        target_oid: int,
+        replacement_oid: int,
+        *,
+        timeout: int,
+    ) -> dict[int, object]:
+        """Return a fresh catalog snapshot after each ambiguous operation."""
+        _ = timeout
+        assert (target_oid, replacement_oid) == (self.OLD_OID, self.REPLACEMENT_OID)
+        self.observations += 1
+        self.events.append("observe")
+        return {
+            oid: restore._DatabaseCatalogRow(oid, self.names[oid], self.allow[oid])
+            for oid in (self.OLD_OID, self.REPLACEMENT_OID)
+        }
+
+    def set_allow(
+        self,
+        _container: str,
+        database: str,
+        *,
+        allow: bool,
+        timeout: int,
+    ) -> None:
+        """Apply one modeled ALTER DATABASE ... ALLOW_CONNECTIONS call."""
+        _ = timeout
+        oid = next(oid for oid, name in self.names.items() if name == database)
+        self.allow[oid] = allow
+        self.events.append(f"allow:{database}:{allow}")
+
+    def drain(self, _container: str, database: str, *, timeout: int) -> None:
+        """Record the session drain ordering boundary."""
+        _ = timeout
+        self.events.append(f"drain:{database}")
+
+    def count(
+        self, _container: str, *, timeout: int, target_db: str | None = None
+    ) -> int:
+        """Record and satisfy the immediate pre-rename session recheck."""
+        _ = timeout
+        self.events.append(f"count:{target_db}")
+        return 0
+
+    def rename(
+        self,
+        _container: str,
+        source: str,
+        destination: str,
+        *,
+        timeout: int,
+    ) -> None:
+        """Model server commit separately from a later client-side timeout."""
+        _ = timeout
+        self.rename_attempts.append((source, destination))
+        attempt = len(self.rename_attempts)
+        self.events.append(f"rename:{source}->{destination}")
+        if self.fail_before_commit(source, destination, attempt):
+            raise restore.RestoreError(restore.EXIT_RESTORE_FAILED, "rename refused")
+        source_oid = next(oid for oid, name in self.names.items() if name == source)
+        assert destination not in self.names.values()
+        self.names[source_oid] = destination
+        if self.timeout_after_commit(source, destination, attempt):
+            raise restore.RestoreError(
+                restore.EXIT_RESTORE_FAILED, "client timed out after server commit"
+            )
+
+    def install(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Patch only the PostgreSQL boundaries exercised by cutover."""
+        monkeypatch.setattr(restore, "_capture_cutover_database_identities", self.capture)
+        monkeypatch.setattr(restore, "_observe_cutover_database_state", self.observe)
+        monkeypatch.setattr(restore, "_set_database_allow_connections", self.set_allow)
+        monkeypatch.setattr(restore, "_drain_database_sessions", self.drain)
+        monkeypatch.setattr(restore, "_foreign_writer_session_count", self.count)
+        monkeypatch.setattr(restore, "_rename_database", self.rename)
+
+
+def _assert_catalog_rolled_back(model: _CutoverCatalogModel) -> None:
+    """Assert the captured old database is live and replacement is closed."""
+    assert model.names == {
+        model.OLD_OID: "appdb",
+        model.REPLACEMENT_OID: "staging-db",
+    }
+    assert model.allow == {model.OLD_OID: True, model.REPLACEMENT_OID: False}
+
+
+def test_cutover_failure_between_renames_restores_the_previous_target(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Injected second-rename refusal rolls the preserved old DB name back."""
+    model = _CutoverCatalogModel()
+    model.fail_before_commit = (
+        lambda source, destination, _attempt: source == "staging-db"
+        and destination == "appdb"
+    )
+    model.install(monkeypatch)
+
     with pytest.raises(restore.RestoreError) as caught:
         restore._cutover_verified_database(
             "container", "appdb", "staging-db", timeout=5
         )
     assert caught.value.code == restore.EXIT_RESTORE_FAILED
     assert "rename refused" in str(caught.value)
-    assert "automatic rollback completed" in str(caught.value)
+    assert "automatic catalog-reconciled rollback completed" in str(caught.value)
     assert "Neither database was dropped" in str(caught.value)
-    previous = renames[0][1]
-    assert renames == [
-        ("appdb", previous),
+    assert model.rename_attempts == [
+        ("appdb", model.previous),
         ("staging-db", "appdb"),
-        (previous, "appdb"),
+        (model.previous, "appdb"),
     ]
-    assert connection_changes[-1] == ("appdb", True)
+    _assert_catalog_rolled_back(model)
+
+
+def test_first_rename_commit_then_timeout_is_reconciled_from_database_oids(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A timeout after old->previous commits cannot make rollback trust a flag."""
+    model = _CutoverCatalogModel()
+    model.timeout_after_commit = lambda _source, _destination, attempt: attempt == 1
+    model.install(monkeypatch)
+
+    with pytest.raises(restore.RestoreError) as caught:
+        restore._cutover_verified_database(
+            "container", "appdb", "staging-db", timeout=5
+        )
+
+    message = str(caught.value)
+    assert "client timed out after server commit" in message
+    assert "automatic catalog-reconciled rollback completed" in message
+    assert f"previous_live_oid={model.OLD_OID}" in message
+    assert f"verified_replacement_oid={model.REPLACEMENT_OID}" in message
+    assert model.rename_attempts == [
+        ("appdb", model.previous),
+        (model.previous, "appdb"),
+    ]
+    assert model.observations >= 3
+    _assert_catalog_rolled_back(model)
+
+
+def test_ambiguous_rename_with_failed_catalog_query_prints_no_speculative_rename(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When identity cannot be re-read, recovery emits only the safe OID query."""
+    model = _CutoverCatalogModel()
+    model.timeout_after_commit = lambda _source, _destination, attempt: attempt == 1
+    model.install(monkeypatch)
+
+    def unavailable(*_args: object, **_kwargs: object) -> dict[int, object]:
+        """Model loss of the independent maintenance connection."""
+        raise restore.RestoreError(
+            restore.EXIT_RESTORE_FAILED, "maintenance query unavailable"
+        )
+
+    monkeypatch.setattr(restore, "_observe_cutover_database_state", unavailable)
+    with pytest.raises(restore.RestoreError) as caught:
+        restore._cutover_verified_database(
+            "container", "appdb", "staging-db", timeout=5
+        )
+
+    message = str(caught.value)
+    assert "automatic catalog-reconciled rollback is INCOMPLETE" in message
+    assert "observed UNAVAILABLE" in message
+    assert "No ALTER DATABASE recovery command can be derived" in message
+    assert " RENAME TO " not in message
+    assert model.rename_attempts == [("appdb", model.previous)]
+
+
+def test_second_rename_commit_then_timeout_is_reconciled_from_database_oids(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A timeout after replacement->target commits is undone by observed identity."""
+    model = _CutoverCatalogModel()
+    model.timeout_after_commit = lambda _source, _destination, attempt: attempt == 2
+    model.install(monkeypatch)
+
+    with pytest.raises(restore.RestoreError) as caught:
+        restore._cutover_verified_database(
+            "container", "appdb", "staging-db", timeout=5
+        )
+
+    assert "automatic catalog-reconciled rollback completed" in str(caught.value)
+    assert model.rename_attempts == [
+        ("appdb", model.previous),
+        ("staging-db", "appdb"),
+        ("appdb", "staging-db"),
+        (model.previous, "appdb"),
+    ]
+    assert model.observations >= 4
+    _assert_catalog_rolled_back(model)
 
 
 def test_cutover_drains_rechecks_and_preserves_the_previous_database(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The success path reaches renames only after both names are closed and empty."""
-    events: list[str] = []
-    monkeypatch.setattr(
-        restore,
-        "_set_database_allow_connections",
-        lambda _c, database, *, allow, timeout: events.append(
-            f"allow:{database}:{allow}"
-        ),
-    )
-    monkeypatch.setattr(
-        restore,
-        "_drain_database_sessions",
-        lambda _c, database, *, timeout: events.append(f"drain:{database}"),
-    )
-
-    def no_sessions(
-        _container: str, *, timeout: int, target_db: str | None = None
-    ) -> int:
-        """Record the immediate pre-rename rechecks."""
-        events.append(f"count:{target_db}")
-        return 0
-
-    monkeypatch.setattr(restore, "_foreign_writer_session_count", no_sessions)
-    monkeypatch.setattr(
-        restore,
-        "_rename_database",
-        lambda _c, source, destination, *, timeout: events.append(
-            f"rename:{source}->{destination}"
-        ),
-    )
+    model = _CutoverCatalogModel()
+    model.install(monkeypatch)
 
     previous = restore._cutover_verified_database(
         "container",
         "appdb",
         "staging-db",
         timeout=5,
-        finalize=lambda: events.append("finalize"),
+        finalize=lambda: model.events.append("finalize"),
     )
     assert previous.startswith("ums_previous_")
-    assert events == [
+    assert model.events == [
+        "capture",
         "allow:appdb:False",
         "drain:appdb",
         "allow:staging-db:False",
@@ -7456,24 +7826,25 @@ def test_cutover_drains_rechecks_and_preserves_the_previous_database(
         "rename:staging-db->appdb",
         "finalize",
         "allow:appdb:True",
+        "observe",
     ]
+    assert model.names == {
+        model.OLD_OID: previous,
+        model.REPLACEMENT_OID: "appdb",
+    }
+    assert model.allow == {model.OLD_OID: False, model.REPLACEMENT_OID: True}
 
 
 def test_role_finalization_failure_rolls_both_database_names_back(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A fail-closed final role replay cannot strand the old DB under a side name."""
-    renames: list[tuple[str, str]] = []
-    monkeypatch.setattr(restore, "_drain_database_sessions", lambda *a, **k: None)
-    monkeypatch.setattr(restore, "_foreign_writer_session_count", lambda *a, **k: 0)
-    monkeypatch.setattr(restore, "_set_database_allow_connections", lambda *a, **k: None)
-    monkeypatch.setattr(
-        restore,
-        "_rename_database",
-        lambda _c, source, destination, *, timeout: renames.append(
-            (source, destination)
-        ),
+    """Rollback re-queries after its own rename commits but the client times out."""
+    model = _CutoverCatalogModel()
+    model.timeout_after_commit = (
+        lambda source, destination, _attempt: source == "appdb"
+        and destination == "staging-db"
     )
+    model.install(monkeypatch)
 
     def fail_roles() -> None:
         """Inject an unexpected failure after promotion, before admission."""
@@ -7483,15 +7854,16 @@ def test_role_finalization_failure_rolls_both_database_names_back(
         restore._cutover_verified_database(
             "container", "appdb", "staging-db", timeout=5, finalize=fail_roles
         )
-    previous = renames[0][1]
     assert caught.value.code == restore.EXIT_INTERNAL
-    assert "automatic rollback completed" in str(caught.value)
-    assert renames == [
-        ("appdb", previous),
+    assert "automatic catalog-reconciled rollback completed" in str(caught.value)
+    assert "reported failure" in str(caught.value)
+    assert model.rename_attempts == [
+        ("appdb", model.previous),
         ("staging-db", "appdb"),
         ("appdb", "staging-db"),
-        (previous, "appdb"),
+        (model.previous, "appdb"),
     ]
+    _assert_catalog_rolled_back(model)
 
 
 def test_strict_backup_permissions_fail_closed_on_chmod_error(
