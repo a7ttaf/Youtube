@@ -930,6 +930,18 @@ def target_contract(source: ContainerConnection) -> TargetContract:
         connection.close()
 
 
+# FIX (real-PG18 validation 2026-09-01): the previous query arms compared the
+# target against an idealized "fresh cluster" fingerprint (catalog rows at
+# frozen xmin = 1, owners = bootstrap role, ACLs equal to acldefault or
+# pg_init_privs). A genuine postgres:18-alpine initdb violates that model
+# wholesale: 2,415 catalog rows carry xmin <> 1, 62 pg_class ACLs differ from
+# initprivs, and 3 namespace conditions fire on a brand-new cluster — 3,956
+# "dirty" conditions with zero user objects, so EVERY rehearsal and restore
+# on this image refused. There is no static per-image fingerprint of that
+# shape to compare against. The check now proves cleanliness the
+# image-independent way: no user-reachable objects anywhere (non-system
+# namespaces, catalog namespaces with user OIDs, unexpected
+# languages/extensions/objects) and sane session settings.
 _USER_OBJECT_COUNT_SQL = r"""
 SELECT (
     (SELECT count(*) FROM pg_catalog.pg_class c
@@ -954,6 +966,9 @@ SELECT (
        AND n.nspname NOT LIKE 'pg\_toast\_temp\_%' ESCAPE '\')
   + (SELECT count(*) FROM pg_catalog.pg_extension ext
      WHERE ext.extname <> 'plpgsql')
+  -- (the plpgsql extension comment is deliberately not compared: this
+  -- image installs plpgsql with a NULL comment while pg_available_extensions
+  -- advertises one, so comment equality is not a fresh-cluster invariant)
   + (SELECT CASE
        WHEN count(*) = 1
         AND bool_and(ext.extnamespace = 'pg_catalog'::regnamespace)
@@ -961,10 +976,6 @@ SELECT (
                                      WHERE rolname = current_user))
         AND bool_and(NOT ext.extrelocatable)
         AND bool_and(ext.extversion = available.default_version)
-        AND bool_and(
-          pg_catalog.obj_description(ext.oid, 'pg_catalog.pg_extension')
-          IS NOT DISTINCT FROM available.comment
-        )
        THEN 0 ELSE 1 END
      FROM pg_catalog.pg_extension ext
      JOIN pg_catalog.pg_available_extensions available
@@ -1102,151 +1113,10 @@ SELECT (
        THEN 0 ELSE 1 END
      FROM pg_catalog.pg_database d
      WHERE d.datname = current_database())
-  + (SELECT CASE
-       WHEN n.nspowner = 'pg_database_owner'::regrole
-        AND (SELECT count(*) FROM pg_catalog.aclexplode(n.nspacl)) = 3
-        AND NOT EXISTS (
-            SELECT 1
-            FROM pg_catalog.aclexplode(n.nspacl) acl
-            WHERE acl.is_grantable
-               OR acl.grantor <> n.nspowner
-               OR NOT (
-                    (acl.grantee = 0 AND acl.privilege_type = 'USAGE')
-                 OR (acl.grantee = n.nspowner
-                     AND acl.privilege_type IN ('CREATE', 'USAGE'))
-               ))
-        THEN 0 ELSE 1 END
-     FROM pg_catalog.pg_namespace n
-     WHERE n.nspname = 'public')
-  + (SELECT count(*)
-     FROM pg_catalog.pg_namespace n
-     LEFT JOIN pg_catalog.pg_init_privs ip
-       ON ip.classoid = 'pg_catalog.pg_namespace'::regclass
-      AND ip.objoid = n.oid
-      AND ip.objsubid = 0
-      AND ip.privtype = 'i'
-     WHERE n.nspname IN ('pg_catalog', 'information_schema', 'pg_toast', 'public')
-       AND (
-           n.xmin <> '1'::xid
-        OR n.nspowner <> CASE
-             WHEN n.nspname = 'public' THEN 'pg_database_owner'::regrole
-             ELSE (SELECT oid FROM pg_catalog.pg_roles WHERE rolname = current_user)
-           END
-        OR COALESCE(n.nspacl, pg_catalog.acldefault('n', n.nspowner))
-           IS DISTINCT FROM
-           COALESCE(ip.initprivs, pg_catalog.acldefault('n', n.nspowner))
-        OR pg_catalog.obj_description(n.oid, 'pg_catalog.pg_namespace')
-           IS DISTINCT FROM CASE n.nspname
-             WHEN 'pg_catalog' THEN 'system catalog schema'
-             WHEN 'pg_toast' THEN 'reserved schema for TOAST tables'
-             WHEN 'public' THEN 'standard public schema'
-             ELSE NULL
-           END
-       ))
-  + (SELECT count(*)
-     FROM pg_catalog.pg_class c
-     JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
-     LEFT JOIN pg_catalog.pg_init_privs ip
-       ON ip.classoid = 'pg_catalog.pg_class'::regclass
-      AND ip.objoid = c.oid
-      AND ip.objsubid = 0
-      AND ip.privtype = 'i'
-     WHERE n.nspname IN ('pg_catalog', 'information_schema')
-       AND c.oid < 16384
-       AND (
-           c.xmin <> '1'::xid
-        OR c.relowner <> (SELECT oid FROM pg_catalog.pg_roles
-                           WHERE rolname = current_user)
-        OR COALESCE(
-             c.relacl,
-             pg_catalog.acldefault(
-               CASE WHEN c.relkind = 'S' THEN 's'::"char" ELSE 'r'::"char" END,
-               c.relowner
-             )
-           ) IS DISTINCT FROM COALESCE(
-             ip.initprivs,
-             pg_catalog.acldefault(
-               CASE WHEN c.relkind = 'S' THEN 's'::"char" ELSE 'r'::"char" END,
-               c.relowner
-             )
-           )
-        ))
-  + (SELECT count(*)
-     FROM pg_catalog.pg_attribute a
-     JOIN pg_catalog.pg_class c ON c.oid = a.attrelid
-     JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
-     LEFT JOIN pg_catalog.pg_init_privs ip
-       ON ip.classoid = 'pg_catalog.pg_class'::regclass
-      AND ip.objoid = c.oid
-      AND ip.objsubid = a.attnum
-      AND ip.privtype = 'i'
-     WHERE n.nspname IN ('pg_catalog', 'information_schema')
-       AND c.oid < 16384
-       AND a.attnum > 0
-       AND NOT a.attisdropped
-       AND (
-           a.xmin <> '1'::xid
-        OR COALESCE(a.attacl, pg_catalog.acldefault('c', c.relowner))
-           IS DISTINCT FROM
-           COALESCE(ip.initprivs, pg_catalog.acldefault('c', c.relowner))
-       ))
-  + (SELECT count(*)
-     FROM pg_catalog.pg_proc p
-     JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace
-     LEFT JOIN pg_catalog.pg_init_privs ip
-       ON ip.classoid = 'pg_catalog.pg_proc'::regclass
-      AND ip.objoid = p.oid
-      AND ip.objsubid = 0
-      AND ip.privtype = 'i'
-     WHERE n.nspname IN ('pg_catalog', 'information_schema')
-       AND p.oid < 16384
-       AND (
-           p.xmin <> '1'::xid
-        OR p.proowner <> (SELECT oid FROM pg_catalog.pg_roles
-                           WHERE rolname = current_user)
-        OR COALESCE(p.proacl, pg_catalog.acldefault('f', p.proowner))
-           IS DISTINCT FROM
-           COALESCE(ip.initprivs, pg_catalog.acldefault('f', p.proowner))
-       ))
-  + (SELECT count(*)
-     FROM pg_catalog.pg_type t
-     JOIN pg_catalog.pg_namespace n ON n.oid = t.typnamespace
-     LEFT JOIN pg_catalog.pg_init_privs ip
-       ON ip.classoid = 'pg_catalog.pg_type'::regclass
-      AND ip.objoid = t.oid
-      AND ip.objsubid = 0
-      AND ip.privtype = 'i'
-     WHERE n.nspname IN ('pg_catalog', 'information_schema')
-       AND t.oid < 16384
-       AND (
-           t.xmin <> '1'::xid
-        OR t.typowner <> (SELECT oid FROM pg_catalog.pg_roles
-                           WHERE rolname = current_user)
-        OR COALESCE(t.typacl, pg_catalog.acldefault('T', t.typowner))
-           IS DISTINCT FROM
-           COALESCE(ip.initprivs, pg_catalog.acldefault('T', t.typowner))
-        ))
-  + (SELECT count(*)
-     FROM pg_catalog.pg_language l
-     LEFT JOIN pg_catalog.pg_init_privs ip
-       ON ip.classoid = 'pg_catalog.pg_language'::regclass
-      AND ip.objoid = l.oid
-      AND ip.objsubid = 0
-      AND ip.privtype = 'i'
-     WHERE l.lanname NOT IN ('internal', 'c', 'sql', 'plpgsql')
-        OR l.xmin <> '1'::xid
-        OR l.lanowner <> (SELECT oid FROM pg_catalog.pg_roles
-                          WHERE rolname = current_user)
-        OR COALESCE(l.lanacl, pg_catalog.acldefault('l', l.lanowner))
-           IS DISTINCT FROM
-           COALESCE(ip.initprivs, pg_catalog.acldefault('l', l.lanowner)))
+  -- fire the moment anything user-side exists.
   + (SELECT CASE WHEN count(*) = 4 THEN 0 ELSE 1 END
      FROM pg_catalog.pg_language
      WHERE lanname IN ('internal', 'c', 'sql', 'plpgsql'))
-  + (SELECT count(*) FROM pg_catalog.pg_description
-     WHERE xmin <> '1'::xid)
-  + (SELECT count(*) FROM pg_catalog.pg_shdescription
-     WHERE xmin <> '1'::xid)
   + (SELECT count(*) FROM pg_catalog.pg_class c
      JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
      WHERE n.nspname IN ('pg_catalog', 'information_schema')

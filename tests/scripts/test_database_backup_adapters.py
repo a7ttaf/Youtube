@@ -330,13 +330,20 @@ def test_clean_target_query_covers_non_table_user_objects() -> None:
         "pg_cast",
         "pg_language",
         "pg_am",
-        "pg_database_owner",
-        "aclexplode",
+    ):
+        assert catalog in query
+
+    # The check must stay calibrated for a genuine fresh PostgreSQL 18
+    # cluster: no idealized-fingerprint arms (real-PG validation 2026-09-01
+    # measured 3,956 false conditions from xmin/ACL-default/initprivs/comment
+    # comparisons on an unmodified postgres:18-alpine cluster).
+    for stale_arm in (
+        "xmin <> '1'::xid",
         "pg_init_privs",
         "acldefault",
         "obj_description",
     ):
-        assert catalog in query
+        assert stale_arm not in query, f"fingerprint arm reintroduced: {stale_arm}"
 
     assert "ext.extname <> 'plpgsql'" in query
     assert "ext.extnamespace = 'pg_catalog'::regnamespace" in query
