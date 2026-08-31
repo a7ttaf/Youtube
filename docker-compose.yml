@@ -86,6 +86,9 @@ services:
       dockerfile: Dockerfile
     image: ums-smart-revenue:dev
     restart: unless-stopped
+    # ConnectorJobExecutor.close() has a 90s total cap (including its retained
+    # shutdown-audit join); keep enough grace for the audit to finish before
+    # Docker escalates SIGTERM to SIGKILL.
     stop_grace_period: 120s
     depends_on:
       postgres:
@@ -99,7 +102,7 @@ services:
     ports:
       - "127.0.0.1:${UMS_APP_PORT:-8000}:8000"
     healthcheck:
-      test: ["CMD", "curl", "--fail", "--silent", "http://localhost:8000/livez"]
+      test: ["CMD", "curl", "--fail", "--silent", "http://localhost:8000/readyz"]
       interval: 15s
       timeout: 4s
       retries: 5

@@ -97,6 +97,10 @@ from ums_smart_revenue.db.session import (
     build_session_factory,
     session_dependency,
 )
+from ums_smart_revenue.ops.health import (
+    ReadinessUnavailableError,
+    check_database_readiness,
+)
 from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
 from ums_smart_revenue.tenancy.context import TENANT_CTX
 from ums_smart_revenue.tenancy.models import Tenant, TenantStatus
@@ -278,8 +282,10 @@ def create_app(*, database_url: str | None = None, authz_source: str | None = No
         lifespan=_lifespan,
     )
 
+    readiness_session_factory: SessionFactory | None = None
     if resolved_database_url:
         session_factory = build_session_factory(resolved_database_url)
+        readiness_session_factory = session_factory
         sqlite_database = _is_sqlite_database_url(resolved_database_url)
         platform_session_factory = build_platform_session_factory(resolved_database_url)
         _wire_connector_background_workers(
@@ -317,7 +323,7 @@ def create_app(*, database_url: str | None = None, authz_source: str | None = No
     _app.include_router(users_router)
 
     def health_payload() -> dict[str, object]:
-        """Return service and pinned runtime health metadata."""
+        """Return liveness metadata without claiming dependencies are ready."""
         return {
             "status": "ok",
             "service": "ums-smart-revenue",
@@ -337,6 +343,32 @@ def create_app(*, database_url: str | None = None, authz_source: str | None = No
     def livez() -> dict[str, object]:
         """Return liveness probe status."""
         return health_payload()
+
+    # ========================================================================
+    # Purpose: Expose dependency readiness separately from process liveness so
+    #   an app with an unavailable/unconfigured database is not advertised as
+    #   ready merely because the FastAPI process is responding.
+    # Database/ORM: The health service performs one ``SELECT 1`` through the
+    #   configured SessionFactory; no schema or row is changed.
+    # Standards: Thin route boundary; typed service failure becomes a safe
+    #   503 response without leaking driver/DSN details.
+    # Blast Radius: Unauthenticated operational probe and container startup;
+    #   no authorization, finance, audit, tenancy, or export behavior.
+    # Connections:
+    #   - File: backend/ums_smart_revenue/ops/health.py -> dependency check.
+    #   - File: docker-compose.yml -> app healthcheck uses /readyz.
+    #   - File: Dockerfile -> image healthcheck uses /readyz.
+    # ========================================================================
+    @_app.get("/readyz", tags=["system"])
+    def readyz() -> dict[str, object]:
+        """Return readiness only when the configured database is reachable."""
+        try:
+            check_database_readiness(readiness_session_factory)
+        except ReadinessUnavailableError:
+            raise HTTPException(status_code=503, detail="Service not ready") from None
+        payload = health_payload()
+        payload["checks"] = {"database": "ok"}
+        return payload
 
     return _app
 

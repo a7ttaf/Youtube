@@ -60,7 +60,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import logging
 import threading
 import weakref
@@ -69,6 +68,7 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from ums_smart_revenue.config.logging_config import fingerprint_log_identifier
 from ums_smart_revenue.connectors.credentials import (
     MAX_CREDENTIAL_PAGE_SIZE,
     SqlAlchemyConnectorCredentialRepository,
@@ -110,8 +110,8 @@ _CLOSE_JOIN_TIMEOUT_SECONDS = 10.0
 #   id, so DEBUG-level steady-state lines cannot leak the identifier that
 #   THIRD_PARTY_LOG_LEVEL handling keeps out at other levels.
 # Database/ORM: None.
-# Standards: Short deterministic SHA-256 prefix; mirrors the normalizer's
-#   actor fingerprint treatment for guarded identifiers in logs.
+# Standards: Short process-local keyed fingerprint; a raw content-owner id and
+#   an unsalted offline dictionary are both unsuitable for retained logs.
 # Blast Radius: Log content only.
 # Connections:
 #   - File: backend/ums_smart_revenue/connectors/runs/scheduler.py -> the
@@ -119,7 +119,7 @@ _CLOSE_JOIN_TIMEOUT_SECONDS = 10.0
 # ============================================================================
 def _owner_log_label(account_id: str) -> str:
     """Return a non-reversible fingerprint of a CMS content-owner id for logs."""
-    return hashlib.sha256(account_id.encode("utf-8")).hexdigest()[:12]
+    return fingerprint_log_identifier(account_id)
 
 
 # ============================================================================
@@ -427,7 +427,7 @@ class GroupSyncScheduler:
                     # state noise on a short interval, not an operator signal.
                     # FIX: the guarded CMS content-owner id went out raw; the
                     # README presents DEBUG as safe for operators, so only the
-                    # SHA-256 fingerprint is logged now.
+                    # process-local keyed fingerprint is logged now.
                     logger.debug(
                         "group-sync tick: sync already in flight (tenant=%s owner_fp=%s)",
                         tenant_id,

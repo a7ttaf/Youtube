@@ -9,7 +9,6 @@ SqlAlchemyRevenueFactRepository.record_fact().
 See: Docs/superpowers/specs/2026-05-25-spec-c1-google-source-normalizer-design.md
 """
 
-import hashlib
 import logging
 from collections import Counter
 from collections.abc import Mapping
@@ -22,6 +21,7 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from ums_smart_revenue.config.logging_config import fingerprint_log_identifier
 from ums_smart_revenue.connectors.google_source_rows.dataclasses import (
     GoogleRevenueSourceRowEntry,
 )
@@ -182,7 +182,7 @@ def _channel_scope_label(channel_ids: set[str] | None) -> str:
 
 def _actor_log_label(actor_user_id: str) -> str:
     """Return a non-reversible fingerprint of the acting user's UUID."""
-    return hashlib.sha256(actor_user_id.encode("utf-8")).hexdigest()[:12]
+    return fingerprint_log_identifier(actor_user_id)
 
 
 def _scoped_source_rows(
@@ -515,8 +515,8 @@ class GoogleSourceNormalizer:
         # FIX: UMS_LOG_LEVEL defaults to INFO, so this first-party INFO line
         # reaches the retained Docker logs; emitting the raw triggering user's
         # UUID there leaked a private user identifier (PR #210 review). The log
-        # carries a short SHA-256 fingerprint instead -- the persisted audit
-        # rows remain the attribution source of record.
+        # carries a short process-local keyed fingerprint instead -- the
+        # persisted audit rows remain the attribution source of record.
         logger.info(
             "normalize_month start tenant_id=%s month=%s channel_scope=%s actor_fp=%s",
             self._tenant_id,

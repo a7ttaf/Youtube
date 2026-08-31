@@ -32,7 +32,6 @@
 from __future__ import annotations
 
 import gc
-import hashlib
 import logging
 import threading
 import weakref
@@ -47,6 +46,7 @@ import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
+from ums_smart_revenue.config.logging_config import fingerprint_log_identifier
 from ums_smart_revenue.connectors.google.audit import _SERVICE_ACCOUNT_EMAIL
 from ums_smart_revenue.connectors.keys import YOUTUBE_ANALYTICS_CONNECTOR
 from ums_smart_revenue.connectors.runs import scheduler as scheduler_module
@@ -452,7 +452,7 @@ def test_in_flight_debug_log_fingerprints_the_owner(tmp_path: Path, caplog) -> N
 
     log_text = "\n".join(rec.getMessage() for rec in caplog.records)
     assert OWNER_A_ACTIVE not in log_text
-    fingerprint = hashlib.sha256(OWNER_A_ACTIVE.encode("utf-8")).hexdigest()[:12]
+    fingerprint = fingerprint_log_identifier(OWNER_A_ACTIVE)
     assert f"owner_fp={fingerprint}" in log_text
 
 

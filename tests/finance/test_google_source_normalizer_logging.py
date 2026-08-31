@@ -1,6 +1,5 @@
 """Logging contract: counts/distribution logged; PII / finance values redacted."""
 
-import hashlib
 import logging
 from datetime import date
 from decimal import Decimal
@@ -9,6 +8,7 @@ from uuid import uuid4
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
+from ums_smart_revenue.config.logging_config import fingerprint_log_identifier
 from ums_smart_revenue.connectors.google_source_rows.dataclasses import (
     ParsedSourceRow,
 )
@@ -147,9 +147,9 @@ def test_normalize_month_logging_redacts_payload_amount_channel_id_source_row_id
 
         # PR #210 review: the raw triggering user's UUID must never reach the
         # retained Docker logs at the default UMS_LOG_LEVEL=INFO; only its
-        # non-reversible SHA-256 fingerprint may appear.
+        # process-local keyed fingerprint may appear.
         assert ACTOR_USER_ID not in log_text
-        expected_fp = hashlib.sha256(ACTOR_USER_ID.encode("utf-8")).hexdigest()[:12]
+        expected_fp = fingerprint_log_identifier(ACTOR_USER_ID)
         assert f"actor_fp={expected_fp}" in log_text
         # source_row_id UUIDs are never emitted as individual values.
         for row_entry in SqlAlchemyGoogleRevenueSourceRowRepository(session).list(

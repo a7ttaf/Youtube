@@ -32,6 +32,24 @@ def test_livez_exposes_runtime_health_contract():
     assert response.json() == client.get("/health").json()
 
 
+def test_readyz_fails_closed_when_no_database_is_configured():
+    """Liveness may work without a DB, but readiness must not claim it is ready."""
+    response = TestClient(create_app()).get("/readyz")
+
+    assert response.status_code == 503
+    assert response.json() == {"detail": "Service not ready"}
+
+
+def test_readyz_checks_the_configured_database(tmp_path):
+    """Readiness performs a safe connection check on a configured SQLite lane."""
+    database_url = f"sqlite+pysqlite:///{(tmp_path / 'readyz.db').as_posix()}"
+    response = TestClient(create_app(database_url=database_url)).get("/readyz")
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "ok"
+    assert response.json()["checks"] == {"database": "ok"}
+
+
 def test_security_metadata_endpoints_visible_to_audit_permissioned_principals():
     """The role/permission catalog is readable by audit-permissioned principals.
 
