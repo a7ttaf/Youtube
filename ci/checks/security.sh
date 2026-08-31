@@ -1,6 +1,14 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
+# Git replacement refs are a local view overlay; a push transfers the original
+# object IDs and their original bytes. Every object/history read in this process
+# must therefore use the same canonical object graph the destination receives.
+# Exporting at process entry also disables a caller-selected
+# GIT_REPLACE_REF_BASE and legacy graft replacement while all child git
+# processes run.
+export GIT_NO_REPLACE_OBJECTS=1
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
@@ -14,6 +22,12 @@ cd "$ROOT_DIR"
 ci::common::section "Check: security"
 
 matches=0
+security_object_only="${CI_GATE_SECURITY_OBJECT_ONLY:-0}"
+
+case "$security_object_only" in
+  0|1) ;;
+  *) security_infra_failure "Security object-only mode must be either 0 or 1." ;;
+esac
 
 if [ -z "${CI_CHECKS_SECRET_PATTERN:-}" ]; then
   echo "CI_CHECKS_SECRET_PATTERN is missing or empty; cannot run security scan."
@@ -671,12 +685,38 @@ if [ -n "$outgoing_ref_names" ] \
   security_infra_failure "Security received outgoing ref names without their object tips."
 fi
 
+# Ref-object-only mode is an explicit availability optimization for a push that
+# publishes only tag/other-ref labels. It is never inferred from an empty
+# context, never applies to branches or mutable notes, and never accepts the
+# deletion marker. These requirements keep a forged ambient variable from
+# suppressing checkout and dependency audits for application content.
+if [ "$security_object_only" = "1" ]; then
+  if [ -n "${CI_GATE_PUSH_OLD_SHA:-}${CI_GATE_PUSH_NEW_SHA:-}${CI_GATE_PUSH_BRANCH_TIPS:-}" ]; then
+    security_infra_failure "Security object-only mode cannot scan a branch range or branch tip."
+  fi
+  if [ -n "${CI_GATE_PUSH_NOTES_TIPS:-}" ]; then
+    security_infra_failure "Security object-only mode cannot scan mutable notes refs."
+  fi
+  if [ "${CI_GATE_PUSH_DELETIONS_ONLY:-0}" = "1" ]; then
+    security_infra_failure "Security object-only mode cannot scan a deletion-only push."
+  fi
+  if [ -z "$outgoing_ref_names" ] \
+    || [ -z "${CI_GATE_PUSH_TAG_TIPS:-}${CI_GATE_PUSH_OTHER_TIPS:-}" ]; then
+    security_infra_failure "Security object-only mode requires authoritative outgoing ref names and tag/other tips."
+  fi
+fi
+
 if [ "$push_context_seen" -eq 0 ]; then
   scan_local_paths
 fi
 
 if [ "$matches" -ne 0 ]; then
   exit "$CI_RESULT_FAIL_NEW_ISSUE"
+fi
+
+if [ "$security_object_only" = "1" ]; then
+  echo "Security ref-object checks passed."
+  exit "$CI_RESULT_PASS"
 fi
 
 audit_failed=0

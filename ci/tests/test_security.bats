@@ -168,6 +168,64 @@ security_utf16_secret() {
   [[ "$output" == *"Potential secret-like content in transient.txt"* ]]
 }
 
+@test "security: replacement refs cannot substitute safe bytes for the pushed object" {
+  base="$(cd "$SECURITY_SB" && git rev-parse HEAD)"
+  security_secret_line > "$SECURITY_SB/replaced.txt"
+  security_commit secret-object
+  secret_tip="$(cd "$SECURITY_SB" && git rev-parse HEAD)"
+  rm "$SECURITY_SB/replaced.txt"
+  security_commit safe-replacement
+  safe_tip="$(cd "$SECURITY_SB" && git rev-parse HEAD)"
+  (
+    cd "$SECURITY_SB"
+    unset GIT_NO_REPLACE_OBJECTS
+    git replace "$secret_tip" "$safe_tip"
+    # Populate a status-clean index/worktree from the safe replacement while
+    # HEAD still names the original credential-bearing commit.
+    git reset -q --hard "$secret_tip"
+    git init -q --bare remote.git
+    git status --porcelain > .replacement-status
+  )
+  [ ! -s "$SECURITY_SB/.replacement-status" ]
+
+  run bash -c "cd '$SECURITY_SB' && CI_GATE_PUSH_OLD_SHA='$base' \
+    CI_GATE_PUSH_NEW_SHA='$secret_tip' bash ci/checks/security.sh 2>&1"
+
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"clean tracked worktree and index"* || "$output" == *"replaced.txt"* ]]
+
+  # Git push publishes the original object, not the local replacement view.
+  run bash -c "cd '$SECURITY_SB' && git push -q --no-verify \
+    '$SECURITY_SB/remote.git' HEAD:refs/heads/leaked && \
+    GIT_NO_REPLACE_OBJECTS=1 git --git-dir='$SECURITY_SB/remote.git' \
+      show refs/heads/leaked:replaced.txt"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"example.invalid/transient"* ]]
+}
+
+@test "security: a custom replacement namespace cannot redirect object traversal" {
+  base="$(cd "$SECURITY_SB" && git rev-parse HEAD)"
+  security_secret_line > "$SECURITY_SB/custom-replaced.txt"
+  security_commit custom-secret-object
+  secret_tip="$(cd "$SECURITY_SB" && git rev-parse HEAD)"
+  rm "$SECURITY_SB/custom-replaced.txt"
+  security_commit custom-safe-replacement
+  safe_tip="$(cd "$SECURITY_SB" && git rev-parse HEAD)"
+  (
+    cd "$SECURITY_SB"
+    unset GIT_NO_REPLACE_OBJECTS
+    git update-ref "refs/custom-replace/$secret_tip" "$safe_tip"
+    GIT_REPLACE_REF_BASE=refs/custom-replace git reset -q --hard "$secret_tip"
+  )
+
+  run bash -c "cd '$SECURITY_SB' && GIT_REPLACE_REF_BASE=refs/custom-replace \
+    CI_GATE_PUSH_OLD_SHA='$base' CI_GATE_PUSH_NEW_SHA='$secret_tip' \
+    bash ci/checks/security.sh 2>&1"
+
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"clean tracked worktree and index"* || "$output" == *"custom-replaced.txt"* ]]
+}
+
 @test "security: committed range scans a leading-NUL blob as text" {
   base="$(cd "$SECURITY_SB" && git rev-parse HEAD)"
   security_binary_secret > "$SECURITY_SB/committed-nul.bin"

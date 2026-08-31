@@ -1610,7 +1610,7 @@ YML
   # Gerrit namespace arrived by being missing from exactly that kind of copy.
   kept="$(printf '%s\n' "$sample" | eval "$q_git" | tr '\n' ' ')"
   local want
-  for want in aaaaaaa1 aaaaaaa2 aaaaaaa3 aaaaaaa4 aaaaaaa5 aaaaaaa6; do
+  for want in aaaaaaa1 aaaaaaa2 aaaaaaa3 aaaaaaa4 aaaaaaa6; do
     [[ "$kept" == *"$want"* ]] || { echo "a published ref was dropped: ${want} (got [$kept])" >&2; return 1; }
   done
   local unwanted
@@ -1618,7 +1618,7 @@ YML
   # after the other two: there every change lives in that namespace until it is
   # submitted, so on a Gerrit remote counting them as published is not an edge
   # case but the normal state of unmerged work.
-  for unwanted in bbbbbbb1 bbbbbbb2 bbbbbbb3 bbbbbbb4 bbbbbbb5; do
+  for unwanted in aaaaaaa5 bbbbbbb1 bbbbbbb2 bbbbbbb3 bbbbbbb4 bbbbbbb5; do
     [[ "$kept" != *"$unwanted"* ]] || { echo "a proposal ref counted as published: ${unwanted}" >&2; return 1; }
   done
 }
@@ -2332,16 +2332,17 @@ YML
   [[ "$output" != *test-layout* ]] \
     || { echo "a label-only push ran the content lanes under lanes.conf: $output" >&2; rm -rf "$sb"; return 1; }
 
-  # A published label beside notes still takes the narrow application path,
-  # but notes are mutable Git content and must retain the security object scan.
+  # A notes ref disqualifies the narrow path. Git accepts an arbitrary app
+  # commit under refs/notes/*, so the full application plan must run even beside
+  # an otherwise published label.
   run _pf_lanes ship CI_GATE_USE_LANES=1 CI_GATE_PUSH_REMOTE=origin \
                 CI_GATE_PUSH_REMOTE_REFS= CI_GATE_PUSH_TAG_TIPS="$published" \
                 CI_GATE_PUSH_NOTES_TIPS="$published"
   [ "$status" -eq 0 ]
   [[ "$output" == *branch-protection* ]]
   [[ "$output" == *security* ]]
-  [[ "$output" != *test-layout* ]]
-  [[ "$output" != *node* ]]
+  [[ "$output" == *test-layout* ]]
+  [[ "$output" == *tests-shell* ]]
 
   # The control that the hoist did not widen the rule: `full` is a deliberate
   # whole-tree run, not a push, so a leftover push variable must not narrow it

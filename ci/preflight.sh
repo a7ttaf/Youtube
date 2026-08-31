@@ -917,16 +917,6 @@ run_ship_deletion_only_checks() {
   run_phase "branch-protection:./ci/checks/branch-protection.sh"
 }
 
-# Notes do not publish an application tree, but they do publish Git objects.
-# Keep the expensive application lanes skipped while still scanning the notes
-# commit message, tree paths, and note blobs before they reach the destination.
-run_ship_notes_only_checks() {
-  echo "Push publishes only Git notes; application content lanes do not apply."
-  echo "  Destination protection and security object scanning still run."
-  run_phase "branch-protection:./ci/checks/branch-protection.sh" \
-            "security:./ci/checks/security.sh"
-}
-
 # The other push that carries no content: one that publishes only a name.
 #
 # `git tag v1.2 <commit the destination already has>; git push origin v1.2`
@@ -940,10 +930,29 @@ run_ship_notes_only_checks() {
 # because the newly published ref name and annotated-tag object are new bytes
 # even when the target commit is already present on the destination.
 run_ship_label_only_checks() {
+  local CI_GATE_SECURITY_OBJECT_ONLY=1
+  export CI_GATE_SECURITY_OBJECT_ONLY
   echo "Push publishes only refs the destination already carries; no tree is going out."
   echo "  Destination protection and security ref-object scanning still run."
   run_phase "branch-protection:./ci/checks/branch-protection.sh" \
             "security:./ci/checks/security.sh"
+}
+
+# Whether the index hides tracked worktree bytes from normal status/diff
+# consumers. `git ls-files -v -z` is a NUL-delimited machine-readable record:
+# uppercase S is skip-worktree, and any lowercase status means assume-unchanged.
+# No path is logged because an index path can itself contain secret-like bytes.
+index_hides_tracked_content() {
+  local records="" record="" marker=""
+  records="$(ci::common::mktemp_file index-flags)" || return 2
+  LC_ALL=C git ls-files -v -z -- > "$records" || return 2
+  while IFS= read -r -d '' record; do
+    marker="${record%"${record#?}"}"
+    case "$marker" in
+      S|[a-z]) return 0 ;;
+    esac
+  done < "$records"
+  return 1
 }
 
 # ci/checks/typecheck.sh is scheduled here, and was not scheduled anywhere.
@@ -999,14 +1008,12 @@ run_mode() {
   # a rule that will be true in one place, which is the shape of nearly every
   # finding on this branch.
   if [ "$MODE" = "ship" ] && [ "${CI_GATE_PUSH_DELETIONS_ONLY:-0}" = "1" ]; then
-    if [ -n "${CI_GATE_PUSH_NOTES_TIPS:-}" ]; then
-      run_ship_notes_only_checks
-    else
+    if [ -z "${CI_GATE_PUSH_NOTES_TIPS:-}" ]; then
       run_ship_deletion_only_checks
+      return 0
     fi
-    return 0
   fi
-  if [ "$MODE" = "ship" ] && ci::git::push_is_label_only; then
+  if [ "$MODE" = "ship" ] && [ "${_SHIP_LABEL_ONLY:-0}" = "1" ]; then
     run_ship_label_only_checks
     return 0
   fi
@@ -1142,6 +1149,46 @@ export CI_GATE_MODE="$MODE"
 _checks_config_resolve
 export CI_CHECKS_CONFIG="$_CHECKS_CONFIG_FILE"
 
+# Decide the two genuinely application-content-free ship paths before checking
+# the checkout. Notes are deliberately not here: refs/notes/* can point at an
+# arbitrary commit/tree, so they take the full application plan plus the notes
+# object scan. The result is retained for run_mode so the remote publication
+# query is answered once.
+_SHIP_LABEL_ONLY=0
+_SHIP_CONTENT_FREE=0
+if [ "$MODE" = "ship" ]; then
+  if [ "${CI_GATE_PUSH_DELETIONS_ONLY:-0}" = "1" ] \
+    && [ -z "${CI_GATE_PUSH_NOTES_TIPS:-}" ]; then
+    _SHIP_CONTENT_FREE=1
+  elif ci::git::push_is_label_only; then
+    _SHIP_LABEL_ONLY=1
+    _SHIP_CONTENT_FREE=1
+  fi
+fi
+
+# Application lanes read filesystem bytes. skip-worktree and assume-unchanged
+# make status/diff report a clean checkout while those bytes differ from HEAD,
+# so a green lane can otherwise vouch for content Git push actually sends. Full
+# mode always reads application content; ship mode does unless it is one of the
+# two narrow paths above.
+if [ "$MODE" = "full" ] \
+  || { [ "$MODE" = "ship" ] && [ "$_SHIP_CONTENT_FREE" -eq 0 ]; }; then
+  _index_flags_rc=0
+  index_hides_tracked_content || _index_flags_rc=$?
+  case "$_index_flags_rc" in
+    0)
+      echo "Refusing to validate application content while tracked index entries are hidden." >&2
+      echo "  Clear skip-worktree and assume-unchanged flags before running the gate." >&2
+      exit "$CI_RESULT_FAIL_NEW_ISSUE"
+      ;;
+    1) ;;
+    *)
+      echo "Could not audit tracked index flags; refusing to guess which bytes the lanes read." >&2
+      exit "$CI_RESULT_FAIL_INFRA"
+      ;;
+  esac
+fi
+
 # And is that tree the one being pushed? Ship mode resolves its *ranges* from
 # the hook's SHAs, so the history checks read the right commits — but every
 # check that runs content reads the worktree, and `git push origin
@@ -1154,7 +1201,8 @@ export CI_CHECKS_CONFIG="$_CHECKS_CONFIG_FILE"
 # which is a much larger change than this is a bug, and one that fails badly
 # on a dirty tree. Declining to answer is the honest option, and the remedy is
 # one command for the developer.
-if [ "$MODE" = "ship" ] && type ci::git::worktree_covers_push >/dev/null 2>&1 \
+if [ "$MODE" = "ship" ] && [ "$_SHIP_CONTENT_FREE" -eq 0 ] \
+  && type ci::git::worktree_covers_push >/dev/null 2>&1 \
   && ! ci::git::worktree_covers_push; then
   ci::git::explain_push_tip_drift >&2
   exit "$CI_RESULT_FAIL_NEW_ISSUE"
