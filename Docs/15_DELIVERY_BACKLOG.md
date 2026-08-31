@@ -650,7 +650,9 @@ closed unmerged and superseded by the consolidated batch in #156.
   enforces selected-month grants for bank and Smart Alerts reads, and withholds
   lock until status/readiness are trustworthy and unlock until locked status is
   trustworthy. Official finance values remain server-derived; no migration or
-  backfill is involved.
+  backfill is involved. The implementation scope, non-goals, validation,
+  PostgreSQL baseline blocker, risk, rollback, and next work are recorded in
+  [`pulls/2026-08-31-pr-tbd-frontend-p1-integration-handoff.md`](pulls/2026-08-31-pr-tbd-frontend-p1-integration-handoff.md).
 
 ## P2 — Advanced features
 

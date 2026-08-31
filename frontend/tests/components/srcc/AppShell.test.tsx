@@ -525,6 +525,12 @@ const routeFetchWithSessionRoutes = (sessionResponder: () => Response): FetchRou
   ["/adsense/payments", () => jsonResponse(EMPTY_ADSENSE_PAYMENTS)],
   ["/exports", () => jsonResponse(EMPTY_EXPORTS)],
   ["/groups", () => jsonResponse(EMPTY_GROUPS)],
+  // Real-shaped authorized-scopes body: the hardened useRevenueScopes hook
+  // withholds every finance query on a malformed/failed scopes read, so the
+  // neutral net-revenue default body must never answer this route.
+  ["/revenue/scopes", () => jsonResponse({
+    scopes: [{ scope_type: "global", scope_id: null, label: "Global" }],
+  })],
 ]);
 
 const requestPathOf = (input: unknown) =>
@@ -929,6 +935,60 @@ describe("AppShell fixture-free chrome", () => {
     });
     const reenteredChannel = (await screen.findByLabelText("Channel")) as HTMLSelectElement;
     await waitFor(() => expect(reenteredChannel.value).toBe("UC-FIRST-LIVE"));
+  });
+});
+
+// ---------------------------------------------------------- month controls
+
+describe("AppShell month controls", () => {
+  it("MONTH CHROME: removes the inert global filter and preserves the wired rolling selector", async () => {
+    const routed = routeFetchWithSession(() =>
+      jsonResponse(sessionBody({ canViewRevenue: true })),
+    );
+    (globalThis.fetch as ReturnType<typeof vi.fn>).mockImplementation(
+      (input: unknown) => {
+        if (requestPathOf(input) === "/revenue/scopes") {
+          return Promise.resolve(
+            jsonResponse({
+              scopes: [{ scope_type: "global", scope_id: null, label: "Global" }],
+            }),
+          );
+        }
+        return routed(input);
+      },
+    );
+    renderShell();
+
+    expect(screen.queryByLabelText("Report filters")).not.toBeInTheDocument();
+    // The deleted shell subtitle asserted a frozen close month and reporting
+    // currency that the shell did not read from any trusted source.
+    expect(screen.queryByText(/March 2026 close/iu)).not.toBeInTheDocument();
+    expect(screen.queryByText(/USD reporting currency/iu)).not.toBeInTheDocument();
+    const viewFilters = await screen.findByLabelText("Net revenue filters");
+    const monthSelect = within(viewFilters).getByLabelText("Month") as HTMLSelectElement;
+    const renderedLabels = within(monthSelect)
+      .getAllByRole("option")
+      .map((option) => option.textContent);
+    // The real controlled view retains PR #211's rolling source/default.
+    expect(renderedLabels).toEqual(MONTH_OPTIONS);
+    expect(monthSelect.value).toBe(DEFAULT_MONTH);
+
+    const selectedMonth = MONTH_OPTIONS[1];
+    if (!selectedMonth) {
+      throw new Error("rolling month window must expose a second month");
+    }
+    fireEvent.change(monthSelect, { target: { value: selectedMonth } });
+    await waitFor(() => expect(monthSelect.value).toBe(selectedMonth));
+    const fetchMock = globalThis.fetch as ReturnType<typeof vi.fn>;
+    await waitFor(() =>
+      expect(
+        fetchMock.mock.calls.some(([input]) =>
+          urlOf(input).includes(
+            `/revenue/months/${encodeURIComponent(selectedMonth)}/net-revenue`,
+          ),
+        ),
+      ).toBe(true),
+    );
   });
 });
 
