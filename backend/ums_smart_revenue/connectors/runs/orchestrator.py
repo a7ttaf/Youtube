@@ -3284,6 +3284,29 @@ def _synthesise_analytics_channel_dimension(
 
 
 # ============================================================================
+# Purpose: Declare the parser-visible Analytics dimensions after the runner
+#          synthesises channel evidence into the wire response.
+# Database/ORM: None.
+# Standards: Derived only from the outbound request contract, never from the
+#            returned headers, so response drift remains detectable by parser.
+# Blast Radius: Finance source-row admission and replay metadata only; outbound
+#               Google query parameters remain unchanged.
+# Connections:
+#   - File: backend/ums_smart_revenue/connectors/google/youtube_analytics_client.py
+#     -> Builds the month-only wire request.
+#   - File: backend/ums_smart_revenue/connectors/google_source_parsers/
+#     youtube_analytics.py -> Validates this declaration against response headers.
+# ============================================================================
+def _analytics_parser_dimension_declaration(query_request: dict[str, str]) -> str:
+    """Return the expected post-synthesis dimension declaration for replay."""
+    wire_dimensions = query_request["dimensions"]
+    names = wire_dimensions.split(",")
+    if "channel" in names:
+        return wire_dimensions
+    return ",".join(("channel", *names))
+
+
+# ============================================================================
 # Purpose: B2.5 adapter that fetches YouTube Analytics per-channel reports. One
 #          ``reports.query`` GET per eligible CMS channel for the run's month;
 #          each success is yielded as ``("youtube_analytics", payload, bytes)``
@@ -3459,6 +3482,11 @@ class YouTubeAnalyticsRunner:
                 parser_query_request = {
                     **query_request,
                     "endDate": calendar_month_end_iso(report_month),
+                    # FIX: The parser consumes the post-synthesis response, so
+                    # its metadata must declare channel plus the wire-requested
+                    # dimensions. Leaving this as wire-level `month` would make
+                    # the injected channel look like undeclared response drift.
+                    "dimensions": _analytics_parser_dimension_declaration(query_request),
                 }
                 # Augment the raw response with the query_request metadata the
                 # parser needs to build row keys and validate the range. Reuse

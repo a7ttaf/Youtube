@@ -6,7 +6,7 @@ from decimal import Decimal
 from uuid import UUID, uuid4
 
 import pytest
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
 from ums_smart_revenue.connectors.google_source_rows.dataclasses import (
@@ -15,7 +15,7 @@ from ums_smart_revenue.connectors.google_source_rows.dataclasses import (
 from ums_smart_revenue.connectors.google_source_rows.repository import (
     SqlAlchemyGoogleRevenueSourceRowRepository,
 )
-from ums_smart_revenue.db.finance_models import FinanceBase
+from ums_smart_revenue.db.finance_models import FinanceBase, MonthlyChannelRevenueFactORM
 from ums_smart_revenue.db.org_models import OrgBase, YouTubeChannelORM
 from ums_smart_revenue.db.source_models import CurrencyORM
 from ums_smart_revenue.db.tenant_models import TenantBase, TenantORM
@@ -391,9 +391,7 @@ def test_normalize_month_excludes_country_analytics_and_preserves_worldwide_fact
     assert result.created[0].source_kind == "YOUTUBE_ANALYTICS"
     assert result.created[0].gross_revenue_usd == Decimal("100.000000")
     assert len(result.skipped) == 2
-    source_entry_ids = {
-        entry.source_row_key: entry.id for entry in upsert_result.entries
-    }
+    source_entry_ids = {entry.source_row_key: entry.id for entry in upsert_result.entries}
     assert {(skip.source_row_id, skip.reason.value) for skip in result.skipped} == {
         (source_entry_ids[country.source_row_key], "non_projecting_evidence"),
         (source_entry_ids[malformed.source_row_key], "malformed_source_payload"),
@@ -401,6 +399,57 @@ def test_normalize_month_excludes_country_analytics_and_preserves_worldwide_fact
     assert {
         entry.source_row_key for entry in source_repo.list(tenant_id, report_month="2026-04")
     } == {country.source_row_key, malformed.source_row_key, worldwide.source_row_key}
+
+
+def test_normalize_month_rejects_whitespace_dimension_drift_without_creating_fact(session):
+    """Keep a legacy `country ` source row from masquerading as worldwide revenue."""
+    tenant_id = uuid4()
+    _seed_tenant_and_currencies(session, tenant_id)
+    _seed_active_channel(session, tenant_id, "UC_test_dimension_drift")
+    malformed = replace(
+        _yt_reporting_row(
+            channel="UC_test_dimension_drift",
+            source_row_key_seed="d",
+            amount="999.000000",
+        ),
+        source_system="youtube_analytics",
+        raw_payload={
+            "dimensions": {
+                "channel": "UC_test_dimension_drift",
+                "country ": "US",
+            },
+            "metric": "estimatedRevenue",
+            "value": "999.000000",
+        },
+    )
+    source_repo = SqlAlchemyGoogleRevenueSourceRowRepository(session)
+    upsert_result = source_repo.upsert_many(
+        tenant_id,
+        [malformed],
+        raw_file_id=None,
+        imported_by=None,
+    )
+    session.commit()
+
+    result = GoogleSourceNormalizer(session, tenant_id=tenant_id).normalize_month(
+        month="2026-04",
+        actor_user_id=ACTOR_USER_ID,
+    )
+
+    assert result.created == []
+    assert result.updated == []
+    assert result.unchanged == []
+    assert len(upsert_result.entries) == 1
+    assert result.skipped[0].source_row_id == upsert_result.entries[0].id
+    assert result.skipped[0].reason.value == "malformed_source_payload"
+    assert (
+        session.scalars(
+            select(MonthlyChannelRevenueFactORM).where(
+                MonthlyChannelRevenueFactORM.tenant_id == tenant_id
+            )
+        ).all()
+        == []
+    )
 
 
 def _adsense_row(

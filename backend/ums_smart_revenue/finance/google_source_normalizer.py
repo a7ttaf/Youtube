@@ -248,6 +248,14 @@ def _analytics_projection_skip_reason(row: GoogleRevenueSourceRowEntry) -> SkipR
         return SkipReason.MALFORMED_SOURCE_PAYLOAD
     if any(not isinstance(key, str) for key in dimensions):
         return SkipReason.MALFORMED_SOURCE_PAYLOAD
+    # FIX: Fail closed for legacy or directly-inserted rows whose dimension
+    # header names carry whitespace. A key such as `country ` bypassed the
+    # country-evidence fence and could otherwise project as worldwide revenue.
+    if any(
+        not key or key != key.strip() or any(character.isspace() for character in key)
+        for key in dimensions
+    ):
+        return SkipReason.MALFORMED_SOURCE_PAYLOAD
     if any(key.casefold() in _COUNTRY_DIMENSION_KEYS for key in dimensions):
         return SkipReason.NON_PROJECTING_EVIDENCE
     channel = dimensions.get("channel")

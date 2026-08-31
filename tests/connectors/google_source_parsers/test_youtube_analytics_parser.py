@@ -404,3 +404,128 @@ def test_whitespace_padded_channel_is_trimmed_and_keyed_consistently() -> None:
     )
     assert {r.youtube_channel_id for r in padded} == {r.youtube_channel_id for r in clean}
     assert sorted(r.source_row_key for r in padded) == sorted(r.source_row_key for r in clean)
+
+
+def _dimension_contract_payload(
+    *,
+    declared_dimensions: str,
+    returned_dimensions: list[str],
+) -> dict[str, object]:
+    """Build one internally aligned row for dimension-contract parser tests."""
+    dimension_values = {
+        "channel": "UC_dimension_contract",
+        "month": "2026-04",
+        "country": "US",
+        "country ": "US",
+        "Country": "US",
+    }
+    return {
+        "query_request": {
+            "ids": "channel==UC_dimension_contract",
+            "startDate": "2026-04-01",
+            "endDate": "2026-04-30",
+            "metrics": "estimatedRevenue",
+            "dimensions": declared_dimensions,
+            "currency": "USD",
+        },
+        "columnHeaders": [
+            *[
+                {"name": name, "columnType": "DIMENSION", "dataType": "STRING"}
+                for name in returned_dimensions
+            ],
+            {
+                "name": "estimatedRevenue",
+                "columnType": "METRIC",
+                "dataType": "FLOAT",
+            },
+        ],
+        "rows": [
+            [
+                *[dimension_values[name] for name in returned_dimensions],
+                "100.000000",
+            ]
+        ],
+    }
+
+
+@pytest.mark.parametrize(
+    ("declared_dimensions", "returned_dimensions", "error_match"),
+    [
+        ("channel,country", ["channel"], "missing=.*country"),
+        ("channel", ["channel", "country"], "extra=.*country"),
+        ("channel,country", ["channel", "country", "country"], "duplicate"),
+        ("channel,country", ["channel", "country "], "canonical non-whitespace"),
+        ("channel,country", ["channel", "Country"], "missing=.*country.*extra=.*Country"),
+    ],
+    ids=[
+        "missing-country",
+        "extra-country",
+        "duplicate-country",
+        "whitespace-country",
+        "case-mismatch-country",
+    ],
+)
+def test_dimension_headers_must_exactly_match_declared_query_dimensions(
+    declared_dimensions: str,
+    returned_dimensions: list[str],
+    error_match: str,
+) -> None:
+    """Reject response dimension drift before any ParsedSourceRow can escape."""
+    payload = _dimension_contract_payload(
+        declared_dimensions=declared_dimensions,
+        returned_dimensions=returned_dimensions,
+    )
+
+    with pytest.raises(ParserError, match=error_match):
+        list(YouTubeAnalyticsParser().parse(payload, tenant_id=TENANT_ID))
+
+
+@pytest.mark.parametrize(
+    ("declared_dimensions", "returned_dimensions", "expected_dimensions"),
+    [
+        (
+            "channel,month",
+            ["channel", "month"],
+            {"channel": "UC_dimension_contract", "month": "2026-04"},
+        ),
+        (
+            "channel,country",
+            ["channel", "country"],
+            {"channel": "UC_dimension_contract", "country": "US"},
+        ),
+    ],
+    ids=["synthesized-channel-month", "country-evidence"],
+)
+def test_matching_dimension_headers_preserve_supported_analytics_evidence(
+    declared_dimensions: str,
+    returned_dimensions: list[str],
+    expected_dimensions: dict[str, str],
+) -> None:
+    """Keep valid worldwide and country-dimensional evidence parseable."""
+    payload = _dimension_contract_payload(
+        declared_dimensions=declared_dimensions,
+        returned_dimensions=returned_dimensions,
+    )
+
+    rows = list(YouTubeAnalyticsParser().parse(payload, tenant_id=TENANT_ID))
+
+    assert len(rows) == 1
+    assert rows[0].raw_payload["dimensions"] == expected_dimensions
+
+
+@pytest.mark.parametrize(
+    "declared_dimensions",
+    ["channel,channel", "channel,Channel", "channel, country", "channel,,country"],
+    ids=["duplicate", "case-duplicate", "whitespace", "empty-token"],
+)
+def test_malformed_declared_dimensions_fail_before_rows_are_emitted(
+    declared_dimensions: str,
+) -> None:
+    """Reject ambiguous request metadata instead of canonicalizing it silently."""
+    payload = _dimension_contract_payload(
+        declared_dimensions=declared_dimensions,
+        returned_dimensions=["channel", "country"],
+    )
+
+    with pytest.raises(ParserError, match="query_request.dimensions"):
+        list(YouTubeAnalyticsParser().parse(payload, tenant_id=TENANT_ID))

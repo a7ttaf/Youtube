@@ -322,6 +322,7 @@ def test_country_dimension_aliases_are_non_projecting(country_alias: str):
         {"dimensions": []},
         {"dimensions": None},
         {"dimensions": {1: "US"}},
+        {"dimensions": {"channel": "UC_test_1", "country ": "US"}},
     ],
     ids=[
         "payload-list",
@@ -331,6 +332,7 @@ def test_country_dimension_aliases_are_non_projecting(country_alias: str):
         "dimensions-list",
         "dimensions-null",
         "key-int",
+        "whitespace-drifted-key",
     ],
 )
 def test_malformed_analytics_payload_is_skipped_before_projection(raw_payload: object):

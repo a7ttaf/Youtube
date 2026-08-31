@@ -75,6 +75,7 @@ class _AnalyticsParseContext:
     currency: str
     content_owner_id: str | None
     normalized_ids: str
+    declared_dimensions: frozenset[str]
     query_signature: str
     filters_key: str | None
 
@@ -97,6 +98,7 @@ def _analytics_parse_context(request: dict[str, object]) -> _AnalyticsParseConte
     include_historical = _analytics_include_historical(request)
     require_str(request, "metrics")
     dimensions_csv = require_str(request, "dimensions")
+    declared_dimensions = _analytics_declared_dimensions(dimensions_csv)
     content_owner_id, normalized_ids = _analytics_ids(require_str(request, "ids"))
     filters_key = _analytics_filters_key(request)
     _require_analytics_single_month_range(period_start, period_end)
@@ -111,9 +113,26 @@ def _analytics_parse_context(request: dict[str, object]) -> _AnalyticsParseConte
         currency=currency,
         content_owner_id=content_owner_id,
         normalized_ids=normalized_ids,
+        declared_dimensions=declared_dimensions,
         query_signature=query_signature,
         filters_key=filters_key,
     )
+
+
+def _analytics_declared_dimensions(dimensions_csv: str) -> frozenset[str]:
+    """Return the canonical, unique dimension names declared by the request."""
+    names = dimensions_csv.split(",")
+    if any(
+        not name or name != name.strip() or any(character.isspace() for character in name)
+        for name in names
+    ):
+        raise ParserError(
+            "query_request.dimensions must be a comma-delimited list of canonical names"
+        )
+    declared = frozenset(names)
+    if len(declared) != len(names) or len({name.casefold() for name in names}) != len(names):
+        raise ParserError("query_request.dimensions must not contain duplicate names")
+    return declared
 
 
 def _analytics_currency(request: dict[str, object]) -> str:
@@ -195,10 +214,47 @@ def _analytics_header_specs(column_headers: object) -> list[tuple[str, str]]:
         name = header.get("name")
         if not isinstance(name, str):
             raise ParserError("each DIMENSION/METRIC header requires a string name")
+        if column_type == "DIMENSION" and (
+            not name or name != name.strip() or any(character.isspace() for character in name)
+        ):
+            raise ParserError(
+                "each DIMENSION header name must be a canonical non-whitespace string"
+            )
         if (column_type, name) in header_specs:
             raise ParserError(f"duplicate columnHeaders entry: {column_type}.{name}")
         header_specs.append((column_type, name))
     return header_specs
+
+
+# ============================================================================
+# Purpose: Require the returned Analytics dimension headers to match the
+#          parser-owned query declaration before any ParsedSourceRow is emitted.
+# Database/ORM: None. Runs before source-row persistence.
+# Standards: Exact case-sensitive names; order-independent; typed ParserError
+#            for missing or extra response dimensions.
+# Blast Radius: Finance ingestion provenance and downstream fact eligibility.
+# Connections:
+#   - File: backend/ums_smart_revenue/connectors/runs/orchestrator.py -> Stores
+#     the post-synthesis channel dimension in parser query metadata.
+#   - File: backend/ums_smart_revenue/finance/google_source_normalizer.py ->
+#     Consumes only rows admitted by this parser boundary.
+# ============================================================================
+def _require_matching_dimension_headers(
+    *,
+    declared_dimensions: frozenset[str],
+    header_specs: list[tuple[str, str]],
+) -> None:
+    """Fail closed when returned dimensions drift from the declared query shape."""
+    returned_dimensions = frozenset(
+        name for column_type, name in header_specs if column_type == "DIMENSION"
+    )
+    missing = sorted(declared_dimensions - returned_dimensions)
+    extra = sorted(returned_dimensions - declared_dimensions)
+    if missing or extra:
+        raise ParserError(
+            "DIMENSION columnHeaders must exactly match query_request.dimensions; "
+            f"missing={missing!r}, extra={extra!r}"
+        )
 
 
 def _analytics_row_values(
@@ -295,6 +351,13 @@ class YouTubeAnalyticsParser:
         request = require_dict(payload, "query_request")
         context = _analytics_parse_context(request)
         header_specs = _analytics_header_specs(payload.get("columnHeaders"))
+        # FIX: The parser previously trusted response headers independently of
+        # query_request.dimensions, so a dropped or whitespace-drifted country
+        # header could erase country evidence and admit an official fact.
+        _require_matching_dimension_headers(
+            declared_dimensions=context.declared_dimensions,
+            header_specs=header_specs,
+        )
         metric_names = [name for column_type, name in header_specs if column_type == "METRIC"]
 
         for data_row in _analytics_rows(payload):

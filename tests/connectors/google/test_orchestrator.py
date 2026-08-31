@@ -3049,6 +3049,101 @@ def test_run_one_with_youtube_analytics_succeeds_for_cms_channels_only(
     assert all(r.source_system == "youtube_analytics" for r in source_rows)
     assert {r.metric_key for r in source_rows} == set(_ANALYTICS_METRICS.split(","))
     assert {r.youtube_channel_id for r in source_rows} == {"UC_orch_cms"}
+    stored_payload = json.loads(next(iter(store.values())))
+    assert stored_payload["query_request"]["dimensions"] == "channel,month"
+
+
+def test_run_one_rejects_analytics_dimension_mismatch_before_source_or_fact_write(
+    session: Session, _stub_secret_resolver
+) -> None:
+    """Contain a missing returned month dimension as a typed report failure."""
+    session.add(
+        YouTubeChannelORM(
+            id=uuid4(),
+            tenant_id=TENANT_ID,
+            youtube_channel_id="UC_dimension_mismatch",
+            channel_name="Dimension Mismatch",
+            content_owner_id=_ANALYTICS_ACCOUNT_ID,
+            active=True,
+            revenue_required=True,
+            cms_status="INSIDE_CMS",
+        )
+    )
+    session.flush()
+    _make_credential_row(
+        session,
+        tenant_id=TENANT_ID,
+        connector_key=_ANALYTICS_CONNECTOR_KEY,
+        account_id=_ANALYTICS_ACCOUNT_ID,
+    )
+    payload = _make_analytics_parser_payload(
+        channel_id="UC_dimension_mismatch",
+        report_month="2026-05",
+    )
+    # The wire request declares month, but this simulated Google response
+    # drops both the month header and its cell. The runner still synthesises
+    # channel; the parser must detect that month remains missing.
+    payload["columnHeaders"] = payload["columnHeaders"][1:]
+    payload["rows"] = [payload["rows"][0][1:]]
+
+    with (
+        patch(
+            "ums_smart_revenue.connectors.runs.orchestrator.YouTubeAnalyticsClient"
+        ) as yt_analytics_cls,
+        patch("ums_smart_revenue.connectors.runs.orchestrator.LocalFileStoreBackend") as local_cls,
+        patch("ums_smart_revenue.connectors.runs.orchestrator.refresh_credentials") as refresh,
+        patch("ums_smart_revenue.connectors.runs.orchestrator.GoogleHttpClient") as http_cls,
+    ):
+        http_cls.return_value.close.return_value = None
+        refresh.return_value = None
+        yt_analytics_cls.return_value.fetch_channel_report.return_value = payload
+
+        backend = local_cls.return_value
+        store: dict[str, bytes] = {}
+        backend.upload.side_effect = lambda *, storage_uri, content: store.__setitem__(
+            storage_uri, content
+        )
+        backend.get_bytes.side_effect = lambda *, storage_uri: store[storage_uri]
+
+        outcome = run_one(
+            session,
+            tenant_id=TENANT_ID,
+            connector_key=_ANALYTICS_CONNECTOR_KEY,
+            account_id=_ANALYTICS_ACCOUNT_ID,
+            report_month="2026-05",
+        )
+
+    assert outcome.run is not None
+    assert outcome.run.status == "FAILED"
+    assert outcome.counts["reports_succeeded"] == 0
+    assert outcome.counts["reports_failed"] == 1
+    assert outcome.counts["rows_upserted_total"] == 0
+    assert outcome.per_report_failures == [("youtube_analytics", "ParserError")]
+    assert (
+        session.scalars(
+            select(GoogleRevenueSourceRowORM).where(
+                GoogleRevenueSourceRowORM.tenant_id == TENANT_ID
+            )
+        ).all()
+        == []
+    )
+
+    from ums_smart_revenue.db.finance_models import (
+        MonthlyChannelRevenueFactORM,
+    )  # noqa: PLC0415
+
+    assert (
+        session.scalars(
+            select(MonthlyChannelRevenueFactORM).where(
+                MonthlyChannelRevenueFactORM.tenant_id == TENANT_ID
+            )
+        ).all()
+        == []
+    )
+    raw_file = session.scalars(
+        select(RawReportFileORM).where(RawReportFileORM.tenant_id == TENANT_ID)
+    ).one()
+    assert raw_file.parse_status == "FAILED"
 
 
 def test_run_one_with_youtube_analytics_contains_channel_fetch_failures(
@@ -3581,14 +3676,15 @@ def test_run_one_with_youtube_analytics_real_local_file_store_backend_round_trip
     # the exact bytes on disk. The runner spreads the stub response,
     # synthesises the `channel` DIMENSION header / row prefix (since the wire
     # request uses `dimensions=month` only), then OVERWRITES query_request
-    # with a freshly constructed dict using the canonical
-    # _ANALYTICS_METRICS/_ANALYTICS_DIMENSIONS constants. Mirror that logic
-    # here so the expected bytes match what lands on disk.
+    # with parser-owned metadata using the canonical metric set and the
+    # post-synthesis `channel,month` dimension set. Mirror that logic here so
+    # the expected bytes match what lands on disk.
     _year, _month = report_month.split("-")
     _first_day = f"{_year}-{_month}-01"
 
-    # The parser-payload's endDate is the calendar month end, not the wire
-    # first-of-month, so persisted period_end records the actual coverage.
+    # The parser payload deliberately differs from the wire request in two
+    # fields: endDate records calendar-month coverage, and dimensions declares
+    # the synthesized channel header alongside month.
     from calendar import (
         monthrange as _monthrange,
     )  # local import to avoid test churn  # noqa: PLC0415
@@ -3596,14 +3692,14 @@ def test_run_one_with_youtube_analytics_real_local_file_store_backend_round_trip
     _last_day = f"{int(_year):04d}-{int(_month):02d}-{_monthrange(int(_year), int(_month))[1]:02d}"
 
     def _runner_query_request(channel_id: str) -> dict:
-        """Build the runner-side query_request dict (mirrors the wire request layout)."""
+        """Build parser-owned metadata for the post-synthesis response shape."""
         return {
             "ids": f"contentOwner=={_ANALYTICS_ACCOUNT_ID}",
             "filters": f"channel=={channel_id}",
             "startDate": _first_day,
             "endDate": _last_day,
             "metrics": _ANALYTICS_METRICS,
-            "dimensions": _ANALYTICS_DIMENSIONS,
+            "dimensions": f"channel,{_ANALYTICS_DIMENSIONS}",
         }
 
     def _synthesise_channel(payload: dict, channel_id: str) -> dict:
