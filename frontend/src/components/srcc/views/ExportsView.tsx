@@ -69,6 +69,11 @@ type DownloadRoute = {
   readonly requiresRevenueVisibility?: boolean;
 };
 
+type ResolvedDownload = {
+  readonly path: string;
+  readonly format: string;
+};
+
 const DOWNLOAD_ROUTES: Partial<Record<ExportType, DownloadRoute>> = {
   FINANCE_EXCEL: {
     path: (id) => `/exports/${id}/finance-workbook.xlsx`,
@@ -229,7 +234,7 @@ const effectiveReportType = (
 const downloadFor = (
   job: ExportJob,
   canViewRevenue: boolean,
-): { path: string; format: string } | null => {
+): ResolvedDownload | null => {
   const route = hasDownloadRoute(job.export_type)
     ? DOWNLOAD_ROUTES[job.export_type]
     : null;
@@ -272,28 +277,47 @@ const saveBlobAsFile = (blob: Blob, filename: string): void => {
 //   - File: backend/ums_smart_revenue/api/exports.py -> download routes emit
 //     Content-Disposition and persist artifact_filename for queued jobs.
 // ============================================================================
+const REJECTED_DOWNLOAD_FILENAMES = new Set(["", ".", ".."]) as ReadonlySet<string>;
+
+// FIX: Classify code units explicitly so C0, DEL, and the complete C1 range
+// are rejected without embedding control characters in a regular expression.
+const isUnsafeFilenameControl = (character: string): boolean => {
+  const codeUnit = character.charCodeAt(0);
+  if (codeUnit <= 0x1f) return true;
+  return codeUnit >= 0x7f && codeUnit <= 0x9f;
+};
+
+/** Return whether a filename contains a C0, DEL, or C1 control code unit. */
+const hasUnsafeFilenameControl = (value: string): boolean => {
+  return Array.from(value).some(isUnsafeFilenameControl);
+};
+
+/** Return whether a filename could be interpreted as a path. */
+const hasFilenamePathSeparator = (value: string): boolean => {
+  return value.includes("/") || value.includes("\\");
+};
+
+/** Reject empty/dot names and path-shaped filename input. */
+const hasUnsafeFilenameShape = (value: string): boolean => {
+  return (
+    REJECTED_DOWNLOAD_FILENAMES.has(value) || hasFilenamePathSeparator(value)
+  );
+};
+
+/** Normalize characters that Windows forbids in a local filename. */
+const normalizeDownloadFilename = (value: string): string => {
+  return value.replace(/[<>:"|?*]/g, "_").replace(/[. ]+$/g, "");
+};
+
 const safeDownloadFilename = (
   value: string | null | undefined,
 ): string | null => {
   if (typeof value !== "string") return null;
+  if (hasUnsafeFilenameControl(value)) return null;
   const trimmed = value.trim();
-  if (
-    !trimmed ||
-    trimmed === "." ||
-    trimmed === ".." ||
-    // FIX: C1 controls are unsafe response metadata too; reject the full
-    // U+0080-U+009F range before a filename reaches the download attribute.
-    /[\u0000-\u001f\u007f-\u009f]/.test(trimmed) ||
-    /[\\/]/.test(trimmed)
-  ) {
-    return null;
-  }
-  const sanitized = trimmed
-    .replace(/[<>:"|?*]/g, "_")
-    .replace(/[. ]+$/g, "");
-  return sanitized && sanitized !== "." && sanitized !== ".."
-    ? sanitized
-    : null;
+  if (hasUnsafeFilenameShape(trimmed)) return null;
+  const sanitized = normalizeDownloadFilename(trimmed);
+  return REJECTED_DOWNLOAD_FILENAMES.has(sanitized) ? null : sanitized;
 };
 
 /** Read the quoted Content-Disposition filename used by the export routes. */
@@ -651,11 +675,95 @@ const ExportJobsTableHead = () => {
   );
 };
 
+/** Normalize an unknown artifact-download failure into safe UI detail. */
+const exportDownloadErrorDetail = (caught: unknown): string => {
+  const error = caught instanceof Error ? caught : new Error("Download failed");
+  return describeError(error, "Your role cannot download this export.").detail;
+};
+
+// ============================================================================
+// Purpose: Run one authenticated, tenant-scoped artifact download with a
+//   synchronous same-tick latch and an authoritative list reload on success.
+// Database/ORM: None (frontend) — reads a backend-served export Blob only.
+// Standards: Shared API client owns base URL and tenant headers; all failures
+//   become safe UI detail, and the in-flight latch is released in `finally`.
+// Blast Radius: Export artifact download only; no finance or auth decision is
+//   calculated client-side and temporary object URLs remain always-revoked.
+// Connections:
+//   - File: frontend/src/lib/api/client.ts -> getBlob performs the guarded read.
+//   - File: backend/ums_smart_revenue/api/exports.py -> authoritative download.
+// ============================================================================
+const ExportDownloadAction = ({
+  job,
+  download,
+  onDownloadSuccess,
+}: {
+  job: ExportJob;
+  download: ResolvedDownload;
+  onDownloadSuccess: () => void;
+}) => {
+  const client = useApiClient();
+  const [busy, setBusy] = useState(false);
+  const [errorDetail, setErrorDetail] = useState<string | null>(null);
+  const inFlightRef = useRef(false);
+
+  /** Start one download and retain the latch until save/reload settles. */
+  const startDownload = (): void => {
+    // State updates are asynchronous; the ref closes the same-tick window
+    // where two click handlers could otherwise both observe busy === false.
+    if (inFlightRef.current) return;
+    inFlightRef.current = true;
+    setBusy(true);
+    setErrorDetail(null);
+
+    /** Fetch, save, then reload the authoritative export-job metadata. */
+    const fetchAndSave = async (): Promise<void> => {
+      const { blob, headers } = await client.getBlob(download.path);
+      saveBlobAsFile(blob, downloadFilenameFor(headers, job, download.format));
+      onDownloadSuccess();
+    };
+
+    fetchAndSave()
+      .catch((caught: unknown) => {
+        setErrorDetail(exportDownloadErrorDetail(caught));
+      })
+      .finally(() => {
+        inFlightRef.current = false;
+        setBusy(false);
+      });
+  };
+
+  return (
+    <>
+      <button
+        className="mini-button"
+        type="button"
+        disabled={busy}
+        onClick={startDownload}
+      >
+        {busy
+          ? `Downloading ${download.format}`
+          : `${downloadVerb(job)} ${download.format}`}
+      </button>
+      {errorDetail ? (
+        <span className="form-error" role="alert">
+          {errorDetail}
+        </span>
+      ) : null}
+    </>
+  );
+};
+
+/** Return the honest unavailable state for a non-downloadable export job. */
+const unavailableDownloadLabel = (job: ExportJob): string => {
+  return job.status.toUpperCase() === "FAILED"
+    ? job.failure_reason ?? "Failed"
+    : "Not ready";
+};
+
 /**
- * The download cell for a job: a tenant-scoped Blob action (Generate for
- * QUEUED, Download for COMPLETED) when the type has a route, otherwise a
- * failure reason or not-ready note. A successful binary completion reloads
- * the list so queued jobs reflect the backend's persisted artifact metadata.
+ * Render a download action only for a ready/generatable job with an allowed
+ * route; otherwise render the job's failure or not-ready state.
  */
 const ExportDownloadCell = ({
   job,
@@ -666,60 +774,19 @@ const ExportDownloadCell = ({
   canViewRevenue: boolean;
   onDownloadSuccess: () => void;
 }) => {
-  const client = useApiClient();
-  const [busy, setBusy] = useState(false);
-  const [errorDetail, setErrorDetail] = useState<string | null>(null);
-  const inFlightRef = useRef(false);
+  if (!isDownloadable(job)) {
+    return <span className="muted">{unavailableDownloadLabel(job)}</span>;
+  }
   const download = downloadFor(job, canViewRevenue);
-  if (isDownloadable(job) && download) {
-    /** Fetch and save one export artifact while preventing concurrent clicks. */
-    const handleDownload = async (): Promise<void> => {
-      // State updates are asynchronous; the ref closes the same-tick window
-      // where two click handlers could otherwise both observe busy === false.
-      if (inFlightRef.current) return;
-      inFlightRef.current = true;
-      setBusy(true);
-      setErrorDetail(null);
-      try {
-        const { blob, headers } = await client.getBlob(download.path);
-        saveBlobAsFile(blob, downloadFilenameFor(headers, job, download.format));
-        onDownloadSuccess();
-      } catch (caught) {
-        const error = caught instanceof Error ? caught : new Error("Download failed");
-        setErrorDetail(
-          describeError(error, "Your role cannot download this export.").detail,
-        );
-      } finally {
-        inFlightRef.current = false;
-        setBusy(false);
-      }
-    };
-    return (
-      <>
-        <button
-          className="mini-button"
-          type="button"
-          disabled={busy}
-          onClick={() => void handleDownload()}
-        >
-          {busy
-            ? `Downloading ${download.format}`
-            : `${downloadVerb(job)} ${download.format}`}
-        </button>
-        {errorDetail ? (
-          <span className="form-error" role="alert">
-            {errorDetail}
-          </span>
-        ) : null}
-      </>
-    );
+  if (!download) {
+    return <span className="muted">{unavailableDownloadLabel(job)}</span>;
   }
   return (
-    <span className="muted">
-      {job.status.toUpperCase() === "FAILED"
-        ? job.failure_reason ?? "Failed"
-        : "Not ready"}
-    </span>
+    <ExportDownloadAction
+      job={job}
+      download={download}
+      onDownloadSuccess={onDownloadSuccess}
+    />
   );
 };
 
