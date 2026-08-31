@@ -3,6 +3,7 @@
 
 import type { JSX } from "react";
 
+/** Wrap SVG paths in the shared presentation-only icon container. */
 const wrap = (path: JSX.Element) => (
   <span className="icon" aria-hidden="true">
     <svg viewBox="0 0 24 24">{path}</svg>
@@ -72,6 +73,7 @@ export const NAV_ICONS: Record<string, JSX.Element> = {
   ),
 };
 
+/** Render the command-center brand glyph. */
 export const BrandIcon = () =>
   wrap(
     <>
