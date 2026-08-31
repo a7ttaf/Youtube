@@ -159,6 +159,12 @@ would need its full migration, parser/source allowlist, source-row-key, and audi
 contract changes before it could be proposed. The existing channel-month canonical
 lane remains untouched.
 
+Worldwide and country Analytics rows also need compatible cleanup semantics: either
+one atomic run-level keep-set covers both shapes for the same content owner/month, or
+the source-row cleanup key gains a discriminator that prevents a country-only refresh
+from deleting worldwide rows and prevents a worldwide refresh from deleting country
+evidence. Distinct row hashes alone do not protect deferred stale cleanup.
+
 The filter belongs in the shared dashboard/export signal reader **before** sensitive-
 reason redaction. It subtracts only the explicit `non_projecting_evidence` count from
 the raw total and removes that key from the returned reason map; any positive unlabeled
@@ -214,6 +220,10 @@ months keep the same rate-record id. A retroactive correction revokes/supersedes
 affected interval and appends explicit replacement interval(s), preserving the old row
 and its reason. Month lookup requires **exactly one** matching account/category
 interval. Zero or multiple matches fail closed and suppress estimate fields.
+The account is resolved per channel through the effective
+`ContentOwnerChannelLinkORM` → verified `AdsenseContentOwnerLinkORM` bridge for the
+same tenant/month. Missing, expired, unverified, or ambiguous mappings fail closed
+instead of applying another account's rate.
 
 Every figure is labeled "estimated"; the panel links the §0 explanation.
 
@@ -236,6 +246,18 @@ fields (US revenue, nullable share + status, estimated withholding, rate record 
 effective interval, account/category, currency, confidence/source tokens). The SPA
 **renders** those fields — it must **not** compute `US × rate` in the browser. Display
 only: nothing feeds net revenue, allocation, close, or reconciliation (F6 fence).
+The US-share denominator must come from evidence compatible with the country numerator:
+same channel/content owner, metric, currency, period, and compatible report generation
+(preferably the sum of that country response). A mismatch returns a typed provenance
+mismatch state rather than dividing by a headline worldwide fact from a different lane.
+Exports must define canonical serialized fields for US revenue, US share/status,
+estimated withholding, rate id/rate, currency, source tokens, and confidence, or
+explicitly exclude them with a typed evidence reason; the SPA cannot be the only place
+where reviewed finance values exist.
+Withholding-rate and estimate mutation/read APIs require explicit authorization: seed a
+withholding-specific permission, or name an existing finance write permission, scoped to
+the relevant AdSense account/month. Tests must cover missing, insufficient,
+cross-account, and storage-failure paths.
 
 **Acceptance criteria (U3):**
 - [ ] PostgreSQL rate migration/repository/API are tenant-scoped, audited, non-overlapping, and append/revoke historical corrections
@@ -244,7 +266,10 @@ only: nothing feeds net revenue, allocation, close, or reconciliation (F6 fence)
   after a later **forward-effective** rate change; a retroactive correction changes it
   only through an explicit revoke/replace audit trail
 - [ ] Zero/missing/inconsistent revenue cases return the typed nullable semantics above; no divide-by-zero and no missing-as-zero
-- [ ] With one confirmed effective rate, backend returns labeled estimate fields and rate-record provenance only
+- [ ] With one confirmed effective rate resolved through the channel→content-owner→AdSense bridge, backend returns labeled estimate fields and rate-record provenance only
+- [ ] Numerator/denominator provenance must match; mismatches return a typed status and no share/estimate
+- [ ] Export/API contracts preserve the new finance values and their source/confidence tokens
+- [ ] Authorization gates are explicit and fail closed for missing, insufficient, cross-account, and storage-failure cases
 - [ ] SPA renders backend fields; no client-side withholding math
 - [ ] Recon `DEFAULT_US_WITHHOLDING_RATE` (0.30) unchanged and dormant
 
@@ -258,8 +283,11 @@ a durable manual-entry/CSV boundary plus a delta view: estimated (U3) vs actual.
 not component state or an overwriteable setting.
 
 Persist tenant-scoped `us_withholding_actuals` revisions with a composite
-`(tenant_id, payment_id)` FK to the existing `adsense_payments` row (thereby fixing
-account, month, payment name, amount, and currency) plus income category. Store a
+`(tenant_id, payment_id)` FK to the existing `adsense_payments` row plus income
+category. Because payment sync updates amount, currency, source-report id, and payment
+metadata in place, each actual revision also snapshots the payment amount, currency,
+source report/version, payment name, account id, payment month, and covered earnings
+period used for comparison; otherwise the FK is only a mutable pointer. Store a
 non-negative finite actual withheld amount/currency, non-blank AdSense transaction-
 report reference, optional durable artifact hash/reference, client idempotency key,
 entered_by/reason/created_at, `supersedes_id`, and revoked_by/reason/at. Require the
@@ -280,9 +308,11 @@ reused with different content fails closed. There is no DELETE or in-place amoun
 A locked finance month rejects new/corrected anchors; the operator must use the existing
 audited unlock workflow, append the correction with a new reason/source reference, and
 re-lock. Reads return revision provenance and a backend-computed estimated-vs-actual
-delta **only when both values carry the same currency**; the SPA renders that value and
-performs no finance math. Missing estimate data returns `delta=null` with a typed missing-
-estimate status. A currency mismatch returns `delta=null` with
+delta **only when both values carry the same currency and the actual's covered earnings
+period/account aggregation matches the U3 estimate period**; the SPA renders that value
+and performs no finance math. If the report does not expose a trustworthy covered
+period, return the actual without a delta. Missing estimate data returns `delta=null`
+with a typed missing-estimate status. A currency mismatch returns `delta=null` with
 `CURRENCY_MISMATCH_NO_FX`, preserving both source amounts without conversion. The
 comparison remains reproducible after restart. This is the only way to catch a silently
 lapsed W-8 (actual jumps to 24/30% while the estimate stays 15%). Until U4, that check
@@ -291,6 +321,7 @@ is a monthly manual glance at the AdSense payments report.
 **Acceptance criteria (U4):**
 - [ ] Migration, tenant RLS, repository/service, typed API/CSV validation, and audit reason are present
 - [ ] Anchor references an existing account/payment and source report; currency mismatch and unknown payment fail closed
+- [ ] Anchor snapshots mutable payment fields and records the covered earnings period; no delta is emitted when period/account linkage is absent or incompatible
 - [ ] Retry is idempotent; correction appends/supersedes and preserves prior revision;
   concurrent writers leave one active revision
 - [ ] Locked month rejects insert/correction until audited unlock; restart preserves the same actual-vs-estimated comparison

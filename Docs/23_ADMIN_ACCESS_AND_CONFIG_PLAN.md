@@ -381,7 +381,11 @@ partial unique indexes apply only where `revoked_at IS NULL`: one prevents a pro
 subject from binding to two users; the other prevents one UMS user from carrying two
 active Google identities for the same issuer. Revoked rows remain as history, so relink
 does not overwrite evidence. The gateway adapter resolves Google OIDC claims → UMS UUID
-**before** trusted headers reach FastAPI (`dependencies.py` UUID validation).
+**before** trusted headers reach FastAPI (`dependencies.py` UUID validation), but only
+after the gateway has established a trusted tenant binding such as a configured
+hostname, callback state, or operator-owned tenant selection record. A browser-supplied
+tenant header is not an authentication boundary; absent or ambiguous tenant binding
+fails closed before the external-identity lookup.
 
 **Enrollment is explicit; account creation alone is not enough.** Add an audited
 operator action such as

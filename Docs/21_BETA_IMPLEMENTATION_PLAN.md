@@ -132,7 +132,10 @@ no backup of any kind.
 
 The only item in this plan I would refuse to skip.
 
-- `pg_dump -Fc` to a **host** directory (not a container path), on Task Scheduler.
+- `pg_dump -Fc` to a **protected external/off-PC** destination, not merely a
+  container path or another directory on the same disk as Docker's VHDX and the
+  artifact bind mount. Keep retention there, and rehearse restore from that
+  detached copy.
 - A restore script, and **one rehearsed restore into a throwaway container.**
 
 > ⚠️ **`pg_dump` does not dump roles.** A restore into a fresh container fails on the
@@ -241,8 +244,15 @@ The beta import runner and API boundary must fail closed as one contract:
 - [ ] The runner reports complete only when the exact set/amount/report-id/control-total
   comparison passes; absence of `CHANNELS_MISSING_REVENUE_FACTS` alone is never proof
 - [ ] Batch output records source hash/id and the attributed bootstrap UUID without storing secrets
+- [ ] Replacement/import idempotency is backed by an immutable PostgreSQL batch
+  ledger (or an equivalent append-only audit ledger) recording batch key,
+  manifest hash, report/source ids, status, actor, and completion time inside
+  the replacement transaction; stale delayed retries must compare against that
+  ledger before they can rewrite facts
 
-**Migration/API impact (P0.2a):** no database migration or backfill is required. Making
+**Migration/API impact (P0.2a):** the implementation PR requires a PostgreSQL
+migration for the immutable import-batch ledger described above; no historical
+backfill is required before real beta data because the gate must land first. Making
 `source_currency="USD"` a required typed request field is an intentional API-contract
 change; every direct caller, fixture, and generated client must be updated in the same
 implementation PR. Existing USD rows remain valid; no historical currency is guessed.
@@ -341,6 +351,10 @@ then applies only mappings present in that manifest through the audited mapping 
 If the operator does not yet know a channel's owner, leave `primary_company_id` NULL,
 keep its `MISSING_COMPANY` issue visible, and exclude/label company and sector rollups
 as incomplete. Never clear an issue by inventing ownership.
+Before real revenue is entered, the backend must either suppress company/sector
+rollups while revenue-bearing channels remain unmapped or expose completeness metadata
+on rankings responses, including an incomplete flag and excluded-channel count, so
+partial totals cannot look authoritative.
 
 > **Do not build a general `POST /org-units` for the beta.** A manifest-driven bootstrap
 > is enough for one operator. The existing per-channel write remains
