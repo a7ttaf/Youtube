@@ -125,17 +125,14 @@ Must run on the integration branch **before push**, in order:
 2. `python -m pytest -q` — must pass full suite. Origin/main baseline = 452 tests. Post-integration target = ~570 (452 + ~120 new from S2.4b coverage PRs).
 3. **Alembic validation — prefer disposable PostgreSQL**:
    - If docker is available: `docker compose up -d postgres`, set `DATABASE_URL`, run `PYTHONPATH=backend python -m alembic upgrade head` (must reach single head), then exercise a round-trip using **one of** the two options below, then tear down the container. Record which option was used in the Phase 4 run log entry (`Docs/superpowers/runlog/2026-05-21-phase-4.md`).
-     - **Option A — targeted (faster)**: downgrade to the recorded pre-merge head (`LAST_PRE_MERGE_HEAD`, captured from `alembic heads` against `origin/main` and `origin/pr/s2-4a-...` before the integration merge), then re-`upgrade head`. Exercises only the migrations introduced by the integration; failures point cleanly at the new chain.
+     - **Security floor:** `20260825_0002` is irreversible. Never ask Alembic to downgrade a current database below that revision. Historical migration round-trips must start from a fresh disposable schema, upgrade only to the exact revision under test, downgrade to its predecessor, and re-upgrade that same revision. Crossing the floor requires a reviewed database reset/redeploy.
+     - **Option A — targeted (faster):** use only when the recorded pre-merge head (`LAST_PRE_MERGE_HEAD`, captured from `alembic heads` against `origin/main` and `origin/pr/s2-4a-...` before the integration merge) is `20260825_0002` or newer. Downgrade to that revision, then re-`upgrade head`. Exercises only the reversible migrations introduced after the security floor; failures point cleanly at the new chain.
        ```bash
-       export LAST_PRE_MERGE_HEAD=<alembic_revision>   # e.g. 20260513_0006 or 20260518_0001 — the alembic revision identifier of the side you want to bounce against (NOT a git commit SHA)
+       export LAST_PRE_MERGE_HEAD=<alembic_revision_at_or_after_20260825_0002>
        PYTHONPATH=backend python -m alembic downgrade "$LAST_PRE_MERGE_HEAD"
        PYTHONPATH=backend python -m alembic upgrade head
        ```
-     - **Option B — full round-trip (more thorough, slower)**: downgrade to `base` then re-`upgrade head`. Exercises every `downgrade()` in the chain (including the older `20260510_*` / `20260513_*` migrations) at the cost of additional time. Use this when integrating a stack that touches multiple migration branches and you want maximum confidence.
-       ```bash
-       PYTHONPATH=backend python -m alembic downgrade base
-       PYTHONPATH=backend python -m alembic upgrade head
-       ```
+     - **Option B — fresh-schema convergence:** reset/recreate the disposable test database, then `upgrade head`. A `downgrade base` round-trip is intentionally unavailable after `20260825_0002`; use revision-pinned migration tests for older reversible migrations.
    - SQLite fallback only if PG unavailable: same commands against `sqlite:///./.pytest-tmp/integration.sqlite`. If fallback used, document the contract gap in the run log (SQLite does not enforce all PG constraints used by this repo, especially partial indexes and `RESTRICT` FKs).
 4. **Inspect the generated merge migration file** (the file produced by `alembic merge` in the "Alembic migrations" section above; lives at `backend/ums_smart_revenue/db/alembic/versions/<timestamp>_merge_*.py`). Confirm both `upgrade()` and `downgrade()` contain only `pass` (or are empty). If either function contains any schema operation (`op.create_table`, `op.add_column`, `op.alter_column`, `op.drop_*`, etc.), **STOP and CHECKPOINT** — incompatible schema changes between branches detected; the merge is unsafe without hand-resolution.
 5. `cd frontend && npm install && npm run build` — must succeed. (`cd` required because `package.json` lives in `frontend/`.)
@@ -164,7 +161,7 @@ The integration merge commit on `main` (recorded as `INTEGRATION_MERGE_SHA` in t
 3. Push: `git push -u origin revert/s2-integration`
 4. Open revert PR: `gh pr create --base main --head revert/s2-integration --title "Revert S2 integration" --body "Reverts merge commit <SHA>. See run log Docs/superpowers/runlog/2026-05-21-phase-4.md."`
 5. Merge revert PR with `gh pr merge --merge`
-6. Alembic rollback if needed: against disposable PG, `PYTHONPATH=backend python -m alembic downgrade "$LAST_PRE_MERGE_HEAD"`. `LAST_PRE_MERGE_HEAD` is the pre-integration head captured during the validation gate (e.g., `20260513_0006` or `20260518_0001`) — see the Phase 4 run log entry. The merge migration is no-op and reversible.
+6. Alembic rollback if needed: downgrade only when `LAST_PRE_MERGE_HEAD` is `20260825_0002` or newer. Never cross the irreversible authorization floor. If rollback requires an older schema, use a reviewed database reset/redeploy rather than `alembic downgrade`. The merge migration itself remains no-op and reversible.
 
 Net effect: main returns to pre-integration state in one PR. No data loss (integration is code-only; no production data migration runs).
 

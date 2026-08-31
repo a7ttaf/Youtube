@@ -1,6 +1,6 @@
 """Shared helper for the PostgreSQL migration round-trip test fixtures.
 
-The 9 ``fresh_engine`` / ``_drop_public_schema`` test fixtures all need the
+The migration ``fresh_engine`` / ``_drop_public_schema`` fixtures all need the
 exact same schema-reset behaviour:
 
   1. Open a short-lived SQLAlchemy engine.
@@ -12,7 +12,7 @@ exact same schema-reset behaviour:
      not leak the pool for the rest of the test session.
 
 Extracting the body into :func:`reset_public_schema` keeps the timeout
-bound (and any future tuning) to a single line, removes the 9-way
+bound (and any future tuning) to a single line, removes duplicated
 copy-paste, and gives every fixture the same disposal guarantees.
 The per-fixture contract block (AGENTS.md) stays in the fixture; the
 helper only owns the body.
@@ -20,6 +20,8 @@ helper only owns the body.
 
 import sqlalchemy as sa
 from sqlalchemy import text
+
+_DATABASE_SELECTION_QUERY_KEYS = frozenset({"database", "dbname", "service", "servicefile"})
 
 
 # ============================================================================
@@ -31,18 +33,43 @@ from sqlalchemy import text
 # Standards: SET LOCAL is transaction-scoped (reverts on engine.begin()
 #            commit), so existing lock-blocking tests that set their own
 #            `statement_timeout='750ms'` on a contender connection are
-#            unaffected. The `try/finally` wrapper guarantees
+#            unaffected. Database-name validation runs before connection. The
+#            `try/finally` wrapper guarantees
 #            `engine.dispose()` runs even when the schema reset raises.
-# Blast Radius: Test harness only — no product code, no migration, no
-#               `alembic/env.py` change. AGENTS.md statement: None detected.
+# Blast Radius: Test harness only. Destructive reset is refused unless the
+#               PostgreSQL database name is explicitly test-shaped.
 # Connections:
-#   - File: tests/_postgres_helpers.py -> `require_postgres_url()` supplies
+#   - File: tests/db/_postgres_helpers.py -> `require_postgres_url()` supplies
 #     the disposable test DB URL.
 #   - File: tests/db/test_tenant_rls_migration.py -> `_drop_public_schema`
 #     is the original private version of this logic; the public helper
-#     here is the de-duplicated one used by all 9 fixtures.
+#     here is the de-duplicated boundary used by migration fixtures.
 #   - File: AGENTS.md -> "Professional Commenting Standard" (this block).
 # ============================================================================
+def _require_disposable_postgres_database(postgres_url: str) -> None:
+    """Reject a destructive schema reset unless the URL names a test database."""
+    try:
+        parsed = sa.engine.make_url(postgres_url)
+    except (sa.exc.ArgumentError, ValueError) as exc:
+        raise RuntimeError(
+            "Refusing destructive public-schema reset: invalid PostgreSQL URL."
+        ) from exc
+    query_keys = {key.casefold() for key in parsed.query}
+    if query_keys & _DATABASE_SELECTION_QUERY_KEYS:
+        raise RuntimeError(
+            "Refusing destructive public-schema reset: database-selection query "
+            "parameters are not allowed."
+        )
+    database = (parsed.database or "").strip().casefold()
+    if not parsed.drivername.startswith("postgresql") or not (
+        database.startswith("test_") or database.endswith("_test")
+    ):
+        raise RuntimeError(
+            "Refusing destructive public-schema reset: PostgreSQL database name "
+            "must start with 'test_' or end with '_test'."
+        )
+
+
 def reset_public_schema(postgres_url: str) -> None:
     """Drop and recreate the ``public`` schema with a 30s lock_timeout.
 
@@ -51,6 +78,10 @@ def reset_public_schema(postgres_url: str) -> None:
     ``LockNotAvailable`` after ``lock_timeout``; the helper does not
     swallow that error).
     """
+    # FIX: The shared reset previously trusted any non-empty environment URL;
+    # path-only validation also let libpq's dbname/service query parameters
+    # redirect a test-shaped URL to a non-test database.
+    _require_disposable_postgres_database(postgres_url)
     engine = sa.create_engine(postgres_url)
     try:
         with engine.begin() as conn:
