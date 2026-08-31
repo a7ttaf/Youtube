@@ -330,10 +330,10 @@ listening when `UMS_TRUSTED_GATEWAY_TOKEN` is blank. A non-global
 `VITE_DEV_GATEWAY_SCOPE_TYPE` also requires a non-blank
 `VITE_DEV_GATEWAY_SCOPE_ID`; global scope requires that id to be absent.
 
-`VITE_DEV_BACKEND_URL` must be an exact origin. Loopback is trusted by default. To
-target a non-loopback backend, add that exact origin to the Node-only
-`UMS_DEV_TRUSTED_BACKEND_ORIGINS` allowlist; without it Vite refuses to start rather
-than sending the gateway token to an untrusted host.
+`VITE_DEV_BACKEND_URL` must be an exact origin. Loopback may use HTTP and is
+trusted by default. To target a non-loopback backend, use HTTPS and add that exact
+origin to the Node-only `UMS_DEV_TRUSTED_BACKEND_ORIGINS` allowlist; without it
+Vite refuses to start rather than sending the gateway token to an untrusted host.
 
 `finance_admin` covers net-revenue, smart-alerts, finance-close + readiness,
 explain, exports, and AdSense payments. The Connectors **credentials** list

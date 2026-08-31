@@ -14,7 +14,8 @@
 # from the invoking shell or a local --env-file such as .env.local. Keep those
 # files untracked. Use UMS_DB_PASSWORD for Postgres and UMS_DB_PASSWORD_URLENC
 # for the app DSN when the password contains URI-reserved characters.
-# Production uses Helm + External Secrets Operator (see deploy/helm/).
+# This branch supports the single-box compose deployment only. No Helm chart or
+# External Secrets Operator integration is included here.
 
 name: ums-smart-revenue
 

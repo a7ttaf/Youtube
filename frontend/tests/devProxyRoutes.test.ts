@@ -559,6 +559,7 @@ const GATEWAY_HEADERS: [string, string][] = [
 ];
 
 type ProxyReqHandler = (proxyReq: {
+  getHeaderNames: () => string[];
   removeHeader: (header: string) => void;
   setHeader: (header: string, value: string) => void;
 }) => void;
@@ -600,6 +601,7 @@ const headerMutations = (
     throw new Error(`expected ${route} to register a proxyReq handler`);
   }
   handler({
+    getHeaderNames: () => [],
     removeHeader: (header: string) => {
       removed.push(header);
     },

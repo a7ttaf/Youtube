@@ -51,6 +51,22 @@ const BASE_ENV: Record<string, string> = {
   VITE_DEV_GATEWAY_TENANT_SLUG: "ums",
 };
 
+const ATTACKER_GATEWAY_HEADERS: Record<string, string> = {
+  "X-Company-ID": "attacker-company",
+  "X-Permissions": "finance.close",
+  "X-Role": "super_owner",
+  "X-Scope-Forged": "attacker-scope",
+  "X-Scope-ID": "attacker-company",
+  "X-Scope-Type": "company",
+  "X-UMS-Impersonation": "attacker-identity",
+  "X-UMS-Tenant": "attacker-tenant",
+  "X-UMS-Trusted-Gateway-Token": "attacker-token",
+  "X-Unrelated-Header": "preserve-me",
+  "X-User-Email": "attacker@example.test",
+  "X-User-ID": "attacker-user",
+  "X-User-Impersonated": "attacker-shadow",
+};
+
 type BackendHit = {
   headers: IncomingHttpHeaders;
   method: string | undefined;
@@ -118,6 +134,44 @@ const sendRequest = (
     request.end();
   });
 
+const sendExpectRequest = (
+  port: number,
+  requestPath: string,
+  headers: Record<string, string>,
+): Promise<HttpResult> =>
+  new Promise((resolve, reject) => {
+    const body = JSON.stringify({ probe: "expect-continue" });
+    const request = httpRequest(
+      {
+        headers: {
+          Accept: "application/json",
+          ...headers,
+          "Content-Length": String(Buffer.byteLength(body)),
+          "Content-Type": "application/json",
+          Expect: "100-continue",
+        },
+        host: "127.0.0.1",
+        method: "POST",
+        path: requestPath,
+        port,
+      },
+      (response) => {
+        const chunks: Buffer[] = [];
+        response.on("data", (chunk: Buffer) => chunks.push(chunk));
+        response.on("end", () => {
+          resolve({
+            body: Buffer.concat(chunks).toString("utf8"),
+            headers: response.headers,
+            status: response.statusCode ?? 0,
+          });
+        });
+      },
+    );
+    request.on("error", reject);
+    request.once("continue", () => request.end(body));
+    request.flushHeaders();
+  });
+
 describe("development gateway config", () => {
   it("activates only for the development serve command", () => {
     expect(shouldEnableDevGateway("serve", "development")).toBe(true);
@@ -171,16 +225,25 @@ describe("development gateway config", () => {
     ).toThrow(/SCOPE_ID.*blank.*global/iu);
   });
 
-  it("requires explicit trust before forwarding the token to a non-loopback target", () => {
+  it("requires HTTPS and explicit trust before forwarding to a non-loopback target", () => {
     expect(resolveDevBackendTarget("http://127.0.0.1:8000")).toBe(
       "http://127.0.0.1:8000",
     );
+    expect(
+      resolveDevBackendTarget("http://127.0.0.1:8000", ["http://127.0.0.1:8000"]),
+    ).toBe("http://127.0.0.1:8000");
     expect(() => resolveDevBackendTarget("https://api.example.test")).toThrow(
       /refusing non-loopback/iu,
     );
     expect(
       resolveDevBackendTarget("https://api.example.test", ["https://api.example.test"]),
     ).toBe("https://api.example.test");
+    expect(() =>
+      resolveDevBackendTarget("http://api.example.test", ["http://api.example.test"]),
+    ).toThrow(/non-loopback.*https/iu);
+    expect(() =>
+      resolveDevBackendTarget("https://api.example.test", ["http://api.example.test"]),
+    ).toThrow(/non-loopback.*https/iu);
     expect(() => resolveDevBackendTarget("https://user:secret@api.example.test")).toThrow(
       /credentials/iu,
     );
@@ -198,9 +261,12 @@ describe("real development gateway proxy", () => {
 
   beforeAll(async () => {
     backend = createHttpServer((request, response) => {
-      hits.push({ headers: request.headers, method: request.method, url: request.url });
-      response.writeHead(200, { "Content-Type": "application/json" });
-      response.end(JSON.stringify({ proxied: true }));
+      request.resume();
+      request.once("end", () => {
+        hits.push({ headers: request.headers, method: request.method, url: request.url });
+        response.writeHead(200, { "Content-Type": "application/json" });
+        response.end(JSON.stringify({ proxied: true }));
+      });
     });
     backend.listen(0, "127.0.0.1");
     await once(backend, "listening");
@@ -297,16 +363,8 @@ describe("real development gateway proxy", () => {
     expect(hits).toEqual([]);
   });
 
-  it("strips every attacker principal header and omits scope id for global config", async () => {
-    const result = await sendRequest(vitePort, "/users", {
-      "X-Role": "super_owner",
-      "X-Scope-ID": "attacker-company",
-      "X-Scope-Type": "company",
-      "X-UMS-Tenant": "attacker-tenant",
-      "X-UMS-Trusted-Gateway-Token": "attacker-token",
-      "X-User-Email": "attacker@example.test",
-      "X-User-ID": "attacker-user",
-    });
+  it("strips the broad trusted-header namespace and omits scope id for global config", async () => {
+    const result = await sendRequest(vitePort, "/users", ATTACKER_GATEWAY_HEADERS);
 
     expect(result.status).toBe(200);
     expect(hits).toHaveLength(1);
@@ -320,6 +378,40 @@ describe("real development gateway proxy", () => {
     expect(headers?.["x-ums-trusted-gateway-token"]).toBe(
       BASE_ENV.UMS_TRUSTED_GATEWAY_TOKEN,
     );
+    expect(headers?.["x-company-id"]).toBeUndefined();
+    expect(headers?.["x-permissions"]).toBeUndefined();
+    expect(headers?.["x-scope-forged"]).toBeUndefined();
+    expect(headers?.["x-ums-impersonation"]).toBeUndefined();
+    expect(headers?.["x-user-impersonated"]).toBeUndefined();
+    expect(headers?.["x-unrelated-header"]).toBe("preserve-me");
+  });
+
+  it("scrubs and replaces trusted headers on a real Expect: 100-continue request", async () => {
+    const result = await sendExpectRequest(
+      vitePort,
+      "/connectors",
+      ATTACKER_GATEWAY_HEADERS,
+    );
+
+    expect(result.status).toBe(200);
+    expect(hits).toHaveLength(1);
+    const hit = hits[0];
+    expect(hit?.method).toBe("POST");
+    expect(hit?.url).toBe("/connectors");
+    expect(hit?.headers.expect).toBe("100-continue");
+    expect(hit?.headers["x-user-id"]).toBe(BASE_ENV.VITE_DEV_GATEWAY_USER_ID);
+    expect(hit?.headers["x-role"]).toBe(BASE_ENV.VITE_DEV_GATEWAY_ROLE);
+    expect(hit?.headers["x-scope-type"]).toBe("company");
+    expect(hit?.headers["x-scope-id"]).toBe("company-a");
+    expect(hit?.headers["x-ums-trusted-gateway-token"]).toBe(
+      BASE_ENV.UMS_TRUSTED_GATEWAY_TOKEN,
+    );
+    expect(hit?.headers["x-company-id"]).toBeUndefined();
+    expect(hit?.headers["x-permissions"]).toBeUndefined();
+    expect(hit?.headers["x-scope-forged"]).toBeUndefined();
+    expect(hit?.headers["x-ums-impersonation"]).toBeUndefined();
+    expect(hit?.headers["x-user-impersonated"]).toBeUndefined();
+    expect(hit?.headers["x-unrelated-header"]).toBe("preserve-me");
   });
 
   it("rewrites Host, preserves a same-origin Origin, and injects required scoped identity", async () => {

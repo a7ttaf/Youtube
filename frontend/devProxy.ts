@@ -39,9 +39,34 @@ const GATEWAY_HEADER_SOURCES: readonly GatewayHeaderSource[] = [
   ["X-Scope-ID", "VITE_DEV_GATEWAY_SCOPE_ID", ""],
 ] as const;
 
-export const TRUSTED_GATEWAY_HEADERS = GATEWAY_HEADER_SOURCES.map(
-  ([header]) => header,
-);
+// ============================================================================
+// Purpose: Define every known gateway claim plus reserved header namespaces
+//   that browser requests may never control.
+// Database/ORM: None.
+// Standards: Match case-insensitively; explicit names remove absent optional
+//   claims, while namespace patterns protect future claims before list updates.
+// Blast Radius: Development gateway authentication headers only.
+// Connections:
+//   - File: backend/ums_smart_revenue/api/dependencies.py -> consumes claims.
+//   - File: frontend/tests/devProxySecurity.test.ts -> broad namespace probes.
+// ============================================================================
+export const TRUSTED_GATEWAY_HEADERS = [
+  ...GATEWAY_HEADER_SOURCES.map(([header]) => header),
+  "X-Permissions",
+  "X-Company-ID",
+] as const;
+
+const TRUSTED_GATEWAY_HEADER_PATTERNS: readonly RegExp[] = [
+  /^x-user-/iu,
+  /^x-role$/iu,
+  /^x-permissions$/iu,
+  /^x-company-id$/iu,
+  /^x-scope-/iu,
+  /^x-ums-/iu,
+];
+
+const isTrustedGatewayHeader = (header: string): boolean =>
+  TRUSTED_GATEWAY_HEADER_PATTERNS.some((pattern) => pattern.test(header));
 
 export type GatewayHeader = readonly [header: string, value: string];
 
@@ -122,19 +147,30 @@ const parseOrigin = (value: string, label: string): URL => {
 const isLoopbackHostname = (hostname: string): boolean =>
   hostname === "localhost" || hostname === "127.0.0.1" || hostname === "[::1]";
 
+const normalizeTrustedBackendOrigin = (rawValue: string): string => {
+  const origin = parseOrigin(rawValue, TRUSTED_BACKEND_ORIGINS_ENV);
+  if (!isLoopbackHostname(origin.hostname) && origin.protocol !== "https:") {
+    throw new Error(
+      `[vite] ${TRUSTED_BACKEND_ORIGINS_ENV} non-loopback origins must use https`,
+    );
+  }
+  return origin.origin;
+};
+
 export const parseTrustedBackendOrigins = (rawValue: string): string[] =>
   rawValue
     .split(",")
     .map((value) => value.trim())
     .filter(Boolean)
-    .map((value) => parseOrigin(value, TRUSTED_BACKEND_ORIGINS_ENV).origin);
+    .map(normalizeTrustedBackendOrigin);
 
 // ============================================================================
 // Purpose: Prevent a mistyped or attacker-controlled backend target from
 //   receiving the local trusted-gateway token.
 // Database/ORM: None.
 // Standards: Loopback is trusted by default; every non-loopback target needs
-//   an exact Node-only origin allowlist entry and may not embed credentials.
+//   HTTPS plus an exact Node-only origin allowlist entry and may not embed
+//   credentials.
 // Blast Radius: Development gateway target selection only.
 // Connections:
 //   - File: README.md -> documents UMS_DEV_TRUSTED_BACKEND_ORIGINS.
@@ -145,11 +181,13 @@ export const resolveDevBackendTarget = (
   trustedOrigins: readonly string[] = [],
 ): string => {
   const target = parseOrigin(rawTarget.trim(), "VITE_DEV_BACKEND_URL");
-  const normalizedTrustedOrigins = trustedOrigins.map(
-    (origin) => parseOrigin(origin.trim(), TRUSTED_BACKEND_ORIGINS_ENV).origin,
-  );
+  const targetIsLoopback = isLoopbackHostname(target.hostname);
+  if (!targetIsLoopback && target.protocol !== "https:") {
+    throw new Error("[vite] non-loopback VITE_DEV_BACKEND_URL targets must use https");
+  }
+  const normalizedTrustedOrigins = trustedOrigins.map(normalizeTrustedBackendOrigin);
   if (
-    !isLoopbackHostname(target.hostname) &&
+    !targetIsLoopback &&
     !normalizedTrustedOrigins.includes(target.origin)
   ) {
     throw new Error(
@@ -275,12 +313,39 @@ const rejectRequest = (
 };
 
 // ============================================================================
+// Purpose: Replace browser-controlled gateway claims before http-proxy copies
+//   the incoming header map into an outbound request.
+// Database/ORM: None.
+// Standards: Reserve the complete trusted namespaces, preserve unrelated
+//   headers, and inject only values validated from Node-side configuration.
+// Blast Radius: Development authorization headers on proxied requests only.
+// Connections:
+//   - File: frontend/tests/devProxySecurity.test.ts -> exercises normal and
+//     Expect: 100-continue flows through a real Vite proxy.
+//   - File: backend/ums_smart_revenue/api/dependencies.py -> trusted consumer.
+// ============================================================================
+const applyTrustedGatewayHeaders = (
+  request: IncomingMessage,
+  gatewayHeaders: readonly GatewayHeader[],
+): void => {
+  for (const header of Object.keys(request.headers)) {
+    if (isTrustedGatewayHeader(header)) {
+      delete request.headers[header];
+    }
+  }
+  for (const [header, value] of gatewayHeaders) {
+    request.headers[header.toLowerCase()] = value;
+  }
+};
+
+// ============================================================================
 // Purpose: Build exact-segment Vite proxy entries and replace every caller
 //   supplied trusted identity, role, scope, tenant, and token header.
 // Database/ORM: None.
-// Standards: Reject encoded path confusion and cross-origin browser requests
-//   before proxying; changeOrigin rewrites Host to the validated backend while
-//   the browser Origin is preserved for the backend's own policy checks.
+// Standards: Reject encoded path confusion and cross-origin browser requests;
+//   scrub and inject claims before http-proxy copies incoming headers, retaining
+//   proxyReq replacement as defense in depth. Preserve the browser Origin while
+//   changeOrigin rewrites Host to the validated backend.
 // Blast Radius: Development authorization boundary; no production activation.
 // Connections:
 //   - File: frontend/tests/devProxySecurity.test.ts -> drives a real Vite proxy.
@@ -310,6 +375,9 @@ export const buildTenantScopedProxy = (
           if (!requestUsesTrustedOrigin(request)) {
             return rejectRequest(response, 403, "Untrusted development gateway origin");
           }
+          // FIX: proxyReq is not emitted on every Expect: 100-continue path.
+          // Replace trusted claims here before http-proxy copies req.headers.
+          applyTrustedGatewayHeaders(request, gatewayHeaders);
           return undefined;
         },
         configure(proxy) {
@@ -317,8 +385,14 @@ export const buildTenantScopedProxy = (
             // FIX: Deleting the complete trusted set before injection prevents
             // optional headers (especially X-Scope-ID for global identities)
             // from surviving from the caller when no replacement is configured.
-            for (const header of TRUSTED_GATEWAY_HEADERS) {
-              proxyRequest.removeHeader(header);
+            const candidateHeaders = new Set([
+              ...TRUSTED_GATEWAY_HEADERS,
+              ...proxyRequest.getHeaderNames(),
+            ]);
+            for (const header of candidateHeaders) {
+              if (isTrustedGatewayHeader(header)) {
+                proxyRequest.removeHeader(header);
+              }
             }
             for (const [header, value] of gatewayHeaders) {
               proxyRequest.setHeader(header, value);
