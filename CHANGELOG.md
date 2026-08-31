@@ -19,6 +19,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Root governance: `README.md`, `SECURITY.md`, `CONTRIBUTING.md`, `CODEOWNERS`, `CODE_OF_CONDUCT.md`, `.gitignore`.
 
 ### Changed
+- Patch dependency refresh: Pydantic `2.13.4` -> `2.13.5` (with
+  `pydantic-core` `2.46.4` -> `2.46.5`), pypdf `6.16.1` -> `6.16.2`, and
+  Ruff `0.16.4` -> `0.16.5`. The releases contain validation/GC fixes, PDF
+  extraction/transformation robustness fixes, and linter bug fixes. This PR
+  changes no database schema, authorization, finance formula, or export code.
 - Dependency batch, consolidating Dependabot #140, #153 and #154. Runtime:
   `fastapi` 0.137.1 -> 0.140.3, `uvicorn[standard]` 0.49.0 -> 0.51.0,
   `sqlalchemy` 2.0.50 -> 2.0.51, `alembic` 1.18.4 -> 1.18.5, `redis`
