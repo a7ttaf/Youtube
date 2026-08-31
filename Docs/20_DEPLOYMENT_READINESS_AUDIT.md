@@ -10,7 +10,7 @@ corrections are recorded rather than quietly dropped.
 
 > ⚠️ **Freshness banner (2026-08-31).** PR #210 was merged only into the closed PR #209
 > branch; neither its head nor merge commit reached `main`. P0 **implementation** is
-> tracked on open, non-draft split PRs #221–#225 (P0-a…P0-e). This document is
+> tracked on open, draft split PRs #221–#225 (P0-a…P0-e). This document is
 > the **pre-execution snapshot** at `main` = `d8418cea2`. Do **not** schedule unchecked
 > open items from this text alone. For scheduling work, use Docs/21 as maintained on
 > `main` after each P0 split merges (see [`25_PROGRAM_DEPENDENCY_GRAPH.md`](25_PROGRAM_DEPENDENCY_GRAPH.md)).

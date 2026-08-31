@@ -9,7 +9,7 @@ breaks, what it unblocks — not estimated from the finding text.
 
 > ⚠️ **Freshness banner (2026-08-31, post-audit).** PR #210 was merged only into the
 > closed PR #209 branch; neither its head nor merge commit reached `main`. Track P0
-> execution on open, non-draft split PRs #221–#225 (P0-a…P0-e — see
+> execution on open, draft split PRs #221–#225 (P0-a…P0-e — see
 > [`25_PROGRAM_DEPENDENCY_GRAPH.md`](25_PROGRAM_DEPENDENCY_GRAPH.md)).
 > This copy is the **costing snapshot** at `main` = `d8418cea2`. Do not schedule open
 > items from the hour tables alone until P0 split PRs land on `main`.
@@ -26,11 +26,11 @@ breaks, what it unblocks — not estimated from the finding text.
 | Work | Live state at 2026-08-31 | Role |
 | --- | --- | --- |
 | [`20_DEPLOYMENT_READINESS_AUDIT.md`](20_DEPLOYMENT_READINESS_AUDIT.md) | PR #220, open/non-draft | Historical audit snapshot; no runtime implementation |
-| P0-a / #221 | open, non-draft; not merged | Compose/artifact storage |
-| P0-b / #222 | open, non-draft; not merged | Backup/restore |
-| P0-c / #223 | open, non-draft; not merged | Bootstrap/authz seed |
-| P0-d / #224 | open, non-draft; not merged | Logging/ops |
-| P0-e / #225 | open, non-draft; not merged | Dev gateway docs + `/org-units` and `/users` proxy |
+| P0-a / #221 | open draft, BLOCKED; not merged | Compose/artifact storage |
+| P0-b / #222 | open draft, BEHIND; not merged | Backup/restore |
+| P0-c / #223 | open draft, BEHIND; not merged | Bootstrap/authz seed |
+| P0-d / #224 | open draft, BEHIND; not merged | Logging/ops |
+| P0-e / #225 | open draft, BLOCKED; head `e8750885`; not merged | Dev gateway docs + `/org-units` and `/users` proxy |
 | P1.2 / #211 | **merged to `main` as `41b4953`** | Rolling months |
 | P1 / #212 | open, non-draft, BLOCKED; head `db576e01` | Remaining P1 work; not implemented on `main` |
 | P1 / #213–#216 | open drafts (mixed BLOCKED/DIRTY) | Remaining P1 work; not implemented on `main` |

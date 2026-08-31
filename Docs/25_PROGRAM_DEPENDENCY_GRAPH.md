@@ -15,15 +15,15 @@ main-targeted P0 successors.
 | PR | Exact captured head | Live state | Honest scope |
 | --- | --- | --- | --- |
 | #220 | `8192dcbf` | OPEN, non-draft, BLOCKED | Seven docs: Docs/01, 15, 20, 21, 23, 24, 25; 16/25 review threads unresolved at capture |
-| #221 / P0-a | `26bf0256` | OPEN, non-draft, BLOCKED | Compose + artifact storage; not on `main` |
-| #222 / P0-b | `02298275` | OPEN, non-draft, BEHIND | Backup/restore; not on `main` and currently assumes #223 seed tables |
-| #223 / P0-c | `edabb9a2` | OPEN, non-draft, BEHIND | Seed migration/bootstrap/authz; not on `main` |
-| #224 / P0-d | `03e58c49` | OPEN, non-draft, BEHIND | Logging/ops; not on `main` |
-| #225 / P0-e | `270c799f` | OPEN, non-draft, BEHIND | Dev gateway docs + `/org-units` and `/users`; **not** `/security` |
-| #226 | `29a542d2` | OPEN, non-draft, BEHIND | Proposed CI checks; not required on `main` yet |
-| #227 | `e174c51f` | OPEN, non-draft, BEHIND | Requires redesign; current head fails the U2 typed-fence/source-system constraint and is not U2 ingest |
-| #228 | `579c7f13` | OPEN, non-draft, BEHIND | Persistence/repository scaffold only; not A6, A7, or U3 completion |
-| #229 | `4d6967ca` | OPEN, non-draft, DIRTY | Router/query/design-system scaffold with static fixtures; rewrite/restack required |
+| #221 / P0-a | `26bf0256` | OPEN, draft, BLOCKED | Compose + artifact storage; not on `main` |
+| #222 / P0-b | `02298275` | OPEN, draft, BEHIND | Backup/restore; not on `main` and currently assumes #223 seed tables |
+| #223 / P0-c | `edabb9a2` | OPEN, draft, BEHIND | Seed migration/bootstrap/authz; not on `main` |
+| #224 / P0-d | `03e58c49` | OPEN, draft, BEHIND | Logging/ops; not on `main` |
+| #225 / P0-e | `e8750885` | OPEN, draft, BLOCKED | Dev gateway docs + `/org-units` and `/users`; **not** `/security` |
+| #226 | `29a542d2` | OPEN, draft, BEHIND | Proposed CI checks; not required on `main` yet |
+| #227 | `e174c51f` | OPEN, draft, BEHIND | Requires redesign; current head fails the U2 typed-fence/source-system constraint and is not U2 ingest |
+| #228 | `579c7f13` | OPEN, draft, BEHIND | Persistence/repository scaffold only; not A6, A7, or U3 completion |
+| #229 | `4d6967ca` | OPEN, draft, DIRTY | Router/query/design-system scaffold with static fixtures; rewrite/restack required |
 
 PR #211 is already **merged** to `main` as `41b4953` (rolling months). PR #212 at
 `db576e01` is OPEN, non-draft, BLOCKED. PR #213 at `fed1e2ab` and #216 at `b1bd238b`

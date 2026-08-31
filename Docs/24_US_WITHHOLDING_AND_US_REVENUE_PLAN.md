@@ -15,7 +15,7 @@ calculation as display/evidence surfaces. Gap/status-patched 2026-08-31.
 | --- | --- |
 | [`20_DEPLOYMENT_READINESS_AUDIT.md`](20_DEPLOYMENT_READINESS_AUDIT.md) / [`21_BETA_IMPLEMENTATION_PLAN.md`](21_BETA_IMPLEMENTATION_PLAN.md) | Parent audit + frozen costing snapshot; P3 parks recon TAX |
 | [`25_PROGRAM_DEPENDENCY_GRAPH.md`](25_PROGRAM_DEPENDENCY_GRAPH.md) | Execution DAG |
-| P0-a…P0-e / #221–#225 | Open, non-draft, not merged; only current main-targeted P0 successors |
+| P0-a…P0-e / #221–#225 | Open drafts, not merged; only current main-targeted P0 successors |
 | [`23_ADMIN_ACCESS_AND_CONFIG_PLAN.md`](23_ADMIN_ACCESS_AND_CONFIG_PLAN.md) | Sibling admin program (independent) |
 
 > ⚠️ **D-U1 is blocking.** No estimate surfaces until the operator confirms the live

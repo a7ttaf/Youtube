@@ -4,7 +4,7 @@
 `41b4953`; #212 is open/non-draft/BLOCKED, #213–#216 remain open P1 drafts, and #217
 is a separate open EGP draft/BLOCKED.
 PR #210 was merged only into the closed #209 planning branch and never reached `main`;
-#221–#225 are the open main-targeted P0 successors. Every "exists today" claim below
+#221–#225 are the open draft, main-targeted P0 successors. Every "exists today" claim below
 was verified against code, not recalled.*
 
 **Status: PLAN.** PR #228 is an open persistence/repository scaffold and PR #229 is an
@@ -26,8 +26,8 @@ keep them safe.
 | --- | --- |
 | [`20_DEPLOYMENT_READINESS_AUDIT.md`](20_DEPLOYMENT_READINESS_AUDIT.md) / [`21_BETA_IMPLEMENTATION_PLAN.md`](21_BETA_IMPLEMENTATION_PLAN.md) | PR #220 audit/costing snapshots; no runtime implementation |
 | [`25_PROGRAM_DEPENDENCY_GRAPH.md`](25_PROGRAM_DEPENDENCY_GRAPH.md) | Exact execution and PR-status DAG |
-| #223 / P0-c | Open, non-draft; bootstrap/seed prerequisite for A1 and A5 |
-| #225 / P0-e | Open, non-draft; `/users` + `/org-units` proxy prerequisite for A1; **not** `/security` |
+| #223 / P0-c | Open draft, BEHIND; bootstrap/seed prerequisite for A1 and A5 |
+| #225 / P0-e | Open draft, BLOCKED at `e8750885`; `/users` + `/org-units` proxy prerequisite for A1; **not** `/security` |
 | #228 | Open scaffold; must be restacked after #223 before its persistence can feed A6/A7 |
 | #229 | Open/conflicting frontend scaffold; must be rewritten/restacked after P1 before A1/A2 UI work consumes it |
 | [`24_US_WITHHOLDING_AND_US_REVENUE_PLAN.md`](24_US_WITHHOLDING_AND_US_REVENUE_PLAN.md) | Sibling finance program; #228 shares only a persistence prerequisite |
