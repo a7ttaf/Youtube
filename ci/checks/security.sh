@@ -54,16 +54,56 @@ scan_file() {
   fi
 }
 
-scan_paths="$({
-  # Handle initial-commit repos with no HEAD: skip git diff --name-only and only
-  # inspect staged paths from git diff --cached --name-only.
-  if git rev-parse --verify HEAD >/dev/null 2>&1; then
-    git diff --name-only
-  fi
-  git diff --cached --name-only
-} | sort -u)"
+scan_paths=""
+committed_range_requested=0
 
-if [ -z "$scan_paths" ]; then
+# The hosted gate checks out committed bytes, so its worktree is clean. Falling
+# back to every tracked file in that state makes historical findings look new
+# and prevents the required context from ever reporting on the PR range. The
+# push contract already carries the exact old/new commits; validate them and
+# scan their changed paths without inventing a debt baseline.
+if [ -n "${CI_GATE_PUSH_OLD_SHA:-}${CI_GATE_PUSH_NEW_SHA:-}" ]; then
+  committed_range_requested=1
+  old_sha="${CI_GATE_PUSH_OLD_SHA:-}"
+  new_sha="${CI_GATE_PUSH_NEW_SHA:-HEAD}"
+  if ! new_commit="$(git rev-parse --verify "${new_sha}^{commit}" 2>/dev/null)"; then
+    echo "Security committed-range head is missing or unreadable: $new_sha"
+    exit "$CI_RESULT_FAIL_INFRA"
+  fi
+  if ! head_commit="$(git rev-parse --verify "HEAD^{commit}" 2>/dev/null)" \
+    || [ "$new_commit" != "$head_commit" ]; then
+    echo "Security committed-range head must be the checked-out HEAD."
+    exit "$CI_RESULT_FAIL_INFRA"
+  fi
+  if ! git diff --quiet || ! git diff --cached --quiet; then
+    echo "Security committed-range scan requires a clean tracked worktree and index."
+    exit "$CI_RESULT_FAIL_INFRA"
+  fi
+
+  if [ -z "$old_sha" ] || printf '%s' "$old_sha" | grep -Eq '^0+$'; then
+    scan_paths="$(git ls-tree -r --name-only "$new_commit" | sort -u)"
+  else
+    if ! old_commit="$(git rev-parse --verify "${old_sha}^{commit}" 2>/dev/null)"; then
+      echo "Security committed-range base is missing or unreadable: $old_sha"
+      exit "$CI_RESULT_FAIL_INFRA"
+    fi
+    if ! scan_paths="$(git diff --name-only "$old_commit" "$new_commit" | sort -u)"; then
+      echo "Security committed range could not be enumerated."
+      exit "$CI_RESULT_FAIL_INFRA"
+    fi
+  fi
+else
+  scan_paths="$({
+    # Handle initial-commit repos with no HEAD: skip git diff --name-only and only
+    # inspect staged paths from git diff --cached --name-only.
+    if git rev-parse --verify HEAD >/dev/null 2>&1; then
+      git diff --name-only
+    fi
+    git diff --cached --name-only
+  } | sort -u)"
+fi
+
+if [ -z "$scan_paths" ] && [ "$committed_range_requested" -eq 0 ]; then
   scan_paths="$(git ls-files 2>/dev/null | sort -u || true)"
 fi
 

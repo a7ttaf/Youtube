@@ -43,6 +43,7 @@ jobs:
         # actions/checkout@v7.0.1
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
+          fetch-depth: 0
           persist-credentials: false
 
       - name: Set up uv
@@ -94,7 +95,16 @@ jobs:
           rhysd/actionlint@sha256:887a259a5a534f3c4f36cb02dca341673c6089431057242cdc931e9f133147e9
 
       - name: Canonical blocking repository gate
-        run: make verify
+        env:
+          CI_GATE_PUSH_OLD_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+          CI_GATE_PUSH_NEW_SHA: ${{ github.sha }}
+        run: |
+          # Pull-request merge commits are checked out detached. The local-only
+          # branch gives git-safety a name without changing the commit or tree.
+          if [ -z "$(git branch --show-current)" ]; then
+            git switch --create "ci-required-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          fi
+          make verify
 
       - name: Full formatting contract
         if: ${{ always() }}
