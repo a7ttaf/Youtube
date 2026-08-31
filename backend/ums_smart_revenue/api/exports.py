@@ -633,7 +633,9 @@ def download_analytics_summary_csv(
     # The browser follows with a same-origin GET that reauthorizes and emits the
     # normal read/download audit records while its native downloader streams.
     if prepare:
-        return _prepared_artifact_response(session=session)
+        return _prepared_artifact_response(
+            session=session, filename=artifact.filename
+        )
 
     _commit_export_download_audit_before_response(
         audit_sink=audit_sink,
@@ -764,7 +766,7 @@ def download_finance_workbook(
         ) from exc
 
     if prepare:
-        return _prepared_artifact_response(session=session)
+        return _prepared_artifact_response(session=session, filename=filename)
 
     _commit_export_download_audit_before_response(
         audit_sink=audit_sink,
@@ -906,7 +908,7 @@ def download_executive_pdf(
         ) from exc
 
     if prepare:
-        return _prepared_artifact_response(session=session)
+        return _prepared_artifact_response(session=session, filename=filename)
 
     _commit_export_download_audit_before_response(
         audit_sink=audit_sink,
@@ -1050,7 +1052,7 @@ def download_branded_slide_pack(
         ) from exc
 
     if prepare:
-        return _prepared_artifact_response(session=session)
+        return _prepared_artifact_response(session=session, filename=filename)
 
     _commit_export_download_audit_before_response(
         audit_sink=audit_sink,
@@ -1106,8 +1108,13 @@ def _tenant_uuid(user: UserPrincipal) -> UUID:
 #   - File: backend/ums_smart_revenue/api/dependencies.py -> Request-scope commit.
 #   - File: frontend/src/components/srcc/views/ExportsView.tsx -> Native GET start.
 # ============================================================================
-def _prepared_artifact_response(*, session: Session) -> Response:
+def _prepared_artifact_response(*, session: Session, filename: str) -> Response:
     """Commit prepared artifact metadata, then return a non-cacheable 204 response."""
+    # The 204 tells the browser a download is ready, so the filename must be
+    # provably safe HERE, not only at the download's header builder: an unsafe
+    # persisted name that passed preparation would fail the download only
+    # after its audit row had already been committed.
+    _require_safe_artifact_filename(filename)
     try:
         # FIX: Yield dependencies default to request scope, so their teardown
         # commit runs after the response is sent. Commit here before the 204 to
@@ -1180,21 +1187,39 @@ def _rollback_audit_sink_unit_of_work(audit_sink: AuditSink) -> None:
         expunge_all()
 
 
-# Defense in depth for the Content-Disposition choke point: every persisted
-# artifact filename is machine-written by today's generators, but this header
-# is the last boundary every artifact passes through, so a future writer that
-# persists a quote, backslash, or control character must fail closed here
-# rather than inject or split the header.
+# ============================================================================
+# Purpose: Guard the persisted artifact filename at the two boundaries that
+#   consume it — preparation (before the 204 announces a ready download) and
+#   the ordinary GET's Content-Disposition header — so a future artifact
+#   writer cannot inject or split the header regardless of what storage
+#   accepts.
+# Database/ORM: None. The filename arrives from ExportJobORM/artifact
+#   persistence; this boundary only validates it.
+# Standards: Fail closed with a typed 500 on any quote, backslash, control
+#   character, or blank value. Today's generators write fixed machine names;
+#   this is defense in depth, not a generator contract.
+# Blast Radius: Every artifact download handshake leg (CSV, XLSX, PDF, PPTX).
+# Connections:
+#   - Function: _prepared_artifact_response -> validates before its 204.
+#   - Function: _artifact_download_headers -> validates before the header.
+#   - File: tests/api/test_export_preview_api.py -> the fail-closed
+#       parametrized regressions for both legs.
+# ============================================================================
 _ARTIFACT_FILENAME_UNSAFE = re.compile(r'[\x00-\x1f\x7f-\x9f"\\]')
 
 
-def _artifact_download_headers(filename: str) -> dict[str, str]:
-    """Return attachment headers that force every protected GET through the gateway."""
+def _require_safe_artifact_filename(filename: str) -> None:
+    """Fail closed on a persisted filename that could inject or split the header."""
     if _ARTIFACT_FILENAME_UNSAFE.search(filename) or not filename.strip():
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Export artifact filename is unsafe",
         )
+
+
+def _artifact_download_headers(filename: str) -> dict[str, str]:
+    """Return attachment headers that force every protected GET through the gateway."""
+    _require_safe_artifact_filename(filename)
     return {
         "Cache-Control": _ARTIFACT_CACHE_CONTROL,
         "Content-Disposition": f'attachment; filename="{filename}"',

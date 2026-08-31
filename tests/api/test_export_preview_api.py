@@ -665,10 +665,39 @@ def test_prepared_artifact_response_fails_closed_when_commit_fails():
             raise SQLAlchemyError("commit failed")
 
     with pytest.raises(HTTPException) as raised:
-        _prepared_artifact_response(session=cast(Session, FailingCommitSession()))
+        _prepared_artifact_response(
+            session=cast(Session, FailingCommitSession()), filename="ums-finance.xlsx"
+        )
 
     assert raised.value.status_code == 503
     assert raised.value.detail == "Export artifact persistence unavailable"
+
+
+def test_prepared_artifact_response_rejects_unsafe_filename_before_committing():
+    """The 204 must not announce a download whose filename would fail the header.
+
+    Validation precedes the metadata commit, so an unsafe persisted name
+    fails the prepare leg closed without touching the session — the download
+    leg can never reach its post-audit header failure.
+    """
+    commits: list[str] = []
+
+    class RecordingSession:
+        """Session stand-in recording its commits."""
+
+        @staticmethod
+        def commit() -> None:
+            """Record that the prepare leg reached its metadata commit."""
+            commits.append("commit")
+
+    with pytest.raises(HTTPException) as raised:
+        _prepared_artifact_response(
+            session=cast(Session, RecordingSession()), filename='ums-finance-2026-03".xlsx'
+        )
+
+    assert raised.value.status_code == 500
+    assert raised.value.detail == "Export artifact filename is unsafe"
+    assert commits == [], "filename validation must run before the metadata commit"
 
 
 @pytest.mark.parametrize(
