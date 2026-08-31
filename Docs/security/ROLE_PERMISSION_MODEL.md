@@ -41,6 +41,13 @@ Global data operations role for channel registry quality, report ingestion visib
 ### Finance Admin
 Global finance owner for revenue, finalized payments, bank reconciliation reads and receipt recording, manual overrides, allocation rules, exports, and finance month locking. Cannot assign Super Owner without Super Owner approval.
 
+### Beta Operator
+Global first-beta finance operator. It can execute the approved finance workflow
+and import `MANUAL_UPLOAD` facts through `POST /revenue/facts` using
+`finance.import_manual_revenue`. It cannot run connector jobs, register raw
+connector files, sync AdSense/payments or exchange rates, or mutate the channel
+registry. Assignment and revocation require Finance Admin or Super Owner.
+
 ### Finance Approver
 Second-control finance role for approving manual overrides, allocation rule changes, month unlock requests, and controlled bank reconciliation receipt updates. Designed for segregation of duties when Finance Admin enters the change.
 
@@ -84,6 +91,7 @@ Scoped registry maintenance role. Can change channel/company/sector mappings and
 | Analytics | view channel metrics, view company performance, view issue flags. |
 | Finance | view revenue, finalized payments, bank reconciliation, allocation results. |
 | Finance control | manual override, override approval, lock/unlock month, change allocation rules, record bank reconciliation receipts. |
+| Manual revenue | import one `MANUAL_UPLOAD` revenue fact without connector execution. |
 | Registry | manage channel registry, company mapping, sector mapping, groups. |
 | Export | export analytics, export revenue, manage templates, view export history. |
 | Connectors | run connector jobs, manage Google/API connector credential settings, view connector health. |
@@ -124,6 +132,8 @@ Sensitive actions include:
 - Override approval requires `APPROVE_MANUAL_OVERRIDE` and should be a different user from the creator.
 - Month lock/unlock requires `LOCK_FINANCE_MONTH` or `UNLOCK_FINANCE_MONTH` for the month scope.
 - Allocation changes require `CHANGE_ALLOCATION_RULE` for the month scope.
+- Manual revenue-fact upload requires global `finance.import_manual_revenue`, a
+  `manual-upload`/`MANUAL_UPLOAD` payload, and a `REPORT_IMPORTED` audit event.
 - Connector administration requires `MANAGE_CONNECTORS`; running jobs requires `RUN_CONNECTOR_JOBS`.
 - User account creation and updates require `users.manage`, a reason, and a `USER_ACCOUNT_CHANGED` audit event.
 - User account list and access-profile reads require `users.manage`; account lists use bounded cursor pagination and access profiles expose only active role assignments and direct grants for administration workflows.

@@ -15,6 +15,7 @@
 | `finance.lock_month` | Lock a finance month. | Yes |
 | `finance.unlock_month` | Unlock a finance month. | Yes |
 | `finance.change_allocation_rule` | Change allocation or deduction rules. | Yes |
+| `finance.import_manual_revenue` | Import manual-upload monthly revenue facts; does not run connectors. | Yes |
 | `exports.analytics` | Export non-financial analytics reports. | Yes |
 | `exports.revenue` | Export revenue or finance reports. | Yes |
 | `exports.manage_templates` | Manage export templates and branding. | Yes |
@@ -39,6 +40,7 @@
 | Corporate Admin | `global` | Analytics, confidence, users, role assignment below Super Owner, platform settings, registry, groups, export templates, audit metadata. No finance by default. |
 | Revenue Operations Admin | `global` | Analytics, confidence, connector health, run connector jobs, registry/groups, raw parser errors when granted. No payment/bank finance by default. |
 | Finance Admin | `global` or assigned finance scope | Revenue, payments, bank reconciliation, manual overrides, allocation rules, month lock/unlock, finance exports, audit finance events. |
+| Beta Operator | `global` | First-beta finance workflow plus bounded manual revenue-fact upload. No connector jobs, raw files, or registry writes. |
 | Finance Approver | `global` or `finance-month` | Approve overrides, approve allocation changes, unlock month, record bank reconciliation receipts, view finance needed for approval. |
 | Finance Viewer | `global`, `sector`, `company`, or `channel` | Read-only revenue for the assigned organization scope. Finalized-payment and bank-reconciliation reads require a global role or separate finance-month grants. Cannot lock/unlock or edit. |
 | TV Sector Manager | `sector:TV` | TV analytics, confidence, analytics exports. Finance only by explicit direct grant or paired finance role. |
@@ -74,6 +76,7 @@
 | Corporate Admin | Yes | No | No | No | No | No | No | Yes | Analytics/templates | Health only | No | Metadata | Yes |
 | Revenue Operations Admin | Yes | No | No | No | No | No | No | Yes | Analytics | Run jobs | Optional | Operational | No |
 | Finance Admin | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Read | Finance | Health | Optional | Finance | Finance roles |
+| Beta Operator | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Read | Finance | No | No | Finance | No |
 | Finance Approver | Yes | Yes | Yes | Yes | Approve | Unlock | Approve/change | Read | Finance | No | No | Finance | No |
 | Finance Viewer | Yes | Read | Read (global or finance-month grant) | Read (global or finance-month grant) | No | No | No | Read | View/export if granted | No | No | No | No |
 | TV Sector Manager | Sector | Optional | Optional | Optional | No | No | No | Read | Analytics | No | No | No | No |

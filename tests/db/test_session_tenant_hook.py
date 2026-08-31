@@ -1,3 +1,4 @@
+import pytest
 import sqlalchemy as sa
 from alembic import command
 from alembic.config import Config
@@ -8,6 +9,7 @@ from ums_smart_revenue.db.session import (
     _apply_tenant_isolation,
     build_platform_session_factory,
     build_session_factory,
+    session_dependency,
 )
 from ums_smart_revenue.tenancy.context import TENANT_CTX
 from ums_smart_revenue.tenancy.models import Tenant, TenantStatus
@@ -80,6 +82,29 @@ def test_sqlite_engine_uses_static_pool_for_shared_connection():
         "SQLite must use StaticPool so the request session and any "
         "co-tenanted use share one DBAPI connection."
     )
+
+
+def test_sqlite_request_rollback_undoes_released_repository_savepoint(tmp_path):
+    """Keep nested repository writes subordinate to request rollback on SQLite."""
+    database_url = f"sqlite+pysqlite:///{(tmp_path / 'request-rollback.db').as_posix()}"
+    factory = build_session_factory(database_url)
+    engine = factory.kw["bind"]
+    with engine.begin() as connection:
+        connection.exec_driver_sql("CREATE TABLE request_rollback_probe (id INTEGER PRIMARY KEY)")
+
+    request_session = session_dependency(factory)()
+    session = next(request_session)
+    with session.begin_nested():
+        session.execute(sa.text("INSERT INTO request_rollback_probe (id) VALUES (1)"))
+
+    with pytest.raises(RuntimeError, match="audit write failed"):
+        request_session.throw(RuntimeError("audit write failed"))
+
+    with engine.connect() as connection:
+        persisted_rows = connection.execute(
+            sa.text("SELECT count(*) FROM request_rollback_probe")
+        ).scalar()
+    assert persisted_rows == 0
 
 
 def test_postgres_tenant_lane_sets_role_and_trusted_tenant_context():

@@ -45,8 +45,16 @@ from ums_smart_revenue.auth.users import (
 router = APIRouter(prefix="/users", tags=["users"])
 logger = logging.getLogger(__name__)
 
+# FIX: BETA_OPERATOR carries revenue, override, allocation, and month-close
+# powers. Omitting it let Corporate Admin assign/revoke a finance-powerful role
+# through the operational-role path without Finance Admin/Super Owner approval.
 FINANCE_ROLE_KEYS = frozenset(
-    {RoleKey.FINANCE_ADMIN, RoleKey.FINANCE_APPROVER, RoleKey.FINANCE_VIEWER}
+    {
+        RoleKey.FINANCE_ADMIN,
+        RoleKey.BETA_OPERATOR,
+        RoleKey.FINANCE_APPROVER,
+        RoleKey.FINANCE_VIEWER,
+    }
 )
 FINANCE_PERMISSION_KEYS = frozenset(
     {
@@ -54,6 +62,7 @@ FINANCE_PERMISSION_KEYS = frozenset(
         Permission.VIEW_FINALIZED_PAYMENTS,
         Permission.VIEW_BANK_RECONCILIATION,
         Permission.MANAGE_BANK_RECONCILIATION,
+        Permission.IMPORT_MANUAL_REVENUE,
         Permission.CREATE_MANUAL_OVERRIDE,
         Permission.APPROVE_MANUAL_OVERRIDE,
         Permission.LOCK_FINANCE_MONTH,
