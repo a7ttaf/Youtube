@@ -281,7 +281,9 @@ const safeDownloadFilename = (
     !trimmed ||
     trimmed === "." ||
     trimmed === ".." ||
-    /[\u0000-\u001f\u007f]/.test(trimmed) ||
+    // FIX: C1 controls are unsafe response metadata too; reject the full
+    // U+0080-U+009F range before a filename reaches the download attribute.
+    /[\u0000-\u001f\u007f-\u009f]/.test(trimmed) ||
     /[\\/]/.test(trimmed)
   ) {
     return null;

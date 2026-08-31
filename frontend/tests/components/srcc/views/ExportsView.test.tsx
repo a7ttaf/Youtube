@@ -311,6 +311,39 @@ describe("ExportsView wired to the exports endpoint", () => {
     expect(revokeObjectURL).toHaveBeenCalledWith("blob:export-metadata");
   });
 
+  it.each([
+    ["quoted traversal", 'attachment; filename="../../unsafe.xlsx"'],
+    ["C1 lower-bound control", 'attachment; filename="unsafe\u0080.xlsx"'],
+    ["C1 upper-bound control", 'attachment; filename="unsafe\u009f.xlsx"'],
+  ])(
+    "rejects a %s Content-Disposition filename and prefers safe artifact metadata",
+    async (_caseName, contentDisposition) => {
+      const createObjectURL = vi.fn(() => "blob:export-safe-metadata");
+      const revokeObjectURL = vi.fn();
+      let clickedFilename: string | undefined;
+      vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(function (
+        this: HTMLAnchorElement,
+      ) {
+        clickedFilename = this.download;
+      });
+      vi.stubGlobal("URL", { ...URL, createObjectURL, revokeObjectURL });
+      fetchMock().mockImplementation((input: unknown) =>
+        urlOf(input).includes("finance-workbook.xlsx")
+          ? Promise.resolve(
+              blobResponse("export bytes", {
+                "Content-Disposition": contentDisposition,
+              }),
+            )
+          : Promise.resolve(jsonResponse(POPULATED_LIST)),
+      );
+      renderExportsView();
+
+      fireEvent.click(await screen.findByRole("button", { name: /download xlsx/i }));
+      await waitFor(() => expect(clickedFilename).toBe("ums-finance.xlsx"));
+      expect(revokeObjectURL).toHaveBeenCalledWith("blob:export-safe-metadata");
+    },
+  );
+
   it("rejects a malformed Content-Disposition filename before using the generic fallback", async () => {
     const createObjectURL = vi.fn(() => "blob:export-fallback");
     const revokeObjectURL = vi.fn();

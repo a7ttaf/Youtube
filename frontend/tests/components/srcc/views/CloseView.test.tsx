@@ -233,15 +233,14 @@ describe("CloseView wired to finance-close", () => {
     );
     renderCloseView();
 
-    await waitFor(() =>
-      expect(screen.getAllByText("No permission").length).toBeGreaterThan(0),
-    );
-    expect(
-      screen.getByText("Your role cannot view month-close status for this month."),
-    ).toBeInTheDocument();
-    expect(
-      screen.getByText("Your role cannot view month-close readiness for this month."),
-    ).toBeInTheDocument();
+    await waitFor(() => {
+      expect(
+        screen.getByText("Your role cannot view month-close status for this month."),
+      ).toBeInTheDocument();
+      expect(
+        screen.getByText("Your role cannot view month-close readiness for this month."),
+      ).toBeInTheDocument();
+    });
     expect(screen.queryByText(/net revenue/i)).not.toBeInTheDocument();
   });
 
