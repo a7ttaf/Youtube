@@ -39,16 +39,20 @@ const apiRequestTarget = (rawPath: string): string => {
   return rawPath.startsWith("/") ? rawPath : `/${rawPath}`;
 };
 
-const pathPart = (requestUrl: string): string => requestUrl.split("?", 1)[0] ?? "";
+// Browser fragments are navigation metadata and are never part of the HTTP
+// request target. Strip literal fragments consistently for relative and
+// absolute inputs; encoded `%23` remains path data and is rejected below.
+const pathPart = (requestUrl: string): string =>
+  requestUrl.split(/[?#]/u, 1)[0] ?? "";
 
 const hasUnsafeSegments = (value: string): boolean => {
   if (
     !value.startsWith("/") ||
     value.startsWith("//") ||
     value.includes("\\") ||
-    value.includes("\0") ||
+    /[\u0000-\u001f\u007f]/u.test(value) ||
     value.slice(1).includes("//") ||
-    /%(?:2f|5c)/iu.test(value)
+    /%(?:0[0-9a-f]|1[0-9a-f]|23|2f|5c|7f)/iu.test(value)
   ) {
     return true;
   }

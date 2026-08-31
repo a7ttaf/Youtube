@@ -3,12 +3,14 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import ts from "typescript";
+import { resolveConfig } from "vite";
 import { describe, expect, it } from "vitest";
 
 import {
   TENANT_SCOPED_ROUTES,
   TRUSTED_GATEWAY_HEADERS,
   buildTenantScopedProxy,
+  isSafeRouteUrl,
   proxyContextForRoute,
 } from "../vite.config";
 
@@ -86,16 +88,15 @@ const isWithinDirectory = (fileName: string, directory: string): boolean => {
     !path.isAbsolute(relative);
 };
 
-/** Resolve external module-script entries and reject inline/remote Vite roots. */
+/** Resolve external module-script entries with the browser's HTML parser. */
 const viteHtmlModuleEntries = (html: string): string[] => {
   const entries: string[] = [];
-  for (const match of html.matchAll(/<script\b([^>]*)>/giu)) {
-    const attributes = match[1] ?? "";
-    const type = /\btype\s*=\s*["']([^"']+)["']/iu.exec(attributes)?.[1];
-    if (type?.toLowerCase() !== "module") {
-      continue;
+  const document = new DOMParser().parseFromString(html, "text/html");
+  for (const script of document.querySelectorAll("script")) {
+    if (script.getAttribute("type")?.trim().toLowerCase() !== "module") {
+      throw new Error("non-module executable scripts are unsupported by route coverage");
     }
-    const rawSource = /\bsrc\s*=\s*["']([^"']+)["']/iu.exec(attributes)?.[1];
+    const rawSource = script.getAttribute("src")?.trim();
     if (!rawSource) {
       throw new Error("inline Vite module entries are unsupported by route coverage");
     }
@@ -119,6 +120,33 @@ const viteHtmlModuleEntries = (html: string): string[] => {
     throw new Error("frontend/index.html declares no external module entry");
   }
   return entries;
+};
+
+/** Reject Rollup inputs other than the one HTML entry audited above. */
+const canonicalViteBuildEntries = (input: unknown): string[] => {
+  let rawEntries: unknown[];
+  if (input === undefined) {
+    rawEntries = [path.join(FRONTEND_ROOT, "index.html")];
+  } else if (typeof input === "string") {
+    rawEntries = [input];
+  } else if (Array.isArray(input)) {
+    rawEntries = input;
+  } else if (typeof input === "object" && input !== null) {
+    rawEntries = Object.values(input);
+  } else {
+    throw new Error("Vite build input has an unsupported shape");
+  }
+  if (rawEntries.some((entry) => typeof entry !== "string")) {
+    throw new Error("Vite build input contains a non-string entry");
+  }
+  const resolved = (rawEntries as string[]).map((entry) =>
+    canonicalFileIdentity(path.resolve(FRONTEND_ROOT, entry))
+  );
+  const canonicalHtml = canonicalFileIdentity(path.join(FRONTEND_ROOT, "index.html"));
+  if (resolved.length !== 1 || resolved[0] !== canonicalHtml) {
+    throw new Error("alternate Vite/Rollup build inputs are unsupported by route coverage");
+  }
+  return resolved;
 };
 
 const API_CLIENT_METHOD_NAMES = [
@@ -631,9 +659,12 @@ const RAW_NETWORK_NAMES = new Set([
   "sendBeacon",
 ]);
 const DYNAMIC_CODE_NAMES = new Set(["Function", "eval", "require"]);
+const DYNAMIC_SOURCE_NAMES = new Set(["importScripts", "serviceWorker"]);
+const WORKER_CONSTRUCTOR_NAMES = new Set(["SharedWorker", "Worker"]);
 const FORBIDDEN_RUNTIME_NAMES = new Set([
   ...RAW_NETWORK_NAMES,
   ...DYNAMIC_CODE_NAMES,
+  ...DYNAMIC_SOURCE_NAMES,
 ]);
 const BROWSER_GLOBAL_CONTAINERS = new Set([
   "globalThis",
@@ -677,14 +708,7 @@ const isReflectiveRawNetworkReference = (
   const receiver = unwrapExpression(callee.expression);
   const target = node.arguments[0] && unwrapExpression(node.arguments[0]);
   const selector = node.arguments[1];
-  if (
-    !ts.isIdentifier(receiver) ||
-    receiver.text === "Reflect" &&
-    (!target || !ts.isIdentifier(target) || !BROWSER_GLOBAL_CONTAINERS.has(target.text))
-  ) {
-    return false;
-  }
-  if (receiver.text !== "Reflect") {
+  if (!ts.isIdentifier(receiver) || receiver.text !== "Reflect" || !target) {
     return false;
   }
   if (!selector) {
@@ -718,6 +742,101 @@ const isUnsafeBrowserGlobalReference = (
       staticAccessName(parent, checker) === undefined;
   }
   return true;
+};
+
+/** Reject Vite source expansion that TypeScript does not add to its Program. */
+const isUnscannedImportMetaLoader = (
+  node: ts.Node,
+  checker: ts.TypeChecker,
+): boolean => {
+  if (!(ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node))) {
+    return false;
+  }
+  const receiver = unwrapExpression(node.expression);
+  if (
+    !ts.isMetaProperty(receiver) ||
+    receiver.keywordToken !== ts.SyntaxKind.ImportKeyword ||
+    receiver.name.text !== "meta"
+  ) {
+    return false;
+  }
+  const name = staticAccessName(node, checker);
+  return name === undefined || name === "glob" || name === "globEager";
+};
+
+/** Reject string-evaluating timers even when direct eval is absent. */
+const isStringCodeTimer = (
+  node: ts.Node,
+  checker: ts.TypeChecker,
+): boolean => {
+  if (!ts.isCallExpression(node) || node.arguments.length === 0) {
+    return false;
+  }
+  const callee = unwrapExpression(node.expression);
+  const name = ts.isIdentifier(callee)
+    ? callee.text
+    : ts.isPropertyAccessExpression(callee) || ts.isElementAccessExpression(callee)
+      ? staticAccessName(callee, checker)
+      : undefined;
+  if (name !== "setTimeout" && name !== "setInterval") {
+    return false;
+  }
+  const argument = node.arguments[0];
+  return Boolean(
+    argument &&
+    knownString(argument, {
+      checker,
+      substitutions: new Map(),
+      visiting: new Set(),
+    }) !== undefined,
+  );
+};
+
+/** Prove a Vite worker entry is a literal compiler-scanned application file. */
+const assertScannedWorkerConstruction = (
+  worker: ts.NewExpression,
+  scannedFiles: ReadonlySet<string>,
+): void => {
+  const workerUrl = worker.arguments?.[0];
+  if (
+    !workerUrl ||
+    !ts.isNewExpression(unwrapExpression(workerUrl))
+  ) {
+    throw new Error("worker source must be one static new URL(..., import.meta.url)");
+  }
+  const urlConstruction = unwrapExpression(workerUrl) as ts.NewExpression;
+  const urlConstructor = unwrapExpression(urlConstruction.expression);
+  const rawSource = urlConstruction.arguments?.[0];
+  const rawBase = urlConstruction.arguments?.[1];
+  const base = rawBase && unwrapExpression(rawBase);
+  if (
+    !ts.isIdentifier(urlConstructor) ||
+    urlConstructor.text !== "URL" ||
+    !rawSource ||
+    !ts.isStringLiteral(rawSource) ||
+    !base ||
+    !ts.isPropertyAccessExpression(base) ||
+    base.name.text !== "url" ||
+    !ts.isMetaProperty(unwrapExpression(base.expression)) ||
+    (unwrapExpression(base.expression) as ts.MetaProperty).keywordToken !==
+      ts.SyntaxKind.ImportKeyword ||
+    (unwrapExpression(base.expression) as ts.MetaProperty).name.text !== "meta" ||
+    !rawSource.text.startsWith(".") ||
+    /[?#]/u.test(rawSource.text)
+  ) {
+    throw new Error("worker source must be one static new URL(..., import.meta.url)");
+  }
+  const resolved = path.resolve(
+    path.dirname(worker.getSourceFile().fileName),
+    rawSource.text,
+  );
+  if (
+    !isWithinDirectory(resolved, SRC_DIR) ||
+    !hasApplicationSourceSuffix(resolved) ||
+    !scannedFiles.has(canonicalFileIdentity(resolved))
+  ) {
+    throw new Error(`worker source is outside compiler-scanned src: ${resolved}`);
+  }
 };
 
 /** True only for a direct call to the audited API-client hook symbol. */
@@ -785,6 +904,7 @@ const apiClientHookSymbols = (
         ts.isIdentifier(node.name) &&
         node.name.text === "useApiClient" &&
         ts.isVariableStatement(node.parent.parent) &&
+        node.parent.parent.parent === sourceFile &&
         node.parent.parent.modifiers?.some(
           (modifier) => modifier.kind === ts.SyntaxKind.ExportKeyword,
         )
@@ -843,6 +963,9 @@ const validateDirectApiClientContract = (
 ): ReadonlySet<ts.Symbol> => {
   const bindings = new Set<ts.Symbol>();
   const origins: ts.CallExpression[] = [];
+  const scannedFiles = new Set(
+    programSourceFiles.map((sourceFile) => canonicalFileIdentity(sourceFile.fileName)),
+  );
   const hookSymbols = apiClientHookSymbols(programSourceFiles, checker);
   const visitOrigins = (node: ts.Node): void => {
     if (
@@ -934,11 +1057,30 @@ const validateDirectApiClientContract = (
         `dynamic code execution is forbidden in scanned application sources: ${normalizedFile}`,
       );
     }
+    if (ts.isIdentifier(node) && WORKER_CONSTRUCTOR_NAMES.has(node.text)) {
+      const parent = node.parent;
+      if (
+        ts.isTypeReferenceNode(parent) ||
+        ts.isTypeQueryNode(parent) ||
+        (ts.isTypeOfExpression(parent) && parent.expression === node)
+      ) {
+        // Type positions and an availability probe do not load a module.
+      } else if (ts.isNewExpression(parent) && parent.expression === node) {
+        assertScannedWorkerConstruction(parent, scannedFiles);
+      } else {
+        throw new Error(
+          `worker constructors cannot be aliased or escaped: ${normalizedFile}`,
+        );
+      }
+    }
     const rawNetworkReference =
       (ts.isIdentifier(node) && FORBIDDEN_RUNTIME_NAMES.has(node.text)) ||
       ((ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node)) &&
-        FORBIDDEN_RUNTIME_NAMES.has(staticAccessName(node, checker) ?? "")) ||
+        (FORBIDDEN_RUNTIME_NAMES.has(staticAccessName(node, checker) ?? "") ||
+          staticAccessName(node, checker) === "constructor")) ||
       isReflectiveRawNetworkReference(node, checker) ||
+      isUnscannedImportMetaLoader(node, checker) ||
+      isStringCodeTimer(node, checker) ||
       isUnsafeBrowserGlobalReference(node, checker);
     if (rawNetworkReference) {
       const owner =
@@ -2178,6 +2320,60 @@ describe("dev proxy route coverage (derived from frontend/src)", () => {
     );
   });
 
+  it("does not hide an unquoted outside-src module entry behind a valid entry", () => {
+    const entries = viteHtmlModuleEntries([
+      '<script type="module" src="/src/main.tsx"></script>',
+      "<script type=module src=/shared/hidden.ts></script>",
+    ].join(""));
+    expect(entries).toHaveLength(2);
+    expect(entries.some((entry) => !isWithinDirectory(entry, SRC_DIR))).toBe(true);
+  });
+
+  it.each([
+    '<script>fetch("/reports/raw-files")</script>',
+    '<script src="/raw.js"></script>',
+  ])("fails closed on a classic executable script: %s", (html) => {
+    expect(() => viteHtmlModuleEntries([
+      '<script type="module" src="/src/main.tsx"></script>',
+      html,
+    ].join(""))).toThrow(/non-module executable scripts are unsupported/iu);
+  });
+
+  it("rejects alternate Vite/Rollup build inputs", () => {
+    expect(() => canonicalViteBuildEntries({
+      app: "index.html",
+      hidden: "../shared/hidden.ts",
+    })).toThrow(/alternate Vite\/Rollup build inputs are unsupported/iu);
+  });
+
+  it("keeps the resolved production build on the one audited HTML entry", async () => {
+    const config = await resolveConfig(
+      {
+        configFile: path.join(FRONTEND_ROOT, "vite.config.ts"),
+        logLevel: "silent",
+        root: FRONTEND_ROOT,
+      },
+      "build",
+      "production",
+    );
+    expect(canonicalViteBuildEntries(config.build.rollupOptions.input)).toEqual([
+      canonicalFileIdentity(path.join(FRONTEND_ROOT, "index.html")),
+    ]);
+  });
+
+  it("treats literal fragments as non-transport metadata but rejects encoded hashes", () => {
+    expect(isSafeRouteUrl("/users#section", "/users")).toBe(true);
+    expect(isSafeRouteUrl("/users?view=all#section", "/users")).toBe(true);
+    expect(isSafeRouteUrl("/users/%23section", "/users")).toBe(false);
+  });
+
+  it.each(["\t", "\n", "\r"])(
+    "rejects a control-prefixed dot segment before browser URL normalization: %j",
+    (control) => {
+      expect(isSafeRouteUrl(`/revenue/${control}../hidden`, "/revenue")).toBe(false);
+    },
+  );
+
   it("audits compiler-loaded .mts/.cts and application imports outside src", () => {
     const names = [
       path.join(FRONTEND_ROOT, "src", "entry.ts"),
@@ -2252,6 +2448,21 @@ describe("dev proxy route coverage (derived from frontend/src)", () => {
     ].join("\n");
     expect(() => discoverRequestedPrefixesInSource(source)).toThrow(
       /namespace imports are forbidden in scanned application sources/iu,
+    );
+  });
+
+  it.each([
+    [
+      "Vite import.meta.glob",
+      'const modules = import.meta.glob("../shared/hidden.ts", { eager: true });',
+    ],
+    [
+      "module Worker URL",
+      'new Worker(new URL("../shared/hidden.ts", import.meta.url), { type: "module" });',
+    ],
+  ])("fails closed on %s outside the compiler source graph", (_label, source) => {
+    expect(() => discoverRequestedPrefixesInSource(source)).toThrow(
+      /unaudited network or dynamic-code access is forbidden outside canonical client transports|worker source is outside compiler-scanned src/iu,
     );
   });
 
@@ -2679,6 +2890,18 @@ describe("dev proxy route coverage (derived from frontend/src)", () => {
       ].join("\n"),
     ],
     [
+      "Reflect.get through document.defaultView",
+      'Reflect.get(document.defaultView!, "fetch")("/reports/raw-files");',
+    ],
+    [
+      "Function constructor chain",
+      '((() => {}).constructor as FunctionConstructor)("return fetch(\\\"/reports/raw-files\\\")")();',
+    ],
+    [
+      "string-evaluating timer",
+      'setTimeout("fetch(\\\"/reports/raw-files\\\")", 0);',
+    ],
+    [
       "XMLHttpRequest",
       'new XMLHttpRequest().open("GET", "/reports/raw-files");',
     ],
@@ -2754,6 +2977,23 @@ describe("dev proxy route coverage (derived from frontend/src)", () => {
       "}",
     ].join("\n");
     expect(discoverRequestedPrefixesInSource(source)).toEqual([]);
+  });
+
+  it("does not accept a nested exported hook lookalike inside the canonical module", () => {
+    const source = [
+      "namespace Decoy {",
+      "  export const useApiClient = () => ({",
+      ...API_CLIENT_METHOD_NAMES.map(
+        (method) => `    ${method}: (_path: string) => undefined,`,
+      ),
+      "  });",
+      "  const shadow = useApiClient();",
+      '  shadow.get("/reports/decoy");',
+      "}",
+    ].join("\n");
+    expect(
+      discoverRequestedPrefixesInSource(source, [], {}, true),
+    ).toEqual([]);
   });
 
   it("does not mistake a local hook lookalike for an approved React dependency sink", () => {

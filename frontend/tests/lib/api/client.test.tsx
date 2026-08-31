@@ -156,12 +156,12 @@ describe("useApiClient URL resolution", () => {
       jsonResponse({ ok: true }),
     );
     const { result } = renderHook(() => useApiClient(), { wrapper });
-    await result.current.get("https://other.example.com/tenants/me");
-    expect(requireFetchArgs()[0]).toBe("https://other.example.com/tenants/me");
+    await result.current.get("https://api.example.com/tenants/me");
+    expect(requireFetchArgs()[0]).toBe("https://api.example.com/tenants/me");
   });
 
   it("passes through an absolute http:// path without prepending the base", async () => {
-    vi.stubEnv("VITE_API_BASE_URL", "https://api.example.com");
+    vi.stubEnv("VITE_API_BASE_URL", "http://127.0.0.1:8000");
     (globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
       jsonResponse({ ok: true }),
     );
@@ -170,12 +170,59 @@ describe("useApiClient URL resolution", () => {
     expect(requireFetchArgs()[0]).toBe("http://127.0.0.1:8000/tenants/me");
   });
 
+  it("accepts a literal fragment on a relative request", async () => {
+    const requestPath = "/users#section";
+    (globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
+      jsonResponse({ ok: true }),
+    );
+    const { result } = renderHook(() => useApiClient(), { wrapper });
+    await result.current.get(requestPath);
+    expect(requireFetchArgs()[0]).toBe(requestPath);
+  });
+
+  it("accepts a literal fragment on the configured absolute API origin", async () => {
+    const requestPath = "https://api.example.com/users#section";
+    vi.stubEnv("VITE_API_BASE_URL", "https://api.example.com");
+    (globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
+      jsonResponse({ ok: true }),
+    );
+    const { result } = renderHook(() => useApiClient(), { wrapper });
+    await result.current.get(requestPath);
+    expect(requireFetchArgs()[0]).toBe(requestPath);
+  });
+
+  it("rejects an arbitrary absolute origin before tenant headers or body can leave", async () => {
+    vi.stubEnv("VITE_API_BASE_URL", "https://api.example.com");
+    const { result } = renderHook(() => useApiClient(), { wrapper });
+    await expect(
+      result.current.post(
+        "https://attacker.example/users",
+        { private: "finance-data" },
+        { headers: { Authorization: "Bearer browser-credential" } },
+      ),
+    ).rejects.toThrow(/origin is outside the configured API origin/iu);
+    expect(globalThis.fetch).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["TAB", "\t"],
+    ["LF", "\n"],
+    ["CR", "\r"],
+  ])("rejects a %s-normalized traversal before fetch", async (_label, control) => {
+    const { result } = renderHook(() => useApiClient(), { wrapper });
+    await expect(
+      result.current.get(`/revenue/${control}../hidden`),
+    ).rejects.toThrow(/outside the audited route roots/iu);
+    expect(globalThis.fetch).not.toHaveBeenCalled();
+  });
+
   it.each([
     "/unproxied/path",
     "/users.evil/path",
     "/users%2Fevil",
     "/users/%2e%2e/tenants",
     "/users/%252e%252e/tenants",
+    "/users/%23section",
     "/users\\evil",
     "https://api.example.com/unproxied/path",
   ])("rejects an API path outside the shared audited roots: %s", async (requestPath) => {
