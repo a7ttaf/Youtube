@@ -171,6 +171,13 @@ def test_bootstrap_writes_through_force_rls(migrated_url):
         )
         == 1
     )
+    assert (
+        _scalar(
+            migrated_url,
+            "SELECT count(*) FROM audit_logs WHERE event_type = 'ORG_UNIT_CHANGED'",
+        )
+        == 2
+    )
     assert _scalar(migrated_url, "SELECT count(*) FROM org_units") == 2
     assert (
         _scalar(

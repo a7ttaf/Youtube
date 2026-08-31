@@ -79,7 +79,7 @@ ROLE_DEFINITIONS: dict[RoleKey, RoleDefinition] = {
     RoleKey.BETA_OPERATOR: RoleDefinition(
         RoleKey.BETA_OPERATOR,
         "Beta Operator",
-        "First-beta finance operator with manual-import connector access.",
+        "First-beta finance operator with manual revenue-upload access.",
         allowed_scope_types=_GLOBAL,
     ),
     RoleKey.FINANCE_APPROVER: RoleDefinition(

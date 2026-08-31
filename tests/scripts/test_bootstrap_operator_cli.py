@@ -27,7 +27,8 @@ from uuid import UUID, uuid4
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine, select
+from sqlalchemy import create_engine, func, select
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.orm import Session
 
 from ums_smart_revenue.api.registry_dependencies import (
@@ -491,6 +492,24 @@ def test_bootstrap_org_skeleton_creates_a_company_parented_to_a_sector(tmp_path,
     assert units["COMPANY"].tenant_id == _TENANT_ID
     assert units["SECTOR"].active is True
 
+    engine = create_engine(database_url)
+    try:
+        with Session(engine) as session:
+            org_audits = list(
+                session.scalars(
+                    select(AuditLogORM).where(AuditLogORM.event_type == "ORG_UNIT_CHANGED")
+                ).all()
+            )
+    finally:
+        engine.dispose()
+    assert len(org_audits) == 2
+    assert {audit.entity_id for audit in org_audits} == {
+        str(units["SECTOR"].id),
+        str(units["COMPANY"].id),
+    }
+    assert {audit.details.get("action") for audit in org_audits} == {"created"}
+    assert all(audit.sensitive for audit in org_audits)
+
     output = capsys.readouterr().out
     assert str(units["COMPANY"].id) in output
     assert "no bulk mapping endpoint" in output
@@ -498,6 +517,45 @@ def test_bootstrap_org_skeleton_creates_a_company_parented_to_a_sector(tmp_path,
     # Re-running must not add a third unit.
     assert _run(module, database_url, "--email", _OPERATOR_EMAIL, "--org-skeleton") == 0
     assert len(_org_units(database_url)) == 2
+    engine = create_engine(database_url)
+    try:
+        with Session(engine) as session:
+            assert (
+                session.scalar(
+                    select(func.count())
+                    .select_from(AuditLogORM)
+                    .where(AuditLogORM.event_type == "ORG_UNIT_CHANGED")
+                )
+                == 2
+            )
+    finally:
+        engine.dispose()
+
+
+def test_org_skeleton_audit_failure_rolls_back_users_and_org_units(tmp_path, monkeypatch):
+    """Org creation and its audit rows are one indivisible bootstrap transaction."""
+    module = _load_script()
+    database_url = _make_database(tmp_path)
+    deps = module._load_dependencies()
+    real_record_audit_event = deps["record_audit_event"]
+
+    def _fail_org_audit(**kwargs):
+        if kwargs["event_type"] is deps["AuditEventType"].ORG_UNIT_CHANGED:
+            raise ValueError("org audit unavailable")
+        return real_record_audit_event(**kwargs)
+
+    monkeypatch.setitem(deps, "record_audit_event", _fail_org_audit)
+
+    assert _run(module, database_url, "--email", _OPERATOR_EMAIL, "--org-skeleton") == 2
+    assert _users(database_url) == []
+    assert _org_units(database_url) == []
+
+    engine = create_engine(database_url)
+    try:
+        with Session(engine) as session:
+            assert session.scalar(select(func.count()).select_from(AuditLogORM)) == 0
+    finally:
+        engine.dispose()
 
 
 def test_bootstrap_refuses_a_rename_instead_of_reporting_a_false_one(tmp_path, capsys):
@@ -696,6 +754,73 @@ def test_bootstrap_reports_a_database_failure_instead_of_a_traceback(tmp_path, c
     assert database_url not in stderr
     # The whole run is one transaction, so the account is not left half-created.
     assert _users(database_url) == []
+
+
+def test_commit_disconnect_reports_unknown_and_exact_retry_recovers_idempotently(
+    tmp_path, capsys, monkeypatch
+):
+    """A lost COMMIT acknowledgement must not be reported as a definite rollback."""
+    module = _load_script()
+    database_url = _make_database(tmp_path)
+    real_factory = build_session_factory(database_url)
+    deps = module._load_dependencies()
+
+    class _DisconnectAfterCommit:
+        """Proxy one real Session, losing only the post-COMMIT acknowledgement."""
+
+        def __init__(self):
+            self._session = real_factory()
+
+        def __enter__(self):
+            self._session.__enter__()
+            return self
+
+        def __exit__(self, exc_type, exc, traceback):
+            return self._session.__exit__(exc_type, exc, traceback)
+
+        def __getattr__(self, name):
+            return getattr(self._session, name)
+
+        def commit(self):
+            self._session.commit()
+            raise DBAPIError(
+                statement=None,
+                params=None,
+                orig=ConnectionError("commit acknowledgement lost"),
+                connection_invalidated=True,
+            )
+
+    monkeypatch.setitem(deps, "build_session_factory", lambda _url: _DisconnectAfterCommit)
+    argv = ("--email", _OPERATOR_EMAIL, "--org-skeleton")
+
+    assert _run(module, database_url, *argv) == 2
+    first_stderr = capsys.readouterr().err
+    assert "outcome is UNKNOWN" in first_stderr
+    assert "Re-run the exact same bootstrap command" in first_stderr
+    assert "nothing was committed" not in first_stderr
+    # The server committed before the acknowledgement was lost.
+    assert len(_users(database_url)) == 1
+    assert len(_org_units(database_url)) == 2
+
+    monkeypatch.setitem(deps, "build_session_factory", build_session_factory)
+    assert _run(module, database_url, *argv) == 0
+    assert "EXISTING" in capsys.readouterr().out
+    assert len(_users(database_url)) == 1
+    assert len(_org_units(database_url)) == 2
+
+    engine = create_engine(database_url)
+    try:
+        with Session(engine) as session:
+            event_counts = dict(
+                session.execute(
+                    select(AuditLogORM.event_type, func.count())
+                    .group_by(AuditLogORM.event_type)
+                    .order_by(AuditLogORM.event_type)
+                ).all()
+            )
+    finally:
+        engine.dispose()
+    assert event_counts == {"ORG_UNIT_CHANGED": 2, "USER_ACCOUNT_CHANGED": 1}
 
 
 def test_bootstrap_rejects_a_malformed_database_url(capsys):
@@ -972,10 +1097,7 @@ def test_argparse_redaction_masks_split_password_fragment():
     """
     module = _load_script()
     secret_fragment = "s3cret-pass@db.internal.example:5432/ums"
-    message = (
-        "unrecognized arguments: --databse-url postgresql+psycopg://user: "
-        f"{secret_fragment}"
-    )
+    message = f"unrecognized arguments: --databse-url postgresql+psycopg://user: {secret_fragment}"
 
     redacted = module._redact_argparse_message(message)
 
@@ -1711,9 +1833,7 @@ def test_account_only_bootstrap_records_a_user_account_changed_event(tmp_path):
         with Session(engine) as session:
             audit_rows = list(
                 session.scalars(
-                    select(AuditLogORM).where(
-                        AuditLogORM.event_type == "USER_ACCOUNT_CHANGED"
-                    )
+                    select(AuditLogORM).where(AuditLogORM.event_type == "USER_ACCOUNT_CHANGED")
                 ).all()
             )
     finally:

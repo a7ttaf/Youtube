@@ -50,6 +50,7 @@ VALUES
     ('corporate_admin', 'Corporate Admin', 'Global platform administrator without default finance visibility.', false),
     ('revenue_operations_admin', 'Revenue Operations Admin', 'Global operational admin for ingestion, registry quality, and analytics.', false),
     ('finance_admin', 'Finance Admin', 'Finance owner for revenue, reconciliation, overrides, and month close.', false),
+    ('beta_operator', 'Beta Operator', 'First-beta finance operator with manual revenue-upload access.', false),
     ('finance_approver', 'Finance Approver', 'Second-control approver for finance overrides and month unlocks.', false),
     ('finance_viewer', 'Finance Viewer', 'Read-only finance role for granted organization scopes.', false),
     ('tv_sector_manager', 'TV Sector Manager', 'Sector-scoped management role for TV analytics and report operations.', false),
@@ -80,6 +81,7 @@ VALUES
     ('finance.lock_month', 'Lock finance month', true, true),
     ('finance.unlock_month', 'Unlock finance month', true, true),
     ('finance.change_allocation_rule', 'Change allocation rule', true, true),
+    ('finance.import_manual_revenue', 'Import manual revenue facts', true, true),
     ('exports.analytics', 'Export analytics report', true, true),
     ('exports.revenue', 'Export revenue report', true, true),
     ('exports.manage_templates', 'Manage export templates', true, true),
@@ -99,6 +101,13 @@ ON CONFLICT (key) DO UPDATE
 SET label = EXCLUDED.label,
     sensitive = EXCLUDED.sensitive,
     audit_on_use = EXCLUDED.audit_on_use;
+
+-- FIX: An earlier PR #223 draft mapped beta_operator to connectors.run_jobs,
+-- which authorizes every connector rather than the bounded manual-revenue flow.
+-- Remove that exact unsafe draft edge so a manually re-run seed converges.
+DELETE FROM role_permission_assignments
+WHERE role_key = 'beta_operator'
+  AND permission_key = 'connectors.run_jobs';
 
 INSERT INTO role_permission_assignments (role_key, permission_key)
 SELECT 'super_owner' AS role_key, key AS permission_key FROM permissions
@@ -141,6 +150,21 @@ VALUES
     ('finance_admin', 'exports.revenue'),
     ('finance_admin', 'audit.view'),
     ('finance_admin', 'roles.assign'),
+    ('beta_operator', 'analytics.view'),
+    ('beta_operator', 'analytics.view_confidence'),
+    ('beta_operator', 'finance.view_revenue'),
+    ('beta_operator', 'finance.view_finalized_payments'),
+    ('beta_operator', 'finance.view_bank_reconciliation'),
+    ('beta_operator', 'finance.manage_bank_reconciliation'),
+    ('beta_operator', 'finance.create_manual_override'),
+    ('beta_operator', 'finance.approve_manual_override'),
+    ('beta_operator', 'finance.lock_month'),
+    ('beta_operator', 'finance.unlock_month'),
+    ('beta_operator', 'finance.change_allocation_rule'),
+    ('beta_operator', 'finance.import_manual_revenue'),
+    ('beta_operator', 'exports.analytics'),
+    ('beta_operator', 'exports.revenue'),
+    ('beta_operator', 'audit.view'),
     ('finance_approver', 'analytics.view'),
     ('finance_approver', 'analytics.view_confidence'),
     ('finance_approver', 'finance.view_revenue'),
@@ -187,4 +211,3 @@ VALUES
     ('data_steward', 'registry.manage_org_mapping'),
     ('data_steward', 'registry.manage_groups')
 ON CONFLICT DO NOTHING;
-

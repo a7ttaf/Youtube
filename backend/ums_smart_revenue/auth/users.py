@@ -12,8 +12,8 @@
 # Blast Radius: Authorization (account lifecycle, service-account status) and
 #   audit attribution. No finance math.
 # Connections:
-#   - File: backend/ums_smart_revenue/db/session.py -> SQLite BEGIN/SAVEPOINT
-#     recipe the savepoint-per-attempt contract depends on.
+#   - File: backend/ums_smart_revenue/db/session.py -> request-owned SQLite
+#     transaction boundary the savepoint-per-attempt contract depends on.
 #   - File: scripts/bootstrap_operator.py -> shared-session multi-account
 #     create that must survive one account's failure.
 #   - File: backend/ums_smart_revenue/api/users.py -> route layer mapping the
@@ -457,10 +457,10 @@ class SqlAlchemyUserAccountRepository:
     # Database/ORM: UserORM/users via the caller's Session; begin_nested savepoints.
     # Standards: Repository-owned retry; typed UserAccountConflictError /
     #   UserAccountStorageError; no full session.rollback(); SQLite depends on
-    #   db/session.py BEGIN recipe so RELEASE does not early-commit.
+    #   db/session.py request BEGIN boundary so RELEASE does not early-commit.
     # Blast Radius: Authorization account lifecycle writes and bootstrap atomicity.
     # Connections:
-    #   - File: backend/ums_smart_revenue/db/session.py -> SQLite BEGIN/SAVEPOINT.
+    #   - File: backend/ums_smart_revenue/db/session.py -> SQLite request BEGIN.
     #   - File: scripts/bootstrap_operator.py -> shared-session multi-account create.
     # ========================================================================
     def _run_with_storage_retries(self, operation: Callable[[], T]) -> T:
@@ -470,10 +470,10 @@ class SqlAlchemyUserAccountRepository:
         back only that savepoint. A full ``session.rollback()`` would discard
         earlier writes in a shared multi-account bootstrap transaction.
 
-        On SQLite this depends on the engine-level BEGIN recipe in
-        ``db/session.py::build_engine``: without a real outer transaction,
-        pysqlite's RELEASE of the outermost savepoint durably COMMITS, which
-        is an early commit that breaks the caller's one-transaction envelope.
+        On SQLite this depends on the caller opening a physical outer
+        transaction (the API dependency and bootstrap CLI both do so): without
+        it, sqlite3's RELEASE of the outermost savepoint durably COMMITS, which
+        is an early commit that breaks the caller's transaction envelope.
         """
         for attempt_index in range(USER_ACCOUNT_STORAGE_ATTEMPTS):
             try:

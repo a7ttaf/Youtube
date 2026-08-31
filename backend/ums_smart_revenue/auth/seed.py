@@ -68,7 +68,7 @@ ROLE_PERMISSIONS: dict[RoleKey, frozenset[Permission]] = {
             Permission.EXPORT_ANALYTICS_REPORT,
             Permission.EXPORT_REVENUE_REPORT,
             Permission.VIEW_AUDIT_LOG,
-            Permission.RUN_CONNECTOR_JOBS,
+            Permission.IMPORT_MANUAL_REVENUE,
         }
     ),
     RoleKey.FINANCE_APPROVER: frozenset(

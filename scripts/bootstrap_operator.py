@@ -189,6 +189,10 @@ class _OrgUnitOutcome:
     active: bool
 
 
+class _BootstrapCommitOutcomeUnknownError(RuntimeError):
+    """The database disconnected while COMMIT acknowledgement was in flight."""
+
+
 def _ensure_backend_path() -> None:
     """Make the local backend package importable for direct script execution."""
     if _BACKEND_PATH not in sys.path:
@@ -202,7 +206,8 @@ def _load_dependencies() -> dict[str, Any]:
     # sys.path before importing the backend package (mirrors seed_demo_month.py).
     _ensure_backend_path()
 
-    from sqlalchemy.exc import SQLAlchemyError
+    from sqlalchemy import text
+    from sqlalchemy.exc import DBAPIError, SQLAlchemyError
 
     from ums_smart_revenue.auth.audit import AuditEventType
     from ums_smart_revenue.auth.audit_service import record_audit_event
@@ -238,6 +243,7 @@ def _load_dependencies() -> dict[str, Any]:
     return {
         "AccessScope": AccessScope,
         "AuditEventType": AuditEventType,
+        "DBAPIError": DBAPIError,
         "PlatformLaneAuditSink": PlatformLaneAuditSink,
         "ROLE_DEFINITIONS": ROLE_DEFINITIONS,
         "RoleKey": RoleKey,
@@ -262,6 +268,7 @@ def _load_dependencies() -> dict[str, Any]:
         "build_session_factory": build_session_factory,
         "load_app_settings": load_app_settings,
         "record_audit_event": record_audit_event,
+        "sql_text": text,
     }
 
 
@@ -369,8 +376,10 @@ def _argparse_token_looks_credential_bearing(token: str) -> bool:
     # userinfo@host-ish remnant after argparse split on whitespace
     if "@" in token:
         userinfo, _, hostpart = token.partition("@")
-        if userinfo and hostpart and (
-            "." in hostpart or ":" in hostpart or "/" in hostpart or hostpart[0].isalnum()
+        if (
+            userinfo
+            and hostpart
+            and ("." in hostpart or ":" in hostpart or "/" in hostpart or hostpart[0].isalnum())
         ):
             return True
     return False
@@ -409,9 +418,7 @@ def _redact_argparse_message(message: str) -> str:
                 inside_url = False
             continue
         redacted.append(_redact_argparse_token(token))
-        opens_url = "://" in token or token.lower().startswith(
-            _ARGPARSE_SCHEME_PREFIXES
-        )
+        opens_url = "://" in token or token.lower().startswith(_ARGPARSE_SCHEME_PREFIXES)
         if opens_url and "@" not in token:
             inside_url = True
     return " ".join(redacted)
@@ -829,11 +836,12 @@ def _org_unit_drift(
 #   so a re-run mutates nothing, and the insert is flushed before the caller
 #   moves on so the self-referential composite FK
 #   ``(tenant_id, parent_id) -> (tenant_id, id)`` resolves for the child.
-# Blast Radius: Registry/org mapping only. No finance math, no authorization
-#   change, no audit event (this is a pre-first-login bootstrap, and there is no
-#   actor to attribute an event to yet).
+# Blast Radius: Registry/org mapping and audit only. No finance math or
+#   authorization change; the caller emits ORG_UNIT_CHANGED with the first
+#   bootstrapped account as actor when this helper creates a row.
 # Connections:
 #   - File: backend/ums_smart_revenue/db/org_models.py -> OrgUnitORM constraints.
+#   - File: backend/ums_smart_revenue/auth/audit.py -> ORG_UNIT_CHANGED event.
 #   - File: scripts/seed_demo_month.py -> the guarded-insert pattern lifted here.
 # ============================================================================
 def _ensure_org_unit(
@@ -925,8 +933,10 @@ def _ensure_org_unit(
 # Database/ORM: ``org_units`` (OrgUnitORM), via ``_ensure_org_unit``.
 # Standards: The SECTOR is ensured (and flushed) first so the COMPANY's
 #   composite parent FK resolves. A drift on the SECTOR raises before the
-#   COMPANY is touched, so a refused run writes nothing at all.
-# Blast Radius: Registry/org mapping only.
+#   COMPANY is touched, so a refused run writes nothing at all. Each created
+#   unit gets an ORG_UNIT_CHANGED audit row through the same transaction sink;
+#   an audit failure rolls both the org writes and the bootstrap back.
+# Blast Radius: Registry/org mapping and its audit trail only.
 # Connections:
 #   - File: backend/ums_smart_revenue/org/access_index.py -> the COMPANY->SECTOR
 #     walk that decides whether a mapped channel is issue-free.
@@ -939,6 +949,8 @@ def _ensure_org_skeleton(
     tenant_id: UUID,
     sector_name: str,
     company_name: str,
+    audit_sink: Any,
+    actor: Any,
 ) -> list[_OrgUnitOutcome]:
     """Create the SECTOR and its child COMPANY if absent; report both stored rows."""
     org_orm = deps["OrgUnitORM"]
@@ -964,7 +976,27 @@ def _ensure_org_skeleton(
         name=company_name,
         name_flag="--company-name",
     )
-    return [sector, company]
+    units = [sector, company]
+    for unit in units:
+        if not unit.created:
+            continue
+        deps["record_audit_event"](
+            sink=audit_sink,
+            actor=actor,
+            event_type=deps["AuditEventType"].ORG_UNIT_CHANGED,
+            entity_type="org_unit",
+            entity_id=unit.unit_id,
+            scope=deps["AccessScope"].global_scope(),
+            reason=_ROLE_ASSIGNMENT_REASON,
+            details={
+                "action": "created",
+                "unit_type": unit.unit_type,
+                "name": unit.name,
+                "parent_id": unit.parent_id,
+                "active": unit.active,
+            },
+        )
+    return units
 
 
 # ============================================================================
@@ -1059,7 +1091,9 @@ def _load_active_tenant(
 #   ``org_units`` — all tenant-scoped, all FORCE RLS after 20260612_0002.
 # Standards: One session, one commit; the session context manager rolls back on
 #   any exception, and the contextvar token is reset on every exit path so the
-#   process never leaks a tenant into later work.
+#   process never leaks a tenant into later work. A disconnect while COMMIT is
+#   being acknowledged is reported as UNKNOWN, never falsely as rolled back;
+#   deterministic ids and lookup-before-create make the prescribed retry safe.
 # Blast Radius: Authorization (identity + optional role), audit
 #   (``USER_ROLE_CHANGED`` on new ``--role`` grants), and registry (org units).
 #   No finance math, no schema change.
@@ -1099,6 +1133,16 @@ def _run_bootstrap(
                     # failed after account creation (no ``org_units`` table).
                     if not session.in_transaction():
                         session.begin()
+                    # FIX: SQLite defers the physical BEGIN even after
+                    # Session.begin(). If the first database statement is a
+                    # repository begin_nested(), its SAVEPOINT can become the
+                    # outermost physical transaction; releasing it persists the
+                    # account, and a later org failure cannot roll it back. Force
+                    # a real BEGIN before any nested repository write. PostgreSQL
+                    # is intentionally excluded: its first statement starts a
+                    # physical transaction and the session hook must own SET ROLE.
+                    if session.get_bind().dialect.name == "sqlite":
+                        session.execute(deps["sql_text"]("BEGIN"))
                     if role_key is not None:
                         message = _require_seeded_role(session, deps, role_key)
                         if message is not None:
@@ -1133,14 +1177,32 @@ def _run_bootstrap(
                         users.append(user)
                     org_units: list[_OrgUnitOutcome] = []
                     if org_skeleton:
+                        bootstrap_actor = deps["UserPrincipal"](
+                            user_id=users[0].user_id,
+                            email=users[0].email,
+                            tenant_id=str(tenant.id),
+                        )
                         org_units = _ensure_org_skeleton(
                             session,
                             deps,
                             tenant_id=tenant.id,
                             sector_name=sector_name,
                             company_name=company_name,
+                            audit_sink=audit_sink,
+                            actor=bootstrap_actor,
                         )
-                    session.commit()
+                    try:
+                        session.commit()
+                    except deps["DBAPIError"] as exc:
+                        # FIX: A connection-invalidated DBAPIError while COMMIT
+                        # is in flight cannot prove whether PostgreSQL committed
+                        # before the acknowledgement was lost. Calling this a
+                        # rollback can make an operator create a second account
+                        # manually. Surface UNKNOWN and rely on the exact-command
+                        # idempotent replay to reconcile the durable state.
+                        if not exc.connection_invalidated:
+                            raise
+                        raise _BootstrapCommitOutcomeUnknownError from exc
                     return users, org_units
             except storage_error:
                 if attempt_index + 1 >= 2:
@@ -1380,6 +1442,15 @@ def main(argv: list[str] | None = None) -> int:
                 "20260608_0001, and that `alembic upgrade head` has been run.",
                 file=sys.stderr,
             )
+        return 2
+    except _BootstrapCommitOutcomeUnknownError:
+        print(
+            "Database connection was lost while COMMIT was being acknowledged; "
+            "the transaction outcome is UNKNOWN. Re-run the exact same bootstrap "
+            "command. Deterministic org ids and lookup-before-create semantics "
+            "will report durable rows as EXISTING and create only missing rows.",
+            file=sys.stderr,
+        )
         return 2
     except deps["SQLAlchemyError"] as exc:
         # FIX: The tuple above covered only the repository-raised domain errors.

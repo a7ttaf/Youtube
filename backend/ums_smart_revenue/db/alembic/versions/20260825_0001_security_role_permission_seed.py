@@ -18,18 +18,18 @@ any role (``user_role_assignments.role_key -> roles.key``,
 
 Source of truth
 ---------------
-The rows are derived from the **live Python registries** rather than re-typed as
-literals, so the seeded catalog cannot drift from what the running application
-authorizes against:
+The rows were derived from the **live Python registries** at authoring time and
+then frozen in ``db/frozen_security_catalog.py``. The parity tests require a new
+revision whenever the running registries change, while old migrations keep
+their original meaning:
 
 * ``auth/roles.py::ROLE_DEFINITIONS``      -> ``roles``
 * ``auth/permissions.py::PERMISSION_DEFINITIONS`` -> ``permissions``
 * ``auth/seed.py::initial_role_permission_rows`` -> ``role_permission_assignments``
 
-This follows the precedent set by ``20260608_0001_tenant_rls_enforcement``, which
-imports the live ``db/rls.py`` allowlist instead of freezing a copy. All three
-registry modules are dependency-free (stdlib ``enum``/``dataclasses`` only), so
-importing them here cannot drag application wiring into the migration process.
+The migration imports only the frozen snapshot, never mutable runtime auth
+modules, so a future registry edit cannot silently rewrite historical upgrade or
+downgrade behavior.
 
 Idempotency
 -----------
@@ -59,7 +59,7 @@ This revision redefines "a virgin database" (read before editing)
 Seeding rows is not a local act. Before this revision a freshly migrated
 database held 180 rows in three tables, and **zero** rows outside
 ``scripts/backup_database.py::SEED_TABLES``. After it a virgin
-``alembic upgrade head`` measures 38 tables / 328 rows, of which 148 sit in the
+``alembic upgrade head`` measures 38 tables / 346 rows, of which 166 sit in the
 three tables below. That difference is not cosmetic: the backup content gate
 uses "every table outside ``SEED_TABLES`` is empty" as the one signal that tells
 a healthy database from one that was wiped and re-migrated, and it is a
@@ -120,6 +120,24 @@ _ROLE_PERMISSIONS = sa.table(
     sa.column("role_key", sa.Text()),
     sa.column("permission_key", sa.Text()),
 )
+_USER_ROLE_ASSIGNMENTS = sa.table(
+    "user_role_assignments",
+    sa.column("role_key", sa.Text()),
+    sa.column("active", sa.Boolean()),
+)
+_USER_PERMISSION_GRANTS = sa.table(
+    "user_permission_grants",
+    sa.column("permission_key", sa.Text()),
+    sa.column("active", sa.Boolean()),
+)
+
+_BETA_OPERATOR_ROLE = "beta_operator"
+_IMPORT_MANUAL_REVENUE_PERMISSION = "finance.import_manual_revenue"
+_UNSAFE_BETA_CONNECTOR_PERMISSION = "connectors.run_jobs"
+
+
+class UnsafeAuthorizationDowngradeError(RuntimeError):
+    """Downgrade would strand active grants that the previous code cannot parse."""
 
 
 def role_seed_rows() -> list[dict[str, object]]:
@@ -142,11 +160,15 @@ def upgrade() -> None:
     bind = op.get_bind()
     _seed_roles(bind)
     _seed_permissions(bind)
+    _remove_unsafe_beta_connector_edge(bind)
     _seed_role_permission_assignments(bind)
 
 
 # ============================================================================
-# Purpose: Data-only rollback for this revision is intentionally non-destructive.
+# Purpose: Data-only rollback is non-destructive, but refuses while an active
+#   assignment depends on the beta role or manual-revenue permission that the
+#   previous application enum cannot parse. Catalog rows remain because their
+#   provenance cannot be recovered safely.
 #   Upgrade is insert-missing + metadata refresh: on a database that already ran
 #   ``security_seed.sql`` (a state upgrade explicitly supports) it inserts zero
 #   catalog rows. Provenance of any given canonical pair cannot be recovered later,
@@ -155,11 +177,10 @@ def upgrade() -> None:
 #   Operator-added non-canonical pairs would survive a registry wipe, but the
 #   H1/P0.7 catalog itself would not. Leaving the catalog in place keeps
 #   PostgreSQL authorization parents intact; re-upgrade remains idempotent.
-# Database/ORM: ``roles``, ``permissions``, ``role_permission_assignments`` —
-#   left unchanged. No Alembic ``op.*`` DDL.
-# Standards: Fail-closed for authorization catalog integrity over perfect
-#   reverse symmetry. Documented irreversible data seed (same family as other
-#   seed revisions that refuse a destructive reverse).
+# Database/ORM: Reads ``user_role_assignments`` and ``user_permission_grants``;
+#   catalog rows are left unchanged.
+# Standards: Parameterized SQLAlchemy expressions and a typed refusal. The
+#   operator must revoke incompatible active grants before retrying downgrade.
 # Blast Radius: Authorization catalog rows persist after ``alembic downgrade`` of
 #   this revision. No finance numbers, no RLS widening, no permission softening.
 # Connections:
@@ -167,11 +188,14 @@ def upgrade() -> None:
 #   - File: tests/db/test_security_role_permission_seed_migration.py -> guards.
 # ============================================================================
 def downgrade() -> None:
-    """Leave the authorization catalog in place; this seed is not reversed."""
-    # Non-destructive by design: upgrade is insert-missing + metadata refresh, so
-    # provenance of canonical pairs cannot be recovered. Touch the bind so this
-    # path is an intentional no-op statement rather than an empty body.
-    _ = op.get_bind()
+    """Refuse incompatible active grants, then leave the catalog in place."""
+    bind = op.get_bind()
+    if _has_incompatible_active_grants(bind):
+        raise UnsafeAuthorizationDowngradeError(
+            "Cannot downgrade 20260825_0001 while active assignments depend on "
+            "beta_operator or finance.import_manual_revenue. Revoke those active "
+            "role/direct-permission grants, then retry the downgrade."
+        )
 
 
 # ============================================================================
@@ -250,6 +274,76 @@ def _seed_permissions(bind: sa.engine.Connection) -> None:
                 audit_on_use=row["audit_on_use"],
             )
         )
+
+
+# ============================================================================
+# Purpose: Remove the exact unsafe edge shipped by the earlier PR #223 draft.
+#   ``connectors.run_jobs`` authorizes every connector and is not a substitute
+#   for the bounded manual revenue-upload workflow.
+# Database/ORM: ``role_permission_assignments`` only.
+# Standards: Parameterized SQLAlchemy delete scoped to one known role/permission
+#   pair; no user-supplied SQL and no widening of any other role.
+# Blast Radius: Authorization tightens beta_operator; connector admins and
+#   service integrations retain their connector execution grants.
+# Connections:
+#   - File: backend/ums_smart_revenue/auth/seed.py -> corrected beta role grants.
+#   - File: backend/ums_smart_revenue/api/revenue.py -> dedicated manual-fact gate.
+# ============================================================================
+def _remove_unsafe_beta_connector_edge(bind: sa.engine.Connection) -> None:
+    """Delete only beta_operator's obsolete global connector execution edge."""
+    bind.execute(
+        _ROLE_PERMISSIONS.delete().where(
+            sa.and_(
+                _ROLE_PERMISSIONS.c.role_key == _BETA_OPERATOR_ROLE,
+                _ROLE_PERMISSIONS.c.permission_key == _UNSAFE_BETA_CONNECTOR_PERMISSION,
+            )
+        )
+    )
+
+
+# ============================================================================
+# Purpose: Detect active assignments that code before this revision cannot
+#   deserialize after an Alembic downgrade: beta_operator itself, plus direct
+#   active grants of the new manual-revenue permission. Ordinary roles (including
+#   super_owner) remain compatible because policy derives role permissions from
+#   the old code's own frozen registry rather than deserializing catalog edges.
+# Database/ORM: ``user_role_assignments`` and ``user_permission_grants``;
+#   read-only.
+# Standards: Fail closed with parameterized SQLAlchemy expressions. Inactive
+#   historical rows do not block because principal loading ignores them.
+# Blast Radius: Deployment rollback safety for authorization only.
+# Connections:
+#   - File: backend/ums_smart_revenue/auth/roles.py -> beta RoleKey.
+#   - File: backend/ums_smart_revenue/auth/permissions.py -> typed permission.
+# ============================================================================
+def _has_incompatible_active_grants(bind: sa.engine.Connection) -> bool:
+    """Return whether an active grant requires post-revision enum values."""
+    active_beta = bind.execute(
+        sa.select(sa.literal(1))
+        .select_from(_USER_ROLE_ASSIGNMENTS)
+        .where(
+            sa.and_(
+                _USER_ROLE_ASSIGNMENTS.c.active.is_(True),
+                _USER_ROLE_ASSIGNMENTS.c.role_key == _BETA_OPERATOR_ROLE,
+            )
+        )
+        .limit(1)
+    ).first()
+    if active_beta is not None:
+        return True
+
+    active_direct_import = bind.execute(
+        sa.select(sa.literal(1))
+        .select_from(_USER_PERMISSION_GRANTS)
+        .where(
+            sa.and_(
+                _USER_PERMISSION_GRANTS.c.active.is_(True),
+                _USER_PERMISSION_GRANTS.c.permission_key == _IMPORT_MANUAL_REVENUE_PERMISSION,
+            )
+        )
+        .limit(1)
+    ).first()
+    return active_direct_import is not None
 
 
 # ============================================================================

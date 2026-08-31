@@ -1,5 +1,6 @@
 from uuid import UUID
 
+import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
@@ -182,6 +183,56 @@ def test_corporate_admin_cannot_assign_finance_role(tmp_path):
     assert response.json()["detail"] == "Finance roles require Finance Admin or Super Owner"
 
 
+def test_corporate_admin_cannot_assign_beta_operator(tmp_path):
+    """The beta role carries finance-control powers and stays in the finance family."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    client = TestClient(create_app(database_url=database_url))
+
+    response = client.post(
+        f"/users/{TARGET_ID}/roles",
+        headers=auth_headers("corporate_admin"),
+        json={
+            "role_key": "beta_operator",
+            "scope_type": "global",
+            "scope_id": None,
+            "reason": "Attempt beta grant without finance authority",
+        },
+    )
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Finance roles require Finance Admin or Super Owner"
+
+
+@pytest.mark.parametrize("authorized_role", ["finance_admin", "super_owner"])
+def test_finance_authority_can_assign_and_revoke_beta_operator(tmp_path, authorized_role):
+    """Finance Admin and Super Owner retain lifecycle authority for the beta role."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    client = TestClient(create_app(database_url=database_url))
+
+    created = client.post(
+        f"/users/{TARGET_ID}/roles",
+        headers=auth_headers(authorized_role),
+        json={
+            "role_key": "beta_operator",
+            "scope_type": "global",
+            "scope_id": None,
+            "reason": "Grant beta finance workflow",
+        },
+    )
+    assert created.status_code == 201, created.text
+
+    revoked = client.post(
+        f"/users/{TARGET_ID}/roles/{created.json()['id']}/revoke",
+        headers=auth_headers(authorized_role),
+        json={"reason": "End beta finance workflow"},
+    )
+
+    assert revoked.status_code == 200, revoked.text
+    assert revoked.json()["active"] is False
+
+
 def test_finance_admin_can_assign_finance_viewer_role(tmp_path):
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
@@ -322,6 +373,34 @@ def test_corporate_admin_cannot_revoke_finance_role(tmp_path):
 
     response = client.post(
         f"/users/{TARGET_ID}/roles/{create_response.json()['id']}/revoke",
+        headers=auth_headers("corporate_admin"),
+        json={"reason": "Attempt revocation without finance authority"},
+    )
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Finance roles require Finance Admin or Super Owner"
+
+
+def test_corporate_admin_cannot_revoke_beta_operator(tmp_path):
+    """Revocation is finance-sensitive for the same beta role family as assignment."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    client = TestClient(create_app(database_url=database_url))
+
+    created = client.post(
+        f"/users/{TARGET_ID}/roles",
+        headers=auth_headers("finance_admin"),
+        json={
+            "role_key": "beta_operator",
+            "scope_type": "global",
+            "scope_id": None,
+            "reason": "Grant beta finance workflow",
+        },
+    )
+    assert created.status_code == 201, created.text
+
+    response = client.post(
+        f"/users/{TARGET_ID}/roles/{created.json()['id']}/revoke",
         headers=auth_headers("corporate_admin"),
         json={"reason": "Attempt revocation without finance authority"},
     )

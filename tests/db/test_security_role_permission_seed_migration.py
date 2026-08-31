@@ -24,6 +24,7 @@ from pathlib import Path
 from types import ModuleType
 from uuid import uuid4
 
+import pytest
 from alembic.migration import MigrationContext
 from alembic.operations import Operations
 from sqlalchemy import create_engine, func, select, text
@@ -145,8 +146,8 @@ def test_migration_writes_only_the_catalog_tables() -> None:
     is how a first run tells a healthy database from one that was wiped and
     re-migrated, and it is a fail-closed refusal with no override. When this
     revision landed, ``SEED_TABLES`` was ``(alembic_version, currencies,
-    tenants)`` — so the 148 rows seeded below read as application data, a virgin
-    database measured ``non_seed_rows=148``, and the refusal stopped firing. A
+    tenants)`` — so the 166 rows seeded below read as application data, a virgin
+    database measured ``non_seed_rows=166``, and the refusal stopped firing. A
     data-seeding migration had disabled a safety check in a file it never
     mentions. ``SEED_TABLES`` now lists all three names.
 
@@ -227,6 +228,38 @@ def test_migration_upgrade_is_idempotent() -> None:
 
         assert (_stored_roles(connection), _stored_permissions(connection)) == first
         assert _stored_pairs(connection) == first_pairs
+
+
+def test_migration_removes_only_the_unsafe_beta_connector_edge() -> None:
+    """A database that ran the unsafe draft converges to the bounded import grant."""
+    module = _migration_module()
+    engine = _security_engine()
+
+    with engine.begin() as connection:
+        _bind_operations(module, connection)
+        module.upgrade()
+        connection.execute(
+            RolePermissionAssignmentORM.__table__.insert().values(
+                role_key=RoleKey.BETA_OPERATOR.value,
+                permission_key=Permission.RUN_CONNECTOR_JOBS.value,
+            )
+        )
+
+        module.upgrade()
+
+        pairs = _stored_pairs(connection)
+        assert (
+            RoleKey.BETA_OPERATOR.value,
+            Permission.RUN_CONNECTOR_JOBS.value,
+        ) not in pairs
+        assert (
+            RoleKey.BETA_OPERATOR.value,
+            Permission.IMPORT_MANUAL_REVENUE.value,
+        ) in pairs
+        assert (
+            RoleKey.CONNECTOR_ADMIN.value,
+            Permission.RUN_CONNECTOR_JOBS.value,
+        ) in pairs
 
 
 def test_migration_refreshes_stale_catalog_metadata() -> None:
@@ -347,6 +380,82 @@ def test_migration_downgrade_keeps_rows_a_live_assignment_still_needs() -> None:
         assert "finance.view_revenue" in _stored_permissions(connection)
         assert _stored_pairs(connection) == pairs_before
         assert ("finance_admin", "finance.view_revenue") in _stored_pairs(connection)
+
+
+def test_migration_downgrade_refuses_an_active_beta_operator_assignment() -> None:
+    """Old application enums cannot deserialize an active beta_operator role."""
+    module = _migration_module()
+    engine = _security_engine()
+
+    with engine.begin() as connection:
+        _bind_operations(module, connection)
+        module.upgrade()
+
+    user_id = uuid4()
+    scope_id = uuid4()
+    with Session(engine) as session:
+        session.add(UserORM(id=user_id, email="beta@example.com", display_name="Beta"))
+        session.add(AccessScopeORM(id=scope_id, scope_type="global", scope_id=None, label="Global"))
+        session.add(
+            UserRoleAssignmentORM(
+                id=uuid4(),
+                user_id=user_id,
+                role_key=RoleKey.BETA_OPERATOR.value,
+                scope_id=scope_id,
+                active=True,
+            )
+        )
+        session.commit()
+
+    with engine.begin() as connection:
+        _bind_operations(module, connection)
+        with pytest.raises(module.UnsafeAuthorizationDowngradeError, match="beta_operator"):
+            module.downgrade()
+
+
+def test_migration_downgrade_refuses_an_active_direct_manual_revenue_grant() -> None:
+    """Old Permission enums cannot deserialize a direct manual-revenue grant."""
+    module = _migration_module()
+    engine = _security_engine()
+
+    with engine.begin() as connection:
+        _bind_operations(module, connection)
+        module.upgrade()
+
+    user_id = uuid4()
+    scope_id = uuid4()
+    with Session(engine) as session:
+        session.add(UserORM(id=user_id, email="direct@example.com", display_name="Direct"))
+        session.add(AccessScopeORM(id=scope_id, scope_type="global", scope_id=None, label="Global"))
+        session.add(
+            UserPermissionGrantORM(
+                id=uuid4(),
+                user_id=user_id,
+                permission_key=Permission.IMPORT_MANUAL_REVENUE.value,
+                scope_id=scope_id,
+                active=True,
+            )
+        )
+        session.commit()
+
+    with engine.begin() as connection:
+        _bind_operations(module, connection)
+        with pytest.raises(
+            module.UnsafeAuthorizationDowngradeError,
+            match=Permission.IMPORT_MANUAL_REVENUE.value,
+        ):
+            module.downgrade()
+
+
+def test_beta_operator_catalog_grants_manual_revenue_but_not_connector_execution() -> None:
+    """The beta role is finance-capable without inheriting global connector runs."""
+    beta_permissions = {
+        permission for role, permission in _expected_pairs() if role == RoleKey.BETA_OPERATOR.value
+    }
+
+    assert Permission.IMPORT_MANUAL_REVENUE.value in beta_permissions
+    assert Permission.RUN_CONNECTOR_JOBS.value not in beta_permissions
+
 
 def test_frozen_security_catalog_matches_live_registries() -> None:
     """The migration snapshot must match today's registries until a new revision."""
