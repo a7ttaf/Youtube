@@ -36,6 +36,7 @@ from uuid import UUID
 import pytest
 
 from ums_smart_revenue.config.settings import (
+    AUTHZ_SOURCE_ENV,
     CONNECTOR_JOB_EXECUTOR_ENABLED_ENV,
     CONNECTOR_JOB_MAX_WORKERS_ENV,
     CONNECTOR_JOB_STALE_RUNNING_HOURS_ENV,
@@ -284,6 +285,7 @@ def test_load_app_settings_tenant_primary_currency_defaults_to_usd(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """An unset currency env resolves to USD — Phase 1 flips nothing."""
+    monkeypatch.setenv(AUTHZ_SOURCE_ENV, "headers")
     monkeypatch.delenv(TENANT_PRIMARY_CURRENCY_ENV, raising=False)
     load_app_settings.cache_clear()
     assert load_app_settings().tenant_primary_currency == "USD"
@@ -294,6 +296,7 @@ def test_load_app_settings_tenant_primary_currency_blank_falls_back_to_default(
     monkeypatch: pytest.MonkeyPatch, blank: str
 ) -> None:
     """A blank/whitespace-only currency env falls back to the default, not an error."""
+    monkeypatch.setenv(AUTHZ_SOURCE_ENV, "headers")
     monkeypatch.setenv(TENANT_PRIMARY_CURRENCY_ENV, blank)
     load_app_settings.cache_clear()
     assert load_app_settings().tenant_primary_currency == "USD"
@@ -304,6 +307,7 @@ def test_load_app_settings_tenant_primary_currency_accepts_iso_codes(
     monkeypatch: pytest.MonkeyPatch, code: str
 ) -> None:
     """A valid 3-letter uppercase code is accepted and whitespace-stripped."""
+    monkeypatch.setenv(AUTHZ_SOURCE_ENV, "headers")
     monkeypatch.setenv(TENANT_PRIMARY_CURRENCY_ENV, code)
     load_app_settings.cache_clear()
     settings = load_app_settings()
@@ -319,6 +323,7 @@ def test_load_app_settings_rejects_malformed_tenant_primary_currency(
     monkeypatch: pytest.MonkeyPatch, bad: str
 ) -> None:
     """Malformed currency shapes fail fast and name the env var."""
+    monkeypatch.setenv(AUTHZ_SOURCE_ENV, "headers")
     monkeypatch.setenv(TENANT_PRIMARY_CURRENCY_ENV, bad)
     load_app_settings.cache_clear()
     with pytest.raises(ValueError) as excinfo:
@@ -330,8 +335,37 @@ def test_load_app_settings_rejects_code_outside_iso_snapshot(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A shape-valid but unknown code must not enter the currency spine."""
+    monkeypatch.setenv(AUTHZ_SOURCE_ENV, "headers")
     monkeypatch.setenv(TENANT_PRIMARY_CURRENCY_ENV, "ZZZ")
     load_app_settings.cache_clear()
     with pytest.raises(ValueError) as excinfo:
         load_app_settings()
     assert TENANT_PRIMARY_CURRENCY_ENV in str(excinfo.value)
+
+
+def test_load_app_settings_remains_strict_in_database_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The public loader keeps its strict contract regardless of authz mode."""
+    monkeypatch.setenv(AUTHZ_SOURCE_ENV, "database")
+    monkeypatch.setenv(TENANT_PRIMARY_CURRENCY_ENV, "not-a-currency")
+    load_app_settings.cache_clear()
+
+    with pytest.raises(ValueError, match=TENANT_PRIMARY_CURRENCY_ENV):
+        load_app_settings()
+
+
+def test_load_app_settings_can_defer_currency_for_mode_aware_consumers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Explicit deferral snapshots config without weakening direct property reads."""
+    monkeypatch.setenv(AUTHZ_SOURCE_ENV, "database")
+    monkeypatch.setenv(TENANT_PRIMARY_CURRENCY_ENV, "not-a-currency")
+    load_app_settings.cache_clear()
+
+    settings = load_app_settings(validate_tenant_currency=False)
+
+    assert settings.authz_source == "database"
+    assert settings.tenant_primary_currency_for_authz("database") == "USD"
+    with pytest.raises(ValueError, match=TENANT_PRIMARY_CURRENCY_ENV):
+        _ = settings.tenant_primary_currency

@@ -95,13 +95,19 @@ closed unmerged and superseded by the consolidated batch in #156.
 
 - ⏳ EGP program Phase 1 (currency spine) — branch
   `feat/egp-phase1-currency-spine`: `tenants.primary_currency` gets its first
-  consumers without flipping anything. `_bootstrap_tenant` reads the new
-  fail-fast `UMS_TENANT_PRIMARY_CURRENCY` setting (default stays `USD`); the
-  fail-closed `tenancy.currency.get_tenant_primary_currency()` helper reads the
+  consumers without flipping anything. In headers mode, `_bootstrap_tenant`
+  reads the new fail-fast `UMS_TENANT_PRIMARY_CURRENCY` setting (default stays
+  `USD`); database mode ignores that setting and reads the persisted tenant row.
+  The fail-closed `tenancy.currency.get_tenant_primary_currency()` helper reads the
   active tenant's declared code; `GET /tenants/me` and `GET /session/me` expose
   it additively. A declared LABEL only — no conversion, no FX, no fact-table or
-  CHECK change; the no-FX AST guard stays green. Remaining: the deliberate flip
-  to `EGP` (one setting) after EGP Phases 2–3, per Docs/21 on the P0 branch.
+  CHECK change; the no-FX AST guard stays green. Remaining after EGP Phases 2–3:
+  the deliberate headers-mode flip sets the environment value, while the
+  database-mode flip requires a reviewed, tenant-ID-scoped transactional data
+  migration/backfill from the current `tenants.primary_currency` value to
+  `EGP`. The operator must capture each prior value, require the expected row
+  count/current value, and restore those captured values for rollback; changing
+  the environment setting alone does nothing in database mode.
 - ⏳ Dynamic org hierarchy — remaining: ORG models (PR #25); hierarchy
   assignment workflow not built.
 - ✅ Channel registry (tenant-scoped, PR #25).
@@ -659,10 +665,15 @@ closed unmerged and superseded by the consolidated batch in #156.
   deduction, AdSense payment, or reconciliation values.
 
   **EGP Phase 1 note (2026-08-27, branch `feat/egp-phase1-currency-spine`):** the tenant
-  currency SPINE now exists and flips nothing — `UMS_TENANT_PRIMARY_CURRENCY` (validated
-  ISO-4217, default still `USD`) feeds `app._bootstrap_tenant`,
-  `tenancy/currency.get_tenant_primary_currency()` reads it fail-closed off `TENANT_CTX`, and
-  `/tenants/me` + `/session/me` expose `primary_currency`. Still no conversion of any kind.
+  currency SPINE now exists and flips nothing. In headers mode,
+  `UMS_TENANT_PRIMARY_CURRENCY` (validated ISO-4217, default still `USD`) feeds
+  `app._bootstrap_tenant`; database mode ignores that setting and hydrates the
+  persisted `tenants.primary_currency` value. The fail-closed
+  `tenancy/currency.get_tenant_primary_currency()` reads either source off
+  `TENANT_CTX`, and `/tenants/me` + `/session/me` expose `primary_currency`.
+  Still no conversion of any kind. The later database-mode EGP flip is a
+  controlled tenant-row data migration/backfill with captured pre-change values
+  for rollback, not an environment-only change.
 
 - ⏳ Anomaly detection foundation for source-backed month-over-month
   revenue movement — remaining: not started.

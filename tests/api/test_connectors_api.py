@@ -32,7 +32,11 @@ from ums_smart_revenue.app import create_app
 from ums_smart_revenue.auth.models import RoleAssignment, UserPrincipal
 from ums_smart_revenue.auth.roles import RoleKey
 from ums_smart_revenue.auth.scopes import AccessScope
-from ums_smart_revenue.config.settings import load_app_settings
+from ums_smart_revenue.config.settings import (
+    AUTHZ_SOURCE_ENV,
+    TENANT_PRIMARY_CURRENCY_ENV,
+    load_app_settings,
+)
 from ums_smart_revenue.connectors.credentials import (
     ConnectorCredentialEntry,
     ConnectorCredentialPage,
@@ -133,6 +137,7 @@ class _FakeExecutor:
         self.submit_calls: list[dict] = []
         self.activate_calls: list[dict] = []
         self.cancel_calls: list[dict] = []
+        self.closed = False
 
     def has_active_job(self, **kwargs) -> bool:
         return self.active
@@ -151,6 +156,10 @@ class _FakeExecutor:
     def cancel_reservation(self, reservation):
         self.cancel_calls.append({"reservation": reservation})
         return True
+
+    def close(self) -> None:
+        """Mirror the production executor lifecycle used by app shutdown."""
+        self.closed = True
 
 
 class _FakeReservation:
@@ -429,6 +438,43 @@ def test_revenue_operations_admin_can_request_connector_job_and_audit(tmp_path):
     # and the after_commit hook activated it (recorded by the fake).
     assert len(fake.activate_calls) == 1
     assert fake.cancel_calls == []
+
+
+def test_connector_job_runtime_ignores_currency_changed_after_headers_app_start(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Gateway and job settings reads defer a currency already fixed at app boot."""
+    monkeypatch.setenv(AUTHZ_SOURCE_ENV, "headers")
+    monkeypatch.delenv(TENANT_PRIMARY_CURRENCY_ENV, raising=False)
+    load_app_settings.cache_clear()
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    _seed_active_credential(database_url)
+    fake = _FakeExecutor(active=False)
+    app = _enable_executor_app(database_url, fake)
+
+    monkeypatch.setenv(TENANT_PRIMARY_CURRENCY_ENV, "not-a-currency")
+    load_app_settings.cache_clear()
+    with TestClient(app) as client:
+        response = client.post(
+            "/connectors/jobs",
+            headers=auth_headers(
+                "revenue_operations_admin",
+                "connector",
+                "youtube_reporting",
+            ),
+            json={
+                "connector_key": "youtube_reporting",
+                "account_id": "content-owner-1",
+                "report_month": "2026-03",
+                "reason": "Validate mode-independent runtime settings reads",
+            },
+        )
+
+    assert response.status_code == 202, response.text
+    assert len(fake.activate_calls) == 1
+    assert fake.closed is True
 
 
 def test_request_connector_job_live_requires_successful_credential_smoke(tmp_path):

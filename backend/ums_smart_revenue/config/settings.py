@@ -2,17 +2,18 @@
 # Purpose: Load process-level runtime settings from UMS_* environment
 #   variables into the frozen AppSettings dataclass (cached via lru_cache),
 #   including the connector job-executor and group-sync scheduler flags the
-#   app boot wiring enforces fail-fast, and the bootstrap tenant's declared
-#   ISO-4217 primary currency.
+#   app boot wiring enforces fail-fast. The raw bootstrap-tenant currency is
+#   snapshotted here so create_app can resolve its effective authz mode before
+#   parsing it, while the public loader remains strict by default.
 # Database/ORM: None.
 # Standards: every setting is read through an explicit UMS_* env constant;
 #   strict truthy/falsy token parsing; no implicit defaults for identity or
 #   URL values. Callers consume load_app_settings(), never os.environ
 #   directly.
-# Blast Radius: App boot wiring only -- the feature flags gate thread-
-#   spawning workers at startup. No authorization, finance, audit, or export
-#   behavior. The primary-currency setting is a DECLARED label only: it never
-#   converts an amount and never reaches a fact row.
+# Blast Radius: App startup and the settings reads used by authorization and
+#   connector execution. The primary-currency setting is a headers-mode
+#   DECLARED label only: it never converts an amount and never reaches a fact
+#   row; database-mode tenant currency remains PostgreSQL-backed.
 # Connections:
 #   - File: backend/ums_smart_revenue/app.py -> create_app consumes
 #     AppSettings and enforces the cross-flag fail-fast contract;
@@ -24,7 +25,7 @@
 """Runtime configuration loaded from UMS_* environment variables."""
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import lru_cache
 from os import environ
 from uuid import UUID
@@ -49,14 +50,11 @@ _FALSY_TOKENS = frozenset({"0", "false", "no", "off", ""})
 # repository snapshot below is authoritative; the regex alone must not accept
 # arbitrary three-letter strings such as ``ZZZ``.
 _ISO_4217_ALPHA_CODE = re.compile(r"[A-Z]{3}")
-_ISO_4217_CODES = frozenset(
-    str(entry["code"]) for entry in ISO_4217_CURRENCIES_2026_05
-)
+_ISO_4217_CODES = frozenset(str(entry["code"]) for entry in ISO_4217_CURRENCIES_2026_05)
 
 # Phase 1 of the EGP program builds the currency spine WITHOUT flipping it:
-# this default stays "USD" so wiring the setting changes no behaviour. The
-# operator-decided flip to EGP is a later, deliberate edit of this one value
-# (or a UMS_TENANT_PRIMARY_CURRENCY entry in the deployment environment).
+# this headers-mode default stays "USD" so wiring the setting changes no
+# behaviour. Database mode reads the persisted tenants.primary_currency value.
 DEFAULT_TENANT_PRIMARY_CURRENCY = "USD"
 
 AUTHZ_SOURCE_HEADERS = "headers"
@@ -99,19 +97,37 @@ class AppSettings:
     # same contract as max_workers.
     group_sync_schedule_enabled: bool = False
     group_sync_interval_hours: int = 24
-    # ISO-4217 alphabetic code DECLARED as the bootstrap tenant's primary
-    # currency by ``app._bootstrap_tenant`` (headers/trusted-gateway mode,
-    # which fabricates its tenant instead of reading the ``tenants`` row).
-    # Database-authz mode ignores this entirely -- the resolver reads
-    # ``tenants.primary_currency``, which stays the source of truth there.
-    # This is a LABEL, never a rate: UMS performs no currency conversion, so
-    # changing it re-labels the declared tenant currency and converts nothing.
-    tenant_primary_currency: str = DEFAULT_TENANT_PRIMARY_CURRENCY
+    # Snapshot the raw headers-only value without validating it in the
+    # dataclass constructor. load_app_settings() validates it strictly by
+    # default; create_app defers parsing until its explicit authz override has
+    # been resolved because that override can differ from UMS_AUTHZ_SOURCE.
+    _tenant_primary_currency_raw: str | None = field(default=None, repr=False)
+
+    @property
+    def tenant_primary_currency(self) -> str:
+        """Return the strictly parsed headers-mode currency setting."""
+        return _parse_currency_code(
+            TENANT_PRIMARY_CURRENCY_ENV,
+            raw=self._tenant_primary_currency_raw,
+            default=DEFAULT_TENANT_PRIMARY_CURRENCY,
+        )
+
+    def tenant_primary_currency_for_authz(self, authz_source: str) -> str:
+        """Resolve currency after an app factory chooses its effective authz mode."""
+        normalized_authz_source = authz_source.strip().lower()
+        if normalized_authz_source == AUTHZ_SOURCE_DATABASE:
+            # FIX: Database mode must not parse a setting it never consumes;
+            # TenantResolverMiddleware hydrates tenants.primary_currency from SQL.
+            # This return value is an unused bootstrap placeholder in that mode.
+            return DEFAULT_TENANT_PRIMARY_CURRENCY
+        if normalized_authz_source != AUTHZ_SOURCE_HEADERS:
+            raise ValueError("authz_source must be 'headers' or 'database'")
+        return self.tenant_primary_currency
 
 
-@lru_cache(maxsize=1)
-def load_app_settings() -> AppSettings:
-    """Load and validate cached application settings from environment variables."""
+@lru_cache(maxsize=2)
+def load_app_settings(*, validate_tenant_currency: bool = True) -> AppSettings:
+    """Load cached settings, preserving strict currency validation by default."""
     raw_database_url = environ.get(DATABASE_URL_ENV)
     database_url = raw_database_url.strip() if raw_database_url else None
     raw_trusted_gateway_token = environ.get(TRUSTED_GATEWAY_TOKEN_ENV)
@@ -121,7 +137,7 @@ def load_app_settings() -> AppSettings:
     if authz_source not in ALLOWED_AUTHZ_SOURCES:
         allowed = ", ".join(sorted(ALLOWED_AUTHZ_SOURCES))
         raise ValueError(f"{AUTHZ_SOURCE_ENV} must be one of: {allowed}")
-    return AppSettings(
+    settings = AppSettings(
         database_url=database_url or None,
         trusted_gateway_token=trusted_gateway_token or None,
         authz_source=authz_source,
@@ -135,10 +151,15 @@ def load_app_settings() -> AppSettings:
         ),
         group_sync_schedule_enabled=_load_bool(GROUP_SYNC_SCHEDULE_ENABLED_ENV, default=False),
         group_sync_interval_hours=_load_int(GROUP_SYNC_INTERVAL_HOURS_ENV, default=24),
-        tenant_primary_currency=_load_currency_code(
-            TENANT_PRIMARY_CURRENCY_ENV, default=DEFAULT_TENANT_PRIMARY_CURRENCY
-        ),
+        _tenant_primary_currency_raw=environ.get(TENANT_PRIMARY_CURRENCY_ENV),
     )
+    if validate_tenant_currency:
+        # Preserve the public loader's historical unconditional fail-fast
+        # contract. create_app and three mode-independent runtime consumers
+        # explicitly defer this check so database mode never parses a setting
+        # it cannot use.
+        _ = settings.tenant_primary_currency
+    return settings
 
 
 # ============================================================================
@@ -255,8 +276,9 @@ def _load_int(env_name: str, *, default: int) -> int:
 
 
 # ============================================================================
-# Purpose: Parse a UMS_* ISO-4217 currency-code env var at settings-load time
-#          with the same two-tier contract as the other loaders: missing/blank
+# Purpose: Parse the snapshotted UMS_* ISO-4217 currency value when the strict
+#          public loader or headers-mode app factory requires it, with the
+#          same two-tier contract as the other loaders: missing/blank
 #          -> default; malformed or absent-from-snapshot -> ValueError carrying
 #          the env name, so a typo ("US", "usd", "US$", "ZZZ") fails the
 #          process at boot rather than producing an invalid tenant label.
@@ -280,20 +302,15 @@ def _load_int(env_name: str, *, default: int) -> int:
 #   - File: backend/ums_smart_revenue/db/iso_4217_2026_05.py -> the immutable
 #     membership snapshot this loader enforces.
 # ============================================================================
-def _load_currency_code(env_name: str, *, default: str) -> str:
-    """Parse a UMS_* ISO-4217 code, rejecting malformed or unknown values."""
-    raw = environ.get(env_name)
+def _parse_currency_code(env_name: str, *, raw: str | None, default: str) -> str:
+    """Parse a snapshotted ISO-4217 code, rejecting malformed or unknown values."""
     if raw is None:
         return default
     candidate = raw.strip()
     if not candidate:
         return default
-    if (
-        _ISO_4217_ALPHA_CODE.fullmatch(candidate) is None
-        or candidate not in _ISO_4217_CODES
-    ):
+    if _ISO_4217_ALPHA_CODE.fullmatch(candidate) is None or candidate not in _ISO_4217_CODES:
         raise ValueError(
-            f"{env_name} must be a 3-letter uppercase ISO 4217 code "
-            "from the repository snapshot"
+            f"{env_name} must be a 3-letter uppercase ISO 4217 code from the repository snapshot"
         )
     return candidate

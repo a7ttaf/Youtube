@@ -692,7 +692,8 @@ def _submitted_connector_job_response(
 # Standards: RUN_CONNECTOR_JOBS@connector gate first (HTTPException 403, no
 #   audit). All non-2xx-but-audited responses use JSONResponse (not
 #   HTTPException) so the request session commits the audit row (mirrors the
-#   test-route 404 pattern). Audit details carry only machine tokens, never
+#   test-route 404 pattern). Runtime settings defer the already-resolved
+#   headers-only currency check. Audit details carry only machine tokens, never
 #   str(exc). triggered_by_user_id degrades to None unless a users row exists.
 # Blast Radius: Authorization (unchanged gate), audit (additive details
 #   actions), connector run lifecycle (orphan supersede via finish_run on the
@@ -725,7 +726,7 @@ def request_connector_job(
         return payload_or_rejection
     payload = payload_or_rejection
 
-    settings = load_app_settings()
+    settings = load_app_settings(validate_tenant_currency=False)
     tenant_id = resolve_tenant_uuid(user)
     executor = getattr(request.app.state, "connector_job_executor", None)
     preflight_rejection = _connector_job_preflight_rejection(

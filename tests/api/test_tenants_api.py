@@ -22,6 +22,7 @@ from ums_smart_revenue.app import (
 )
 from ums_smart_revenue.auth.models import UserPrincipal
 from ums_smart_revenue.config.settings import (
+    AUTHZ_SOURCE_ENV,
     TENANT_PRIMARY_CURRENCY_ENV,
     load_app_settings,
 )
@@ -488,11 +489,17 @@ def test_tenants_me_db_mode_reports_the_tenant_row_currency_not_the_setting(
 ) -> None:
     """Database mode reads ``tenants.primary_currency``; the env must not leak in.
 
-    The seeded row declares USD while the env declares EGP, so a wiring
-    mistake that fed the setting into the resolver path would surface as EGP.
+    The row declares AED while the env declares EGP, so neither the setting nor
+    the USD fallback can accidentally satisfy the assertion.
     """
     monkeypatch.setenv(TENANT_PRIMARY_CURRENCY_ENV, "EGP")
     load_app_settings.cache_clear()
+    with Session(seeded_engine) as session:
+        tenant = session.get(TenantORM, BOOTSTRAP_TENANT_ID)
+        assert tenant is not None
+        tenant.primary_currency = "AED"
+        session.commit()
+
     app = create_app(database_url=str(seeded_engine.url), authz_source="database")
     with TestClient(app) as client:
         response = client.get(
@@ -500,7 +507,60 @@ def test_tenants_me_db_mode_reports_the_tenant_row_currency_not_the_setting(
             headers={"X-UMS-Tenant": "ums", **_gateway_headers()},
         )
     assert response.status_code == 200, response.text
+    assert response.json()["primary_currency"] == "AED"
+
+
+def test_tenants_me_db_override_ignores_invalid_headers_currency_setting(
+    seeded_engine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An explicit database-mode app starts despite invalid headers-only config."""
+    monkeypatch.setenv(AUTHZ_SOURCE_ENV, "headers")
+    monkeypatch.setenv(TENANT_PRIMARY_CURRENCY_ENV, "not-a-currency")
+    load_app_settings.cache_clear()
+
+    app = create_app(database_url=str(seeded_engine.url), authz_source="database")
+    with TestClient(app) as client:
+        response = client.get(
+            "/tenants/me",
+            headers={"X-UMS-Tenant": "ums", **_gateway_headers()},
+        )
+
+    assert response.status_code == 200, response.text
     assert response.json()["primary_currency"] == "USD"
+
+
+def test_tenants_me_configured_db_mode_ignores_invalid_headers_currency_setting(
+    seeded_engine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Environment-selected database mode also skips the unused currency setting."""
+    monkeypatch.setenv(AUTHZ_SOURCE_ENV, "database")
+    monkeypatch.setenv(TENANT_PRIMARY_CURRENCY_ENV, "not-a-currency")
+    load_app_settings.cache_clear()
+
+    app = create_app(database_url=str(seeded_engine.url))
+    with TestClient(app) as client:
+        response = client.get(
+            "/tenants/me",
+            headers={"X-UMS-Tenant": "ums", **_gateway_headers()},
+        )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["primary_currency"] == "USD"
+
+
+def test_tenants_me_headers_override_rejects_invalid_currency_setting(
+    seeded_engine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An explicit headers-mode app keeps strict currency validation."""
+    monkeypatch.setenv(AUTHZ_SOURCE_ENV, "database")
+    monkeypatch.setenv(TENANT_PRIMARY_CURRENCY_ENV, "not-a-currency")
+    load_app_settings.cache_clear()
+
+    with pytest.raises(ValueError, match=TENANT_PRIMARY_CURRENCY_ENV):
+        create_app(database_url=str(seeded_engine.url), authz_source="headers")
 
 
 # ---------------------------------------------------------------------------
