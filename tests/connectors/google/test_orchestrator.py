@@ -602,10 +602,7 @@ def test_csv_adapter_normalizes_whitespace_before_row_lookup() -> None:
             "outside requested report_month",
         ),
         (
-            (
-                b"date,channel_id,estimated_partner_revenue,currencyCode\n"
-                b"2026-05-01,,1.10,USD\n"
-            ),
+            (b"date,channel_id,estimated_partner_revenue,currencyCode\n2026-05-01,,1.10,USD\n"),
             "missing channel/channel_id",
         ),
         (
@@ -630,13 +627,40 @@ def test_csv_adapter_rejects_wrong_month_channel_or_currency(
         )
 
 
-def test_csv_adapter_rejects_negative_revenue_before_totals() -> None:
-    """Negative revenue must not reach parser payload totals."""
+def test_csv_adapter_accepts_negative_adjustment_when_monthly_total_is_non_negative() -> None:
+    """Signed source adjustments remain valid when their completed total is non-negative."""
+    payload = _csv_to_parser_payload(
+        raw_bytes=(
+            b"date,channel_id,estimated_partner_revenue,currencyCode\n"
+            b"2026-05-01,UC_orch_alpha,10.00,USD\n"
+            b"2026-05-02,UC_orch_alpha,-1.00,USD\n"
+        ),
+        report_id="r-negative-adjustment",
+        report_type="content_owner_estimated_revenue_a1",
+        month="2026-05",
+    )
+
+    assert payload["rows"] == [
+        {
+            "line_index": 0,
+            "date_range": {"start": "2026-05-01", "end": "2026-05-31"},
+            "dimensions": {"channel": "UC_orch_alpha"},
+            "metrics": {
+                "estimatedRevenue": "9.00",
+                "currencyCode": "USD",
+            },
+        }
+    ]
+
+
+def test_csv_adapter_rejects_negative_completed_monthly_total() -> None:
+    """A negative completed monthly total must not reach the source-row parser."""
     with pytest.raises(GoogleApiResponseError, match="must be non-negative"):
         _csv_to_parser_payload(
             raw_bytes=(
                 b"date,channel_id,estimated_partner_revenue,currencyCode\n"
-                b"2026-05-01,UC_orch_alpha,-1.10,USD\n"
+                b"2026-05-01,UC_orch_alpha,1.10,USD\n"
+                b"2026-05-02,UC_orch_alpha,-2.20,USD\n"
             ),
             report_id="r-negative-revenue",
             report_type="content_owner_estimated_revenue_a1",
@@ -2820,7 +2844,7 @@ def test_dry_run_writes_nothing_returns_outcome_with_run_none(
 
 
 # ============================================================================
-# Purpose: Prove dry-run rejects a negative CSV amount before reporting a
+# Purpose: Prove dry-run rejects a negative completed monthly total before reporting a
 #          successful report or a would-upsert finance row count.
 # Database/ORM: SQLite session is inspected after the dry-run SAVEPOINT rolls
 #               back; no connector, raw-file, or source-row write is allowed.
@@ -2828,7 +2852,8 @@ def test_dry_run_writes_nothing_returns_outcome_with_run_none(
 #            transport/blob dependencies; assert typed failure and zero rows.
 # Blast Radius: Finance dry-run validation and operator-facing report counts.
 # Connections:
-#   - Function: orchestrator._accumulate_csv_row -> rejects negative revenue.
+#   - Function: orchestrator._parser_payload_from_csv_totals -> rejects a
+#     negative completed total after signed component aggregation.
 #   - Function: orchestrator._run_dry_run -> counts the produced failure.
 # ============================================================================
 def test_dry_run_rejects_negative_revenue_before_counting_rows(
@@ -2890,16 +2915,10 @@ def test_dry_run_rejects_negative_revenue_before_counting_rows(
         (CONNECTOR_KEY, "GoogleApiResponseError"),
     ]
     assert (
-        session.query(ConnectorRunORM)
-        .filter(ConnectorRunORM.tenant_id == TENANT_ID)
-        .count()
-        == 0
+        session.query(ConnectorRunORM).filter(ConnectorRunORM.tenant_id == TENANT_ID).count() == 0
     )
     assert (
-        session.query(RawReportFileORM)
-        .filter(RawReportFileORM.tenant_id == TENANT_ID)
-        .count()
-        == 0
+        session.query(RawReportFileORM).filter(RawReportFileORM.tenant_id == TENANT_ID).count() == 0
     )
     assert (
         session.query(GoogleRevenueSourceRowORM)

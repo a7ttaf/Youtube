@@ -215,6 +215,8 @@ __all__ = [
 # ============================================================================
 _CSV_DATE_COLUMNS = ("date", "day")
 _CSV_CHANNEL_COLUMNS = ("channel", "channel_id")
+# FIX: Removed the unsupported ``ad_revenue`` shorthand; only revenue aliases
+# backed by the shipped YouTube Reporting parser may reach finance ingestion.
 _CSV_REVENUE_COLUMNS = (
     "estimated_partner_revenue",
     "estimatedRevenue",
@@ -2732,9 +2734,7 @@ def _accumulate_csv_report_bytes(
     except UnicodeDecodeError as exc:
         raise _parser_payload_error(report_id=report_id, reason="csv is not valid utf-8") from exc
     reader = csv.DictReader(io.StringIO(text))
-    normalized_fieldnames = _normalize_csv_fieldnames(
-        reader.fieldnames, report_id=report_id
-    )
+    normalized_fieldnames = _normalize_csv_fieldnames(reader.fieldnames, report_id=report_id)
     # DictReader uses its fieldnames as the row-dictionary keys. Replace the
     # raw names with the validated normalized names so header validation and
     # row lookup apply the same whitespace/case contract.
@@ -2870,6 +2870,20 @@ def _validate_csv_headers(
     )
 
 
+# ============================================================================
+# Purpose: Validate completed monthly CSV revenue totals and render the parser
+#          payload consumed by the YouTube Reporting source-row parser.
+# Database/ORM: None. The downstream repository persists the rendered totals.
+# Standards: Preserve Decimal precision and allow signed component adjustments;
+#            fail closed before parser/dry-run handoff when a completed monthly
+#            channel/content-owner/currency total is negative.
+# Blast Radius: Finance ingestion and dry-run row counts for YouTube Reporting.
+# Connections:
+#   - File: backend/ums_smart_revenue/connectors/google_source_parsers/youtube_reporting.py
+#     -> converts each rendered monthly total into a ParsedSourceRow.
+#   - File: backend/ums_smart_revenue/connectors/google_source_rows/repository.py
+#     -> independently enforces non-negative persisted source-row amounts.
+# ============================================================================
 def _parser_payload_from_csv_totals(
     *,
     totals: dict[tuple[str, str | None, str], Decimal],
@@ -2885,6 +2899,14 @@ def _parser_payload_from_csv_totals(
     for line_index, ((channel, content_owner, currency), total) in enumerate(
         sorted(totals.items(), key=lambda item: (item[0][0], item[0][1] or "", item[0][2]))
     ):
+        # FIX: Validate the completed monthly total, not each signed CSV
+        # component. Google may emit legitimate negative daily or breakdown
+        # adjustments when the final source-row amount remains non-negative.
+        if total < 0:
+            raise _parser_payload_error(
+                report_id=report_id,
+                reason=f"csv aggregated revenue total {total!r} must be non-negative",
+            )
         dimensions: dict[str, object] = {"channel": channel}
         if content_owner:
             dimensions["content_owner"] = content_owner
@@ -2912,6 +2934,20 @@ def _parser_payload_from_csv_totals(
     }
 
 
+# ============================================================================
+# Purpose: Validate one YouTube Reporting CSV component row and add its signed
+#          Decimal revenue amount to the matching monthly aggregate.
+# Database/ORM: None. This builds an in-memory parser payload only.
+# Standards: Date, identity, finite-decimal, and currency failures use typed
+#            connector errors; signed adjustments are accepted here and the
+#            completed monthly total is validated before parser handoff.
+# Blast Radius: Finance aggregation for YouTube Reporting CSV ingestion.
+# Connections:
+#   - File: backend/ums_smart_revenue/connectors/google_source_parsers/youtube_reporting.py
+#     -> consumes the completed monthly parser payload.
+#   - File: backend/ums_smart_revenue/connectors/google_source_rows/repository.py
+#     -> enforces the final non-negative persisted amount contract.
+# ============================================================================
 def _accumulate_csv_row(
     *,
     totals: dict[tuple[str, str | None, str], Decimal],
@@ -2921,10 +2957,7 @@ def _accumulate_csv_row(
     default_content_owner: str | None,
     default_currency: str | None,
 ) -> None:
-    """
-    Fold one CSV row's metric into the running ``totals`` map (validates
-    non-negative decimals).
-    """
+    """Fold one finite signed CSV metric into the running monthly ``totals`` map."""
     # Normalize the date column. YouTube Reporting CSV uses ``date`` or
     # ``day``. The row is daily, but the parser payload is monthly, so this
     # date is used only to ensure the row belongs to report_month.
@@ -2986,16 +3019,6 @@ def _accumulate_csv_row(
             report_id=report_id,
             reason=f"csv row revenue {amount!r} not finite",
         )
-    # FIX: Reject negative revenue at the CSV boundary so malformed amounts
-    # fail before parser payload construction or dry-run row counting. The
-    # source-row repository enforces the same non-negative finance contract
-    # for live writes, but dry-run must not report a negative row as valid.
-    if amount_decimal < 0:
-        raise _parser_payload_error(
-            report_id=report_id,
-            reason=f"csv row revenue {amount!r} must be non-negative",
-        )
-
     currency = _first_present(csv_row, *_CSV_CURRENCY_COLUMNS)
     if not currency:
         if _row_has_any_column(csv_row, *_CSV_CURRENCY_COLUMNS):
