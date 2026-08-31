@@ -12,11 +12,7 @@ The browser client rejects any request outside those exact roots before transpor
 including encoded `/`, `\\`, or `#`, ASCII controls, iterative traversal
 encodings, and absolute origins other than the configured API or browser origin.
 Literal browser fragments remain navigation metadata and are validated
-consistently for relative and absolute URLs. The compiler-backed source audit is
-a conservative change/escape tripwire, not a JavaScript interpreter or the
-runtime security boundary: only the two canonical client transports may use raw
-browser networking, while dynamic code/module loading, client-object escapes,
-unscanned HTML/Rollup entries, and unresolved Worker sources fail closed.
+consistently for relative and absolute URLs.
 
 `frontend/vite.config.ts` retains all local defenses: development-serve-only
 activation, explicit preview exclusion, loopback binding, exact route segments,
@@ -27,8 +23,24 @@ so inline/CLI host overrides cannot expose the trusted proxy on a wildcard or
 non-loopback listener; middleware mode is rejected because an outer server would
 otherwise own the real listener boundary.
 
+## Threat model
+
+Frontend source, build configuration, and pinned dependencies are trusted. The
+compiler-backed source audit is a conservative accidental-drift and review-control
+gate; it is not an adversarial JavaScript sandbox and does not claim to prove every
+behavior hostile source could synthesize. It fails closed on practical drift such
+as raw transports, client escapes, unresolved Worker sources, executable JS/JSX
+or Worker-query imports, extra/classic/inline HTML, and alternate Rollup,
+library, or SSR entries.
+
+Runtime security is instead enforced by the shared client route/origin validator;
+Vite's resolved loopback host, middleware/preview exclusion,
+Host/Origin/Fetch-Metadata checks, exact proxy route allowlist, and trusted-header
+scrub/overwrite; plus the backend trusted-token, principal, authorization,
+tenant-scope, and PostgreSQL RLS boundaries.
+
 The exact implementation-and-test snapshot validated below is
-`609b53398c4dc67d9151ae697258a9042724be06`. The subsequent documentation-only
+`7538b4161c932f1916ce7df33d46f82bfa75acf0`. The subsequent documentation-only
 evidence commit changes no runtime or test file.
 
 ## Integration dependency and re-author requirement
@@ -63,12 +75,12 @@ required.
 ## Validation
 
 Validation evidence must name the final committed head. At this isolated
-completion snapshot (`609b53398c4dc67d9151ae697258a9042724be06`):
+completion snapshot (`7538b4161c932f1916ce7df33d46f82bfa75acf0`):
 
 | Gate | Result |
 |---|---|
-| `bun run test --run tests/devProxyRoutes.test.ts tests/devProxySecurity.test.ts tests/lib/api/client.test.tsx tests/lib/api/useExplanation.test.tsx --reporter=dot` | 197 passed across 4 files |
-| `bun run test --run --reporter=dot` | 694 passed across 46 files; existing React/jsdom warnings only |
+| `bun run test --run tests/devProxyRoutes.test.ts tests/devProxySecurity.test.ts tests/lib/api/client.test.tsx tests/lib/api/useExplanation.test.tsx --reporter=dot` | 216 passed across 4 files |
+| `bun run test --run --reporter=dot` | 713 passed across 46 files; existing React/jsdom warnings only |
 | `bun run typecheck` | Passed |
 | `bun run build` | Passed |
 | `uv run pytest -q tests/api/test_org_units_api.py -k "missing_gateway_token or invalid_gateway_token or unknown_gateway_role"` | Earlier unchanged-backend evidence: 3 passed, 6 deselected |

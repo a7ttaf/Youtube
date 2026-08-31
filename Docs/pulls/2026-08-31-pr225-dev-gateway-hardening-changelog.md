@@ -12,12 +12,12 @@
   encoded separators/hash bytes, ASCII controls, iterative traversal encodings,
   and untrusted absolute origins fail before transport. Literal fragments remain
   non-transport browser metadata.
-- A conservative compiler-backed change/escape tripwire. Canonical
-  `useApiClient()` results remain direct immutable bindings; only its two audited
-  transports may use browser networking; raw network primitives, dynamic code or
-  module loading, client aliases/containers, future method changes, unscanned
-  HTML/Rollup entries, unresolved Worker sources, and `.mts`/`.cts` or
-  outside-`src` imports fail closed.
+- A conservative compiler-backed accidental-drift/change-control tripwire.
+  Frontend source, build configuration, and pinned dependencies remain trusted;
+  this gate is not an adversarial JavaScript sandbox or exhaustive behavior
+  proof. It rejects raw transports, dynamic code/loading, client escapes,
+  executable JS/JSX or Worker-query imports, unresolved Worker sources,
+  extra/classic/inline HTML, and alternate Rollup, library, or SSR entries.
 - Startup-fixture coverage distinguishing pre-allocation creation failure and
   proving allocated HTTP servers and file watchers close after listen or port-
   resolution failure.
