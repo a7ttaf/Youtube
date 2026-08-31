@@ -194,18 +194,10 @@ export const useSessionBootstrap = (): SessionBootstrap => {
 
   // The authoritative identity boundary is the provider's opaque auth lifetime
   // plus the tenant slug used for /session/me. A tenant change inside the same
-  // provider therefore invalidates the prior principal immediately. The sole
-  // adoption case is empty bootstrap slug -> the identical tenant already
-  // proven by SessionMe; refetching that same boundary would add a redundant
-  // request after /tenants/me hydrates and can never change the principal.
-  const sessionAlreadyProvesTenant =
-    status === "ready" && session.session?.tenant?.slug === tenantSlug;
-  const adoptsBootstrapTenant =
-    sessionAlreadyProvesTenant &&
-    session.hydratedTenantSlug === "" &&
-    tenantSlug !== "";
-  const boundaryIsAuthoritative =
-    session.hydratedTenantSlug === tenantSlug || sessionAlreadyProvesTenant;
+  // provider therefore invalidates the prior principal immediately. Even when
+  // an empty-slug bootstrap response names the tenant later resolved by
+  // /tenants/me, that response cannot settle the new tenant-keyed query.
+  const boundaryIsAuthoritative = session.hydratedTenantSlug === tenantSlug;
   const requiresHydration =
     !session.seeded && (status === "loading" || !boundaryIsAuthoritative);
   // Keep the production observer active after the first success. Tenant-key
@@ -266,18 +258,10 @@ export const useSessionBootstrap = (): SessionBootstrap => {
   // can mirror it into context; returning context in that frame briefly exposed
   // principal A between `loading` and replacement principal B (or `error`).
   // The provider scope + tenant query key proves which boundary produced this
-  // data, while fetching/pending states stay fail-closed. The sole exception is
-  // the initial empty-slug -> matching SessionMe tenant adoption: that response
-  // already proves the principal and tenant pair, so a query-key transition is
-  // not an auth-boundary revalidation and may retain the proven context value.
+  // data, while fetching/pending states stay fail-closed. This includes the
+  // initial empty-slug -> SessionMe tenant adoption: once that slug changes,
+  // only the tenant-keyed query can authorize the next committed frame.
   if (query.isFetching || query.isPending) {
-    if (adoptsBootstrapTenant) {
-      return {
-        status: session.status,
-        session: session.session,
-        error: session.error,
-      };
-    }
     return { status: "loading", session: null, error: null };
   }
 

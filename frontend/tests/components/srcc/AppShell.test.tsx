@@ -580,7 +580,7 @@ describe("AppShell production session hydration", () => {
     expect(screen.queryByTestId("role-preview-hint")).not.toBeInTheDocument();
   });
 
-  it("reads /session/me exactly once when StrictMode replays the shell mount", async () => {
+  it("reads /session/me once per tenant boundary when StrictMode replays the shell mount", async () => {
     vi.stubEnv("DEV", false);
     vi.stubEnv("VITE_ENABLE_ROLE_PREVIEW", "");
     const fetchMock = globalThis.fetch as ReturnType<typeof vi.fn>;
@@ -598,9 +598,27 @@ describe("AppShell production session hydration", () => {
       </StrictMode>,
     );
 
-    expect(await screen.findByText(/money visible/i)).toBeInTheDocument();
+    await waitFor(
+      () => {
+        const calls = fetchMock.mock.calls.filter(([input]) => isSessionCall(input));
+        expect(calls).toHaveLength(2);
+      },
+      { timeout: 1_000 },
+    );
+    await waitFor(
+      () => expect(screen.getByText(/money visible/i)).toBeInTheDocument(),
+      { timeout: 1_000 },
+    );
     const sessionCalls = fetchMock.mock.calls.filter(([input]) => isSessionCall(input));
-    expect(sessionCalls).toHaveLength(1);
+    expect(sessionCalls).toHaveLength(2);
+    const firstHeaders = new Headers(
+      (sessionCalls[0]?.[1] as RequestInit | undefined)?.headers,
+    );
+    const tenantHeaders = new Headers(
+      (sessionCalls[1]?.[1] as RequestInit | undefined)?.headers,
+    );
+    expect(firstHeaders.has("X-UMS-Tenant")).toBe(false);
+    expect(tenantHeaders.get("X-UMS-Tenant")).toBe(SHELL_TENANT.slug);
   });
 
   it("PRODUCTION: withheld canViewRevenue gates finance cells to the Restricted sentinel", async () => {

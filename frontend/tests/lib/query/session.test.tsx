@@ -96,6 +96,9 @@ const SessionProbe = ({ frames }: { frames?: string[] }) => {
       <button type="button" onClick={() => tenant.hydrate(TENANT_B)}>
         Switch tenant
       </button>
+      <button type="button" onClick={() => tenant.hydrate(TENANT_A)}>
+        Adopt tenant
+      </button>
       <button type="button" onClick={clearSession}>
         Clear session
       </button>
@@ -376,6 +379,70 @@ describe("useSessionMeQuery", () => {
     );
     rendered.unmount();
   });
+
+  it.each([
+    ["disabled", true],
+    ["enabled", false],
+  ])(
+    "never exposes the empty-slug principal while tenant adoption resolves to %s principal B",
+    async (_replacementState, disabled) => {
+      const principalA = sessionFor("principal-a", { tenant: TENANT_A });
+      const principalB = sessionFor("principal-b", {
+        tenant: TENANT_A,
+        disabled,
+      });
+      let resolveReplacement: ((response: Response) => void) | undefined;
+      const replacementPending = new Promise<Response>((resolve) => {
+        resolveReplacement = resolve;
+      });
+      const responses: Array<Response | Promise<Response>> = [
+        jsonResponse(principalA),
+        replacementPending,
+      ];
+      (globalThis.fetch as ReturnType<typeof vi.fn>).mockImplementation(() =>
+        responses.shift() ?? Promise.reject(new Error("missing response")),
+      );
+      const queryClient = sessionQueryClient();
+      const frames: string[] = [];
+
+      const rendered = renderSession(queryClient, "", frames);
+      await waitFor(() =>
+        expect(screen.getByTestId("session-probe")).toHaveAttribute(
+          "data-user-id",
+          "principal-a",
+        ),
+      );
+      frames.length = 0;
+
+      fireEvent.click(screen.getByRole("button", { name: "Adopt tenant" }));
+      await waitFor(() => expect(globalThis.fetch).toHaveBeenCalledTimes(2));
+      expect(screen.getByTestId("session-probe")).toHaveAttribute(
+        "data-status",
+        "loading",
+      );
+      expect(screen.getByTestId("session-probe")).toHaveAttribute("data-user-id", "");
+
+      resolveReplacement?.(jsonResponse(principalB));
+      await waitFor(() =>
+        expect(screen.getByTestId("session-probe")).toHaveAttribute(
+          "data-user-id",
+          "principal-b",
+        ),
+      );
+
+      const loadingFrame = `loading|none|false|${TENANT_A.slug}`;
+      const replacementFrame =
+        `ready|principal-b|${String(disabled)}|${TENANT_A.slug}`;
+      expect(frames[0]).toBe(loadingFrame);
+      expect(
+        frames.every(
+          (frame) => frame === loadingFrame || frame === replacementFrame,
+        ),
+      ).toBe(true);
+      expect(frames.at(-1)).toBe(replacementFrame);
+      rendered.unmount();
+    },
+  );
 
   it("never re-exposes principal A when a same-tenant focus refetch fails", async () => {
     const principalA = sessionFor("principal-a", { tenant: TENANT_A });
