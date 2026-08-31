@@ -38,10 +38,10 @@ credential reference. The packet must not be copied into repo docs.
 | Authorization flow | Google-approved OAuth consent flow that produced the refresh token; no Gmail session shortcut |
 | OAuth client | Client id owner, client type, and allowed token URI |
 | Approved scopes | Narrow scopes per connector/account, copied from the Google approval record |
-| Secret location | GCP Secret Manager secret name/version; do not paste the secret value into UMS |
-| Runtime IAM | UMS runtime identity has read access only to the needed secret version |
+| Secret location | GCP Secret Manager secret name and immutable numeric version; never use `latest` or paste the secret value into UMS |
+| Runtime IAM | Grant `roles/secretmanager.secretAccessor` on the Secret resource. If approval requires version-only access, add an IAM Condition matching the approved numeric SecretVersion; otherwise record that the grant covers every version of that one secret |
 | Tenant/account mapping | UMS tenant id, `connector_key`, and Google `account_id` or CMS content owner id |
-| Service actor | A stable service-account UUID recorded in the tracker. Prefer an account created through the audited `/users` APIs and assigned `system_integration_user`; never the public placeholder from `.env.example`. The runtime currently validates UUID syntax but does not load that account. Under `docker compose` the value cannot be supplied through `.env` alone — see [Supplying the service actor under `docker compose`](#supplying-the-service-actor-under-docker-compose) |
+| Service actor plan | Approved tenant, owner, and `system_integration_user` assignment. Provision it through the audited `/users` APIs only after Step 2 registers the credential reference, then record its UUID; never use a placeholder. The runtime currently validates UUID syntax but does not load that account. Under `docker compose` the value cannot be supplied through `.env` alone — see [Supplying the service actor under `docker compose`](#supplying-the-service-actor-under-docker-compose) |
 | Smoke month | A non-closed month or approved historical month to use for the first dry-run |
 
 ## Secret payload contract
@@ -68,7 +68,9 @@ Current production resolver support:
 
 - Use `secret-manager://projects/<project>/secrets/<secret>/versions/<version>`
   or `gcp-secret-manager://projects/<project>/secrets/<secret>/versions/<version>`
-  for production smoke.
+  for production smoke, where `<version>` is the numeric immutable version id.
+  The resolver can parse `latest`, but this runbook forbids that mutable alias:
+  approval, registration, smoke evidence, and rollback must name the same version.
 - The admin API allowlist also accepts `aws-secretsmanager://`,
   `azure-keyvault://`, `vault://`, and `kms://`, but those schemes are not
   registered production resolvers in this slice. A connector run using one of
@@ -83,7 +85,11 @@ Current production resolver support:
    - Confirm the Google Cloud project and required APIs.
    - Complete the approved Google OAuth authorization flow.
    - Store the OAuth payload in GCP Secret Manager.
-   - Grant the UMS runtime identity read access only to that secret version.
+   - Record the created numeric version id. Grant the UMS runtime identity
+     `roles/secretmanager.secretAccessor` on the Secret resource. SecretVersion
+     resources do not accept IAM bindings directly; if approval requires access
+     to only that version, add and verify an IAM Condition matching its resource
+     name. Otherwise record that the grant covers every version of that secret.
 
 2. Register the external reference in UMS.
 
@@ -95,7 +101,7 @@ POST /connectors/credentials
 {
   "connector_key": "youtube-reporting",
   "account_id": "<content-owner-or-account-id>",
-  "encrypted_secret_ref": "secret-manager://projects/<project>/secrets/<secret>/versions/latest",
+  "encrypted_secret_ref": "secret-manager://projects/<project>/secrets/<secret>/versions/<numeric-version>",
   "reason": "Register owner-approved Google credential reference for smoke"
 }
 ```
@@ -108,6 +114,10 @@ Expected result:
 - Response does not include `encrypted_secret_ref`, raw secret payload, refresh
   token, client secret, or API key.
 - A `CONNECTOR_SETTINGS_CHANGED` audit row records the reference creation.
+
+This registration precedes service-actor provisioning. Creating a service actor
+does not register connector credentials and is not a substitute for this audited
+write; provision the actor later through `POST /users` as the live-run gate requires.
 
 3. Read metadata and health.
 
@@ -230,11 +240,10 @@ connector audit emitters can build a service principal
 ```
 
 — while the operator is looking at the line they set in `.env`. This is a
-deployment gap, not an intentional safety mechanism. It is especially dangerous
-because `.env.example` currently ships the public placeholder
-`00000000-0000-0000-0000-0000000000bb`, and `connectors/google/audit.py` refuses
-only on *unset*, accepting any syntactically valid UUID. Replace or comment out
-the placeholder and use a recorded service-account UUID.
+deployment gap, not an intentional safety mechanism. `.env.example` therefore
+keeps the variable commented and supplies no UUID. `connectors/google/audit.py`
+refuses only on *unset*, accepting any syntactically valid UUID, so use only the
+service-account UUID recorded after audited provisioning.
 
 To supply the value under compose, add an untracked `docker-compose.override.yml`
 beside `docker-compose.yml`. Compose merges it automatically — no `-f` flag:
@@ -291,9 +300,9 @@ Before the first `dry_run: false` job:
   API. This is a governance check: the current runtime builds an in-memory
   principal carrying `connectors.run_jobs` and validates only that the configured
   value is a UUID; it does not verify an active SQL user or role assignment.
-- The value is a service actor you provisioned, not the
-  `00000000-0000-0000-0000-0000000000bb` placeholder from `.env.example`. The
-  runtime check refuses only on *unset* and will accept the placeholder silently.
+- The value is the service actor you provisioned, not a copied or public UUID.
+  `.env.example` deliberately supplies no value because the runtime check refuses
+  only on *unset* and accepts any syntactically valid UUID.
 - The target month is not locked unless the owner explicitly approves the
   behavior for a closed month.
 - Operator has reviewed the expected source tables and rollback note below.
@@ -317,12 +326,16 @@ workstation paths, credential payloads, account ids, and secret references in
 the approved operator tracker or secret store, not in repository docs.
 
 1. Rotate any credential that may have been exposed, then upload the JSON payload
-   described above to GCP Secret Manager. Verify current `gcloud` syntax against
-   the installed SDK or use the Cloud Console.
-2. Give the runtime identity `roles/secretmanager.secretAccessor` on the exact
-   secret version. Host ADC is not automatically visible in Compose; mount and
-   configure container credentials through an untracked override when the API
-   container will resolve the secret.
+   described above to GCP Secret Manager. Record the resulting numeric version;
+   never register the mutable `latest` alias. Verify current `gcloud` syntax
+   against the installed SDK or use the Cloud Console.
+2. Give the runtime identity `roles/secretmanager.secretAccessor` on the Secret
+   resource. SecretVersion resources do not accept IAM bindings directly. When
+   the approval is version-specific, add and verify an IAM Condition matching
+   the recorded numeric version; otherwise document that the binding covers all
+   versions of that one secret. Host ADC is not automatically visible in Compose;
+   mount and configure container credentials through an untracked override when
+   the API container will resolve the secret.
 3. Register the external reference through audited
    `POST /connectors/credentials` with an authorized principal. Expected status
    is `201`, `has_secret_ref: true`, and a `CONNECTOR_SETTINGS_CHANGED` audit
@@ -336,7 +349,8 @@ the approved operator tracker or secret store, not in repository docs.
    approved database URL and exact tenant/connector/account. A Compose database
    is reached from the host through `127.0.0.1` and its published port, not the
    container-only hostname `postgres`.
-6. Provision a service account through audited `POST /users`, then assign the
+6. After credential registration succeeds, provision a service account through
+   audited `POST /users`, then assign the
    `system_integration_user` role through `POST /users/{user_id}/roles`. Set
    `UMS_GOOGLE_CONNECTOR_SERVICE_ACTOR_ID` to that account UUID using the Compose
    override above. Record the current runtime limitation: connector execution

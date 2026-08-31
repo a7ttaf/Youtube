@@ -2,6 +2,7 @@ import { readFileSync, readdirSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+import ts from "typescript";
 import { describe, expect, it } from "vitest";
 
 import {
@@ -12,60 +13,23 @@ import {
 } from "../vite.config";
 
 // ============================================================================
-// Purpose: Guard the dev proxy's route list against OMISSION, which is the bug
-//   class that produced the /org-units defect. A tenant-scoped backend prefix
-//   that is NOT in this list is not merely "unproxied" — the request never
-//   leaves the dev server. The client sends `Accept: application/json`
-//   (client.ts buildHeaders), which Vite's html fallback declines, so the dev
-//   server answers with a bare 404, a zero-length body and no Content-Type,
-//   and the calling view degrades silently (RegistryView renders raw org-unit
-//   ids instead of Company/Sector names and leaves the mapping form's company
-//   picker empty). Measured against a real Vite createServer, not assumed:
-//   Accept: application/json -> 404 / contentType null / 0 bytes, while
-//   Accept: text/html -> 200 / text/html / index.html.
-// Database/ORM: None (frontend dev-server config).
-// Standards: The load-bearing assertion is DERIVED, not hand-copied. Every
-//   leading-slash path literal the application actually issues is scanned out
-//   of frontend/src and required to be covered by TENANT_SCOPED_ROUTES, so a
-//   new API call to an unproxied prefix fails here instead of failing silently
-//   in a browser. The previous revision of this file compared the route list to
-//   a duplicate of itself, which could only ever catch removal — it would have
-//   passed on the exact defect it was written after.
-//   The hand-written EXPECTED_ROUTES list is kept, demoted to what it honestly
-//   is: a change-detector for ADDITIONS. Adding a route means injecting
-//   trusted-principal headers onto one more prefix, which is a deliberate trust
-//   decision that should have to touch a test. It is not evidence of coverage.
-//   Two collection hazards this file deliberately avoids:
-//     - Its name must not match vitest's default `exclude`, which carries
-//       `**/vite.config.*`; naming it after the module under test would have
-//       silently collected nothing.
-//     - It imports the route list and the builder rather than invoking the
-//       default-exported config factory. Vite's own asset transform rewrites
-//       `new URL("./src", import.meta.url)` (vite.config.ts, the `@` alias)
-//       against `self.location`, so under vitest that factory throws
-//       "The URL must be of scheme file" — a transform artifact, not a defect
-//       in the config.
-// Blast Radius: Dev-server only. No production bundle and no runtime
-//   authorization path — outside dev the real gateway injects these headers.
+// Purpose: Guard the development proxy route and header contracts against
+//   omissions without duplicating the implementation as the expected result.
+// Database/ORM: None.
+// Standards: Derive requested prefixes from the TypeScript compiler AST; keep
+//   EXPECTED_ROUTES only as an explicit trust-boundary addition detector.
+// Blast Radius: Test-only development proxy coverage.
 // Connections:
-//   - File: frontend/vite.config.ts -> TENANT_SCOPED_ROUTES and
-//     buildTenantScopedProxy, the values under test.
-//   - File: frontend/src/lib/api/client.ts -> buildHeaders sets the
-//     Accept: application/json that makes an unproxied route a bare 404.
-//   - File: frontend/src/lib/api/useOrgUnits.ts -> GET /org-units, the call
-//     that exposed the gap (RegistryView.tsx:1216 mounts it; the same data
-//     feeds the mapping form's company select at RegistryView.tsx:840-845).
-//   - File: backend/ums_smart_revenue/api/org_units.py -> the backend route the
-//     proxy must reach; backend/ums_smart_revenue/api/users.py for /users.
-//   - File: frontend/README.md -> documents the route list and the four
-//     mounted-but-unproxied backend prefixes.
+//   - File: frontend/vite.config.ts -> exports proxy route/build helpers.
+//   - File: frontend/src/lib/api -> contains the request literals scanned here.
+//   - File: frontend/tests/devProxySecurity.test.ts -> real HTTP boundary tests.
 // ============================================================================
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const SRC_DIR = path.resolve(HERE, "..", "src");
 const SOURCE_SUFFIXES = [".ts", ".tsx"];
 
-// Change-detector only — see Standards above. Not the coverage assertion.
+// Change-detector only; the compiler-derived assertion is the coverage proof.
 const EXPECTED_ROUTES = [
   "/tenants",
   "/session",
@@ -101,396 +65,69 @@ const SCANNER_HEALTH_PREFIXES = [
 
 type ScannedLiteral = {
   value: string;
-  /**
-   * True when the literal is concatenated onto a preceding expression — the
-   * token before it is `+`. Such a literal is a path *fragment*, not a request
-   * path: useExplanation.ts builds
-   *   `/revenue/channels/${id}` + `/months/${month}/explain` + `?metric=...`
-   * so `/months` must not be mistaken for a top-level backend prefix.
-   */
+  /** True when the literal is the right operand of string concatenation. */
   continuesExpression: boolean;
 };
 
-const isWhitespace = (ch: string): boolean =>
-  ch === " " || ch === "\t" || ch === "\n" || ch === "\r";
-
-/** True where a `/` starts a regex literal rather than division, by the usual heuristic. */
-const startsRegex = (previous: string): boolean =>
-  previous === "" || !/[)\]}\w$]/.test(previous);
-
-// Placeholder standing in for a `${...}` interpolation inside a template
-// literal. NUL cannot occur in real source, and firstSegment treats it as a
-// segment terminator, so `/exports${qs}` yields `/exports` rather than a
-// fragment carrying the interpolation's text.
+// NUL marks a template interpolation and cannot collide with TypeScript source.
 const INTERPOLATION = "\u0000";
 
-/** Skip a `//` line comment; returns the index of the newline (or EOF). */
-const skipLineComment = (source: string, index: number): number => {
-  let cursor = index;
-  while (cursor < source.length && source[cursor] !== "\n") {
-    cursor += 1;
+/** Return whether a literal is the right operand of a possibly parenthesized +. */
+const isRightOperandOfPlus = (node: ts.Node): boolean => {
+  let current = node;
+  while (ts.isParenthesizedExpression(current.parent)) {
+    current = current.parent;
   }
-  return cursor;
+  const parent = current.parent;
+  return (
+    ts.isBinaryExpression(parent) &&
+    parent.operatorToken.kind === ts.SyntaxKind.PlusToken &&
+    parent.right === current
+  );
 };
 
-/** Skip a block comment starting at `/*`; returns the index just past it. */
-const skipBlockComment = (source: string, index: number): number => {
-  let cursor = index + 2;
-  while (cursor < source.length && !(source[cursor] === "*" && source[cursor + 1] === "/")) {
-    cursor += 1;
-  }
-  return cursor + 2;
-};
+/** Preserve static template fragments while marking every interpolation boundary. */
+const templateValue = (node: ts.TemplateExpression): string =>
+  [
+    node.head.text,
+    ...node.templateSpans.flatMap((span) => [INTERPOLATION, span.literal.text]),
+  ].join("");
 
-/** Skip a line or block comment; returns the index just past it. */
-const skipComment = (source: string, index: number): number =>
-  source[index + 1] === "/" ? skipLineComment(source, index) : skipBlockComment(source, index);
-
-type RegexCharKind = "escape" | "stop" | "openClass" | "closeClass" | "other";
-
-/** Regex-body kinds when not inside a character class. */
-const REGEX_KIND_OUTSIDE: Record<string, RegexCharKind> = {
-  "\\": "escape",
-  "\n": "stop",
-  "/": "stop",
-  "[": "openClass",
-  "]": "closeClass",
-};
-
-/** Regex-body kinds inside a character class (`/` is ordinary). */
-const REGEX_KIND_IN_CLASS: Record<string, RegexCharKind> = {
-  "\\": "escape",
-  "\n": "stop",
-  "]": "closeClass",
-};
-
-/** Classify one regex-body character for the skipper. */
-const regexCharKind = (ch: string, inClass: boolean): RegexCharKind =>
-  (inClass ? REGEX_KIND_IN_CLASS : REGEX_KIND_OUTSIDE)[ch] ?? "other";
-
-/** Character-class membership after one non-escape, non-stop regex step. */
-const REGEX_CLASS_AFTER: Partial<Record<RegexCharKind, boolean>> = {
-  openClass: true,
-  closeClass: false,
-};
-
-/** Advance one escaped regex-literal character. */
-const advanceRegexEscape = (
-  cursor: number,
-  inClass: boolean,
-): { cursor: number; inClass: boolean; stop: boolean } => ({
-  cursor: cursor + 2,
-  inClass,
-  stop: false,
-});
-
-/** Stop scanning at the closing regex delimiter. */
-const advanceRegexStop = (
-  cursor: number,
-  inClass: boolean,
-): { cursor: number; inClass: boolean; stop: boolean } => ({
-  cursor,
-  inClass,
-  stop: true,
-});
-
-/** Advance one regex body character, updating class membership when needed. */
-const advanceRegexClass = (
-  source: string,
-  cursor: number,
-  inClass: boolean,
-): { cursor: number; inClass: boolean; stop: boolean } => {
-  const kind = regexCharKind(source[cursor] ?? "", inClass);
-  return {
-    cursor: cursor + 1,
-    inClass: REGEX_CLASS_AFTER[kind] ?? inClass,
-    stop: false,
-  };
-};
-
-/** One step through a regex literal body. */
-const stepRegexBody = (
-  source: string,
-  cursor: number,
-  inClass: boolean,
-): { cursor: number; inClass: boolean; stop: boolean } => {
-  const kind = regexCharKind(source[cursor] ?? "", inClass);
-  if (kind === "escape") {
-    return advanceRegexEscape(cursor, inClass);
-  }
-  if (kind === "stop") {
-    return advanceRegexStop(cursor, inClass);
-  }
-  return advanceRegexClass(source, cursor, inClass);
-};
-
-/** Skip a regex literal, honouring escapes and character classes. */
-const skipRegex = (source: string, index: number): number => {
-  let cursor = index + 1;
-  let inClass = false;
-  while (cursor < source.length) {
-    const step = stepRegexBody(source, cursor, inClass);
-    cursor = step.cursor;
-    inClass = step.inClass;
-    if (step.stop) {
-      break;
-    }
-  }
-  return cursor + 1;
-};
-
-/** Append one escaped or raw character from a string literal body. */
-const appendLiteralChar = (
-  source: string,
-  index: number,
-  value: string,
-): { index: number; value: string } => {
-  if (source[index] === "\\") {
-    return { index: index + 2, value: value + (source[index + 1] ?? "") };
-  }
-  return { index: index + 1, value: value + source[index] };
-};
-
-/** True when index starts a `${` interpolation inside a template literal. */
-const isTemplateInterpolation = (quote: string, source: string, index: number): boolean =>
-  quote === "`" && source[index] === "$" && source[index + 1] === "{";
-
-/** Advance past a `/` that starts a comment or a regex literal. */
-const advanceSlashToken = (
-  source: string,
-  index: number,
-  previousToken: string,
-  next: string,
-): { index: number; previousToken: string } | null => {
-  if ("/*".includes(next)) {
-    return { index: skipComment(source, index), previousToken };
-  }
-  if (startsRegex(previousToken)) {
-    return { index: skipRegex(source, index), previousToken: "/" };
-  }
-  return null;
-};
-
-type ScanAdvance = {
-  index: number;
-  depth: number;
-  previousToken: string;
-  done: boolean;
-};
-
-/** Enter one nested `{` while scanning a template interpolation. */
-const advanceOpenBrace = (index: number, depth: number, ch: string): ScanAdvance => ({
-  index: index + 1,
-  depth: depth + 1,
-  previousToken: ch,
-  done: false,
-});
-
-/** Leave one nested `}` while scanning a template interpolation. */
-const advanceCloseBrace = (index: number, depth: number, ch: string): ScanAdvance =>
-  depth === 0
-    ? { index: index + 1, depth, previousToken: ch, done: true }
-    : { index: index + 1, depth: depth - 1, previousToken: ch, done: false };
-
-/** Apply brace nesting rules when scanning inside a template interpolation. */
-const advanceBraceToken = (
-  ch: string,
-  index: number,
-  depth: number,
-  stopAtCloseBrace: boolean,
-): ScanAdvance | null => {
-  if (!stopAtCloseBrace) {
-    return null;
-  }
-  if (ch === "{") {
-    return advanceOpenBrace(index, depth, ch);
-  }
-  if (ch === "}") {
-    return advanceCloseBrace(index, depth, ch);
-  }
-  return null;
-};
-
-/** True when ``ch`` opens a string or template literal. */
-const isStringOpener = (ch: string): boolean => "'\"`".includes(ch);
-
-/** Advance one ordinary (non-special) character in a scan region. */
-const advancePlainToken = (
-  ch: string,
-  index: number,
-  depth: number,
-  previousToken: string,
-): ScanAdvance => ({
-  index: index + 1,
-  depth,
-  previousToken: isWhitespace(ch) ? previousToken : ch,
-  done: false,
-});
-
-/** Try to consume a `/` comment or regex at the current index. */
-const tryAdvanceSlash = (
-  source: string,
-  index: number,
-  previousToken: string,
-  depth: number,
-): ScanAdvance | null => {
-  if (source[index] !== "/") {
-    return null;
-  }
-  const slash = advanceSlashToken(source, index, previousToken, source[index + 1] ?? "");
-  if (slash === null) {
-    return null;
-  }
-  return { ...slash, depth, done: false };
-};
-
-/** Advance one character or template interpolation inside a string literal scan. */
-const advanceOneLiteralChar = (
-  source: string,
-  index: number,
-  quote: string,
-  value: string,
-  scanRegion: (
-    source: string,
-    start: number,
-    stopAtCloseBrace: boolean,
-    literals: ScannedLiteral[],
-  ) => number,
-  literals: ScannedLiteral[],
-): { index: number; value: string; closed: boolean } => {
-  if (source[index] === quote) {
-    return { index, value, closed: true };
-  }
-  if (isTemplateInterpolation(quote, source, index)) {
-    return {
-      index: scanRegion(source, index + 2, true, literals),
-      value: value + INTERPOLATION,
-      closed: false,
-    };
-  }
-  const advanced = appendLiteralChar(source, index, value);
-  return { index: advanced.index, value: advanced.value, closed: false };
-};
-
-/**
- * Held on one object so mutual recursion does not hit the Temporal Dead Zone
- * and does not use module-scope `function` (JS-0067/0357).
- */
-const scanners: {
-  readLiteral: (
-    source: string,
-    openIndex: number,
-    continuesExpression: boolean,
-    literals: ScannedLiteral[],
-  ) => number;
-  scanRegion: (
-    source: string,
-    start: number,
-    stopAtCloseBrace: boolean,
-    literals: ScannedLiteral[],
-  ) => number;
-  tryAdvanceString: (
-    source: string,
-    index: number,
-    previousToken: string,
-    depth: number,
-    literals: ScannedLiteral[],
-  ) => ScanAdvance | null;
-  advanceScanToken: (
-    source: string,
-    index: number,
-    previousToken: string,
-    stopAtCloseBrace: boolean,
-    depth: number,
-    literals: ScannedLiteral[],
-  ) => ScanAdvance;
-} = {
-  readLiteral(source, openIndex, continuesExpression, literals) {
-    const quote = source[openIndex];
-    let index = openIndex + 1;
-    let value = "";
-    let closed = false;
-    while (index < source.length && !closed) {
-      const step = advanceOneLiteralChar(
-        source,
-        index,
-        quote,
-        value,
-        scanners.scanRegion,
-        literals,
-      );
-      index = step.index;
-      value = step.value;
-      closed = step.closed;
-    }
-    literals.push({ value, continuesExpression });
-    return index + 1;
-  },
-
-  scanRegion(source, start, stopAtCloseBrace, literals) {
-    let index = start;
-    let depth = 0;
-    let previousToken = "";
-    while (index < source.length) {
-      const advanced = scanners.advanceScanToken(
-        source,
-        index,
-        previousToken,
-        stopAtCloseBrace,
-        depth,
-        literals,
-      );
-      if (advanced.done) {
-        return advanced.index;
-      }
-      index = advanced.index;
-      depth = advanced.depth;
-      previousToken = advanced.previousToken;
-    }
-    return index;
-  },
-
-  tryAdvanceString(source, index, previousToken, depth, literals) {
-    const ch = source[index];
-    if (!isStringOpener(ch)) {
-      return null;
-    }
-    return {
-      index: scanners.readLiteral(source, index, previousToken === "+", literals),
-      depth,
-      previousToken: ch,
-      done: false,
-    };
-  },
-
-  advanceScanToken(source, index, previousToken, stopAtCloseBrace, depth, literals) {
-    const ch = source[index];
-    return (
-      tryAdvanceSlash(source, index, previousToken, depth) ??
-      scanners.tryAdvanceString(source, index, previousToken, depth, literals) ??
-      advanceBraceToken(ch, index, depth, stopAtCloseBrace) ??
-      advancePlainToken(ch, index, depth, previousToken)
-    );
-  },
-};
-
-/**
- * Purpose: Extract every string/template literal from TypeScript source,
- *   skipping comments and regex literals, and record whether each literal
- *   continues a `+` concatenation.
- * Standards: A hand-rolled character scan rather than a regex, because comments
- *   in this repository quote API paths ("// GET /revenue/months/{month}/...")
- *   and a regex over raw text cannot tell those from real call sites. Template
- *   interpolations are scanned as code, so a nested template such as
- *   `` `/exports${qs ? `?${qs}` : ""}` `` yields `/exports<placeholder>` rather
- *   than the truncated fragment a naive scan produces. The regex heuristic is
- *   the one place a mis-scan could hide a literal, which is why
- *   SCANNER_HEALTH_PREFIXES exists.
- * Blast Radius: Test-only.
- */
+// ============================================================================
+// Purpose: Extract string and template literals through the TypeScript compiler
+//   rather than a handwritten approximation of the source grammar.
+// Database/ORM: None.
+// Standards: Let the compiler distinguish comments, regexes, division, and
+//   strings; retain right-hand concatenation metadata so suffixes are not routes.
+// Blast Radius: Test-only route coverage.
+// Connections:
+//   - File: frontend/src/lib/api -> request literals discovered below.
+//   - File: frontend/vite.config.ts -> allowlisted proxy routes under test.
+// ============================================================================
 export const scanStringLiterals = (source: string): ScannedLiteral[] => {
+  const sourceFile = ts.createSourceFile(
+    "dev-proxy-scan.tsx",
+    source,
+    ts.ScriptTarget.Latest,
+    true,
+    ts.ScriptKind.TSX,
+  );
   const literals: ScannedLiteral[] = [];
-  scanners.scanRegion(source, 0, false, literals);
+  const visit = (node: ts.Node): void => {
+    if (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)) {
+      literals.push({
+        value: node.text,
+        continuesExpression: isRightOperandOfPlus(node),
+      });
+    } else if (ts.isTemplateExpression(node)) {
+      literals.push({
+        value: templateValue(node),
+        continuesExpression: isRightOperandOfPlus(node),
+      });
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(sourceFile);
   return literals;
 };
 
@@ -504,32 +141,29 @@ const sourceFiles = (dir: string): string[] =>
     return SOURCE_SUFFIXES.some((suffix) => entry.name.endsWith(suffix)) ? [full] : [];
   });
 
-/**
- * The first path segment of a literal, e.g. "/revenue/months/x" -> "/revenue".
- * Split on INTERPOLATION as a string first so no control character appears in a
- * regex (DeepSource JS-0004); then terminate on / ? # only.
- */
+/** Return the first path segment of a literal such as /revenue/months/x. */
 const firstSegment = (literal: string): string => {
   const untilPlaceholder = literal.slice(1).split(INTERPOLATION, 1)[0] ?? "";
   return `/${untilPlaceholder.split(/[/?#]/u, 1)[0] ?? ""}`;
 };
 
-/** True when a scanned literal is a leading-slash API path (not a fragment). */
+/** True for a leading-slash API path, not a concatenated path fragment. */
 const isRequestPathLiteral = (literal: ScannedLiteral): boolean =>
   literal.value.startsWith("/") &&
   !literal.continuesExpression &&
   literal.value.length >= 2 &&
   /^[a-z]/iu.test(literal.value[1] ?? "");
 
-/**
- * Purpose: Derive the set of backend prefixes the application actually
- *   requests, by scanning frontend/src for leading-slash path literals.
- * Standards: Scans the whole of src/, not only src/lib/api/ — `/session/me`
- *   lives in contexts/SessionContext.tsx and `/tenants/me` in
- *   components/srcc/AppShell.tsx, so an api-directory-only scan would miss two
- *   of the twelve proxied routes and under-report coverage.
- * Blast Radius: Test-only.
- */
+// ============================================================================
+// Purpose: Derive the backend prefixes the frontend actually requests.
+// Database/ORM: None.
+// Standards: Scan all frontend/src TypeScript through the compiler AST and fail
+//   whenever a leading-slash request prefix lacks a proxy entry.
+// Blast Radius: Test-only coverage; no runtime or authorization effect.
+// Connections:
+//   - File: frontend/vite.config.ts -> TENANT_SCOPED_ROUTES.
+//   - File: frontend/src/lib/api -> request call sites.
+// ============================================================================
 export const discoverRequestedPrefixes = (): string[] => {
   const found = new Set<string>();
   for (const file of sourceFiles(SRC_DIR)) {
@@ -638,6 +272,14 @@ describe("dev proxy route coverage (derived from frontend/src)", () => {
   it("ignores API paths that appear only in comments", () => {
     const source = '// GET /reports/raw-files is documented here\nconst x = 1;\n';
     expect(scanStringLiterals(source)).toEqual([]);
+  });
+
+  it("does not hide a request literal after division following a string", () => {
+    const source = 'const ratio = "x" / 2;\nconst requestPath = "/hidden";';
+    expect(scanStringLiterals(source)).toContainEqual({
+      continuesExpression: false,
+      value: "/hidden",
+    });
   });
 
   it("proxies every backend prefix the application requests", () => {

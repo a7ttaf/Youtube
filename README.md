@@ -134,15 +134,11 @@ export UMS_DATABASE_URL="postgresql+psycopg://ums:ums@localhost:5432/ums_smart_r
 export UMS_AUTHZ_SOURCE=headers
 ```
 
-> ⚠️ **One thing `cp .env.example .env` gets wrong today.** The template ships
-> `UMS_GOOGLE_CONNECTOR_SERVICE_ACTOR_ID` **uncommented**, set to the public
-> placeholder `00000000-0000-0000-0000-0000000000bb`. The loader blocks above export
-> every non-comment line, so a local run picks that value up — and the runtime check
-> refuses only when the variable is *unset*, accepting any syntactically valid UUID.
-> The result is a connector audit trail attributed to an id published in a public
-> template rather than a run that refuses to start. **Comment that line out in your
-> `.env`** unless it holds a real service-principal UUID you provisioned. Fixing the
-> template is plan item P0.3; see the environment-variable notes below.
+> `UMS_GOOGLE_CONNECTOR_SERVICE_ACTOR_ID` is intentionally commented out in
+> `.env.example`. Provision a real service account through the audited user APIs
+> only after registering the connector credential reference; never substitute a
+> public placeholder. Compose does not forward this variable, so use the explicit
+> untracked override described in the environment-variable notes below.
 
 ### Run the tests
 
@@ -178,9 +174,9 @@ uv run pytest -q tests/api
 > ⚠️ **`UMS_GOOGLE_CONNECTOR_SERVICE_ACTOR_ID` is not forwarded by
 > `docker-compose.yml`.** Setting it in `.env` therefore has **no effect on the
 > compose `app` service**, and connector runs there report it as unset. Do not infer
-> intent from that omission: it is a deployment gap. `.env.example` also ships a
-> public placeholder UUID that passes the runtime's syntax-only check, so replace or
-> comment out that value rather than attributing audit rows to a known placeholder.
+> intent from that omission: it is a deployment gap. `.env.example` keeps the
+> variable commented and supplies no UUID; use only the service actor created
+> through the audited operator flow.
 >
 > To run Google connectors under compose in the meantime, add a
 > `docker-compose.override.yml` beside `docker-compose.yml` setting the variable on

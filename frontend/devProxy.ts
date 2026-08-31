@@ -65,6 +65,7 @@ const TRUSTED_GATEWAY_HEADER_PATTERNS: readonly RegExp[] = [
   /^x-ums-/iu,
 ];
 
+/** Return whether a header belongs to a gateway-controlled claim namespace. */
 const isTrustedGatewayHeader = (header: string): boolean =>
   TRUSTED_GATEWAY_HEADER_PATTERNS.some((pattern) => pattern.test(header));
 
@@ -125,28 +126,60 @@ export const resolveGatewayHeaders = (
   return [...resolved, ["X-Scope-ID", scopeId]];
 };
 
-const parseOrigin = (value: string, label: string): URL => {
-  let parsed: URL;
+/** Return whether a parsed URL uses one of the proxy's supported protocols. */
+const isHttpProtocol = (target: URL): boolean =>
+  target.protocol === "http:" || target.protocol === "https:";
+
+/** Return whether a parsed URL embeds credentials. */
+const hasUrlCredentials = (target: URL): boolean =>
+  Boolean(target.username || target.password);
+
+/** Return whether a parsed URL contains more than an origin. */
+const hasNonOriginComponents = (target: URL): boolean =>
+  target.pathname !== "/" || Boolean(target.search || target.hash);
+
+/** Parse an absolute URL or raise the caller's fail-closed configuration error. */
+const parseAbsoluteUrl = (value: string, invalidMessage: string): URL => {
   try {
-    parsed = new URL(value);
+    return new URL(value.trim());
   } catch {
-    throw new Error(`[vite] ${label} must be an absolute http(s) origin`);
+    throw new Error(invalidMessage);
   }
-  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+};
+
+/** Parse one exact http(s) origin without credentials or URL suffixes. */
+const parseOrigin = (value: string, label: string): URL => {
+  const parsed = parseAbsoluteUrl(
+    value,
+    `[vite] ${label} must be an absolute http(s) origin`,
+  );
+  if (!isHttpProtocol(parsed)) {
     throw new Error(`[vite] ${label} must use http or https`);
   }
-  if (parsed.username || parsed.password) {
+  if (hasUrlCredentials(parsed)) {
     throw new Error(`[vite] ${label} must not contain credentials`);
   }
-  if (parsed.pathname !== "/" || parsed.search || parsed.hash) {
+  if (hasNonOriginComponents(parsed)) {
     throw new Error(`[vite] ${label} must be an origin without a path, query, or fragment`);
   }
   return parsed;
 };
 
-const isLoopbackHostname = (hostname: string): boolean =>
-  hostname === "localhost" || hostname === "127.0.0.1" || hostname === "[::1]";
+/** Return whether a URL hostname is syntactically a loopback name or address. */
+const isLoopbackHostname = (hostname: string): boolean => {
+  const normalized = hostname.replace(/^\[|\]$/gu, "").replace(/\.$/u, "").toLowerCase();
+  if (normalized === "localhost" || normalized === "::1") {
+    return true;
+  }
+  const octets = normalized.split(".");
+  return (
+    octets.length === 4 &&
+    octets[0] === "127" &&
+    octets.every((octet) => /^\d{1,3}$/u.test(octet) && Number(octet) <= 255)
+  );
+};
 
+/** Canonicalize one trusted origin and reject plaintext non-loopback entries. */
 const normalizeTrustedBackendOrigin = (rawValue: string): string => {
   const origin = parseOrigin(rawValue, TRUSTED_BACKEND_ORIGINS_ENV);
   if (!isLoopbackHostname(origin.hostname) && origin.protocol !== "https:") {
@@ -328,11 +361,11 @@ const applyTrustedGatewayHeaders = (
   request: IncomingMessage,
   gatewayHeaders: readonly GatewayHeader[],
 ): void => {
-  for (const header of Object.keys(request.headers)) {
-    if (isTrustedGatewayHeader(header)) {
-      delete request.headers[header];
-    }
-  }
+  request.headers = Object.fromEntries(
+    Object.entries(request.headers).filter(
+      ([header]) => !isTrustedGatewayHeader(header),
+    ),
+  );
   for (const [header, value] of gatewayHeaders) {
     request.headers[header.toLowerCase()] = value;
   }

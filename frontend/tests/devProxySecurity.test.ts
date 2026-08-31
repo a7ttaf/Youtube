@@ -1,17 +1,23 @@
 import { once } from "node:events";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import {
   createServer as createHttpServer,
   request as httpRequest,
   type IncomingHttpHeaders,
   type Server as HttpServer,
 } from "node:http";
+import type { AddressInfo } from "node:net";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   createServer as createViteServer,
+  preview as createVitePreview,
   type ConfigEnv,
+  type InlineConfig,
+  type PreviewServer,
   type UserConfig,
   type ViteDevServer,
 } from "vite";
@@ -85,7 +91,11 @@ type HttpResult = {
   status: number;
 };
 
-const portOf = (server: HttpServer): number => {
+type AddressableServer = {
+  address: () => string | AddressInfo | null;
+};
+
+const portOf = (server: AddressableServer): number => {
   const address = server.address();
   if (!address || typeof address === "string") {
     throw new Error("expected an IPv4 backend address");
@@ -93,12 +103,62 @@ const portOf = (server: HttpServer): number => {
   return address.port;
 };
 
-const vitePortOf = (server: ViteDevServer): number => {
-  const address = server.httpServer?.address();
+const httpServerPort = (server: AddressableServer | null | undefined): number => {
+  const address = server?.address();
   if (!address || typeof address === "string") {
-    throw new Error("expected an IPv4 Vite address");
+    throw new Error("expected an IPv4 HTTP server address");
   }
   return address.port;
+};
+
+type ViteStartupDependencies = {
+  createServer: (config: InlineConfig) => Promise<ViteDevServer>;
+  resolvePort: typeof httpServerPort;
+};
+
+type RunningViteServer = {
+  port: number;
+  server: ViteDevServer;
+};
+
+const DEFAULT_VITE_STARTUP_DEPENDENCIES: ViteStartupDependencies = {
+  createServer: createViteServer,
+  resolvePort: httpServerPort,
+};
+
+/** Close a Vite server and watcher before preserving a startup failure. */
+const rethrowAfterViteStartupCleanup = async (
+  server: ViteDevServer | undefined,
+  startupError: unknown,
+): Promise<never> => {
+  if (!server) {
+    throw startupError;
+  }
+  try {
+    await server.close();
+  } catch (cleanupError) {
+    throw new AggregateError(
+      [startupError, cleanupError],
+      "Vite startup failed and cleanup also failed",
+    );
+  }
+  throw startupError;
+};
+
+/** Start Vite and transfer ownership only after its listening port is verified. */
+const startViteServer = async (
+  config: InlineConfig,
+  dependencies: ViteStartupDependencies = DEFAULT_VITE_STARTUP_DEPENDENCIES,
+): Promise<RunningViteServer> => {
+  // FIX: A failed listen or port read must not leak Vite's server or watcher.
+  let server: ViteDevServer | undefined;
+  try {
+    server = await dependencies.createServer(config);
+    await server.listen();
+    return { port: dependencies.resolvePort(server.httpServer), server };
+  } catch (startupError) {
+    return rethrowAfterViteStartupCleanup(server, startupError);
+  }
 };
 
 const closeHttpServer = async (server: HttpServer | undefined): Promise<void> => {
@@ -203,6 +263,77 @@ describe("development gateway config", () => {
     expect(resolved.server?.proxy).toBeUndefined();
   });
 
+  it("preserves creation failures without attempting cleanup before ownership", async () => {
+    const startupError = new Error("synthetic Vite creation failure");
+    const createServer = vi.fn(async () => {
+      throw startupError;
+    });
+    const resolvePort = vi.fn(httpServerPort);
+
+    await expect(
+      startViteServer(
+        { configFile: false },
+        { createServer, resolvePort },
+      ),
+    ).rejects.toBe(startupError);
+    expect(resolvePort).not.toHaveBeenCalled();
+  });
+
+  it("closes an owned Vite server when listen fails", async () => {
+    const startupError = new Error("synthetic Vite listen failure");
+    const close = vi.fn(async () => undefined);
+    const server = {
+      close,
+      httpServer: null,
+      listen: vi.fn(async () => {
+        throw startupError;
+      }),
+    } as unknown as ViteDevServer;
+
+    await expect(
+      startViteServer(
+        { configFile: false },
+        {
+          createServer: vi.fn(async () => server),
+          resolvePort: httpServerPort,
+        },
+      ),
+    ).rejects.toBe(startupError);
+    expect(close).toHaveBeenCalledOnce();
+  });
+
+  it("closes the real Vite HTTP server and watcher when port resolution fails", async () => {
+    const startupError = new Error("synthetic Vite port failure");
+    let createdServer: ViteDevServer | undefined;
+    const createServer: ViteStartupDependencies["createServer"] = async (config) => {
+      createdServer = await createViteServer(config);
+      return createdServer;
+    };
+    const resolvePort = vi.fn(() => {
+      throw startupError;
+    });
+
+    await expect(
+      startViteServer(
+        {
+          configFile: false,
+          logLevel: "silent",
+          root: FRONTEND_ROOT,
+          server: { host: "127.0.0.1", strictPort: false },
+        },
+        { createServer, resolvePort },
+      ),
+    ).rejects.toBe(startupError);
+    if (!createdServer) {
+      throw new Error("expected the startup probe to create a Vite server");
+    }
+    const watcher = createdServer.watcher as typeof createdServer.watcher & {
+      closed: boolean;
+    };
+    expect(createdServer.httpServer?.listening).toBe(false);
+    expect(watcher.closed).toBe(true);
+  });
+
   it("fails closed before startup when the proxy token is blank", () => {
     expect(() =>
       resolveDevGatewayProxy("serve", "development", {
@@ -210,6 +341,15 @@ describe("development gateway config", () => {
         UMS_TRUSTED_GATEWAY_TOKEN: "   ",
       }),
     ).toThrow(/UMS_TRUSTED_GATEWAY_TOKEN.*non-blank/iu);
+  });
+
+  it("rejects whitespace-only configured identity claims before startup", () => {
+    expect(() =>
+      resolveDevGatewayProxy("serve", "development", {
+        ...BASE_ENV,
+        VITE_DEV_GATEWAY_ROLE: " \t ",
+      }),
+    ).toThrow(/VITE_DEV_GATEWAY_ROLE.*non-blank/iu);
   });
 
   it("fails closed when a non-global scope has no configured scope id", () => {
@@ -238,6 +378,12 @@ describe("development gateway config", () => {
     expect(
       resolveDevBackendTarget("http://127.0.0.1:8000", ["http://127.0.0.1:8000"]),
     ).toBe("http://127.0.0.1:8000");
+    expect(resolveDevBackendTarget("http://127.42.17.9:8000")).toBe(
+      "http://127.42.17.9:8000",
+    );
+    expect(resolveDevBackendTarget("http://localhost.:8000")).toBe(
+      "http://localhost.:8000",
+    );
     expect(() => resolveDevBackendTarget("https://api.example.test")).toThrow(
       /refusing non-loopback/iu,
     );
@@ -256,8 +402,104 @@ describe("development gateway config", () => {
     expect(() => resolveDevBackendTarget("http://127.0.0.1:8000/api")).toThrow(
       /without a path/iu,
     );
+    expect(() => resolveDevBackendTarget("http://127.0.0.1:8000?next=/users")).toThrow(
+      /without a path/iu,
+    );
+    expect(() => resolveDevBackendTarget("http://127.0.0.1:8000#users")).toThrow(
+      /without a path/iu,
+    );
+  });
+
+  it("canonicalizes IDNA before exact trusted-origin comparison", () => {
+    const unicodeOrigin = new URL("https://例え.テスト").origin;
+    const asciiOrigin = new URL("https://xn--r8jz45g.xn--zckzah").origin;
+    expect(unicodeOrigin).toBe(asciiOrigin);
+    expect(resolveDevBackendTarget(unicodeOrigin, [asciiOrigin])).toBe(asciiOrigin);
   });
 });
+
+describe("actual Vite serve and preview activation", () => {
+  it("proxies adversarial development traffic but keeps development-mode preview inert", async () => {
+    const hits: BackendHit[] = [];
+    const backend = createHttpServer((request, response) => {
+      request.resume();
+      request.once("end", () => {
+        hits.push({ headers: request.headers, method: request.method, url: request.url });
+        response.writeHead(200, { "Content-Type": "application/json" });
+        response.end(JSON.stringify({ proxied: true }));
+      });
+    });
+    backend.listen(0, "127.0.0.1");
+    await once(backend, "listening");
+    const backendTarget = `http://127.0.0.1:${portOf(backend)}`;
+    const previewRoot = await mkdtemp(path.join(tmpdir(), "ums-vite-preview-"));
+    await writeFile(
+      path.join(previewRoot, "index.html"),
+      "<!doctype html><title>preview without gateway</title>",
+      "utf8",
+    );
+
+    for (const [key, value] of Object.entries({
+      ...BASE_ENV,
+      UMS_DEV_TRUSTED_BACKEND_ORIGINS: "",
+      VITE_DEV_BACKEND_URL: backendTarget,
+      VITE_DEV_GATEWAY_SCOPE_ID: "",
+    })) {
+      vi.stubEnv(key, value);
+    }
+
+    let serve: RunningViteServer | undefined;
+    let preview: PreviewServer | undefined;
+    try {
+      const configFile = path.resolve(FRONTEND_ROOT, "vite.config.ts");
+      serve = await startViteServer({
+        configFile,
+        logLevel: "silent",
+        mode: "development",
+        root: FRONTEND_ROOT,
+        server: { host: "127.0.0.1", strictPort: false },
+      });
+      const served = await sendRequest(
+        serve.port,
+        "/users",
+        ATTACKER_GATEWAY_HEADERS,
+      );
+      expect(served.status).toBe(200);
+      expect(hits).toHaveLength(1);
+      expect(hits[0]?.headers["x-role"]).toBe(BASE_ENV.VITE_DEV_GATEWAY_ROLE);
+      expect(hits[0]?.headers["x-role-shadow"]).toBeUndefined();
+
+      await serve.server.close();
+      serve = undefined;
+      hits.length = 0;
+
+      preview = await createVitePreview({
+        build: { outDir: previewRoot },
+        configFile,
+        logLevel: "silent",
+        mode: "development",
+        preview: { host: "127.0.0.1", strictPort: false },
+        root: FRONTEND_ROOT,
+      });
+      const previewResult = await sendRequest(
+        httpServerPort(preview.httpServer),
+        "/users",
+        ATTACKER_GATEWAY_HEADERS,
+      );
+      expect([200, 404]).toContain(previewResult.status);
+      expect(previewResult.body).not.toContain('"proxied":true');
+      expect(hits).toEqual([]);
+      expect(preview.config.preview.proxy).toBeUndefined();
+    } finally {
+      await preview?.close();
+      await serve?.server.close();
+      await closeHttpServer(backend);
+      await rm(previewRoot, { force: true, recursive: true });
+      vi.unstubAllEnvs();
+    }
+  }, 30_000);
+});
+
 describe("real development gateway proxy", () => {
   const hits: BackendHit[] = [];
   let backend: HttpServer | undefined;
@@ -293,19 +535,19 @@ describe("real development gateway proxy", () => {
         scopedHeaders,
       ),
     };
-    vite = await createViteServer({
+    const startedVite = await startViteServer({
       configFile: false,
       logLevel: "silent",
       root: FRONTEND_ROOT,
       server: {
         host: "127.0.0.1",
-        port: 0,
+        port: 5173,
         proxy,
-        strictPort: true,
+        strictPort: false,
       },
     });
-    await vite.listen();
-    vitePort = vitePortOf(vite);
+    vite = startedVite.server;
+    vitePort = startedVite.port;
   }, 30_000);
 
   beforeEach(() => {
