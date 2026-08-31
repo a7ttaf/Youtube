@@ -6,17 +6,29 @@ This isolated branch hardens the Vite development gateway and its operator
 contracts. It does not add a production gateway, connector credential lifecycle,
 durable artifact storage, Helm deployment, or External Secrets Operator support.
 
-The load-bearing implementation is `frontend/devProxy.ts` plus
-`frontend/vite.config.ts`. The tests retain all local defenses: development-serve
-only activation, explicit preview exclusion, loopback binding, exact route
-segments, iterative encoded-path rejection, same-origin/Fetch Metadata checks,
-broad gateway-header family scrubbing, blank-token startup refusal, and HTTPS plus
-exact trust for non-loopback backends. Vite's post-merge resolved host is checked
-again so an inline or CLI host override cannot expose the trusted proxy on a
-wildcard or non-loopback listener.
+The load-bearing route contract is `frontend/src/lib/api/trustedRoutes.ts`, which
+is consumed by both `frontend/src/lib/api/client.ts` and `frontend/devProxy.ts`.
+The browser client rejects any request outside those exact roots before transport,
+including encoded `/`, `\\`, or `#`, ASCII controls, iterative traversal
+encodings, and absolute origins other than the configured API or browser origin.
+Literal browser fragments remain navigation metadata and are validated
+consistently for relative and absolute URLs. The compiler-backed source audit is
+a conservative change/escape tripwire, not a JavaScript interpreter or the
+runtime security boundary: only the two canonical client transports may use raw
+browser networking, while dynamic code/module loading, client-object escapes,
+unscanned HTML/Rollup entries, and unresolved Worker sources fail closed.
+
+`frontend/vite.config.ts` retains all local defenses: development-serve-only
+activation, explicit preview exclusion, loopback binding, exact route segments,
+iterative encoded-path rejection, same-origin/Fetch Metadata checks, broad
+gateway-header family scrubbing, blank-token startup refusal, and HTTPS plus exact
+trust for non-loopback backends. Vite's post-merge resolved host is checked again
+so inline/CLI host overrides cannot expose the trusted proxy on a wildcard or
+non-loopback listener; middleware mode is rejected because an outer server would
+otherwise own the real listener boundary.
 
 The exact implementation-and-test snapshot validated below is
-`7a1c4ec7da7d576e359b15226b2ccd6a8b4b3261`. The subsequent documentation-only
+`609b53398c4dc67d9151ae697258a9042724be06`. The subsequent documentation-only
 evidence commit changes no runtime or test file.
 
 ## Integration dependency and re-author requirement
@@ -51,15 +63,15 @@ required.
 ## Validation
 
 Validation evidence must name the final committed head. At this isolated
-completion snapshot (`7a1c4ec7da7d576e359b15226b2ccd6a8b4b3261`):
+completion snapshot (`609b53398c4dc67d9151ae697258a9042724be06`):
 
 | Gate | Result |
 |---|---|
-| `bun run test --run tests/devProxyRoutes.test.ts tests/devProxySecurity.test.ts` | 112 passed |
-| `bun run test --run` | 642 passed across 46 files; existing React/jsdom warnings only |
+| `bun run test --run tests/devProxyRoutes.test.ts tests/devProxySecurity.test.ts tests/lib/api/client.test.tsx tests/lib/api/useExplanation.test.tsx --reporter=dot` | 197 passed across 4 files |
+| `bun run test --run --reporter=dot` | 694 passed across 46 files; existing React/jsdom warnings only |
 | `bun run typecheck` | Passed |
 | `bun run build` | Passed |
-| `uv run pytest -q tests/api/test_org_units_api.py -k "missing_gateway_token or invalid_gateway_token or unknown_gateway_role"` | 3 passed, 6 deselected |
-| `uv run ruff check tests/api/test_org_units_api.py` | Passed |
-| `uv run pytest -q -x` | Environment blocker after 122 passed: `RuntimeError: UMS_TEST_DATABASE_URL required for PostgreSQL migration round-trip tests`; rerun with a disposable PostgreSQL test URL |
-| `git diff --check` and `git diff --cached --check` | Passed on the exact staged implementation bytes; `git diff --check HEAD^..HEAD` passed after commit |
+| `uv run pytest -q tests/api/test_org_units_api.py -k "missing_gateway_token or invalid_gateway_token or unknown_gateway_role"` | Earlier unchanged-backend evidence: 3 passed, 6 deselected |
+| `uv run ruff check tests/api/test_org_units_api.py` | Earlier unchanged-backend evidence: passed |
+| `uv run pytest -q -x` | Earlier unchanged-backend gate stopped after 122 passed: `RuntimeError: UMS_TEST_DATABASE_URL required for PostgreSQL migration round-trip tests`; rerun with a disposable PostgreSQL test URL |
+| `git diff --check`, `git diff --cached --check`, and `git diff --check HEAD^..HEAD` | Passed on the exact implementation bytes |

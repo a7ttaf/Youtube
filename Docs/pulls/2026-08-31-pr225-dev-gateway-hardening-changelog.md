@@ -7,14 +7,17 @@
 - Real HTTP adversarial coverage for hostile identity headers, ordinary and
   `Expect: 100-continue` requests, encoded path confusion, prefix/query/absolute
   request smuggling, Host/Origin misuse, and actual serve-versus-preview behavior.
-- Compiler-AST route discovery with a deliberately narrow syntax contract:
-  canonical `useApiClient()` results remain direct immutable bindings, calls
-  remain on the six audited methods, and unsupported aliases, wrappers,
-  containers, assignments, destructuring, constructors, getters, callbacks,
-  or method escapes fail closed.
-- Completeness tripwires for raw `fetch` references outside the audited client,
-  future API-client method additions, `.mts`/`.cts` application files, and
-  compiler-loaded frontend imports outside `src`.
+- One shared exact-route contract consumed at runtime by the canonical browser
+  API client and the Vite proxy. This is the security invariant: unlisted roots,
+  encoded separators/hash bytes, ASCII controls, iterative traversal encodings,
+  and untrusted absolute origins fail before transport. Literal fragments remain
+  non-transport browser metadata.
+- A conservative compiler-backed change/escape tripwire. Canonical
+  `useApiClient()` results remain direct immutable bindings; only its two audited
+  transports may use browser networking; raw network primitives, dynamic code or
+  module loading, client aliases/containers, future method changes, unscanned
+  HTML/Rollup entries, unresolved Worker sources, and `.mts`/`.cts` or
+  outside-`src` imports fail closed.
 - Startup-fixture coverage distinguishing pre-allocation creation failure and
   proving allocated HTTP servers and file watchers close after listen or port-
   resolution failure.
@@ -25,7 +28,9 @@
   contradictory global scope configuration, unsafe backend URL components, or
   an untrusted backend origin.
 - The trusted proxy rechecks Vite's final resolved host after inline and CLI
-  overrides, rejecting wildcard and non-loopback listeners before startup.
+  overrides, rejecting wildcard and non-loopback listeners before startup. It
+  also rejects middleware mode because Vite cannot prove the outer listener is
+  loopback-only.
 - Loopback targets include canonical localhost, IPv6 loopback, and the IPv4
   `127.0.0.0/8` range. Non-loopback targets require HTTPS and an exact canonical
   origin allowlist match, including IDNA normalization.
@@ -45,6 +50,8 @@
 
 ## Runtime and data impact
 
-The gateway changes affect only Vite's local development server. Build and every
-preview mode remain proxy-free. No backend schema, finance calculation, persisted
-JSON shape, production authorization path, migration, or backfill changes.
+Trusted-header injection affects only Vite's local development server; build and
+every preview mode remain proxy-free. The browser API client now enforces the
+shared route contract in every build and rejects encoded path separators before
+calling `fetch`. No backend schema, finance calculation, persisted JSON shape,
+production authorization path, migration, or backfill changes.
