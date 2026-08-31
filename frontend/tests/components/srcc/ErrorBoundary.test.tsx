@@ -267,7 +267,9 @@ describe("ErrorBoundary", () => {
 
       const startWriteAndCrash = (): void => {
         navLatch.arm("The import is still running and cannot be aborted.");
-        void pendingWrite.finally(navLatch.release);
+        // Deliberately detached: the promise settles only when the test
+        // resolves it, and the retained `finally` is what must free the latch.
+        pendingWrite.finally(navLatch.release);
         setCrashed(true);
       };
 

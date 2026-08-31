@@ -140,6 +140,11 @@ const describeImportError = (err: unknown): string => {
  */
 const PLAN_BEARING_STATUSES = new Set([409, 422]);
 
+/**
+ * Extract the refreshed plan a plan-bearing apply rejection carries, or null
+ * for every other failure. Only 409 (fingerprint divergence) and 422
+ * (re-planned roster now holds ERROR rows) ship the full plan as `detail`.
+ */
 const planBearingDetail = (err: unknown): unknown | null => {
   if (!(err instanceof ApiError) || !PLAN_BEARING_STATUSES.has(err.status)) {
     return null;
@@ -1738,6 +1743,12 @@ export const RegistryImportFlow = ({
     // and this flow's exits disable in ONE commit, leaving no window in which
     // the request is running but navigation is still live.
     navLatch.arm(APPLY_IN_FLIGHT_NOTE);
+    // Flips only as the request call begins. Every step above that flag runs
+    // BEFORE any bytes can leave the browser, so a throw from it is a DEFINITE
+    // non-dispatch — the roster cannot have changed and a retry is safe, which
+    // the catch then treats as a plain failure instead of the indeterminate
+    // contract that owns everything from the request onward.
+    let dispatched = false;
     try {
       // FIX: id generation lives INSIDE the try whose finally releases the
       // latch. Between arming and this point nothing may run that can throw
@@ -1764,6 +1775,7 @@ export const RegistryImportFlow = ({
       // The claim was made under THIS scope; remember it so settlement can
       // reach the record even if the namespace moves under the request.
       admittedScopeRef.current = importScope ?? UNSCOPED_IMPORT_SCOPE;
+      dispatched = true;
       const result = await importChannels({
         file: approved.file,
         contentOwnerId: ownerId,
@@ -1784,6 +1796,15 @@ export const RegistryImportFlow = ({
       setApplied(result);
       setStep("applied");
     } catch (caught) {
+      if (!dispatched) {
+        // DEFINITE non-dispatch: no request left the browser, so nothing
+        // committed — retire this apply's admission, surface the failure, and
+        // leave Preview ready for a safe retry instead of the reload-only
+        // indeterminate lockout.
+        settleThisApply();
+        setError(describeImportError(caught));
+        return;
+      }
       // Stay on Preview; the Apply button re-enables in finally for a retry.
       await handleApplyFailure(caught);
     } finally {
@@ -1794,6 +1815,7 @@ export const RegistryImportFlow = ({
     }
   };
 
+  /** Return to the Upload step, clearing any error; entered from Preview's Back. */
   const backToUpload = () => {
     setError(null);
     setStep("upload");

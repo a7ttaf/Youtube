@@ -749,12 +749,15 @@ describe("RegistryImportFlow stepper (through RegistryView)", () => {
       await waitFor(() => expect(setReason).toHaveBeenLastCalledWith(null));
       expect(setReason.mock.calls[0][0]).toMatch(/cannot be aborted/iu);
 
-      // A non-ApiError failure is surfaced fail-closed as indeterminate: the
-      // exits recover (Cancel), Apply stays locked, and nothing strands.
+      // A pre-dispatch throw is a DEFINITE failure: no request left the
+      // browser, so nothing could have committed. The failure surfaces, the
+      // exits recover, and Apply itself re-enables for a safe retry instead
+      // of the reload-only indeterminate lockout.
       expect(screen.getByRole("button", { name: /^cancel$/i })).toBeEnabled();
       expect(
-        await screen.findByText(/did not return a usable result/iu),
+        await screen.findByText(/The import request failed\./iu),
       ).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: /^apply$/i })).toBeEnabled();
     } finally {
       uuidSpy.mockRestore();
     }
