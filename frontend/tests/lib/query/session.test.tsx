@@ -1,5 +1,10 @@
-import { focusManager, QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import type { ReactNode } from "react";
+import {
+  focusManager,
+  onlineManager,
+  QueryClient,
+  QueryClientProvider,
+} from "@tanstack/react-query";
+import { useLayoutEffect, type ReactNode } from "react";
 import { act, fireEvent, render, renderHook, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -65,10 +70,20 @@ const sessionFor = (
 const TENANT_A = { id: "tenant-1", slug: "tenant-a", display_name: "Tenant A" };
 const TENANT_B = { id: "tenant-2", slug: "tenant-b", display_name: "Tenant B" };
 
-const SessionProbe = () => {
+const SessionProbe = ({ frames }: { frames?: string[] }) => {
   const bootstrap = useSessionBootstrap();
   const { clearSession } = useSession();
   const tenant = useTenant();
+  useLayoutEffect(() => {
+    frames?.push(
+      [
+        bootstrap.status,
+        bootstrap.session?.user_id ?? "none",
+        String(bootstrap.session?.disabled ?? false),
+        tenant.tenantSlug,
+      ].join("|"),
+    );
+  });
   return (
     <div
       data-testid="session-probe"
@@ -88,12 +103,16 @@ const SessionProbe = () => {
   );
 };
 
-const renderSession = (queryClient: QueryClient, tenantSlug = "ums") =>
+const renderSession = (
+  queryClient: QueryClient,
+  tenantSlug = "ums",
+  frames?: string[],
+) =>
   render(
     <QueryClientProvider client={queryClient}>
       <SessionProvider>
         <TenantProvider initialSlug={tenantSlug}>
-          <SessionProbe />
+          <SessionProbe frames={frames} />
         </TenantProvider>
       </SessionProvider>
     </QueryClientProvider>,
@@ -355,6 +374,110 @@ describe("useSessionMeQuery", () => {
       "data-tenant-slug",
       TENANT_A.slug,
     );
+    rendered.unmount();
+  });
+
+  it("never re-exposes principal A when a same-tenant focus refetch fails", async () => {
+    const principalA = sessionFor("principal-a", { tenant: TENANT_A });
+    let rejectReplacement: ((error: Error) => void) | undefined;
+    const replacementPending = new Promise<Response>((_resolve, reject) => {
+      rejectReplacement = reject;
+    });
+    const responses: Array<Response | Promise<Response>> = [
+      jsonResponse(principalA),
+      replacementPending,
+    ];
+    (globalThis.fetch as ReturnType<typeof vi.fn>).mockImplementation(() =>
+      responses.shift() ?? Promise.reject(new Error("missing response")),
+    );
+    const queryClient = sessionQueryClient();
+    const frames: string[] = [];
+
+    const rendered = renderSession(queryClient, TENANT_A.slug, frames);
+    await waitFor(() =>
+      expect(screen.getByTestId("session-probe")).toHaveAttribute(
+        "data-user-id",
+        "principal-a",
+      ),
+    );
+    frames.length = 0;
+
+    act(() => {
+      focusManager.setFocused(false);
+      focusManager.setFocused(true);
+    });
+    await waitFor(() => expect(globalThis.fetch).toHaveBeenCalledTimes(2));
+    expect(screen.getByTestId("session-probe")).toHaveAttribute("data-status", "loading");
+
+    act(() => rejectReplacement?.(new Error("replacement gateway unavailable")));
+    await waitFor(() =>
+      expect(screen.getByTestId("session-probe")).toHaveAttribute("data-status", "error"),
+    );
+
+    const loadingFrame = `loading|none|false|${TENANT_A.slug}`;
+    const errorFrame = `error|none|false|${TENANT_A.slug}`;
+    expect(frames[0]).toBe(loadingFrame);
+    expect(
+      frames.every((frame) => frame === loadingFrame || frame === errorFrame),
+    ).toBe(true);
+    expect(frames.at(-1)).toBe(errorFrame);
+    rendered.unmount();
+  });
+
+  it("never re-exposes principal A before reconnect resolves to disabled principal B", async () => {
+    const principalA = sessionFor("principal-a", { tenant: TENANT_A });
+    const principalB = sessionFor("principal-b", {
+      tenant: TENANT_A,
+      disabled: true,
+    });
+    let resolveReplacement: ((response: Response) => void) | undefined;
+    const replacementPending = new Promise<Response>((resolve) => {
+      resolveReplacement = resolve;
+    });
+    const responses: Array<Response | Promise<Response>> = [
+      jsonResponse(principalA),
+      replacementPending,
+    ];
+    (globalThis.fetch as ReturnType<typeof vi.fn>).mockImplementation(() =>
+      responses.shift() ?? Promise.reject(new Error("missing response")),
+    );
+    const queryClient = sessionQueryClient();
+    const frames: string[] = [];
+
+    const rendered = renderSession(queryClient, TENANT_A.slug, frames);
+    await waitFor(() =>
+      expect(screen.getByTestId("session-probe")).toHaveAttribute(
+        "data-user-id",
+        "principal-a",
+      ),
+    );
+    frames.length = 0;
+
+    act(() => {
+      onlineManager.setOnline(false);
+      onlineManager.setOnline(true);
+    });
+    await waitFor(() => expect(globalThis.fetch).toHaveBeenCalledTimes(2));
+    expect(screen.getByTestId("session-probe")).toHaveAttribute("data-status", "loading");
+
+    resolveReplacement?.(jsonResponse(principalB));
+    await waitFor(() =>
+      expect(screen.getByTestId("session-probe")).toHaveAttribute(
+        "data-user-id",
+        "principal-b",
+      ),
+    );
+
+    const loadingFrame = `loading|none|false|${TENANT_A.slug}`;
+    const disabledReplacementFrame =
+      `ready|principal-b|true|${TENANT_A.slug}`;
+    expect(frames[0]).toBe(loadingFrame);
+    expect(
+      frames.every(
+        (frame) => frame === loadingFrame || frame === disabledReplacementFrame,
+      ),
+    ).toBe(true);
+    expect(frames.at(-1)).toBe(disabledReplacementFrame);
     rendered.unmount();
   });
 

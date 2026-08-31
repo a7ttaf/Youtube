@@ -200,6 +200,10 @@ export const useSessionBootstrap = (): SessionBootstrap => {
   // request after /tenants/me hydrates and can never change the principal.
   const sessionAlreadyProvesTenant =
     status === "ready" && session.session?.tenant?.slug === tenantSlug;
+  const adoptsBootstrapTenant =
+    sessionAlreadyProvesTenant &&
+    session.hydratedTenantSlug === "" &&
+    tenantSlug !== "";
   const boundaryIsAuthoritative =
     session.hydratedTenantSlug === tenantSlug || sessionAlreadyProvesTenant;
   const requiresHydration =
@@ -249,13 +253,45 @@ export const useSessionBootstrap = (): SessionBootstrap => {
     tenantSlug,
   ]);
 
-  // Fail closed synchronously on the first render of a boundary change or an
-  // auth revalidation. The effect above commits the replacement success/error
-  // only after the request settles, so principal A is never observable beside
-  // tenant B (or while the gateway may have replaced A in the same tenant).
-  if (requiresHydration || (!session.seeded && query.isFetching)) {
+  if (session.seeded) {
+    return {
+      status: session.status,
+      session: session.session,
+      error: session.error,
+    };
+  }
+
+  // FIX: Project the current boundary's query result during render. TanStack
+  // Query publishes a refetch's terminal result before the passive effect above
+  // can mirror it into context; returning context in that frame briefly exposed
+  // principal A between `loading` and replacement principal B (or `error`).
+  // The provider scope + tenant query key proves which boundary produced this
+  // data, while fetching/pending states stay fail-closed. The sole exception is
+  // the initial empty-slug -> matching SessionMe tenant adoption: that response
+  // already proves the principal and tenant pair, so a query-key transition is
+  // not an auth-boundary revalidation and may retain the proven context value.
+  if (query.isFetching || query.isPending) {
+    if (adoptsBootstrapTenant) {
+      return {
+        status: session.status,
+        session: session.session,
+        error: session.error,
+      };
+    }
     return { status: "loading", session: null, error: null };
   }
 
-  return { status: session.status, session: session.session, error: session.error };
+  if (query.isError) {
+    return {
+      status: "error",
+      session: null,
+      error: query.error as ApiError | Error,
+    };
+  }
+
+  if (query.isSuccess) {
+    return { status: "ready", session: query.data, error: null };
+  }
+
+  return { status: "loading", session: null, error: null };
 };
