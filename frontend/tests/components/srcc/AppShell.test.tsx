@@ -431,11 +431,14 @@ describe("AppShell tenant proof tag", () => {
         </TenantProvider>
       </SessionProvider>,
     );
-    const tag = await screen.findByTestId("tenant-proof");
-    // findByTestId only waits for the element; wait for the resolved tenant text
-    // so the assertion never reads the initial "(resolving…) (loading…)" placeholder.
+    await screen.findByTestId("tenant-proof");
+    // FIX: Tenant-boundary session rehydration intentionally removes the shell
+    // while the replacement principal is unknown, so re-query the proof tag
+    // instead of retaining the detached pre-boundary DOM node.
     await waitFor(() =>
-      expect(tag.textContent).toContain("Acme Holdings (acme)"),
+      expect(screen.getByTestId("tenant-proof").textContent).toContain(
+        "Acme Holdings (acme)",
+      ),
     );
     const tenantCalls = tenantFetchCalls();
     expect(tenantCalls).toHaveLength(1);

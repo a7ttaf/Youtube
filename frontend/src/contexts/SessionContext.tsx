@@ -9,6 +9,7 @@ import {
 } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 
+import { useTenant } from "@/contexts/TenantContext";
 import type { ApiError } from "@/lib/api/client";
 import type { SessionMe } from "@/lib/api/types";
 import {
@@ -28,11 +29,15 @@ type SessionState = {
   status: SessionStatus;
   session: SessionMe | null;
   error: ApiError | Error | null;
+  /** Tenant slug whose auth boundary produced this terminal state. */
+  hydratedTenantSlug: string | null;
+  /** Test/storybook seed remains authoritative until explicitly cleared. */
+  seeded: boolean;
 };
 
 type SessionContextValue = SessionState & {
-  hydrate: (payload: SessionMe) => void;
-  fail: (error: ApiError | Error) => void;
+  hydrate: (payload: SessionMe, tenantSlug: string) => void;
+  fail: (error: ApiError | Error, tenantSlug: string) => void;
   clearSession: () => void;
   queryScope: SessionQueryScope;
 };
@@ -41,6 +46,8 @@ const INITIAL_STATE: SessionState = {
   status: "loading",
   session: null,
   error: null,
+  hydratedTenantSlug: null,
+  seeded: false,
 };
 
 const SessionContext = createContext<SessionContextValue | null>(null);
@@ -79,18 +86,38 @@ export const SessionProvider = ({
   const [queryScope] = useState(createSessionQueryScope);
   const [state, setState] = useState<SessionState>(() =>
     initialSession
-      ? { status: "ready", session: initialSession, error: null }
+      ? {
+          status: "ready",
+          session: initialSession,
+          error: null,
+          hydratedTenantSlug: initialSession.tenant?.slug ?? "",
+          seeded: true,
+        }
       : INITIAL_STATE,
   );
 
-  const hydrate = useCallback((payload: SessionMe) => {
-    setState({ status: "ready", session: payload, error: null });
+  const hydrate = useCallback((payload: SessionMe, tenantSlug: string) => {
+    setState({
+      status: "ready",
+      session: payload,
+      error: null,
+      hydratedTenantSlug: tenantSlug,
+      seeded: false,
+    });
   }, []);
 
-  const fail = useCallback((error: ApiError | Error) => {
+  const fail = useCallback((error: ApiError | Error, tenantSlug: string) => {
     // FIX: drop any previously hydrated session on failure so a transient
     // error can never leave a stale principal's capabilities live — fail closed.
-    setState({ status: "error", session: null, error });
+    // Record the failed boundary as settled; omitting it would keep the query
+    // enabled and create an unbounded failure/refetch render loop.
+    setState({
+      status: "error",
+      session: null,
+      error,
+      hydratedTenantSlug: tenantSlug,
+      seeded: false,
+    });
   }, []);
 
   // ============================================================================
@@ -162,21 +189,73 @@ export type SessionBootstrap = {
 // ============================================================================
 export const useSessionBootstrap = (): SessionBootstrap => {
   const session = useSession();
+  const { tenantSlug } = useTenant();
   const { status, hydrate, fail, queryScope } = session;
-  const query = useSessionMeQuery(status === "loading", queryScope);
+
+  // The authoritative identity boundary is the provider's opaque auth lifetime
+  // plus the tenant slug used for /session/me. A tenant change inside the same
+  // provider therefore invalidates the prior principal immediately. The sole
+  // adoption case is empty bootstrap slug -> the identical tenant already
+  // proven by SessionMe; refetching that same boundary would add a redundant
+  // request after /tenants/me hydrates and can never change the principal.
+  const sessionAlreadyProvesTenant =
+    status === "ready" && session.session?.tenant?.slug === tenantSlug;
+  const boundaryIsAuthoritative =
+    session.hydratedTenantSlug === tenantSlug || sessionAlreadyProvesTenant;
+  const requiresHydration =
+    !session.seeded && (status === "loading" || !boundaryIsAuthoritative);
+  // Keep the production observer active after the first success. Tenant-key
+  // changes fetch automatically, while the query's focus/reconnect policy can
+  // detect a gateway principal change that happened while this SPA stayed
+  // mounted. Only an explicit test/storybook seed disables network hydration.
+  const query = useSessionMeQuery(!session.seeded, queryScope);
 
   useEffect(() => {
-    if (status !== "loading") return;
+    if (session.seeded || query.isFetching) return;
     if (query.isSuccess) {
-      hydrate(query.data);
+      if (
+        requiresHydration ||
+        status !== "ready" ||
+        query.data !== session.session
+      ) {
+        hydrate(query.data, tenantSlug);
+      }
       return;
     }
     if (query.isError) {
       // FIX: clear any prior identity on query failure so a stale principal can
       // never remain authorized while the session is unavailable.
-      fail(query.error as ApiError | Error);
+      if (
+        requiresHydration ||
+        status !== "error" ||
+        session.error !== query.error
+      ) {
+        fail(query.error as ApiError | Error, tenantSlug);
+      }
     }
-  }, [fail, hydrate, query.data, query.error, query.isError, query.isSuccess, status]);
+  }, [
+    fail,
+    hydrate,
+    query.data,
+    query.error,
+    query.isError,
+    query.isFetching,
+    query.isSuccess,
+    requiresHydration,
+    session.error,
+    session.seeded,
+    session.session,
+    status,
+    tenantSlug,
+  ]);
+
+  // Fail closed synchronously on the first render of a boundary change or an
+  // auth revalidation. The effect above commits the replacement success/error
+  // only after the request settles, so principal A is never observable beside
+  // tenant B (or while the gateway may have replaced A in the same tenant).
+  if (requiresHydration || (!session.seeded && query.isFetching)) {
+    return { status: "loading", session: null, error: null };
+  }
 
   return { status: session.status, session: session.session, error: session.error };
 };

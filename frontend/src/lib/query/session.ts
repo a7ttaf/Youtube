@@ -45,15 +45,16 @@ export const sessionMeQueryKey = (
 // Purpose: Expose the backend session contract through the shared query cache.
 // Database/ORM: None; GET /session/me reads the trusted gateway principal.
 // Standards: Namespace cache data by provider lifetime and tenant, override the
-//            application stale window, disable retries for fail-closed bootstrap,
-//            and allow a seeded authoritative session to disable the request.
+//            application stale window, disable retries, and revalidate on a
+//            production focus/reconnect auth boundary. A seeded authoritative
+//            test/storybook session may still disable the request.
 // Blast Radius: Authorization (session identity and capability gating).
 // Connections:
 //   - File: frontend/src/contexts/SessionContext.tsx -> hydrates/fails from
 //     this query rather than maintaining a divergent fetch path.
 //   - File: backend/ums_smart_revenue/api/session.py -> GET /session/me.
 // ============================================================================
-/** Read the authoritative session once through TanStack Query. */
+/** Read and boundary-revalidate the authoritative session through TanStack Query. */
 export const useSessionMeQuery = (
   enabled = true,
   scope?: SessionQueryScope,
@@ -77,10 +78,12 @@ export const useSessionMeQuery = (
     gcTime: 0,
     // A route transition may remount the bootstrap consumer. Reusing the result
     // is safe inside one opaque provider scope; a new provider scope always
-    // fetches afresh.
+    // fetches afresh. Focus/reconnect are different: a gateway login may have
+    // changed while the SPA stayed mounted, so revalidate and let
+    // useSessionBootstrap hide the prior principal until that request settles.
     refetchOnMount: false,
-    refetchOnWindowFocus: false,
-    refetchOnReconnect: false,
+    refetchOnWindowFocus: "always",
+    refetchOnReconnect: "always",
     retry: false,
     queryFn: () => api.get<SessionMe>("/session/me"),
   });

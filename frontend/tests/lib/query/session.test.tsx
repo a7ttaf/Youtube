@@ -1,10 +1,10 @@
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { focusManager, QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { ReactNode } from "react";
-import { fireEvent, render, renderHook, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, renderHook, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { SessionProvider, useSession, useSessionBootstrap } from "@/contexts/SessionContext";
-import { TenantProvider } from "@/contexts/TenantContext";
+import { TenantProvider, useTenant } from "@/contexts/TenantContext";
 import type { SessionMe } from "@/lib/api/types";
 import {
   SESSION_ME_QUERY_KEY,
@@ -62,17 +62,25 @@ const sessionFor = (
   ...overrides,
 });
 
+const TENANT_A = { id: "tenant-1", slug: "tenant-a", display_name: "Tenant A" };
+const TENANT_B = { id: "tenant-2", slug: "tenant-b", display_name: "Tenant B" };
+
 const SessionProbe = () => {
   const bootstrap = useSessionBootstrap();
   const { clearSession } = useSession();
+  const tenant = useTenant();
   return (
     <div
       data-testid="session-probe"
       data-status={bootstrap.status}
       data-user-id={bootstrap.session?.user_id ?? ""}
       data-disabled={String(bootstrap.session?.disabled ?? false)}
+      data-tenant-slug={tenant.tenantSlug}
     >
       {bootstrap.session?.email ?? bootstrap.error?.message ?? bootstrap.status}
+      <button type="button" onClick={() => tenant.hydrate(TENANT_B)}>
+        Switch tenant
+      </button>
       <button type="button" onClick={clearSession}>
         Clear session
       </button>
@@ -118,6 +126,7 @@ beforeEach(() => {
 
 afterEach(() => {
   globalThis.fetch = ORIGINAL_FETCH;
+  focusManager.setFocused(undefined);
 });
 
 describe("useSessionMeQuery", () => {
@@ -159,6 +168,29 @@ describe("useSessionMeQuery", () => {
 
     expect(result.current.fetchStatus).toBe("idle");
     expect(globalThis.fetch).not.toHaveBeenCalled();
+  });
+
+  it("keeps an explicit provider seed authoritative without a network request", () => {
+    const seededPrincipal = sessionFor("seeded-principal", { tenant: TENANT_A });
+    const queryClient = sessionQueryClient();
+
+    const rendered = render(
+      <QueryClientProvider client={queryClient}>
+        <SessionProvider initialSession={seededPrincipal}>
+          <TenantProvider>
+            <SessionProbe />
+          </TenantProvider>
+        </SessionProvider>
+      </QueryClientProvider>,
+    );
+
+    expect(screen.getByTestId("session-probe")).toHaveAttribute("data-status", "ready");
+    expect(screen.getByTestId("session-probe")).toHaveAttribute(
+      "data-user-id",
+      "seeded-principal",
+    );
+    expect(globalThis.fetch).not.toHaveBeenCalled();
+    rendered.unmount();
   });
 
   it("namespaces the exact session cache key by both provider lifetime and tenant", () => {
@@ -231,6 +263,162 @@ describe("useSessionMeQuery", () => {
     expect(secondRequestHeaders.get("X-UMS-Tenant")).toBe("tenant-b");
     expect(queryClient.getQueriesData({ queryKey: SESSION_ME_QUERY_KEY })).toHaveLength(1);
     second.unmount();
+  });
+
+  it("fails closed and rehydrates when the tenant changes inside the same provider", async () => {
+    const principalA = sessionFor("principal-a", { tenant: TENANT_A });
+    const principalB = sessionFor("principal-b", { tenant: TENANT_B });
+    let resolveReplacement: ((response: Response) => void) | undefined;
+    const replacementPending = new Promise<Response>((resolve) => {
+      resolveReplacement = resolve;
+    });
+    const responses: Array<Response | Promise<Response>> = [
+      jsonResponse(principalA),
+      replacementPending,
+    ];
+    (globalThis.fetch as ReturnType<typeof vi.fn>).mockImplementation(() =>
+      responses.shift() ?? Promise.reject(new Error("missing response")),
+    );
+    const queryClient = sessionQueryClient();
+
+    const rendered = renderSession(queryClient, TENANT_A.slug);
+    await waitFor(() =>
+      expect(screen.getByTestId("session-probe")).toHaveAttribute(
+        "data-user-id",
+        "principal-a",
+      ),
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Switch tenant" }));
+    expect(screen.getByTestId("session-probe")).toHaveAttribute(
+      "data-tenant-slug",
+      TENANT_B.slug,
+    );
+    expect(screen.getByTestId("session-probe")).toHaveAttribute("data-status", "loading");
+    expect(screen.getByTestId("session-probe")).toHaveAttribute("data-user-id", "");
+    expect(screen.queryByText("principal-a@ums.local")).not.toBeInTheDocument();
+
+    resolveReplacement?.(jsonResponse(principalB));
+    await waitFor(() =>
+      expect(screen.getByTestId("session-probe")).toHaveAttribute(
+        "data-user-id",
+        "principal-b",
+      ),
+    );
+    expect(globalThis.fetch).toHaveBeenCalledTimes(2);
+    const replacementHeaders = (globalThis.fetch as ReturnType<typeof vi.fn>).mock
+      .calls[1]?.[1]?.headers as Headers;
+    expect(replacementHeaders.get("X-UMS-Tenant")).toBe(TENANT_B.slug);
+    rendered.unmount();
+  });
+
+  it("revalidates a same-tenant principal after the mounted SPA regains focus", async () => {
+    const principalA = sessionFor("principal-a", { tenant: TENANT_A });
+    const principalB = sessionFor("principal-b", { tenant: TENANT_A });
+    let resolveReplacement: ((response: Response) => void) | undefined;
+    const replacementPending = new Promise<Response>((resolve) => {
+      resolveReplacement = resolve;
+    });
+    const responses: Array<Response | Promise<Response>> = [
+      jsonResponse(principalA),
+      replacementPending,
+    ];
+    (globalThis.fetch as ReturnType<typeof vi.fn>).mockImplementation(() =>
+      responses.shift() ?? Promise.reject(new Error("missing response")),
+    );
+    const queryClient = sessionQueryClient();
+
+    const rendered = renderSession(queryClient, TENANT_A.slug);
+    await waitFor(() =>
+      expect(screen.getByTestId("session-probe")).toHaveAttribute(
+        "data-user-id",
+        "principal-a",
+      ),
+    );
+
+    act(() => {
+      focusManager.setFocused(false);
+      focusManager.setFocused(true);
+    });
+    await waitFor(() => expect(globalThis.fetch).toHaveBeenCalledTimes(2));
+    expect(screen.getByTestId("session-probe")).toHaveAttribute("data-status", "loading");
+    expect(screen.getByTestId("session-probe")).toHaveAttribute("data-user-id", "");
+
+    resolveReplacement?.(jsonResponse(principalB));
+    await waitFor(() =>
+      expect(screen.getByTestId("session-probe")).toHaveAttribute(
+        "data-user-id",
+        "principal-b",
+      ),
+    );
+    expect(screen.getByTestId("session-probe")).toHaveAttribute(
+      "data-tenant-slug",
+      TENANT_A.slug,
+    );
+    rendered.unmount();
+  });
+
+  it("fails closed when same-provider tenant replacement hydration fails", async () => {
+    let requestCount = 0;
+    (globalThis.fetch as ReturnType<typeof vi.fn>).mockImplementation(() => {
+      requestCount += 1;
+      if (requestCount === 1) {
+        return Promise.resolve(
+          jsonResponse(sessionFor("principal-a", { tenant: TENANT_A })),
+        );
+      }
+      return Promise.reject(new Error("replacement gateway unavailable"));
+    });
+    const queryClient = sessionQueryClient();
+
+    const rendered = renderSession(queryClient, TENANT_A.slug);
+    await waitFor(() =>
+      expect(screen.getByTestId("session-probe")).toHaveAttribute(
+        "data-user-id",
+        "principal-a",
+      ),
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Switch tenant" }));
+    expect(screen.getByTestId("session-probe")).toHaveAttribute("data-user-id", "");
+    await waitFor(() =>
+      expect(screen.getByTestId("session-probe")).toHaveAttribute("data-status", "error"),
+    );
+    expect(screen.getByTestId("session-probe")).toHaveAttribute("data-user-id", "");
+    expect(screen.queryByText("principal-a@ums.local")).not.toBeInTheDocument();
+    expect(globalThis.fetch).toHaveBeenCalledTimes(2);
+    rendered.unmount();
+  });
+
+  it("renders the disabled replacement after a same-provider tenant change", async () => {
+    const responses = [
+      jsonResponse(sessionFor("principal-a", { tenant: TENANT_A })),
+      jsonResponse(sessionFor("principal-b", { tenant: TENANT_B, disabled: true })),
+    ];
+    (globalThis.fetch as ReturnType<typeof vi.fn>).mockImplementation(() =>
+      Promise.resolve(responses.shift() ?? jsonResponse({ detail: "missing response" }, 500)),
+    );
+    const queryClient = sessionQueryClient();
+
+    const rendered = renderSession(queryClient, TENANT_A.slug);
+    await waitFor(() =>
+      expect(screen.getByTestId("session-probe")).toHaveAttribute(
+        "data-user-id",
+        "principal-a",
+      ),
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Switch tenant" }));
+    await waitFor(() =>
+      expect(screen.getByTestId("session-probe")).toHaveAttribute(
+        "data-user-id",
+        "principal-b",
+      ),
+    );
+    expect(screen.getByTestId("session-probe")).toHaveAttribute("data-disabled", "true");
+    expect(screen.queryByText("principal-a@ums.local")).not.toBeInTheDocument();
+    expect(globalThis.fetch).toHaveBeenCalledTimes(2);
+    rendered.unmount();
   });
 
   it("fails closed after principal A when the replacement session request fails", async () => {
