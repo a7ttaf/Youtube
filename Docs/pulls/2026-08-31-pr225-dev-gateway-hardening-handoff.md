@@ -16,7 +16,7 @@ again so an inline or CLI host override cannot expose the trusted proxy on a
 wildcard or non-loopback listener.
 
 The exact implementation-and-test snapshot validated below is
-`65a0c59a72ca11950384ecc1cec27b1eea086561`. The subsequent documentation-only
+`7a1c4ec7da7d576e359b15226b2ccd6a8b4b3261`. The subsequent documentation-only
 evidence commit changes no runtime or test file.
 
 ## Integration dependency and re-author requirement
@@ -51,7 +51,7 @@ required.
 ## Validation
 
 Validation evidence must name the final committed head. At this isolated
-completion snapshot (`65a0c59a72ca11950384ecc1cec27b1eea086561`):
+completion snapshot (`7a1c4ec7da7d576e359b15226b2ccd6a8b4b3261`):
 
 | Gate | Result |
 |---|---|
