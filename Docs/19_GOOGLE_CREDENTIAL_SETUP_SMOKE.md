@@ -91,12 +91,15 @@ Current production resolver support:
 
 2. Verify the operator, then register the external reference in UMS.
 
-The trusted `X-User-ID` must be the UUID of an active user row in the same tenant;
-a syntactically valid but absent UUID fails with `422 actor_user_id does not
-reference an existing user`. On a freshly migrated local database, provision the
-operator through the audited `POST /users` flow before this request. The detailed
-local sequence below creates the row, assigns `connector_admin`, and only then
-registers the credential.
+For the credential-registration request, the trusted `X-User-ID` must be the UUID
+of an existing operator row in the same tenant; a syntactically valid but absent
+UUID fails with `422 actor_user_id does not reference an existing user`.
+Header-bootstrap mode enforces same-tenant actor existence at the credential
+repository boundary, while database auth additionally fails closed for disabled
+principals before the route runs. On a freshly migrated local database, provision
+an active human operator through the audited `POST /users` flow before this
+request. The detailed local sequence below creates the row, assigns
+`connector_admin`, and only then registers the credential.
 
 ```http
 POST /connectors/credentials
@@ -398,13 +401,15 @@ and set `GOOGLE_APPLICATION_CREDENTIALS` via an untracked
 Otherwise the host probe can pass while API credential tests and connector jobs
 fail with `SecretFetchError` inside the container.
 
-**Step 3 — provision the operator, then register through the audited APIs.** The
-fresh local database has no user row, and credential creation rejects an unknown
-actor before writing anything. For this local smoke only, start the API in
-`UMS_AUTHZ_SOURCE=headers` bootstrap mode and use the trusted gateway token to
-create the human operator first. Production/database mode must instead start from
-an already provisioned SQL principal; never switch production back to header role
-claims to run this checklist.
+**Step 3 — provision the administrator and operator, then register through the
+audited APIs.** The fresh local database has no user row, and credential creation
+rejects an unknown actor before writing anything. For this local smoke only, start
+the API in `UMS_AUTHZ_SOURCE=headers` bootstrap mode and use the trusted gateway
+token once to create a durable bootstrap administrator row. That administrator
+then creates the human connector operator and assigns `connector_admin`.
+Production/database mode must instead start from an already provisioned SQL
+principal; never switch production back to header role claims to run this
+checklist.
 
 ```powershell
 $bootstrapActorId = [guid]::NewGuid().ToString()
@@ -416,23 +421,37 @@ $bootstrapHeaders = @{
   "X-UMS-Trusted-Gateway-Token" = $env:UMS_TRUSTED_GATEWAY_TOKEN
   "X-UMS-Tenant" = "<tenant-slug>"
 }
+$bootstrapAdminPayload = @{
+  email = "<bootstrap-admin-email>"
+  display_name = "<bootstrap-admin-display-name>"
+  reason = "Provision bootstrap administrator for local credential smoke"
+} | ConvertTo-Json
+$bootstrapAdmin = Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:8000/users" `
+  -Headers $bootstrapHeaders -ContentType "application/json" -Body $bootstrapAdminPayload
+if ($bootstrapAdmin.status -ne "active" -or $bootstrapAdmin.is_service_account -or
+    $bootstrapAdmin.audit_event.event_type -ne "USER_ACCOUNT_CHANGED") {
+  throw "Audited bootstrap-administrator provisioning did not complete"
+}
+$bootstrapAdminUserId = [guid]::Parse($bootstrapAdmin.id).ToString()
+
+$bootstrapAdminHeaders = $bootstrapHeaders.Clone()
+$bootstrapAdminHeaders["X-User-ID"] = $bootstrapAdminUserId
+$bootstrapAdminHeaders["X-User-Email"] = "<bootstrap-admin-email>"
+
 $operatorPayload = @{
   email = "<operator-email>"
   display_name = "<operator-display-name>"
   reason = "Provision connector operator for local credential smoke"
 } | ConvertTo-Json
 $operator = Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:8000/users" `
-  -Headers $bootstrapHeaders -ContentType "application/json" -Body $operatorPayload
+  -Headers $bootstrapAdminHeaders -ContentType "application/json" -Body $operatorPayload
 if ($operator.status -ne "active" -or $operator.is_service_account -or
     $operator.audit_event.event_type -ne "USER_ACCOUNT_CHANGED") {
   throw "Audited human-operator provisioning did not complete"
 }
 $operatorUserId = [guid]::Parse($operator.id).ToString()
 
-# The actor now exists, so this role write has a real actor FK and its own audit event.
-$operatorAdminHeaders = $bootstrapHeaders.Clone()
-$operatorAdminHeaders["X-User-ID"] = $operatorUserId
-$operatorAdminHeaders["X-User-Email"] = "<operator-email>"
+# The administrator actor exists, so this role write has a real actor FK and audit event.
 $rolePayload = @{
   role_key = "connector_admin"
   scope_type = "global"
@@ -440,7 +459,7 @@ $rolePayload = @{
 } | ConvertTo-Json
 $roleAssignment = Invoke-RestMethod -Method Post `
   -Uri "http://127.0.0.1:8000/users/$operatorUserId/roles" `
-  -Headers $operatorAdminHeaders -ContentType "application/json" -Body $rolePayload
+  -Headers $bootstrapAdminHeaders -ContentType "application/json" -Body $rolePayload
 if ($roleAssignment.role_key -ne "connector_admin" -or
     $roleAssignment.audit_event.event_type -ne "USER_ROLE_CHANGED") {
   throw "Audited connector-admin assignment did not complete"
@@ -449,12 +468,15 @@ if ($roleAssignment.role_key -ne "connector_admin" -or
 
 Record `$bootstrapActorId` with the named bootstrap administrator in the secure
 operator tracker. The first `USER_ACCOUNT_CHANGED` event retains that external
-gateway actor in its details because no local user row existed yet; the role and
-credential events use `$operatorUserId` as their database-backed actor FK.
+gateway actor in its details because no local user row existed yet. The operator
+creation and role-assignment events use `$bootstrapAdminUserId` as their
+database-backed actor FK; only credential-registration events use
+`$operatorUserId`.
 
-If the human operator already exists, do not create a duplicate. Use an authorized
-`GET /users` lookup, verify that the row is active, human, and in this tenant, and
-retain its exact UUID. The create block above is the fresh-database path.
+If the bootstrap administrator or human operator already exists, do not create a
+duplicate. Use an authorized `GET /users` lookup, verify that the row is active,
+human, and in this tenant, and retain its exact UUID. The create block above is
+the fresh-database path.
 
 Only after the operator row and role assignment exist, register the credential.
 Do not insert it with a database superuser. Reuse `$approvedSecretRef` from Step 1;

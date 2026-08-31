@@ -28,10 +28,11 @@ def auth_headers(
     scope_id: str | None = None,
     *,
     user_id: str | UUID = USER_ID,
+    email: str = "connector-review-user@example.com",
 ) -> dict[str, str]:
     headers = {
         "x-user-id": str(user_id),
-        "x-user-email": "connector-review-user@example.com",
+        "x-user-email": email,
         "x-role": role,
         "x-scope-type": scope_type,
         "x-ums-trusted-gateway-token": "pytest-trusted-gateway-token",
@@ -87,7 +88,7 @@ def seed_fresh_database_with_role_catalog(database_url: str) -> None:
 def test_audited_operator_setup_precedes_numeric_version_credential_registration(
     tmp_path,
 ):
-    """Lock the fresh-database operator, role, then credential runbook order."""
+    """Lock the fresh-database admin, operator, role, then credential runbook order."""
     database_url = build_database_url(tmp_path)
     seed_fresh_database_with_role_catalog(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -95,10 +96,32 @@ def test_audited_operator_setup_precedes_numeric_version_credential_registration
     bootstrap_headers = auth_headers(
         "super_owner",
         user_id="00000000-0000-0000-0000-000000014999",
+        email="external-bootstrap-admin@example.com",
+    )
+    admin_response = client.post(
+        "/users",
+        headers=bootstrap_headers,
+        json={
+            "email": "local-bootstrap-admin@example.com",
+            "display_name": "Local Bootstrap Admin",
+            "reason": "Provision bootstrap administrator for local credential smoke",
+        },
+    )
+
+    assert admin_response.status_code == 201
+    admin = admin_response.json()
+    assert admin["status"] == "active"
+    assert admin["is_service_account"] is False
+    assert admin["audit_event"]["event_type"] == "USER_ACCOUNT_CHANGED"
+
+    admin_headers = auth_headers(
+        "super_owner",
+        user_id=admin["id"],
+        email=admin["email"],
     )
     operator_response = client.post(
         "/users",
-        headers=bootstrap_headers,
+        headers=admin_headers,
         json={
             "email": "local-connector-operator@example.com",
             "display_name": "Local Connector Operator",
@@ -112,10 +135,9 @@ def test_audited_operator_setup_precedes_numeric_version_credential_registration
     assert operator["is_service_account"] is False
     assert operator["audit_event"]["event_type"] == "USER_ACCOUNT_CHANGED"
 
-    operator_headers = auth_headers("super_owner", user_id=operator["id"])
     role_response = client.post(
         f"/users/{operator['id']}/roles",
-        headers=operator_headers,
+        headers=admin_headers,
         json={
             "role_key": "connector_admin",
             "scope_type": "global",
@@ -130,7 +152,11 @@ def test_audited_operator_setup_precedes_numeric_version_credential_registration
     numeric_version_ref = "secret-manager://projects/ums-local/secrets/ums-google-oauth/versions/17"
     credential_response = client.post(
         "/connectors/credentials",
-        headers=auth_headers("connector_admin", user_id=operator["id"]),
+        headers=auth_headers(
+            "connector_admin",
+            user_id=operator["id"],
+            email=operator["email"],
+        ),
         json={
             "connector_key": "youtube-analytics",
             "account_id": "content-owner-1",
@@ -153,20 +179,33 @@ def test_audited_operator_setup_precedes_numeric_version_credential_registration
         assert credential.created_by == UUID(operator["id"])
         assert credential.updated_by == UUID(operator["id"])
         assert role_assignment.role_key == "connector_admin"
-        assert role_assignment.assigned_by == UUID(operator["id"])
-        assert len(audit_rows) == 3
+        assert role_assignment.assigned_by == UUID(admin["id"])
+        assert len(audit_rows) == 4
         assert [row.event_type for row in audit_rows] == [
+            "USER_ACCOUNT_CHANGED",
             "USER_ACCOUNT_CHANGED",
             "USER_ROLE_CHANGED",
             "CONNECTOR_SETTINGS_CHANGED",
         ]
-        assert audit_rows[0].created_at < audit_rows[1].created_at < audit_rows[2].created_at
-        audit_by_event = {row.event_type: row for row in audit_rows}
-        user_change_audit = audit_by_event["USER_ACCOUNT_CHANGED"]
-        assert user_change_audit.user_id is None
-        assert user_change_audit.details["actor_user_id"] == bootstrap_headers["x-user-id"]
-        assert audit_by_event["USER_ROLE_CHANGED"].user_id == UUID(operator["id"])
-        assert audit_by_event["CONNECTOR_SETTINGS_CHANGED"].user_id == UUID(operator["id"])
+        assert (
+            audit_rows[0].created_at
+            < audit_rows[1].created_at
+            < audit_rows[2].created_at
+            < audit_rows[3].created_at
+        )
+        bootstrap_admin_audit = audit_rows[0]
+        operator_create_audit = audit_rows[1]
+        role_change_audit = audit_rows[2]
+        credential_audit = audit_rows[3]
+        assert bootstrap_admin_audit.user_id is None
+        assert bootstrap_admin_audit.details["actor_user_id"] == bootstrap_headers["x-user-id"]
+        assert bootstrap_admin_audit.entity_id == admin["id"]
+        assert operator_create_audit.user_id == UUID(admin["id"])
+        assert operator_create_audit.details["target_user_id"] == operator["id"]
+        assert role_change_audit.user_id == UUID(admin["id"])
+        assert role_change_audit.details["target_user_id"] == operator["id"]
+        assert role_change_audit.details["role_key"] == "connector_admin"
+        assert credential_audit.user_id == UUID(operator["id"])
     finally:
         engine.dispose()
 
