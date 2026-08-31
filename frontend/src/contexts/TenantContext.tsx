@@ -81,6 +81,7 @@ export const TenantProvider = ({
   );
 };
 
+/** Return the active tenant context value; must be called inside TenantProvider. */
 export const useTenant = (): TenantContextValue => {
   const value = useContext(TenantContext);
   if (value === null) {
