@@ -55,6 +55,10 @@ Dockerfile
 .dockerignore
 docker-compose*.yml
 
+# Runtime bind mount (export artifacts + connector blobs) — keeps the build
+# context from growing with the blob store as the stack runs.
+data
+
 # Helm / deploy assets (not needed in the runtime image)
 deploy
 

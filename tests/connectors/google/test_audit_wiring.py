@@ -32,6 +32,7 @@ from ums_smart_revenue.auth.audit_service import InMemoryAuditSink
 from ums_smart_revenue.auth.permissions import Permission
 from ums_smart_revenue.config.settings import (
     GOOGLE_CONNECTOR_SERVICE_ACTOR_ID_ENV,
+    GOOGLE_CONNECTOR_SERVICE_ACTOR_PLACEHOLDER_ID,
 )
 from ums_smart_revenue.connectors.google.audit import (
     build_connector_service_principal,
@@ -119,6 +120,27 @@ def test_build_service_principal_requires_actor_id_setting(
         build_connector_service_principal(tenant_id=_TENANT_ID)
     message = str(excinfo.value)
     assert GOOGLE_CONNECTOR_SERVICE_ACTOR_ID_ENV in message
+
+
+def test_build_service_principal_rejects_template_placeholder(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The .env.example placeholder UUID is refused, never silently attributed.
+
+    The template ships the placeholder UNCOMMENTED, so a ``cp .env.example
+    .env`` deployment reaches the builder with this exact value. Accepting it
+    would attribute every connector-emitted audit row to a UUID published in
+    a public template; the builder must fail closed and name the placeholder.
+    """
+    monkeypatch.setenv(
+        GOOGLE_CONNECTOR_SERVICE_ACTOR_ID_ENV,
+        GOOGLE_CONNECTOR_SERVICE_ACTOR_PLACEHOLDER_ID,
+    )
+    with pytest.raises(ValueError) as excinfo:
+        build_connector_service_principal(tenant_id=_TENANT_ID)
+    message = str(excinfo.value)
+    assert GOOGLE_CONNECTOR_SERVICE_ACTOR_ID_ENV in message
+    assert GOOGLE_CONNECTOR_SERVICE_ACTOR_PLACEHOLDER_ID in message
 
 
 # ---------------------------------------------------------------------------
