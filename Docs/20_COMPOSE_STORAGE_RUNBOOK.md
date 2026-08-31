@@ -32,15 +32,16 @@ must change before that feature ships.
   host path, mounts that resolved source, then passes configured and canonical
   receipts. Accidental direct init without those receipts, a copied marker used
   through the wrapper, or a mismatched receipt fails before any root ownership
-  or mode operation. The image entrypoint also refuses an ordinary no-dependency
-  `app`/`app-dev` start until init has published its readiness marker.
+  or mode operation. The Compose `app` and `app-dev` service entrypoints also
+  refuse an ordinary no-dependency start until init has published its readiness
+  marker. The base image remains usable without a Compose storage mount.
   Never set `UMS_APP_DATA_HOST_CANONICAL` or `UMS_APP_DATA_HOST_CONFIGURED`
   manually.
 - These receipts are an operator safety contract, not a security boundary
   against a Docker-capable local administrator. Such an administrator can forge
   environment values, reuse an existing container configuration, or override
-  the image entrypoint. Those actions are unsupported; no in-container process
-  can independently prove the host bind's identity.
+  the Compose service entrypoint. Those actions are unsupported; no
+  in-container process can independently prove the host bind's identity.
 - POSIX `chmod` inside Docker Desktop does not prove a restrictive NTFS ACL.
   The path marker is a destructive-target contract, not a Windows privacy
   claim. Use the owner-only ACL block below for backup bundles. A multi-user
@@ -380,20 +381,30 @@ target. Never reuse the default project name or live bind.
    `scripts/compose_restore_roles.sql`.
 5. Restore the custom-format database with `--exit-on-error`.
 6. Restore the artifact archive into the empty marked bind.
-7. Run `app-data-init` so restored POSIX ownership is adopted by the image's
+7. For GCS, restore or prove every exact object generation and CRC32C from
+   `gcs-snapshot.json` before any application service starts.
+8. Run `app-data-init` so restored POSIX ownership is adopted by the image's
    actual app uid, then start and validate the recovery app. Initialization
    retains `.ums-restore-pending` unless that uid can traverse every restored
    directory, read every restored file, and create files in both storage roots.
 
-Artifact publication is journaled inside the marked target. An ordinary
-publication error rolls both roots back to the empty state while retaining the
+Artifact publication is journaled inside the marked target before its stage is
+created. An ordinary publication error rolls both roots back to the empty state
+while retaining the
 verified stage and journal for retry. After an abrupt process or host
 interruption, rerun the exact same `restore-artifacts` command with the same
-verified archive; it revalidates every staged or published byte against the
-archive, infers the publication state, and resumes. The completed journal and
+verified archive, manifest, blob backend, and GCS bucket. A `staging` retry
+discards only the journal-bound partial stage and re-extracts it; later states
+revalidate every staged or published byte against the archive, infer the
+publication state, and resume. The completed journal and
 pending marker remain until `app-data-init` proves runtime access and publishes
 the application-readiness marker. Do not edit `.ums-restore-journal.json`,
 `.ums-restore-pending`, readiness markers, or stage paths.
+
+The GCS prompts below are deliberate fail-stop acknowledgments, not provider
+verification. Before typing the phrase, use provider tooling to prove every
+generation and CRC32C in `gcs-snapshot.json`; retain that provider output with
+the rehearsal evidence.
 
 PowerShell skeleton:
 
@@ -410,10 +421,14 @@ $env:UMS_POSTGRES_PORT = '55433'
 $env:UMS_REDIS_PORT = '56380'
 $env:UMS_APP_PORT = '58000'
 $env:UMS_APP_DATA_HOST = ".\data\recovery-$runId"
+$env:UMS_BLOB_BACKEND = 'file-store' # Use 'gcs' when the manifest declares GCS.
+$env:UMS_GCS_BUCKET = 'ums-smart-revenue-raw'
 
 uv run python scripts/compose_storage.py verify `
   --manifest (Join-Path $bundle 'SHA256SUMS.json') `
-  --artifact-archive (Join-Path $bundle 'ums-app-data.tgz')
+  --artifact-archive (Join-Path $bundle 'ums-app-data.tgz') `
+  --blob-backend $env:UMS_BLOB_BACKEND `
+  --gcs-bucket $env:UMS_GCS_BUCKET
 Assert-NativeSuccess 'verify recovery bundle'
 uv run python scripts/compose_storage.py prepare `
   --path $env:UMS_APP_DATA_HOST
@@ -437,8 +452,17 @@ Assert-NativeSuccess 'restore recovery database'
 uv run python scripts/compose_storage.py restore-artifacts `
   --path $env:UMS_APP_DATA_HOST `
   --archive (Join-Path $bundle 'ums-app-data.tgz') `
-  --manifest (Join-Path $bundle 'SHA256SUMS.json')
-Assert-NativeSuccess 'restore artifact and blob bytes'
+  --manifest (Join-Path $bundle 'SHA256SUMS.json') `
+  --blob-backend $env:UMS_BLOB_BACKEND `
+  --gcs-bucket $env:UMS_GCS_BUCKET
+Assert-NativeSuccess 'restore local artifact and blob-root bytes'
+if ($env:UMS_BLOB_BACKEND -eq 'gcs') {
+  $gcsRecoveryAck = Read-Host `
+    'After proving every gcs-snapshot.json generation and CRC32C, type GCS-GENERATIONS-VERIFIED'
+  if ($gcsRecoveryAck -cne 'GCS-GENERATIONS-VERIFIED') {
+    throw 'GCS recovery proof was not acknowledged; refusing to start the application'
+  }
+}
 uv run python scripts/compose_storage.py compose `
   --path $env:UMS_APP_DATA_HOST -- `
   -p $project run --rm --no-deps app-data-init
@@ -456,10 +480,14 @@ set -eu
 project="ums-recovery-$run_id"
 export UMS_POSTGRES_PORT=55433 UMS_REDIS_PORT=56380 UMS_APP_PORT=58000
 export UMS_APP_DATA_HOST="./data/recovery-$run_id"
+export UMS_BLOB_BACKEND="${UMS_BLOB_BACKEND:-file-store}"
+export UMS_GCS_BUCKET="${UMS_GCS_BUCKET:-ums-smart-revenue-raw}"
 
 uv run python scripts/compose_storage.py verify \
   --manifest "$bundle/SHA256SUMS.json" \
-  --artifact-archive "$bundle/ums-app-data.tgz"
+  --artifact-archive "$bundle/ums-app-data.tgz" \
+  --blob-backend "$UMS_BLOB_BACKEND" \
+  --gcs-bucket "$UMS_GCS_BUCKET"
 uv run python scripts/compose_storage.py prepare --path "$UMS_APP_DATA_HOST"
 
 docker compose -p "$project" up -d --wait --wait-timeout 120 postgres
@@ -475,7 +503,18 @@ docker compose -p "$project" exec -T postgres sh -euc \
 uv run python scripts/compose_storage.py restore-artifacts \
   --path "$UMS_APP_DATA_HOST" \
   --archive "$bundle/ums-app-data.tgz" \
-  --manifest "$bundle/SHA256SUMS.json"
+  --manifest "$bundle/SHA256SUMS.json" \
+  --blob-backend "$UMS_BLOB_BACKEND" \
+  --gcs-bucket "$UMS_GCS_BUCKET"
+if [ "$UMS_BLOB_BACKEND" = "gcs" ]; then
+  printf '%s\n' \
+    'After proving every gcs-snapshot.json generation and CRC32C, type GCS-GENERATIONS-VERIFIED'
+  IFS= read -r gcs_recovery_ack
+  if [ "$gcs_recovery_ack" != "GCS-GENERATIONS-VERIFIED" ]; then
+    printf '%s\n' 'GCS recovery proof was not acknowledged; refusing application start' >&2
+    exit 1
+  fi
+fi
 uv run python scripts/compose_storage.py compose \
   --path "$UMS_APP_DATA_HOST" -- \
   -p "$project" run --rm --no-deps app-data-init

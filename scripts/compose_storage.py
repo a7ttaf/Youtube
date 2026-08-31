@@ -17,7 +17,7 @@ import subprocess
 import sys
 import tarfile
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import Any, BinaryIO
 
 LOGGER = logging.getLogger("ums.compose_storage")
 CONTRACT_NAME = "ums-compose-storage-v1"
@@ -781,6 +781,18 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _sha256_stream(handle: BinaryIO) -> str:
+    position = handle.tell()
+    digest = hashlib.sha256()
+    try:
+        handle.seek(0)
+        while chunk := handle.read(CHUNK_SIZE):
+            digest.update(chunk)
+    finally:
+        handle.seek(position)
+    return digest.hexdigest()
+
+
 def _configured_gcs_bucket(value: str | None) -> str:
     bucket = value if value is not None else os.environ.get("UMS_GCS_BUCKET", DEFAULT_GCS_BUCKET)
     if not isinstance(bucket, str) or not bucket or bucket != bucket.strip():
@@ -788,8 +800,21 @@ def _configured_gcs_bucket(value: str | None) -> str:
     return bucket
 
 
-def _validate_gcs_snapshot(path: Path, *, expected_bucket: str) -> None:
-    payload = _read_json(path)
+def _decode_gcs_snapshot(data: bytes, *, source: Path) -> dict[str, Any]:
+    try:
+        payload = json.loads(data.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise StorageContractError(f"GCS snapshot is unreadable: {source}") from exc
+    if not isinstance(payload, dict):
+        raise StorageContractError("GCS snapshot is not a JSON object")
+    return payload
+
+
+def _validate_gcs_snapshot_payload(
+    payload: dict[str, Any],
+    *,
+    expected_bucket: str,
+) -> None:
     if (
         set(payload) != {"bucket", "objects", "schema"}
         or payload.get("schema") != "ums-gcs-snapshot-v1"
@@ -860,6 +885,7 @@ def create_bundle_manifest(
     manifest = _assert_sensitive_output(output, repository_root=repository)
     bundle_root = manifest.parent
     records: list[dict[str, Any]] = []
+    gcs_snapshot_payload: dict[str, Any] | None = None
     for file_path in files:
         unresolved_candidate = file_path.expanduser()
         if _is_redirect(unresolved_candidate):
@@ -875,11 +901,20 @@ def create_bundle_manifest(
             ) from exc
         if candidate == manifest:
             raise StorageContractError("manifest cannot include itself")
+        relative_name = relative.as_posix()
+        if relative_name == GCS_SNAPSHOT_MEMBER:
+            snapshot_bytes = candidate.read_bytes()
+            actual_digest = hashlib.sha256(snapshot_bytes).hexdigest()
+            actual_size = len(snapshot_bytes)
+            gcs_snapshot_payload = _decode_gcs_snapshot(snapshot_bytes, source=candidate)
+        else:
+            actual_digest = _sha256(candidate)
+            actual_size = candidate.stat().st_size
         records.append(
             {
-                "path": relative.as_posix(),
-                "sha256": _sha256(candidate),
-                "size": candidate.stat().st_size,
+                "path": relative_name,
+                "sha256": actual_digest,
+                "size": actual_size,
             }
         )
     if not records:
@@ -911,8 +946,10 @@ def create_bundle_manifest(
         ):
             raise StorageContractError("GCS snapshot record must not be empty")
         if blob_backend == "gcs":
-            _validate_gcs_snapshot(
-                bundle_root / GCS_SNAPSHOT_MEMBER,
+            if gcs_snapshot_payload is None:
+                raise StorageContractError("GCS snapshot bytes were not captured")
+            _validate_gcs_snapshot_payload(
+                gcs_snapshot_payload,
                 expected_bucket=_configured_gcs_bucket(expected_gcs_bucket),
             )
     _write_json_exclusive(
@@ -933,9 +970,24 @@ def verify_bundle_manifest(
     required_profile: str | None = None,
     required_blob_backend: str | None = None,
     expected_gcs_bucket: str | None = None,
+    _pinned_files: dict[str, BinaryIO] | None = None,
+    _manifest_digest_out: list[str] | None = None,
+    _verified_digests_out: dict[str, str] | None = None,
 ) -> dict[str, Path]:
     """Verify every size and SHA-256 recorded in a backup bundle manifest."""
-    payload = _read_json(manifest)
+    unresolved_manifest = manifest.expanduser()
+    if _is_redirect(unresolved_manifest):
+        raise StorageContractError(f"contract file may not be a link: {manifest}")
+    resolved_manifest = unresolved_manifest.resolve(strict=True)
+    try:
+        manifest_bytes = resolved_manifest.read_bytes()
+        payload = json.loads(manifest_bytes.decode("utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise StorageContractError(f"storage contract is unreadable: {manifest}") from exc
+    if not isinstance(payload, dict):
+        raise StorageContractError(f"storage contract is not a JSON object: {manifest}")
+    if _manifest_digest_out is not None:
+        _manifest_digest_out.append(hashlib.sha256(manifest_bytes).hexdigest())
     if (
         set(payload) != {"blob_backend", "files", "profile", "schema"}
         or payload.get("schema") != MANIFEST_NAME
@@ -959,7 +1011,10 @@ def verify_bundle_manifest(
     if not isinstance(records, list) or not records:
         raise StorageContractError("backup manifest has no file records")
     verified: dict[str, Path] = {}
-    bundle_root = manifest.resolve(strict=True).parent
+    verified_sizes: dict[str, int] = {}
+    gcs_snapshot_payload: dict[str, Any] | None = None
+    bundle_root = resolved_manifest.parent
+    pinned_files = _pinned_files or {}
     for record in records:
         if not isinstance(record, dict) or set(record) != {"path", "sha256", "size"}:
             raise StorageContractError("backup manifest record is malformed")
@@ -984,31 +1039,62 @@ def verify_bundle_manifest(
         candidate = unresolved_candidate.resolve(strict=True)
         if not candidate.is_relative_to(bundle_root) or not candidate.is_file():
             raise StorageContractError(f"backup member escapes the bundle: {name}")
-        if candidate.stat().st_size != size or _sha256(candidate) != digest:
+        pinned = pinned_files.get(name)
+        if pinned is not None:
+            pinned_stat = os.fstat(pinned.fileno())
+            candidate_stat = candidate.stat()
+            if (pinned_stat.st_dev, pinned_stat.st_ino) != (
+                candidate_stat.st_dev,
+                candidate_stat.st_ino,
+            ):
+                raise StorageContractError(f"backup member changed during verification: {name}")
+        if name == GCS_SNAPSHOT_MEMBER:
+            if pinned is not None:
+                position = pinned.tell()
+                try:
+                    pinned.seek(0)
+                    snapshot_bytes = pinned.read()
+                finally:
+                    pinned.seek(position)
+            else:
+                snapshot_bytes = candidate.read_bytes()
+            actual_size = len(snapshot_bytes)
+            actual_digest = hashlib.sha256(snapshot_bytes).hexdigest()
+            gcs_snapshot_payload = _decode_gcs_snapshot(snapshot_bytes, source=candidate)
+        elif pinned is not None:
+            actual_size = pinned_stat.st_size
+            actual_digest = _sha256_stream(pinned)
+        else:
+            actual_size = candidate.stat().st_size
+            actual_digest = _sha256(candidate)
+        if actual_size != size or actual_digest != digest:
             raise StorageContractError(f"backup checksum mismatch: {name}")
         if name in verified:
             raise StorageContractError(f"duplicate backup manifest path: {name}")
         verified[name] = candidate
+        verified_sizes[name] = actual_size
+        if _verified_digests_out is not None:
+            _verified_digests_out[name] = actual_digest
     if profile == COMPOSE_RECOVERY_PROFILE:
         missing = sorted(REQUIRED_RECOVERY_MEMBERS - verified.keys())
         if missing:
             raise StorageContractError(
                 "compose recovery manifest is incomplete; missing: " + ", ".join(missing)
             )
-        empty = sorted(
-            name for name in REQUIRED_RECOVERY_MEMBERS if verified[name].stat().st_size == 0
-        )
+        empty = sorted(name for name in REQUIRED_RECOVERY_MEMBERS if verified_sizes[name] == 0)
         if empty:
             raise StorageContractError(
                 "compose recovery manifest has empty required members: " + ", ".join(empty)
             )
         if blob_backend == "gcs" and GCS_SNAPSHOT_MEMBER not in verified:
             raise StorageContractError(f"GCS recovery manifest requires {GCS_SNAPSHOT_MEMBER}")
-        if blob_backend == "gcs" and verified[GCS_SNAPSHOT_MEMBER].stat().st_size == 0:
+        if blob_backend == "gcs" and verified_sizes[GCS_SNAPSHOT_MEMBER] == 0:
             raise StorageContractError("GCS snapshot record must not be empty")
         if blob_backend == "gcs":
-            _validate_gcs_snapshot(
-                verified[GCS_SNAPSHOT_MEMBER],
+            if gcs_snapshot_payload is None:
+                raise StorageContractError("GCS snapshot bytes were not captured")
+            _validate_gcs_snapshot_payload(
+                gcs_snapshot_payload,
                 expected_bucket=_configured_gcs_bucket(expected_gcs_bucket),
             )
     return verified
@@ -1040,13 +1126,22 @@ def _ensure_empty_restore_target(storage: Path) -> None:
 #   - File: Docs/20_COMPOSE_STORAGE_RUNBOOK.md -> operator retry procedure.
 #   - File: docker-compose.yml -> app-data-init consumes the pending marker.
 # ============================================================================
-def _restore_journal_payload(archive_digest: str, stage_name: str) -> dict[str, Any]:
+def _restore_journal_payload(
+    archive_digest: str,
+    manifest_digest: str,
+    blob_backend: str,
+    gcs_bucket: str | None,
+    stage_name: str,
+) -> dict[str, Any]:
     return {
         "archive_sha256": archive_digest,
+        "blob_backend": blob_backend,
         "contract": CONTRACT_NAME,
+        "gcs_bucket": gcs_bucket,
+        "manifest_sha256": manifest_digest,
         "published": [],
         "stage": stage_name,
-        "state": "publishing",
+        "state": "staging",
     }
 
 
@@ -1054,10 +1149,22 @@ def _validate_restore_journal(
     storage: Path,
     payload: dict[str, Any],
     archive_digest: str,
+    manifest_digest: str,
+    blob_backend: str,
+    gcs_bucket: str | None,
     *,
     allow_missing_stage: bool = False,
 ) -> Path:
-    if set(payload) != {"archive_sha256", "contract", "published", "stage", "state"}:
+    if set(payload) != {
+        "archive_sha256",
+        "blob_backend",
+        "contract",
+        "gcs_bucket",
+        "manifest_sha256",
+        "published",
+        "stage",
+        "state",
+    }:
         raise StorageContractError("restore journal has unexpected fields")
     if payload.get("contract") != CONTRACT_NAME or payload.get("state") not in {
         "complete",
@@ -1065,10 +1172,35 @@ def _validate_restore_journal(
         "publishing",
         "rolled-back",
         "rolling-back",
+        "staging",
     }:
         raise StorageContractError("restore journal has an unknown contract or state")
-    if payload.get("archive_sha256") != archive_digest:
-        raise StorageContractError("restore journal belongs to a different artifact archive")
+    journal_backend = payload.get("blob_backend")
+    journal_bucket = payload.get("gcs_bucket")
+    if (
+        journal_backend not in {"file-store", "gcs"}
+        or (journal_backend == "file-store" and journal_bucket is not None)
+        or (
+            journal_backend == "gcs" and (not isinstance(journal_bucket, str) or not journal_bucket)
+        )
+        or any(
+            not isinstance(digest, str)
+            or len(digest) != 64
+            or any(character not in "0123456789abcdef" for character in digest)
+            for digest in (
+                payload.get("archive_sha256"),
+                payload.get("manifest_sha256"),
+            )
+        )
+    ):
+        raise StorageContractError("restore journal recovery identity is malformed")
+    if (
+        payload.get("archive_sha256") != archive_digest
+        or payload.get("manifest_sha256") != manifest_digest
+        or payload.get("blob_backend") != blob_backend
+        or payload.get("gcs_bucket") != gcs_bucket
+    ):
+        raise StorageContractError("restore journal belongs to a different recovery contract")
     stage_name = payload.get("stage")
     published = payload.get("published")
     if (
@@ -1081,31 +1213,68 @@ def _validate_restore_journal(
         or any(name not in STORAGE_DIRECTORIES for name in published)
     ):
         raise StorageContractError("restore journal is malformed")
+    if payload["state"] == "staging":
+        if published or (storage / RESTORE_PENDING_FILENAME).exists():
+            raise StorageContractError("staging restore journal has publication state")
+        for name in STORAGE_DIRECTORIES:
+            root = storage / name
+            if root.exists() and (not root.is_dir() or _is_redirect(root) or any(root.iterdir())):
+                raise StorageContractError("staging restore target is not empty")
     stage = storage / stage_name
+    unexpected_stages = [
+        candidate for candidate in storage.glob(f"{RESTORE_STAGE_PREFIX}*") if candidate != stage
+    ]
+    if unexpected_stages:
+        raise StorageContractError("restore target contains an unjournaled stage")
     if stage.exists() and (not stage.is_dir() or _is_redirect(stage)):
         raise StorageContractError("restore journal stage is missing or redirected")
-    if not stage.exists() and not allow_missing_stage:
+    if not stage.exists() and payload["state"] != "staging" and not allow_missing_stage:
         raise StorageContractError("restore journal stage is missing or redirected")
     return stage
 
 
-def _pending_restore_payload(archive_digest: str) -> dict[str, str]:
+def _pending_restore_payload(
+    archive_digest: str,
+    manifest_digest: str,
+    blob_backend: str,
+    gcs_bucket: str | None,
+) -> dict[str, str | None]:
     return {
         "archive_sha256": archive_digest,
+        "blob_backend": blob_backend,
         "contract": CONTRACT_NAME,
+        "gcs_bucket": gcs_bucket,
+        "manifest_sha256": manifest_digest,
         "state": "ownership-pending",
     }
 
 
 def _validate_pending_restore_payload(payload: dict[str, Any]) -> None:
-    digest = payload.get("archive_sha256")
+    archive_digest = payload.get("archive_sha256")
+    manifest_digest = payload.get("manifest_sha256")
+    blob_backend = payload.get("blob_backend")
+    gcs_bucket = payload.get("gcs_bucket")
     if (
-        set(payload) != {"archive_sha256", "contract", "state"}
+        set(payload)
+        != {
+            "archive_sha256",
+            "blob_backend",
+            "contract",
+            "gcs_bucket",
+            "manifest_sha256",
+            "state",
+        }
         or payload.get("contract") != CONTRACT_NAME
         or payload.get("state") != "ownership-pending"
-        or not isinstance(digest, str)
-        or len(digest) != 64
-        or any(character not in "0123456789abcdef" for character in digest)
+        or blob_backend not in {"file-store", "gcs"}
+        or (blob_backend == "file-store" and gcs_bucket is not None)
+        or (blob_backend == "gcs" and (not isinstance(gcs_bucket, str) or not gcs_bucket))
+        or any(
+            not isinstance(digest, str)
+            or len(digest) != 64
+            or any(character not in "0123456789abcdef" for character in digest)
+            for digest in (archive_digest, manifest_digest)
+        )
     ):
         raise StorageContractError("restore-pending marker is malformed")
 
@@ -1115,6 +1284,9 @@ def _rollback_restore_publication(
     stage: Path,
     *,
     archive_digest: str,
+    manifest_digest: str,
+    blob_backend: str,
+    gcs_bucket: str | None,
     journal: dict[str, Any],
 ) -> None:
     journal_path = storage / RESTORE_JOURNAL_FILENAME
@@ -1122,7 +1294,12 @@ def _rollback_restore_publication(
     _write_json_atomic(journal_path, journal)
     pending = storage / RESTORE_PENDING_FILENAME
     if pending.exists():
-        if _read_json(pending) != _pending_restore_payload(archive_digest):
+        if _read_json(pending) != _pending_restore_payload(
+            archive_digest,
+            manifest_digest,
+            blob_backend,
+            gcs_bucket,
+        ):
             raise StorageContractError("restore-pending marker does not match the journal")
         pending.unlink()
         _sync_directory(storage)
@@ -1153,17 +1330,26 @@ def _finish_pending_restore_initialization(storage: Path) -> None:
     journal_path = storage / RESTORE_JOURNAL_FILENAME
     if journal_path.exists():
         journal = _read_json(journal_path)
-        digest = (
-            str(pending_payload["archive_sha256"])
-            if pending_payload is not None
-            else str(journal.get("archive_sha256", ""))
-        )
+        archive_digest = journal.get("archive_sha256")
+        manifest_digest = journal.get("manifest_sha256")
+        blob_backend = journal.get("blob_backend")
+        gcs_bucket = journal.get("gcs_bucket")
         stage = _validate_restore_journal(
             storage,
             journal,
-            digest,
+            archive_digest,
+            manifest_digest,
+            blob_backend,
+            gcs_bucket,
             allow_missing_stage=True,
         )
+        if pending_payload is not None and pending_payload != _pending_restore_payload(
+            archive_digest,
+            manifest_digest,
+            blob_backend,
+            gcs_bucket,
+        ):
+            raise StorageContractError("restore-pending marker does not match the journal")
         if journal["state"] not in {"complete", "initialized"}:
             raise StorageContractError("restore journal is not ready for initialization cleanup")
         if journal["state"] == "complete":
@@ -1188,7 +1374,7 @@ def _unlink_and_sync(path: Path) -> None:
     _sync_directory(path.parent)
 
 
-def _verify_restore_bytes(storage: Path, stage: Path, archive: Path) -> None:
+def _verify_restore_bytes(storage: Path, stage: Path, archive: BinaryIO) -> None:
     locations: dict[str, Path] = {}
     actual_names: set[str] = set()
     for name in STORAGE_DIRECTORIES:
@@ -1204,7 +1390,8 @@ def _verify_restore_bytes(storage: Path, stage: Path, archive: Path) -> None:
             suffix = path.relative_to(root)
             actual_names.add(PurePosixPath(name, *suffix.parts).as_posix())
 
-    with tarfile.open(archive, mode="r:gz") as handle:
+    archive.seek(0)
+    with tarfile.open(fileobj=archive, mode="r:gz") as handle:
         members = _validated_archive_members(handle)
         expected_names = {PurePosixPath(member.name).as_posix() for member in members}
         if actual_names != expected_names:
@@ -1232,6 +1419,81 @@ def _verify_restore_bytes(storage: Path, stage: Path, archive: Path) -> None:
 
 
 # ============================================================================
+# Purpose: Rebuild only the partial stage named by durable restore intent.
+# Database/ORM: None.
+# Standards: Reject redirects/special entries; fsync intent before extraction.
+# Blast Radius: One marked, empty recovery target; published roots are excluded.
+# Connections:
+#   - File: Docs/20_COMPOSE_STORAGE_RUNBOOK.md -> crash retry contract.
+#   - File: tests/scripts/test_compose_storage.py -> interruption counterexamples.
+# ============================================================================
+def _discard_journaled_stage(stage: Path, storage: Path) -> None:
+    """Remove only a redirect-free stage named by the durable restore journal."""
+    if not stage.exists():
+        return
+    paths = _walk_without_redirects(stage)
+    for path in reversed(paths[1:]):
+        if path.is_dir():
+            path.rmdir()
+        elif path.is_file():
+            path.unlink()
+        else:
+            raise StorageContractError(f"restore stage contains a special entry: {path}")
+    _remove_empty_stage(stage, storage)
+
+
+def _stage_verified_restore(
+    storage: Path,
+    stage: Path,
+    archive: BinaryIO,
+    journal: dict[str, Any],
+) -> None:
+    """Restart journaled staging from zero, then publish its durable state."""
+    journal_path = storage / RESTORE_JOURNAL_FILENAME
+    if _sha256_stream(archive) != journal["archive_sha256"]:
+        raise StorageContractError("verified artifact archive changed before staging")
+    _discard_journaled_stage(stage, storage)
+    stage.mkdir(mode=0o700)
+    _sync_directory(storage)
+    archive.seek(0)
+    with tarfile.open(fileobj=archive, mode="r:gz") as handle:
+        members = _validated_archive_members(handle)
+        for member in members:
+            destination = stage.joinpath(*PurePosixPath(member.name).parts)
+            if member.isdir():
+                destination.mkdir(mode=0o700, parents=True, exist_ok=True)
+                continue
+            destination.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            source = handle.extractfile(member)
+            if source is None:
+                raise StorageContractError(f"archive file has no payload: {member.name}")
+            descriptor = os.open(
+                destination,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                0o600,
+            )
+            with source, os.fdopen(descriptor, "wb") as output:
+                shutil.copyfileobj(source, output, length=CHUNK_SIZE)
+                output.flush()
+                os.fsync(output.fileno())
+    for path in reversed(_walk_without_redirects(stage)):
+        if path.is_dir():
+            _sync_directory(path)
+    for name in STORAGE_DIRECTORIES:
+        destination = storage / name
+        if destination.exists():
+            if not destination.is_dir() or _is_redirect(destination) or any(destination.iterdir()):
+                raise StorageContractError(f"restore target is not empty: {destination}")
+            destination.rmdir()
+            _sync_directory(storage)
+    _verify_restore_bytes(storage, stage, archive)
+    if _sha256_stream(archive) != journal["archive_sha256"]:
+        raise StorageContractError("verified artifact archive changed during staging")
+    journal["state"] = "publishing"
+    _write_json_atomic(journal_path, journal)
+
+
+# ============================================================================
 # Purpose: Restore verified artifact/blob bytes into an empty prepared target.
 # Database/ORM: None; roles and database restore remain explicit prior steps.
 # Standards: Verify complete bundle, journal publication, and roll back on error.
@@ -1245,22 +1507,62 @@ def restore_artifact_archive(
     *,
     archive: Path,
     manifest: Path,
+    blob_backend: str = "file-store",
+    expected_gcs_bucket: str | None = None,
     repository_root: Path | None = None,
 ) -> None:
     """Restore one verified archive without overwriting existing storage bytes."""
+    if blob_backend not in {"file-store", "gcs"}:
+        raise StorageContractError(f"unknown backup blob backend: {blob_backend}")
+    if blob_backend == "gcs" and expected_gcs_bucket is None:
+        raise StorageContractError("GCS restore requires an explicit expected bucket")
+    gcs_bucket = _configured_gcs_bucket(expected_gcs_bucket) if blob_backend == "gcs" else None
     repository = (repository_root or _repository_root()).resolve(strict=False)
     storage = check_host_storage(raw_path, repository_root=repository)
-    verified = verify_bundle_manifest(
-        manifest,
-        required_profile=COMPOSE_RECOVERY_PROFILE,
-        required_blob_backend=os.environ.get("UMS_BLOB_BACKEND", "file-store"),
-    )
+    resolved_manifest = manifest.expanduser().resolve(strict=True)
     resolved_archive = archive.expanduser().resolve(strict=True)
-    if verified.get("ums-app-data.tgz") != resolved_archive:
-        raise StorageContractError(
-            "artifact archive must be the verified ums-app-data.tgz bundle member"
+    if _is_redirect(resolved_archive):
+        raise StorageContractError("artifact archive may not be a link")
+    manifest_digests: list[str] = []
+    verified_digests: dict[str, str] = {}
+    with resolved_archive.open("rb") as archive_handle:
+        verified = verify_bundle_manifest(
+            resolved_manifest,
+            required_profile=COMPOSE_RECOVERY_PROFILE,
+            required_blob_backend=blob_backend,
+            expected_gcs_bucket=gcs_bucket,
+            _pinned_files={"ums-app-data.tgz": archive_handle},
+            _manifest_digest_out=manifest_digests,
+            _verified_digests_out=verified_digests,
         )
-    archive_digest = _sha256(resolved_archive)
+        if verified.get("ums-app-data.tgz") != resolved_archive:
+            raise StorageContractError(
+                "artifact archive must be the verified ums-app-data.tgz bundle member"
+            )
+        if len(manifest_digests) != 1 or "ums-app-data.tgz" not in verified_digests:
+            raise StorageContractError("recovery bundle verification did not pin its inputs")
+        if _sha256_stream(archive_handle) != verified_digests["ums-app-data.tgz"]:
+            raise StorageContractError("verified artifact archive changed after verification")
+        _restore_artifact_archive_from_stream(
+            storage,
+            archive_handle,
+            archive_digest=verified_digests["ums-app-data.tgz"],
+            manifest_digest=manifest_digests[0],
+            blob_backend=blob_backend,
+            gcs_bucket=gcs_bucket,
+        )
+
+
+def _restore_artifact_archive_from_stream(
+    storage: Path,
+    archive: BinaryIO,
+    *,
+    archive_digest: str,
+    manifest_digest: str,
+    blob_backend: str,
+    gcs_bucket: str | None,
+) -> None:
+    """Publish bytes from the same open archive stream verified by the manifest."""
     journal_path = storage / RESTORE_JOURNAL_FILENAME
     if journal_path.exists():
         journal = _read_json(journal_path)
@@ -1268,17 +1570,37 @@ def restore_artifact_archive(
             storage,
             journal,
             archive_digest,
+            manifest_digest,
+            blob_backend,
+            gcs_bucket,
             allow_missing_stage=journal.get("state") == "initialized",
         )
+        if journal["state"] == "staging":
+            try:
+                # FIX: The journal is durable before stage creation. A retry
+                # discards only its bound partial tree and re-extracts exactly.
+                _stage_verified_restore(storage, stage, archive, journal)
+            except Exception as exc:
+                if isinstance(exc, StorageContractError):
+                    raise
+                raise StorageContractError("artifact restore staging failed") from exc
+        else:
+            _verify_restore_bytes(storage, stage, archive)
+            if _sha256_stream(archive) != archive_digest:
+                raise StorageContractError("verified artifact archive changed during retry")
         if journal["state"] == "initialized":
             marker = _read_json(storage / MARKER_FILENAME)
             if _read_json(storage / READY_FILENAME) != _ready_payload(marker):
                 raise StorageContractError("initialized restore lacks its readiness marker")
             return
-        _verify_restore_bytes(storage, stage, resolved_archive)
         if journal["state"] == "complete":
             pending = storage / RESTORE_PENDING_FILENAME
-            if _read_json(pending) != _pending_restore_payload(archive_digest):
+            if _read_json(pending) != _pending_restore_payload(
+                archive_digest,
+                manifest_digest,
+                blob_backend,
+                gcs_bucket,
+            ):
                 raise StorageContractError("completed restore lacks its matching pending marker")
             return
         if journal["state"] == "rolling-back":
@@ -1286,6 +1608,9 @@ def restore_artifact_archive(
                 storage,
                 stage,
                 archive_digest=archive_digest,
+                manifest_digest=manifest_digest,
+                blob_backend=blob_backend,
+                gcs_bucket=gcs_bucket,
                 journal=journal,
             )
         if journal["state"] == "rolled-back":
@@ -1294,42 +1619,19 @@ def restore_artifact_archive(
     else:
         _ensure_empty_restore_target(storage)
         stage = storage / f"{RESTORE_STAGE_PREFIX}{secrets.token_hex(8)}"
-        stage.mkdir(mode=0o700)
+        journal = _restore_journal_payload(
+            archive_digest,
+            manifest_digest,
+            blob_backend,
+            gcs_bucket,
+            stage.name,
+        )
+        # FIX: A stage created before its journal could survive a process or
+        # host crash but had no safe identity for retry or cleanup.
+        _write_json_exclusive(journal_path, journal)
         try:
-            with tarfile.open(resolved_archive, mode="r:gz") as handle:
-                members = _validated_archive_members(handle)
-                for member in members:
-                    destination = stage.joinpath(*PurePosixPath(member.name).parts)
-                    if member.isdir():
-                        destination.mkdir(mode=0o700, parents=True, exist_ok=True)
-                        continue
-                    destination.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-                    source = handle.extractfile(member)
-                    if source is None:
-                        raise StorageContractError(f"archive file has no payload: {member.name}")
-                    descriptor = os.open(
-                        destination,
-                        os.O_WRONLY | os.O_CREAT | os.O_EXCL,
-                        0o600,
-                    )
-                    with source, os.fdopen(descriptor, "wb") as output:
-                        shutil.copyfileobj(source, output, length=CHUNK_SIZE)
-                        output.flush()
-                        os.fsync(output.fileno())
-            for path in reversed(_walk_without_redirects(stage)):
-                if path.is_dir():
-                    _sync_directory(path)
-            for name in STORAGE_DIRECTORIES:
-                destination = storage / name
-                if destination.exists():
-                    destination.rmdir()
-                    _sync_directory(storage)
-            _verify_restore_bytes(storage, stage, resolved_archive)
-            journal = _restore_journal_payload(archive_digest, stage.name)
-            _write_json_exclusive(journal_path, journal)
+            _stage_verified_restore(storage, stage, archive, journal)
         except Exception as exc:
-            if not journal_path.exists():
-                shutil.rmtree(stage, ignore_errors=True)
             if isinstance(exc, StorageContractError):
                 raise
             raise StorageContractError("artifact restore staging failed") from exc
@@ -1353,10 +1655,17 @@ def restore_artifact_archive(
                 _write_json_atomic(journal_path, journal)
 
         pending = storage / RESTORE_PENDING_FILENAME
-        pending_payload = _pending_restore_payload(archive_digest)
+        pending_payload = _pending_restore_payload(
+            archive_digest,
+            manifest_digest,
+            blob_backend,
+            gcs_bucket,
+        )
         if pending.exists():
             if _read_json(pending) != pending_payload:
-                raise StorageContractError("restore-pending marker does not match the archive")
+                raise StorageContractError(
+                    "restore-pending marker does not match the recovery contract"
+                )
         else:
             _write_json_exclusive(pending, pending_payload)
         journal["state"] = "complete"
@@ -1367,6 +1676,9 @@ def restore_artifact_archive(
                 storage,
                 stage,
                 archive_digest=archive_digest,
+                manifest_digest=manifest_digest,
+                blob_backend=blob_backend,
+                gcs_bucket=gcs_bucket,
                 journal=journal,
             )
         except Exception as rollback_exc:
@@ -1456,6 +1768,16 @@ def _build_parser() -> argparse.ArgumentParser:
     restore.add_argument("--path", required=True)
     restore.add_argument("--archive", required=True, type=Path)
     restore.add_argument("--manifest", required=True, type=Path)
+    restore.add_argument(
+        "--blob-backend",
+        choices=("file-store", "gcs"),
+        default=os.environ.get("UMS_BLOB_BACKEND", "file-store"),
+    )
+    restore.add_argument(
+        "--gcs-bucket",
+        default=os.environ.get("UMS_GCS_BUCKET", DEFAULT_GCS_BUCKET),
+        help="expected snapshot bucket when --blob-backend=gcs",
+    )
     return parser
 
 
@@ -1530,6 +1852,8 @@ def main(argv: list[str] | None = None) -> int:
                 args.path,
                 archive=args.archive,
                 manifest=args.manifest,
+                blob_backend=args.blob_backend,
+                expected_gcs_bucket=args.gcs_bucket,
             )
         else:  # pragma: no cover - argparse enforces the command choices.
             raise AssertionError(f"unknown command: {args.command}")

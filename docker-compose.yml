@@ -271,6 +271,12 @@ x-app-storage-env: &app-storage-env
   UMS_APP_DATA_HOST_CONTRACT: ${UMS_APP_DATA_HOST_CONFIGURED-}
   UMS_APP_DATA_HOST_CANONICAL_CONTRACT: ${UMS_APP_DATA_HOST_CANONICAL-}
 
+# Apply readiness admission only to Compose services that mount the durable
+# storage bind. The image-wide entrypoint remains portable for mount-free
+# `docker run` and non-Compose orchestrators.
+x-app-storage-entrypoint: &app-storage-entrypoint
+  ["/usr/bin/tini", "--", "python", "/srv/app/scripts/compose_storage.py", "container-exec", "--path", "/var/lib/ums", "--"]
+
 # Keep every service built from the application image on one runtime uid. The
 # init service does not trust this text value at run time; it resolves the
 # image's actual `app` account, so a stale same-tag image fails safely instead
@@ -410,6 +416,10 @@ services:
         condition: service_completed_successfully
     environment:
       <<: [*app-env, *app-storage-env]
+    entrypoint: *app-storage-entrypoint
+    # Compose ignores the image CMD when a service entrypoint is set, so keep
+    # the production command explicit beside the storage admission boundary.
+    command: ["python", "-m", "uvicorn", "ums_smart_revenue.app:app", "--host", "0.0.0.0", "--port", "8000", "--proxy-headers"]
     ports:
       - "127.0.0.1:${UMS_APP_PORT:-8000}:8000"
     volumes:
@@ -471,6 +481,7 @@ services:
         condition: service_completed_successfully
     environment:
       <<: [*app-env, *app-storage-env]
+    entrypoint: *app-storage-entrypoint
     ports:
       - "127.0.0.1:${UMS_APP_DEV_PORT:-8001}:8000"
     volumes:
