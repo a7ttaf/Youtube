@@ -649,37 +649,6 @@ const Sidebar = ({
 
 /* ------------------------------------------------------------------ topbar */
 
-// ============================================================================
-// Purpose: Page header — the active view's title and subtitle. What it NO
-//   LONGER renders is the point of this component: an
-//   "Operational status" cue strip (Source "A Official", Bank gap "$31.4K",
-//   Export blockers "2", Trace "SQL scoped") whose four values were literals,
-//   and controls that were wired to nothing — Scope, Currency, Month, Refresh,
-//   and Create Export. A control that does not act, and a status that is not
-//   read from anywhere, both misreport the system; the fix for each is deletion,
-//   not a fabricated backend call. The real month and scope selectors remain
-//   inside their data-owning views, where their state drives the corresponding
-//   authorized reads.
-// FIX: Removed the shell-level Month selector; its value never reached the
-//   CommandView request and could display a month different from the data.
-// Database/ORM: None (frontend) — renders props only.
-// Standards: The app is SINGLE-CURRENCY by decision, so the chrome carries no
-//   currency control at all: not wired, not disabled, ABSENT. Re-adding one
-//   would need the currency program (rate source, per-month FX, source-row
-//   keying) that decision is waiting on, and a picker offering USD/EGP/AED with
-//   nothing behind it is the exact failure this removes. The shell also owns no
-//   month or scope state, so it cannot render a selector that looks authoritative
-//   while leaving the view request unchanged.
-// Blast Radius: Presentation only. Removing these chrome controls removes NO
-//   capability: real view-owned controls and the export request flow remain
-//   permission-gated by their owning views.
-// Connections:
-//   - File: frontend/src/components/srcc/views/ExportsView.tsx -> the real,
-//     permission-gated export request surface (with its own wired month +
-//     currency fields, which this deletion does not touch).
-//   - File: frontend/src/components/srcc/views/CommandView.tsx -> the real,
-//     controlled month/scope selectors and authorized net-revenue reads.
-// ============================================================================
 /** Page header: the routed view's title and subtitle only. */
 const Topbar = ({ title, subtitle }: { title: string; subtitle: string }) => {
   return (
