@@ -112,123 +112,21 @@ Run these from the repository root on the exact PR head being reviewed:
 git diff --check origin/main...HEAD
 git diff --check
 $files = git diff --name-only origin/main...HEAD -- '*.md'
-$isEscaped = {
-  param([string] $text, [int] $index)
-  $slashes = 0
-  for ($i = $index - 1; $i -ge 0 -and $text[$i] -eq '\'; $i--) { $slashes++ }
-  ($slashes % 2) -eq 1
-}
-$destinations = {
-  param([string] $line)
-  $out = @()
-  for ($i = 0; $i -lt $line.Length - 2; $i++) {
-    if ($line[$i] -ne ']' -or $line[$i + 1] -ne '(' -or (& $isEscaped $line $i)) {
-      continue
-    }
-    $j = $i + 2
-    while ($j -lt $line.Length -and [char]::IsWhiteSpace($line[$j])) { $j++ }
-    if ($j -ge $line.Length) { continue }
-    if ($line[$j] -eq '<') {
-      $end = $line.IndexOf('>', $j + 1)
-      if ($end -gt $j) { $out += $line.Substring($j + 1, $end - $j - 1) }
-      continue
-    }
-    $start = $j
-    $depth = 0
-    while ($j -lt $line.Length) {
-      if ((& $isEscaped $line $j)) { $j++; continue }
-      if ($line[$j] -eq '(') { $depth++; $j++; continue }
-      if ($line[$j] -eq ')') {
-        if ($depth -eq 0) { break }
-        $depth--; $j++; continue
-      }
-      if ([char]::IsWhiteSpace($line[$j]) -and $depth -eq 0) { break }
-      $j++
-    }
-    if ($j -gt $start) { $out += $line.Substring($start, $j - $start) }
-  }
-  $out
-}
-$missing = @()
-foreach ($f in $files) {
-  $dir = Split-Path -Parent $f
-  if (-not $dir) { $dir = '.' }
-  foreach ($line in Get-Content -LiteralPath $f) {
-    foreach ($target in (& $destinations $line)) {
-      if ($target -match '^(https?:|mailto:|#)' -or $target -eq '') { continue }
-      $pathPart = ($target -split '#')[0]
-      if ($pathPart -eq '') { continue }
-      $candidate = Join-Path $dir ([uri]::UnescapeDataString($pathPart))
-      if (-not (Test-Path -LiteralPath $candidate)) { $missing += "${f} -> $target" }
-    }
-  }
-}
-if ($missing.Count) { $missing; exit 1 }
-$splitCells = {
-  param([string] $line)
-  $cells = @()
-  $start = 0
-  for ($i = 0; $i -lt $line.Length; $i++) {
-    if ($line[$i] -eq '|' -and -not (& $isEscaped $line $i)) {
-      $cells += $line.Substring($start, $i - $start)
-      $start = $i + 1
-    }
-  }
-  $cells += $line.Substring($start)
-  if ($cells.Count -gt 1 -and $cells[0].Trim() -eq '') { $cells = $cells[1..($cells.Count - 1)] }
-  if ($cells.Count -gt 1 -and $cells[-1].Trim() -eq '') { $cells = $cells[0..($cells.Count - 2)] }
-  $cells
-}
-$cellCount = {
-  param([string] $line)
-  (& $splitCells $line).Count
-}
-$isSeparatorRow = {
-  param([string] $line)
-  if ($line -notmatch '\|') { return $false }
-  $cells = & $splitCells $line
-  if ($cells.Count -eq 0) { return $false }
-  foreach ($cell in $cells) {
-    if ($cell.Trim() -notmatch '^:?-{3,}:?$') { return $false }
-  }
-  $true
-}
-$tableErrors = @()
-foreach ($f in $files) {
-  $rows = Get-Content -LiteralPath $f
-  $inFence = $false
-  for ($i = 0; $i -lt $rows.Count; $i++) {
-    $line = $rows[$i]
-    if ($line.TrimStart() -match '^(```|~~~)') {
-      $inFence = -not $inFence
-      continue
-    }
-    if ($inFence -or $i + 1 -ge $rows.Count) { continue }
-    $header = $line.Trim()
-    $separator = $rows[$i + 1].Trim()
-    if ($header -notmatch '\|' -or -not (& $isSeparatorRow $separator)) { continue }
-    $expected = & $cellCount $header
-    $separatorCols = & $cellCount $separator
-    if ($separatorCols -ne $expected) {
-      $lineNo = $i + 2
-      $tableErrors += "${f}:${lineNo} row cols $separatorCols expected $expected"
-    }
-    $i += 2
-    while ($i -lt $rows.Count) {
-      $row = $rows[$i]
-      if ($row.TrimStart() -match '^(```|~~~)' -or $row.Trim() -notmatch '\|') {
-        $i--
-        break
-      }
-      $cols = & $cellCount $row.Trim()
-      if ($cols -ne $expected) {
-        $lineNo = $i + 1
-        $tableErrors += "${f}:${lineNo} row cols $cols expected $expected"
-      }
-      $i++
-    }
-  }
-}
-if ($tableErrors.Count) { $tableErrors; exit 1 }
-rg -n '2026-08-31|#221 and #225 are open/BLOCKED|#222.?#224 are open/BEHIND|No migration/backfill required|Final PR #227 SHA is supplied|no environment fallback and no default rate' Docs/01_IMPLEMENTATION_PLAN.md Docs/15_DELIVERY_BACKLOG.md Docs/20_DEPLOYMENT_READINESS_AUDIT.md Docs/21_BETA_IMPLEMENTATION_PLAN.md Docs/23_ADMIN_ACCESS_AND_CONFIG_PLAN.md Docs/24_US_WITHHOLDING_AND_US_REVENUE_PLAN.md Docs/25_PROGRAM_DEPENDENCY_GRAPH.md
+$files
+$docs = @(
+  'Docs/01_IMPLEMENTATION_PLAN.md',
+  'Docs/15_DELIVERY_BACKLOG.md',
+  'Docs/20_DEPLOYMENT_READINESS_AUDIT.md',
+  'Docs/21_BETA_IMPLEMENTATION_PLAN.md',
+  'Docs/23_ADMIN_ACCESS_AND_CONFIG_PLAN.md',
+  'Docs/24_US_WITHHOLDING_AND_US_REVENUE_PLAN.md',
+  'Docs/25_PROGRAM_DEPENDENCY_GRAPH.md'
+)
+rg -n '2026-08-31|#221 and #225 are open/BLOCKED|#222.?#224 are open/BEHIND|No migration/backfill required|Final PR #227 SHA is supplied|no environment fallback and no default rate|global `roles.assign` plus either active `connector_admin` or `super_owner`' $docs
+$conflicts = rg -n '^(<<<<<<<|=======|>>>>>>>)' $docs
+if ($LASTEXITCODE -eq 0) { $conflicts; exit 1 }
+if ($LASTEXITCODE -gt 1) { exit $LASTEXITCODE }
+$claude = rg -n 'Generated with \[Claude Code\]\(https://claude.com/claude-code\)' $docs
+if ($LASTEXITCODE -eq 0) { $claude; exit 1 }
+if ($LASTEXITCODE -gt 1) { exit $LASTEXITCODE }
 ```

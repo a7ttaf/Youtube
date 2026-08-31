@@ -315,8 +315,8 @@ Creates the first operator user, prints the stored UUID/email, assigns existing
 creates an audited direct `connectors.run_jobs` grant at
 `connector:manual-upload`. It must never grant that connector permission globally.
 That direct grant is issued by the local bootstrap path while it is still running with
-setup authority (`super_owner` or connector-admin-equivalent permission), never by the
-new finance principal granting authority to itself.
+setup authority: global `roles.assign` plus either active `connector_admin` or
+`super_owner`, never by the new finance principal granting authority to itself.
 The returned identity is an output contract: P0-e installs it as
 `VITE_DEV_GATEWAY_USER_ID` / `VITE_DEV_GATEWAY_USER_EMAIL` before database authz or
 any real-revenue write is attempted.
