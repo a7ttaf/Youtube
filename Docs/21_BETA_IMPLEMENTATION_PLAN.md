@@ -209,9 +209,18 @@ The beta import runner and API boundary must fail closed as one contract:
    so a retry replaces the same `MANUAL_UPLOAD` facts instead of duplicating them. A
    changed report id does not create a second row and must be treated as a provenance
    mismatch during verification, not as a new batch identity.
-4. On interruption, rerun the complete manifest. A successful single 201 is only a
+4. A corrected manifest that removes a channel needs an explicit open-month
+   batch-replacement cleanup; row-by-row upsert alone cannot converge because no public
+   delete path removes stale `MANUAL_UPLOAD` facts outside the new manifest. The runner
+   must hold one tenant/month/source lock, require the same finance/manual-import
+   authority and non-blank reason, refuse locked months, remove or supersede only prior
+   manual-upload facts not present in the replacement manifest, write audited provenance
+   for every removed/superseded fact, and make the replacement idempotent by manifest
+   hash/report id. A retry after interruption repeats the same replacement and leaves
+   one exact active set; a reused idempotency key with different content fails closed.
+5. On interruption, rerun the complete manifest. A successful single 201 is only a
    row smoke, never a batch-success signal.
-5. After the loop, take the complete active roster from the current, unpaginated
+6. After the loop, take the complete active roster from the current, unpaginated
    `GET /channels` response and compare its `revenue_required` set with the manifest.
    Then read `GET /revenue/channels/{channel_id}/months/{month}/facts` for **every active
    channel**, not only a sample or the manifest members. Require the set of active
@@ -225,6 +234,8 @@ The beta import runner and API boundary must fail closed as one contract:
 **Acceptance criteria (P0.2a):**
 - [ ] Missing/mixed/EGP source metadata turns the preflight RED with zero facts written
 - [ ] Kill-after-N test leaves a partial month; rerun converges to the exact intended set without duplicates
+- [ ] Reduced-manifest test starts with an extra stale manual fact; audited open-month
+  replacement removes/supersedes that extra and retry remains idempotent
 - [ ] Post-import comparison covers the complete active roster, proves every active
   `revenue_required` channel is in the manifest, and rejects stale manual facts outside it
 - [ ] The runner reports complete only when the exact set/amount/report-id/control-total
@@ -303,6 +314,9 @@ Creates the first operator user, prints the stored UUID/email, assigns existing
 `finance_admin` at global scope, and — only with an explicit manual-import flag —
 creates an audited direct `connectors.run_jobs` grant at
 `connector:manual-upload`. It must never grant that connector permission globally.
+That direct grant is issued by the local bootstrap path while it is still running with
+setup authority (`super_owner` or connector-admin-equivalent permission), never by the
+new finance principal granting authority to itself.
 The returned identity is an output contract: P0-e installs it as
 `VITE_DEV_GATEWAY_USER_ID` / `VITE_DEV_GATEWAY_USER_EMAIL` before database authz or
 any real-revenue write is attempted.

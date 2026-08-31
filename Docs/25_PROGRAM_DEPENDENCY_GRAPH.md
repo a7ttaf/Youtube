@@ -10,7 +10,7 @@ PR #210 is historical: it merged on 2026-08-29 into the non-main
 ## DAG (execution order)
 
 ```text
-[#220 docs amend]  ← you are here (16 current review threads pending remediated push/review)
+[#220 docs amend]  ← re-check review threads and analyzer statuses after every push
         │
         ▼
 [P0-a compose/storage] ──► `./data/ums:/var/lib/ums` on app/app-dev; anchored `/data/` gitignore + Docker-context ignore before writes; absolute artifact/blob env targets; PG18; Redis; grace; log rotate; storage smokes
@@ -27,12 +27,14 @@ PR #210 is historical: it merged on 2026-08-29 into the non-main
         ▼
 [P0-e dev gateway/docs] ──► Vite proxy (/users, /org-units); .env.example; runbook
         │
-        ├──► [manual-import gate] — source-verified USD manifest; resumable/idempotent loop; complete active roster + exact manual-fact set/report id/totals compared before complete
+        ├──► [manual-import gate] — source-verified USD manifest; audited open-month replacement for reduced manifests; resumable/idempotent loop; complete active roster + exact manual-fact set/report id/totals compared before complete
         │
         ├──► [ci-fast + ci-database + ci-frontend] proposed required gates (see status note)
         │
         ▼
-[P1 band restack: #211–#217] ──► rolling months, de-mock, error boundary, alias cleanup
+[#211 merged] ──► rolling month window on `main`
+        │
+        ├──► [open P1 cleanup: #212–#217] — de-mock, error boundary, confidence/alias/currency fixes; validate and push each PR independently
         │
         ├──► [A1 Admin UI + A2 matrix] (Docs/23) — after P0-e + session capabilities
         │
@@ -72,9 +74,9 @@ PR #210 is historical: it merged on 2026-08-29 into the non-main
 
 | Gate | Blocks |
 | --- | --- |
-| All current #220 review threads resolved | Satisfied at the 2026-08-31 post-push repoll for the cleanup head; re-check after any later push |
+| All current #220 review threads resolved | Re-check after the final push; the DAG status above must be updated from the same repoll |
 | P0-a…P0-e merged to `main` | A1, beta runbook, living Docs/21 status |
-| USD manifest preflight + resumable import + complete-roster/exact-fact-set comparison green | Any real manual revenue import / claim that a month is complete |
+| USD manifest preflight + audited replacement + resumable import + complete-roster/exact-fact-set comparison green | Any real manual revenue import / claim that a month is complete |
 | Proposed `ci-fast` + `ci-database` + `ci-frontend` gates in #226 | Future review-readiness gate; not active on current `main` |
 | Final reviewed PR #227 SHA supplied, exact contract verified, then merged | U2 country ingest; intermediate/open heads are not shipped evidence |
 | D-U1 AdSense rate confirmed + config row written | U3 estimate surfaces |
@@ -101,3 +103,19 @@ See also: [`20_DEPLOYMENT_READINESS_AUDIT.md`](20_DEPLOYMENT_READINESS_AUDIT.md)
 [`21_BETA_IMPLEMENTATION_PLAN.md`](21_BETA_IMPLEMENTATION_PLAN.md),
 [`23_ADMIN_ACCESS_AND_CONFIG_PLAN.md`](23_ADMIN_ACCESS_AND_CONFIG_PLAN.md),
 [`24_US_WITHHOLDING_AND_US_REVENUE_PLAN.md`](24_US_WITHHOLDING_AND_US_REVENUE_PLAN.md).
+
+## Recertification commands
+
+Run these from the repository root on the exact PR head being reviewed:
+
+```powershell
+git diff --check origin/main...HEAD
+git diff --check
+$files = git diff --name-only origin/main...HEAD
+foreach ($f in $files) { if ($f -like 'Docs/*.md') { Select-String -LiteralPath $f -Pattern '\[[^\]]+\]\(([^)]+)\)' -AllMatches } }
+rg -n '2026-08-31|#221 and #225 are open/BLOCKED|#222.?#224 are open/BEHIND|No migration/backfill required|Final PR #227 SHA is supplied|no environment fallback and no default rate' Docs/01_IMPLEMENTATION_PLAN.md Docs/15_DELIVERY_BACKLOG.md Docs/20_DEPLOYMENT_READINESS_AUDIT.md Docs/21_BETA_IMPLEMENTATION_PLAN.md Docs/23_ADMIN_ACCESS_AND_CONFIG_PLAN.md Docs/24_US_WITHHOLDING_AND_US_REVENUE_PLAN.md Docs/25_PROGRAM_DEPENDENCY_GRAPH.md
+```
+
+The link check must resolve each non-URL Markdown link target relative to the source
+file. The table check must count unescaped `|` separators for each contiguous Markdown
+table and fail on mixed column counts.
