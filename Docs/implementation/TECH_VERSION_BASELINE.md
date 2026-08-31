@@ -33,9 +33,9 @@ For this project:
 | Alembic | `1.19.1` |
 | psycopg | `3.3.4` |
 | Celery | `5.6.3` |
-| Redis Python client | `7.4.0` |
+| Redis Python client | `8.1.0` |
 | openpyxl | `3.1.5` |
-| ReportLab | `4.5.1` |
+| ReportLab | `5.0.1` |
 | python-pptx | `1.0.2` |
 | pytest | `9.1.1` |
 | httpx2 | `2.12.0` |
