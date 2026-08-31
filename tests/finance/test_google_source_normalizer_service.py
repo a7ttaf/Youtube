@@ -35,6 +35,7 @@ ACTOR_USER_ID = "00000000-0000-0000-0000-000000010001"
 
 @pytest.fixture
 def session() -> Session:
+    """Provide an isolated SQLite session with every required schema."""
     engine = create_engine("sqlite+pysqlite:///:memory:")
     TenantBase.metadata.create_all(engine)
     OrgBase.metadata.create_all(engine)
@@ -60,6 +61,7 @@ def session() -> Session:
 # Blast Radius: Test scope only.
 # ============================================================================
 def _seed_tenant_and_currencies(session: Session, tenant_id: UUID) -> None:
+    """Seed one tenant and the USD/EGP reference currencies."""
     # FIX: is_supported=True requires activated_at to be non-null
     # (CHECK ck_currencies_supported_activated in source_models.CurrencyORM);
     # the plan's literal snippet omitted activated_at and would fail flush.
@@ -89,6 +91,7 @@ def _seed_tenant_and_currencies(session: Session, tenant_id: UUID) -> None:
 
 
 def _seed_active_channel(session: Session, tenant_id: UUID, channel_id: str) -> None:
+    """Seed one active in-CMS channel eligible for revenue projection."""
     # FIX: YouTubeChannelORM.id has server_default=gen_random_uuid() (Postgres
     # only); SQLite raises "unknown function: gen_random_uuid()" on flush.
     # Pass an explicit Python-side UUID so the test stays sqlite-portable,
@@ -116,6 +119,7 @@ def _yt_reporting_row(
     metric_key: str = "estimatedRevenue",
     value_kind: str = "estimated",
 ) -> ParsedSourceRow:
+    """Build a YouTube Reporting row for one channel and month."""
     return ParsedSourceRow(
         source_system="youtube_reporting",
         source_row_key=(source_row_key_seed * 64)[:64],
@@ -136,12 +140,14 @@ def _yt_reporting_row(
 
 
 def test_normalize_month_raises_validation_error_for_invalid_month_format(session):
+    """Reject invalid month strings at the service boundary."""
     normalizer = GoogleSourceNormalizer(session)
     with pytest.raises(RevenueFactValidationError, match="month must use YYYY-MM"):
         normalizer.normalize_month(month="2026-13", actor_user_id=ACTOR_USER_ID)
 
 
 def test_normalize_month_channel_ids_filter_drops_out_of_scope_rows_silently(session):
+    """Drop rows outside an explicit channel scope without skip telemetry."""
     tenant_id = uuid4()
     _seed_tenant_and_currencies(session, tenant_id)
     _seed_active_channel(session, tenant_id, "UC_test_in")
@@ -179,6 +185,7 @@ def test_normalize_month_channel_ids_filter_drops_out_of_scope_rows_silently(ses
 
 
 def test_normalize_month_skips_missing_channel_id_rows(session):
+    """Audit source rows that lack a channel identifier as skipped."""
     tenant_id = uuid4()
     _seed_tenant_and_currencies(session, tenant_id)
     repo = SqlAlchemyGoogleRevenueSourceRowRepository(session)
@@ -220,6 +227,7 @@ def test_normalize_month_skips_missing_channel_id_rows(session):
 
 
 def test_normalize_month_skips_unknown_channel_rows(session):
+    """Skip unregistered and inactive channels as unknown."""
     tenant_id = uuid4()
     _seed_tenant_and_currencies(session, tenant_id)
     # Sub-arrange A: channel does not exist in registry at all.
@@ -258,6 +266,7 @@ def test_normalize_month_skips_unknown_channel_rows(session):
 
 
 def test_normalize_month_skips_unsupported_value_kind_rows(session):
+    """Skip tax, deduction, and adjustment source rows."""
     tenant_id = uuid4()
     _seed_tenant_and_currencies(session, tenant_id)
     _seed_active_channel(session, tenant_id, "UC_test_tax")
@@ -298,6 +307,7 @@ def test_normalize_month_skips_unsupported_value_kind_rows(session):
 
 
 def test_normalize_month_skips_non_usd_canonical_with_NON_USD_CURRENCY(session):  # noqa: N802
+    """Skip a non-USD canonical row with the currency audit reason."""
     tenant_id = uuid4()
     _seed_tenant_and_currencies(session, tenant_id)
     _seed_active_channel(session, tenant_id, "UC_test_fx")
@@ -402,6 +412,7 @@ def _adsense_row(
     amount: str = "100.000000",
     currency: str = "USD",
 ) -> ParsedSourceRow:
+    """Build a channel-scoped AdSense row for service-flow tests."""
     # AdSense parser sets youtube_channel_id=None natively. For service tests
     # exercising channel-scoped AdSense canonical selection, build
     # ParsedSourceRow inline with a synthesized channel_id.
@@ -425,6 +436,7 @@ def _adsense_row(
 
 
 def test_normalize_month_skips_no_canonical_row_with_NO_CANONICAL_ROW(session):  # noqa: N802
+    """Audit an AdSense bucket that has no preferred metric."""
     # AdSense bucket with only UNPAID_AMOUNT: no preferred metric matches.
     tenant_id = uuid4()
     _seed_tenant_and_currencies(session, tenant_id)
@@ -452,6 +464,7 @@ def test_normalize_month_skips_no_canonical_row_with_NO_CANONICAL_ROW(session): 
 
 
 def test_normalize_month_marks_unselected_usd_rows_as_NON_CANONICAL_METRIC(session):  # noqa: N802
+    """Audit eligible USD rows that lose canonical selection."""
     # AdSense bucket with both PAID_AMOUNT and ESTIMATED_EARNINGS in USD:
     # PAID_AMOUNT wins canonical; ESTIMATED_EARNINGS is marked NON_CANONICAL_METRIC.
     tenant_id = uuid4()
@@ -487,6 +500,7 @@ def test_normalize_month_marks_unselected_usd_rows_as_NON_CANONICAL_METRIC(sessi
 
 
 def test_normalize_month_creates_revenue_facts_for_eligible_USD_rows(session):  # noqa: N802
+    """Create a revenue fact from an eligible canonical USD row."""
     tenant_id = uuid4()
     _seed_tenant_and_currencies(session, tenant_id)
     _seed_active_channel(session, tenant_id, "UC_test_create")
@@ -519,6 +533,7 @@ OTHER_ACTOR_USER_ID = "00000000-0000-0000-0000-000000010002"
 
 
 def test_normalize_month_classifies_byte_identical_replay_as_unchanged(session):
+    """Classify a byte-identical replay as unchanged."""
     tenant_id = uuid4()
     _seed_tenant_and_currencies(session, tenant_id)
     _seed_active_channel(session, tenant_id, "UC_test_replay")
@@ -541,6 +556,7 @@ def test_normalize_month_classifies_byte_identical_replay_as_unchanged(session):
 
 
 def test_normalize_month_classifies_amount_change_as_updated(session):
+    """Classify a changed canonical amount as an update."""
     tenant_id = uuid4()
     _seed_tenant_and_currencies(session, tenant_id)
     _seed_active_channel(session, tenant_id, "UC_test_upd")
@@ -570,6 +586,7 @@ def test_normalize_month_classifies_amount_change_as_updated(session):
 
 
 def test_normalize_month_replay_by_different_actor_with_identical_payload_is_unchanged(session):
+    """Ignore actor identity when classifying an identical replay."""
     tenant_id = uuid4()
     _seed_tenant_and_currencies(session, tenant_id)
     _seed_active_channel(session, tenant_id, "UC_test_actor")
@@ -592,6 +609,7 @@ def test_normalize_month_replay_by_different_actor_with_identical_payload_is_unc
 
 
 def test_normalize_month_writes_confidence_score_one_point_zero(session):
+    """Write full confidence for a directly normalized canonical row."""
     tenant_id = uuid4()
     _seed_tenant_and_currencies(session, tenant_id)
     _seed_active_channel(session, tenant_id, "UC_test_conf")
@@ -610,6 +628,7 @@ def test_normalize_month_writes_confidence_score_one_point_zero(session):
 
 
 def test_normalize_month_uses_canonical_source_report_id(session):
+    """Preserve the canonical source row's report identifier."""
     tenant_id = uuid4()
     _seed_tenant_and_currencies(session, tenant_id)
     _seed_active_channel(session, tenant_id, "UC_test_rid")
@@ -617,9 +636,8 @@ def test_normalize_month_uses_canonical_source_report_id(session):
     # with an explicit report id value.
     repo = SqlAlchemyGoogleRevenueSourceRowRepository(session)
     row = _yt_reporting_row(channel="UC_test_rid", source_row_key_seed="i")
-    from dataclasses import replace as dc_replace
-
-    row = dc_replace(row, source_report_id="report-canonical-001")
+    # FIX: Reuse the module-level import instead of reimporting replace locally.
+    row = replace(row, source_report_id="report-canonical-001")
     repo.upsert_many(tenant_id, [row], raw_file_id=None, imported_by=None)
     session.commit()
     result = GoogleSourceNormalizer(session, tenant_id=tenant_id).normalize_month(
@@ -630,6 +648,7 @@ def test_normalize_month_uses_canonical_source_report_id(session):
 
 
 def test_normalize_month_reverse_lookup_returns_same_canonical_row(session):
+    """Reproduce the written fact's canonical row through reverse lookup."""
     # Given a written fact, re-applying select_canonical_row() on USD-filtered
     # source rows for the same (tenant, month, channel, source_system) must
     # return the same row that produced the fact. Pins the explain-endpoint

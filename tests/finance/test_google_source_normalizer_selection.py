@@ -32,6 +32,7 @@ from ums_smart_revenue.finance.revenue_facts import (
 
 
 def test_source_system_to_source_kind_mapping_covers_three_supported_systems():
+    """Map every supported Google system to its revenue-fact source kind."""
     assert dict(SOURCE_SYSTEM_TO_SOURCE_KIND) == {
         "youtube_reporting": RevenueFactSourceKind.YOUTUBE_CMS,
         "youtube_analytics": RevenueFactSourceKind.YOUTUBE_ANALYTICS,
@@ -40,6 +41,7 @@ def test_source_system_to_source_kind_mapping_covers_three_supported_systems():
 
 
 def test_canonical_metric_rule_mapping_is_frozen():
+    """Reject runtime mutation of the canonical metric priorities."""
     with pytest.raises(TypeError):
         CANONICAL_METRIC_RULE["youtube_reporting"] = ("foo",)  # type: ignore[index]
 
@@ -56,6 +58,7 @@ def _entry(
     raw_payload: object | None = None,
     source_report_id: str | None = "r-1",
 ) -> GoogleRevenueSourceRowEntry:
+    """Build one persisted-source-row value for pure selection tests."""
     return GoogleRevenueSourceRowEntry(
         id=f"id-{source_row_key[:8]}",
         tenant_id="00000000-0000-0000-0000-000000000001",
@@ -98,12 +101,16 @@ def _parsed_country_evidence() -> ParsedSourceRow:
         ],
         "rows": [["UC_test_1", "US", "25.000000"]],
     }
-    return next(
+    parsed_rows = list(
         YouTubeAnalyticsParser().parse(
             payload,
             tenant_id=UUID("00000000-0000-0000-0000-000000000001"),
         )
     )
+    # FIX: Assert parser cardinality explicitly so an empty generator yields an
+    # actionable test failure instead of leaking StopIteration from next().
+    assert len(parsed_rows) == 1
+    return parsed_rows[0]
 
 
 def _parsed_worldwide() -> ParsedSourceRow:
@@ -124,12 +131,16 @@ def _parsed_worldwide() -> ParsedSourceRow:
         ],
         "rows": [["UC_test_1", "2026-04", "100.000000"]],
     }
-    return next(
+    parsed_rows = list(
         YouTubeAnalyticsParser().parse(
             payload,
             tenant_id=UUID("00000000-0000-0000-0000-000000000001"),
         )
     )
+    # FIX: Assert parser cardinality explicitly so an empty generator yields an
+    # actionable test failure instead of leaking StopIteration from next().
+    assert len(parsed_rows) == 1
+    return parsed_rows[0]
 
 
 def _entry_from_parsed(row: ParsedSourceRow) -> GoogleRevenueSourceRowEntry:
@@ -148,6 +159,7 @@ def _entry_from_parsed(row: ParsedSourceRow) -> GoogleRevenueSourceRowEntry:
 
 
 def test_select_canonical_row_youtube_reporting_picks_estimatedRevenue():  # noqa: N802
+    """Select estimated revenue for YouTube Reporting rows."""
     rows = [
         _entry(
             source_system="youtube_reporting",
@@ -161,6 +173,7 @@ def test_select_canonical_row_youtube_reporting_picks_estimatedRevenue():  # noq
 
 
 def test_select_canonical_row_youtube_analytics_picks_estimatedRevenue():  # noqa: N802
+    """Select estimated revenue for worldwide YouTube Analytics rows."""
     rows = [
         _entry(
             source_system="youtube_analytics",
@@ -174,6 +187,7 @@ def test_select_canonical_row_youtube_analytics_picks_estimatedRevenue():  # noq
 
 
 def test_select_canonical_row_adsense_prefers_PAID_AMOUNT_over_ESTIMATED_EARNINGS():  # noqa: N802
+    """Prefer paid AdSense amounts over estimated earnings."""
     paid = _entry(
         source_system="adsense_management", metric_key="PAID_AMOUNT", source_row_key="c" * 64
     )
@@ -186,6 +200,7 @@ def test_select_canonical_row_adsense_prefers_PAID_AMOUNT_over_ESTIMATED_EARNING
 
 
 def test_select_canonical_row_adsense_falls_back_to_ESTIMATED_EARNINGS_when_no_PAID_AMOUNT():  # noqa: N802
+    """Fall back to estimated AdSense earnings when no paid amount exists."""
     earnings = _entry(
         source_system="adsense_management", metric_key="ESTIMATED_EARNINGS", source_row_key="e" * 64
     )
@@ -195,6 +210,7 @@ def test_select_canonical_row_adsense_falls_back_to_ESTIMATED_EARNINGS_when_no_P
 
 
 def test_select_canonical_row_returns_none_when_no_preferred_metric_present():
+    """Return no canonical row when a bucket has no preferred metric."""
     unpaid = _entry(
         source_system="adsense_management", metric_key="UNPAID_AMOUNT", source_row_key="f" * 64
     )
@@ -204,6 +220,7 @@ def test_select_canonical_row_returns_none_when_no_preferred_metric_present():
 
 
 def test_select_canonical_row_tie_break_is_deterministic_by_source_row_key_asc():
+    """Break equal-priority ties by ascending source-row key."""
     later = _entry(
         source_system="youtube_reporting", metric_key="estimatedRevenue", source_row_key="b" * 64
     )
@@ -217,6 +234,7 @@ def test_select_canonical_row_tie_break_is_deterministic_by_source_row_key_asc()
 
 
 def test_select_canonical_row_non_canonical_rest_excludes_canonical():
+    """Return every unselected row without duplicating the canonical row."""
     a = _entry(
         source_system="adsense_management",
         metric_key="PAID_AMOUNT",
@@ -241,6 +259,7 @@ def test_select_canonical_row_non_canonical_rest_excludes_canonical():
 
 
 def test_select_canonical_row_raises_on_unsupported_source_system():
+    """Reject source systems outside the canonicalization contract."""
     bogus = _entry(
         source_system="totally_bogus_system", metric_key="estimatedRevenue", source_row_key="z" * 64
     )
