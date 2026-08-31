@@ -1030,24 +1030,21 @@ def _remove_container_ids(
 #   - File: docker-compose.yml -> Declares the two reviewed child bind targets.
 #   - File: scripts/validate_compose_storage_path.py -> Supplies proven sources.
 # ============================================================================
-def _verify_created_storage_mounts(
-    request: LaunchRequest,
+def _inspect_container_storage_mounts(
+    identifier: str,
     *,
     cwd: Path,
     env: dict[str, str],
     expected_sources: dict[str, Path],
 ) -> None:
-    """Prove Docker persisted the two durable canonical child binds."""
+    """Prove one captured container has both exact durable child binds."""
 
-    identifiers = _storage_container_ids(request, cwd=cwd, env=env)
-    if len(identifiers) != 1:
-        raise StoragePathError("Compose did not create exactly one reviewed application container")
     inspected = _run_daemon_checked(
         [
             "docker",
             "container",
             "inspect",
-            identifiers[0],
+            identifier,
             "--format",
             "{{json .Mounts}}",
         ],
@@ -1098,6 +1095,79 @@ def _verify_created_storage_mounts(
             )
 
 
+# ============================================================================
+# Purpose: Audit every captured app container after a detached create attempt
+#   and remove only containers whose persisted storage mounts are unsafe.
+# Database/ORM: None.
+# Standards: Exact Source/Destination/RW proof per validated container ID;
+#   captured-ID cleanup only; no volume deletion; unsafe cleanup fails closed.
+# Blast Radius: Application container lifecycle and durable host storage.
+# Connections:
+#   - File: docker-compose.yml -> Declares the reviewed storage mount contract.
+#   - File: tests/scripts/test_compose_storage_preflight.py -> Adversarial proof.
+# ============================================================================
+def _audit_current_storage_containers(
+    request: LaunchRequest,
+    *,
+    cwd: Path,
+    env: dict[str, str],
+    expected_sources: dict[str, Path],
+    require_exactly_one: bool,
+) -> StoragePathError | None:
+    """Inspect captured app IDs and remove only IDs that violate the contract."""
+
+    identifiers = _storage_container_ids(request, cwd=cwd, env=env)
+    issue: StoragePathError | None = None
+    mismatching: list[str] = []
+    if require_exactly_one and len(identifiers) != 1:
+        issue = StoragePathError(
+            "Compose did not create exactly one reviewed application container"
+        )
+
+    for identifier in identifiers:
+        try:
+            _inspect_container_storage_mounts(
+                identifier,
+                cwd=cwd,
+                env=env,
+                expected_sources=expected_sources,
+            )
+        except StoragePathError as exc:
+            if issue is None:
+                issue = exc
+            if identifier not in mismatching:
+                mismatching.append(identifier)
+
+    if mismatching:
+        try:
+            _remove_container_ids(tuple(mismatching), cwd=cwd, env=env)
+        except StoragePathError as cleanup_error:
+            raise StoragePathError(
+                "container mount verification failed and scoped removal also failed"
+            ) from cleanup_error
+    return issue
+
+
+def _verify_created_storage_mounts(
+    request: LaunchRequest,
+    *,
+    cwd: Path,
+    env: dict[str, str],
+    expected_sources: dict[str, Path],
+) -> None:
+    """Require exactly one app container with durable canonical child binds."""
+
+    issue = _audit_current_storage_containers(
+        request,
+        cwd=cwd,
+        env=env,
+        expected_sources=expected_sources,
+        require_exactly_one=True,
+    )
+    if issue is not None:
+        raise issue
+
+
 def _remove_request_storage_containers(
     request: LaunchRequest,
     *,
@@ -1110,6 +1180,37 @@ def _remove_request_storage_containers(
     _remove_container_ids(identifiers, cwd=cwd, env=env)
 
 
+# ============================================================================
+# Purpose: Fail closed if the held host-storage identity changes after Compose
+#   may have created an application container.
+# Database/ORM: None.
+# Standards: Re-enumerate only the scoped app service; remove containers by
+#   validated ID without deleting volumes; preserve the identity failure.
+# Blast Radius: Application container lifecycle and host storage integrity.
+# Connections:
+#   - File: scripts/validate_compose_storage_path.py -> Owns identity checking.
+#   - File: docker-compose.yml -> Declares the guarded child bind sources.
+# ============================================================================
+def _assert_storage_identity_or_remove(
+    request: LaunchRequest,
+    *,
+    cwd: Path,
+    env: dict[str, str],
+    identity_guard: StorageIdentityGuard,
+    cleanup_message: str,
+) -> None:
+    """Remove scoped app containers if the held storage identity changed."""
+
+    try:
+        identity_guard.assert_current()
+    except StoragePathError:
+        try:
+            _remove_request_storage_containers(request, cwd=cwd, env=env)
+        except StoragePathError as cleanup_error:
+            raise StoragePathError(cleanup_message) from cleanup_error
+        raise
+
+
 # FIX: `/proc/<launcher-pid>/fd/<child-fd>` kept the initial mount identity but
 # left a dead or reusable source in Docker's restart configuration. Containers
 # now persist canonical child paths; held descriptors, trusted parent modes,
@@ -1118,8 +1219,8 @@ def _remove_request_storage_containers(
 # Purpose: Reconcile one storage-bearing app container in a detached create
 #   phase, prove its persisted mounts, then preserve requested attach behavior.
 # Database/ORM: None.
-# Standards: Identity checks bracket every Compose up; mount mismatches remove
-#   only Compose-discovered app container IDs and never named volumes.
+# Standards: Identity checks bracket every Compose up; every detached attempt
+#   audits captured app IDs; mount mismatches remove only those IDs, never data.
 # Blast Radius: Application container creation, restart, and storage durability.
 # Connections:
 #   - File: docker-compose.yml -> Supplies restart policy and canonical binds.
@@ -1142,52 +1243,72 @@ def _run_guarded_storage_up(
         cwd=cwd,
         env=env,
     )
+    # FIX: Compose may return nonzero after creating or reconciling the app.
+    # Audit every captured ID and remove only unsafe ones before preserving the
+    # original command status; an unsafe audit or cleanup still fails closed.
     if created.returncode != 0:
-        identity_guard.assert_current()
-        return created
-    try:
-        identity_guard.assert_current()
-        _verify_created_storage_mounts(
+        _audit_current_storage_containers(
             request,
             cwd=cwd,
             env=env,
             expected_sources=expected_sources,
+            require_exactly_one=False,
         )
-        identity_guard.assert_current()
-    except StoragePathError:
-        try:
-            _remove_request_storage_containers(request, cwd=cwd, env=env)
-        except StoragePathError as cleanup_error:
-            raise StoragePathError(
-                "storage identity verification failed and automatic removal also failed"
-            ) from cleanup_error
-        raise
+        _assert_storage_identity_or_remove(
+            request,
+            cwd=cwd,
+            env=env,
+            identity_guard=identity_guard,
+            cleanup_message=(
+                "failed storage creation changed identity and automatic removal also failed"
+            ),
+        )
+        return created
+    created_issue = _audit_current_storage_containers(
+        request,
+        cwd=cwd,
+        env=env,
+        expected_sources=expected_sources,
+        require_exactly_one=True,
+    )
+    _assert_storage_identity_or_remove(
+        request,
+        cwd=cwd,
+        env=env,
+        identity_guard=identity_guard,
+        cleanup_message=("storage identity verification failed and automatic removal also failed"),
+    )
+    if created_issue is not None:
+        raise created_issue
 
     if create_args == request.compose_args:
         return created
 
-    identity_guard.assert_current()
+    _assert_storage_identity_or_remove(
+        request,
+        cwd=cwd,
+        env=env,
+        identity_guard=identity_guard,
+        cleanup_message=("storage identity verification failed and automatic removal also failed"),
+    )
     attached = _run_daemon_checked(
         ["docker", "compose", *request.compose_args],
         cwd=cwd,
         env=env,
     )
-    try:
-        identity_guard.assert_current()
-        _verify_created_storage_mounts(
-            request,
-            cwd=cwd,
-            env=env,
-            expected_sources=expected_sources,
-        )
-    except StoragePathError:
-        try:
-            _remove_request_storage_containers(request, cwd=cwd, env=env)
-        except StoragePathError as cleanup_error:
-            raise StoragePathError(
-                "attached storage verification failed and automatic removal also failed"
-            ) from cleanup_error
-        raise
+    _assert_storage_identity_or_remove(
+        request,
+        cwd=cwd,
+        env=env,
+        identity_guard=identity_guard,
+        cleanup_message=("attached storage verification failed and automatic removal also failed"),
+    )
+    _verify_created_storage_mounts(
+        request,
+        cwd=cwd,
+        env=env,
+        expected_sources=expected_sources,
+    )
     return attached
 
 

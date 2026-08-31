@@ -1668,6 +1668,108 @@ def test_post_create_mount_mismatch_removes_only_the_scoped_app_container(
     assert all("--volumes" not in command and "-v" not in command for command, _ in calls)
 
 
+def test_nonzero_partial_create_audits_all_ids_and_removes_only_mismatch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed detached up can leave an app container that must be audited."""
+
+    source = (tmp_path / "store").resolve()
+    expected_sources = {child: source / child for child in storage.STORAGE_CHILDREN}
+    request = compose_launcher._parse_request(["up", "app"])
+    good_id = "e" * 64
+    bad_id = "f" * 64
+    calls: list[tuple[list[str], bool]] = []
+    assertions = 0
+
+    class Guard:
+        def assert_current(self) -> None:
+            nonlocal assertions
+            assertions += 1
+
+    def mounts_for(identifier: str) -> list[dict[str, object]]:
+        mounts = [
+            {
+                "Type": "bind",
+                "Source": str(expected_sources[child]),
+                "Destination": target,
+                "RW": True,
+            }
+            for child, target in compose_launcher.STORAGE_TARGETS.items()
+        ]
+        if identifier == bad_id:
+            mounts[0]["Source"] = str(tmp_path / "attacker")
+        return mounts
+
+    def fake_daemon(
+        command: list[str],
+        *,
+        cwd: Path,
+        env: dict[str, str],
+        capture: bool = False,
+    ) -> SimpleNamespace:
+        del cwd, env
+        calls.append((command, capture))
+        if command == ["docker", "compose", "up", "--detach", "app"]:
+            assert capture is False
+            return SimpleNamespace(returncode=37, stdout="", stderr="partial failure")
+        if command == ["docker", "compose", "ps", "--all", "--quiet", "app"]:
+            assert capture is True
+            return SimpleNamespace(
+                returncode=0,
+                stdout=f"{good_id}\n{bad_id}\n",
+                stderr="",
+            )
+        if tuple(command) in {
+            (
+                "docker",
+                "container",
+                "inspect",
+                good_id,
+                "--format",
+                "{{json .Mounts}}",
+            ),
+            (
+                "docker",
+                "container",
+                "inspect",
+                bad_id,
+                "--format",
+                "{{json .Mounts}}",
+            ),
+        }:
+            assert capture is True
+            identifier = command[3]
+            return SimpleNamespace(
+                returncode=0,
+                stdout=json.dumps(mounts_for(identifier)),
+                stderr="",
+            )
+        if command == ["docker", "container", "rm", "--force", bad_id]:
+            assert capture is True
+            return SimpleNamespace(returncode=0, stdout=bad_id, stderr="")
+        raise AssertionError(f"unexpected daemon command: {command!r}")
+
+    monkeypatch.setattr(compose_launcher, "_run_daemon_checked", fake_daemon)
+    completed = compose_launcher._run_guarded_storage_up(
+        request,
+        cwd=tmp_path,
+        env={"DOCKER_HOST": "npipe:////./pipe/docker_engine"},
+        identity_guard=Guard(),  # type: ignore[arg-type]
+        expected_sources=expected_sources,
+    )
+
+    assert completed.returncode == 37
+    assert assertions == 2
+    inspections = [
+        command[3] for command, _ in calls if command[:3] == ["docker", "container", "inspect"]
+    ]
+    assert inspections == [good_id, bad_id]
+    removals = [command for command, _ in calls if command[1:3] == ["container", "rm"]]
+    assert removals == [["docker", "container", "rm", "--force", bad_id]]
+    assert all("--volumes" not in command and "-v" not in command for command, _ in calls)
+
+
 def test_main_keeps_identity_and_immutable_image_pinned_through_final_up(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1803,7 +1905,7 @@ def test_main_keeps_identity_and_immutable_image_pinned_through_final_up(
     assert compose_launcher.main(["up", "app"]) == 23
     assert state == {
         "guard_active": False,
-        "assertions": 7,
+        "assertions": 6,
         "final_calls": 2,
         "inspections": 2,
     }
