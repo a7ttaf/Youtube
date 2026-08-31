@@ -16,6 +16,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
 def test_backend_dependencies_are_pinned_to_checked_latest_stable_versions():
+    """Verify the dependency pins, lockfile, and optional extras stay aligned."""
     pyproject = tomllib.loads((PROJECT_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     lockfile = tomllib.loads((PROJECT_ROOT / "uv.lock").read_text(encoding="utf-8"))
     dependencies = set(pyproject["project"]["dependencies"])
@@ -74,6 +75,7 @@ def test_backend_dependencies_are_pinned_to_checked_latest_stable_versions():
 
 
 def test_stack_version_baseline_records_runtime_and_frontend_targets():
+    """Verify the machine-readable stack baseline reports current targets."""
     assert STACK_VERSION_BASELINE["runtime"]["python"] == "3.14.5"
     assert STACK_VERSION_BASELINE["runtime"]["node_lts"] == "24.15.0"
     assert STACK_VERSION_BASELINE["backend"]["fastapi"] == "0.141.1"
