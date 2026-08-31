@@ -1,10 +1,10 @@
-"""B1 does not modify the permission set.
+"""Permission catalog stays at the B1 baseline plus the approved P0-c grant.
 
 Existing connectors.run_jobs covers ingestion job authorization. This
-test pins the entire permission set as a B1 scope invariant: no permission
-values added or removed relative to the PR #41 baseline. (The assertions
-below intentionally guard the full set, not only connectors.*/ingestion.*,
-so any out-of-scope permission drift in B1 is caught.)
+test pins the entire permission set against the PR #41 baseline plus the one
+P0-c exception: manual revenue facts use a dedicated permission so beta users
+do not receive global connector execution. The assertions intentionally guard
+the full set, so any other permission drift remains visible.
 """
 
 from ums_smart_revenue.auth.permissions import Permission
@@ -40,11 +40,13 @@ EXPECTED_PERMISSION_VALUES = frozenset(
         "platform.manage_settings",
     }
 )
+P0_C_PERMISSION_VALUES = frozenset({"finance.import_manual_revenue"})
 
 
-def test_no_new_permission_added_in_b1() -> None:
+def test_permission_catalog_is_b1_baseline_plus_p0c_manual_revenue() -> None:
+    expected = EXPECTED_PERMISSION_VALUES | P0_C_PERMISSION_VALUES
     actual = {p.value for p in Permission}
-    added = actual - EXPECTED_PERMISSION_VALUES
-    removed = EXPECTED_PERMISSION_VALUES - actual
-    assert not added, f"B1 added unexpected permissions: {sorted(added)}"
-    assert not removed, f"B1 removed permissions (out of scope): {sorted(removed)}"
+    added = actual - expected
+    removed = expected - actual
+    assert not added, f"Unexpected permissions beyond the P0-c contract: {sorted(added)}"
+    assert not removed, f"Expected baseline or P0-c permissions removed: {sorted(removed)}"

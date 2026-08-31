@@ -9,7 +9,10 @@ from ums_smart_revenue.api.dependencies import (
     current_db_session,
     current_principal_from_headers,
 )
-from ums_smart_revenue.api.dependencies_audit import audit_record_to_api, current_audit_sink
+from ums_smart_revenue.api.dependencies_audit import (
+    audit_record_to_api,
+    current_atomic_audit_sink,
+)
 from ums_smart_revenue.auth.audit import AuditEventType
 from ums_smart_revenue.auth.audit_service import AuditSink, record_audit_event
 from ums_smart_revenue.auth.models import UserPrincipal
@@ -45,8 +48,16 @@ from ums_smart_revenue.auth.users import (
 router = APIRouter(prefix="/users", tags=["users"])
 logger = logging.getLogger(__name__)
 
+# FIX: BETA_OPERATOR carries revenue, override, allocation, and month-close
+# powers. Omitting it let Corporate Admin assign/revoke a finance-powerful role
+# through the operational-role path without Finance Admin/Super Owner approval.
 FINANCE_ROLE_KEYS = frozenset(
-    {RoleKey.FINANCE_ADMIN, RoleKey.FINANCE_APPROVER, RoleKey.FINANCE_VIEWER}
+    {
+        RoleKey.FINANCE_ADMIN,
+        RoleKey.BETA_OPERATOR,
+        RoleKey.FINANCE_APPROVER,
+        RoleKey.FINANCE_VIEWER,
+    }
 )
 FINANCE_PERMISSION_KEYS = frozenset(
     {
@@ -54,6 +65,7 @@ FINANCE_PERMISSION_KEYS = frozenset(
         Permission.VIEW_FINALIZED_PAYMENTS,
         Permission.VIEW_BANK_RECONCILIATION,
         Permission.MANAGE_BANK_RECONCILIATION,
+        Permission.IMPORT_MANUAL_REVENUE,
         Permission.CREATE_MANUAL_OVERRIDE,
         Permission.APPROVE_MANUAL_OVERRIDE,
         Permission.LOCK_FINANCE_MONTH,
@@ -334,6 +346,20 @@ def get_user_access_profile(
         ) from exc
 
 
+# ============================================================================
+# Purpose: Keep every user/account, role-assignment, and direct-permission
+#   mutation in the same request transaction as its required audit row.
+# Database/ORM: users, user_role_assignments, user_permission_grants, audit_logs.
+# Standards: Thin route boundary; typed repositories; atomic audit dependency;
+#   storage and audit failures propagate so request teardown rolls back all state.
+# Blast Radius: Authorization and audit atomicity; no permission widening.
+# Connections:
+#   - File: backend/ums_smart_revenue/api/dependencies_audit.py -> atomic sink.
+#   - File: backend/ums_smart_revenue/auth/sql_audit_sink.py -> same-session write.
+# ============================================================================
+# FIX: The independent audit sink could commit a success event before the
+# tenant mutation's final COMMIT failed. All six mutation routes below now use
+# the request-owned atomic sink so neither side can persist alone.
 @router.post("", status_code=status.HTTP_201_CREATED)
 def create_user_account(
     payload: UserAccountCreateRequest,
@@ -341,7 +367,7 @@ def create_user_account(
     repository: Annotated[
         SqlAlchemyUserAccountRepository, Depends(current_user_account_repository)
     ],
-    audit_sink: Annotated[AuditSink, Depends(current_audit_sink)],
+    audit_sink: Annotated[AuditSink, Depends(current_atomic_audit_sink)],
 ) -> dict[str, object]:
     """Create a human or service user account; requires MANAGE_USERS."""
     _require_user_management_permission(user)
@@ -386,7 +412,7 @@ def update_user_account(
     repository: Annotated[
         SqlAlchemyUserAccountRepository, Depends(current_user_account_repository)
     ],
-    audit_sink: Annotated[AuditSink, Depends(current_audit_sink)],
+    audit_sink: Annotated[AuditSink, Depends(current_atomic_audit_sink)],
 ) -> dict[str, object]:
     """Update user account metadata or status; requires MANAGE_USERS."""
     _require_user_management_permission(user)
@@ -453,7 +479,7 @@ def assign_user_role(
         SqlAlchemyUserRoleAssignmentRepository,
         Depends(current_user_role_assignment_repository),
     ],
-    audit_sink: Annotated[AuditSink, Depends(current_audit_sink)],
+    audit_sink: Annotated[AuditSink, Depends(current_atomic_audit_sink)],
 ) -> dict[str, object]:
     """Assign a role to a user within a scope.
 
@@ -502,7 +528,7 @@ def revoke_user_role(
         SqlAlchemyUserRoleAssignmentRepository,
         Depends(current_user_role_assignment_repository),
     ],
-    audit_sink: Annotated[AuditSink, Depends(current_audit_sink)],
+    audit_sink: Annotated[AuditSink, Depends(current_atomic_audit_sink)],
 ) -> dict[str, object]:
     """Revoke an active role assignment.
 
@@ -556,7 +582,7 @@ def grant_user_permission(
         SqlAlchemyUserPermissionGrantRepository,
         Depends(current_user_permission_grant_repository),
     ],
-    audit_sink: Annotated[AuditSink, Depends(current_audit_sink)],
+    audit_sink: Annotated[AuditSink, Depends(current_atomic_audit_sink)],
 ) -> dict[str, object]:
     """Grant a direct permission to a user; enforces family-specific authority rules."""
     _require_role_assignment_permission(user)
@@ -602,7 +628,7 @@ def revoke_user_permission(
         SqlAlchemyUserPermissionGrantRepository,
         Depends(current_user_permission_grant_repository),
     ],
-    audit_sink: Annotated[AuditSink, Depends(current_audit_sink)],
+    audit_sink: Annotated[AuditSink, Depends(current_atomic_audit_sink)],
 ) -> dict[str, object]:
     """Revoke an active permission grant.
 

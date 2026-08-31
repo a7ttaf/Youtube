@@ -378,6 +378,19 @@ def test_derive_capabilities_import_channels_requires_both_permissions():
     assert capabilities.can_import_channels is True
 
 
+def test_beta_operator_session_cannot_import_channels_or_run_connector_jobs(client_headers_mode):
+    """The beta finance workflow grants neither registry nor connector powers."""
+    response = client_headers_mode.get(
+        "/session/me",
+        headers=_header_principal(role="beta_operator"),
+    )
+
+    assert response.status_code == 200
+    capabilities = response.json()["capabilities"]
+    assert capabilities["canImportChannels"] is False
+    assert capabilities["canRunConnectorJobs"] is False
+
+
 def test_derive_capabilities_import_channels_channels_alone_insufficient():
     """MANAGE_CHANNELS alone stays false: group-bearing rosters would 403 mid-flow."""
     capabilities = _derive_capabilities(_direct_grant_principal(Permission.MANAGE_CHANNELS))

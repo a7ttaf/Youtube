@@ -32,7 +32,7 @@ from ums_smart_revenue.auth.principals import (
 from ums_smart_revenue.auth.roles import RoleKey
 from ums_smart_revenue.auth.scopes import AccessScope, ScopeType
 from ums_smart_revenue.config.settings import load_app_settings
-from ums_smart_revenue.db.session import SessionFactory
+from ums_smart_revenue.db.session import SessionFactory, begin_request_transaction
 from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
 from ums_smart_revenue.tenancy.context import (
     TenantContextMissing,
@@ -185,9 +185,16 @@ def current_principal_from_database(
     """Load a request principal from SQL after trusted gateway validation."""
     try:
         tenant = require_current_tenant()
-        return _load_database_principal_with_retries(
+        principal = _load_database_principal_with_retries(
             session, identity.user_id, tenant_id=str(tenant.id)
         )
+        # FIX: The principal loader owns and closes its isolated read
+        # transaction first. Only then can SQLite open the request write
+        # envelope that keeps repository SAVEPOINTs subordinate to the final
+        # dependency commit/rollback. PostgreSQL is a no-op here and retains
+        # its normal implicit BEGIN plus RLS hook behavior.
+        begin_request_transaction(session)
+        return principal
     except TenantContextMissing as exc:
         logger.error("Database principal lookup missing tenant context")
         raise HTTPException(
