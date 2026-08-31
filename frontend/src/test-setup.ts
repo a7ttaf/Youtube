@@ -1,5 +1,6 @@
 import "@testing-library/jest-dom/vitest";
 import { cleanup } from "@testing-library/react";
+import { transferableAbortController } from "node:util";
 import { afterEach } from "vitest";
 
 // ============================================================================
@@ -7,9 +8,9 @@ import { afterEach } from "vitest";
 //          Vitest's jsdom AbortSignal and Node's native Request implementation.
 // Database/ORM: None.
 // Standards: Tests still exercise router cancellation. Compatible signals pass
-//            through untouched; only jsdom's cross-realm signal is omitted from
-//            Node's constructor, then exposed by the Request so abort state and
-//            reason remain live. Production browser globals are untouched.
+//            through untouched; a jsdom cross-realm signal is followed by a
+//            native Node signal so Request internals, clone(), and fetch() all
+//            observe the same abort. Production browser globals are untouched.
 // Blast Radius: Test bootstrap only; no shipped runtime behavior.
 // ============================================================================
 const NativeRequest = globalThis.Request;
@@ -28,27 +29,34 @@ if (NativeRequest) {
     }
   };
 
-  globalThis.Request = class extends NativeRequest {
-    readonly #crossRealmSignal: AbortSignal | null;
+  const followWithNativeSignal = (source: AbortSignal): AbortSignal => {
+    const nativeController = transferableAbortController();
+    const abortNativeSignal = () => nativeController.abort(source.reason);
 
+    if (source.aborted) {
+      abortNativeSignal();
+    } else {
+      source.addEventListener("abort", abortNativeSignal, { once: true });
+    }
+    return nativeController.signal;
+  };
+
+  globalThis.Request = class extends NativeRequest {
     constructor(input: RequestInfo | URL, init?: RequestInit) {
       const suppliedSignal = init?.signal ?? null;
       const isCrossRealmSignal =
         suppliedSignal !== null && !nativeRequestAcceptsSignal(suppliedSignal);
 
       // FIX: The former adapter deleted every RequestInit.signal, including
-      // compatible signals, so router cancellation silently stopped working.
-      // Node alone receives the incompatible signal-free init; callers still
-      // observe the original live jsdom signal through the getter below.
+      // compatible signals, and the getter-only follow-up left Request's native
+      // slot unconnected, so clone() and fetch() still ignored cancellation.
+      // Bridge only the rejected jsdom signal into a real Node AbortSignal.
       super(
         input,
-        isCrossRealmSignal ? { ...init, signal: undefined } : init,
+        isCrossRealmSignal
+          ? { ...init, signal: followWithNativeSignal(suppliedSignal) }
+          : init,
       );
-      this.#crossRealmSignal = isCrossRealmSignal ? suppliedSignal : null;
-    }
-
-    override get signal(): AbortSignal {
-      return this.#crossRealmSignal ?? super.signal;
     }
   } as typeof Request;
 }

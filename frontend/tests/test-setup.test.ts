@@ -7,13 +7,30 @@ describe("Request compatibility setup", () => {
       signal: controller.signal,
     });
 
-    expect(request.signal).toBe(controller.signal);
+    // Request follows the caller's signal with its own native signal; it does
+    // not merely return the cross-realm object from an overridden getter.
+    expect(request.signal).not.toBe(controller.signal);
     expect(request.signal.aborted).toBe(false);
 
     controller.abort("superseded navigation");
 
     expect(request.signal.aborted).toBe(true);
     expect(request.signal.reason).toBe("superseded navigation");
+  });
+
+  it("propagates a jsdom abort through clone() and native fetch()", async () => {
+    const controller = new AbortController();
+    const request = new Request("data:text/plain,should-not-load", {
+      signal: controller.signal,
+    });
+    const clone = request.clone();
+
+    controller.abort();
+
+    expect(request.signal.aborted).toBe(true);
+    expect(clone.signal.aborted).toBe(true);
+    expect(clone.signal.reason).toMatchObject({ name: "AbortError" });
+    await expect(fetch(clone)).rejects.toMatchObject({ name: "AbortError" });
   });
 
   it("passes a native-compatible AbortSignal through with its aborted state", () => {
