@@ -2966,7 +2966,9 @@ def _reset_existing_protected_role_settings(container: str, *, timeout: int) -> 
     roles.sql carries nothing to overwrite a target-only leftover, so this
     reset makes the replayed file the sole authority over protected-role
     settings. Only roles that already exist are reset -- on a fresh cluster
-    the CREATE ROLE lines create them with no settings at all.
+    the CREATE ROLE lines create them with no settings at all. The resets share
+    one tagged transaction so timeout handling proves the backend stopped before
+    outer database-role rollback or staging cleanup can begin.
     """
     existing = [
         line.strip()
@@ -2980,11 +2982,13 @@ def _reset_existing_protected_role_settings(container: str, *, timeout: int) -> 
     reset_lines = [
         f"ALTER ROLE {_quote_identifier(role)} RESET ALL;" for role in existing
     ]
-    _psql(
+    _psql_mutation(
         container,
-        "\n".join(reset_lines) + "\n",
+        "BEGIN;\n" + "\n".join(reset_lines) + "\nCOMMIT;\n",
         timeout=timeout,
         dbname="postgres",
+        label="protected-role RESET ALL transaction",
+        failure_code=EXIT_ROLES_FAILED,
     )
 
 

@@ -167,6 +167,11 @@ def _restore_psql(
     return fake_psql
 
 
+def _successful_restore_mutation(*_args: object, **_kwargs: object) -> str:
+    """Model a completed tagged mutation in tests focused on later role gates."""
+    return ""
+
+
 # --------------------------------------------------------------------------
 # ONE CLOCK FOR THE WHOLE FILE.
 #
@@ -2860,6 +2865,7 @@ def test_restore_roles_tolerates_bootstrap_duplicate_nonzero(
 
     monkeypatch.setattr(restore, "_run_with_file", fake_run_with_file)
     monkeypatch.setattr(restore, "_psql", _restore_psql())
+    monkeypatch.setattr(restore, "_psql_mutation", _successful_restore_mutation)
     present = restore._restore_roles("fake", roles_path, timeout=5)
     assert present == list(restore.REQUIRED_ROLES)
     out = capsys.readouterr().out
@@ -2887,6 +2893,7 @@ def test_restore_roles_rejects_unexpected_error_line(
 
     monkeypatch.setattr(restore, "_run_with_file", fake_run_with_file)
     monkeypatch.setattr(restore, "_psql", _restore_psql())
+    monkeypatch.setattr(restore, "_psql_mutation", _successful_restore_mutation)
     with pytest.raises(restore.RestoreError) as caught:
         restore._restore_roles("fake", roles_path, timeout=5)
     assert caught.value.code == restore.EXIT_ROLES_FAILED
@@ -2911,6 +2918,7 @@ def test_restore_roles_rejects_nonzero_without_allowed_error(
 
     monkeypatch.setattr(restore, "_run_with_file", fake_run_with_file)
     monkeypatch.setattr(restore, "_psql", _restore_psql())
+    monkeypatch.setattr(restore, "_psql_mutation", _successful_restore_mutation)
     with pytest.raises(restore.RestoreError) as caught:
         restore._restore_roles("fake", roles_path, timeout=5)
     assert caught.value.code == restore.EXIT_ROLES_FAILED
@@ -2937,6 +2945,7 @@ def test_restore_roles_rejects_fatal_even_after_allowed_duplicate(
 
     monkeypatch.setattr(restore, "_run_with_file", fake_run_with_file)
     monkeypatch.setattr(restore, "_psql", _restore_psql())
+    monkeypatch.setattr(restore, "_psql_mutation", _successful_restore_mutation)
     with pytest.raises(restore.RestoreError) as caught:
         restore._restore_roles("fake", roles_path, timeout=5)
     assert caught.value.code == restore.EXIT_ROLES_FAILED
@@ -3991,6 +4000,7 @@ def test_restore_roles_accepts_semicolon_terminated_create_role_lines(
         encoding="utf-8",
     )
     monkeypatch.setattr(restore, "_psql", _restore_psql(superuser="postgres"))
+    monkeypatch.setattr(restore, "_psql_mutation", _successful_restore_mutation)
     monkeypatch.setattr(
         restore,
         "_run_with_file",
@@ -4027,6 +4037,7 @@ def test_restore_preflight_refuses_privileged_app_role_attributes(
         "_run_with_file",
         lambda *_a, **_k: subprocess.CompletedProcess([], 0, "", ""),
     )
+    monkeypatch.setattr(restore, "_psql_mutation", _successful_restore_mutation)
 
     clean = tmp_path / restore.ROLES_NAME
     clean.write_text(
@@ -4294,6 +4305,7 @@ def test_restore_preflight_refuses_a_role_membership_for_an_app_role(
         lambda *_a, **_k: subprocess.CompletedProcess([], 0, "", ""),
     )
     monkeypatch.setattr(restore, "_psql", _restore_psql(superuser="postgres"))
+    monkeypatch.setattr(restore, "_psql_mutation", _successful_restore_mutation)
 
     accepted = tmp_path / restore.ROLES_NAME
     accepted.write_text(_REAL_ROLES_SQL, encoding="utf-8")
@@ -4350,6 +4362,7 @@ def test_restore_refuses_a_membership_the_target_cluster_already_had(
         "_run_with_file",
         lambda *_a, **_k: subprocess.CompletedProcess([], 0, "", ""),
     )
+    monkeypatch.setattr(restore, "_psql_mutation", _successful_restore_mutation)
     clean = tmp_path / restore.ROLES_NAME
     clean.write_text(_REAL_ROLES_SQL, encoding="utf-8")
 
@@ -6316,7 +6329,25 @@ def test_restore_roles_resets_existing_protected_roles_before_replay(
         applied.append("replay")
         return subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
 
+    def recording_mutation(
+        _container: str,
+        sql: str,
+        *,
+        timeout: int,
+        dbname: str,
+        label: str,
+        failure_code: int,
+    ) -> str:
+        """Record the tagged transaction without launching PostgreSQL."""
+        _ = timeout
+        assert dbname == "postgres"
+        assert label == "protected-role RESET ALL transaction"
+        assert failure_code == restore.EXIT_ROLES_FAILED
+        issued.append(sql)
+        return ""
+
     monkeypatch.setattr(restore, "_psql", recording_psql)
+    monkeypatch.setattr(restore, "_psql_mutation", recording_mutation)
     monkeypatch.setattr(restore, "_run_with_file", fake_run_with_file)
     assert restore._restore_roles("fake", roles_path, timeout=5) == [
         "app_tenant",
@@ -6324,9 +6355,83 @@ def test_restore_roles_resets_existing_protected_roles_before_replay(
     ]
     reset_statements = [sql for sql in issued if "RESET ALL" in sql]
     assert reset_statements == [
-        'ALTER ROLE "app_tenant" RESET ALL;\nALTER ROLE "app_platform" RESET ALL;\n'
+        "BEGIN;\n"
+        'ALTER ROLE "app_tenant" RESET ALL;\n'
+        'ALTER ROLE "app_platform" RESET ALL;\n'
+        "COMMIT;\n"
     ]
     assert applied == ["replay"] and reset_statements
+
+
+def test_protected_role_reset_quiesces_late_commit_before_failure_returns(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A timed-out RESET ALL transaction must stop before rollback can begin."""
+    pending_commit = False
+    events: list[str] = []
+
+    def control_psql(
+        _container: str, sql: str, *, timeout: int, dbname: str | None = None
+    ) -> str:
+        """Answer role discovery and terminate the exact tagged backend."""
+        nonlocal pending_commit
+        _ = timeout
+        assert dbname == "postgres"
+        if "pg_terminate_backend" in sql:
+            events.append("terminate")
+            pending_commit = False
+            return ""
+        assert sql == restore.ROLES_PRESENT_SQL
+        return "app_tenant\napp_platform\n"
+
+    def host_timeout(
+        argv: list[str], *, timeout: int, stdin_text: str
+    ) -> subprocess.CompletedProcess[str]:
+        """Leave a late COMMIT pending after docker.exe loses the response."""
+        nonlocal pending_commit
+        command = " ".join(argv)
+        assert "PGAPPNAME=ums_restore_mut_" in command
+        assert "statement_timeout=" in command and "lock_timeout=" in command
+        assert "psql -X" in command and "ON_ERROR_STOP=1" in command
+        assert stdin_text == (
+            "BEGIN;\n"
+            'ALTER ROLE "app_tenant" RESET ALL;\n'
+            'ALTER ROLE "app_platform" RESET ALL;\n'
+            "COMMIT;\n"
+        )
+        pending_commit = True
+        events.append("client-timeout")
+        raise subprocess.TimeoutExpired(argv, timeout)
+
+    def backend_pids(*_args: object, **_kwargs: object) -> list[int]:
+        """Expose the modeled backend until termination settles the transaction."""
+        events.append("pid-active" if pending_commit else "pid-absent")
+        return [9345] if pending_commit else []
+
+    monkeypatch.setattr(restore, "_psql", control_psql)
+    monkeypatch.setattr(restore, "_run_with_input", host_timeout)
+    monkeypatch.setattr(restore, "_mutation_backend_pids", backend_pids)
+    monkeypatch.setattr(restore.time, "sleep", lambda _seconds: None)
+
+    with pytest.raises(restore.RestoreError) as caught:
+        restore._reset_existing_protected_role_settings("container", timeout=5)
+
+    # Model the outer rollback starting only after this helper returned. If the
+    # backend were still live, this is where its late COMMIT would race it.
+    events.append("rollback-start")
+    if pending_commit:
+        events.append("LATE-COMMIT")
+    assert caught.value.code == restore.EXIT_ROLES_FAILED
+    assert "is quiescent" in str(caught.value)
+    assert pending_commit is False and "LATE-COMMIT" not in events
+    assert events == [
+        "client-timeout",
+        "pid-active",
+        "terminate",
+        "pid-absent",
+        "pid-absent",
+        "rollback-start",
+    ]
 
 
 def test_restore_roles_rejects_settings_the_file_does_not_declare(
@@ -6340,6 +6445,7 @@ def test_restore_roles_rejects_settings_the_file_does_not_declare(
     monkeypatch.setattr(
         restore, "_psql", _restore_psql(settings=["app_tenant = statement_timeout"])
     )
+    monkeypatch.setattr(restore, "_psql_mutation", _successful_restore_mutation)
     monkeypatch.setattr(
         restore,
         "_run_with_file",
@@ -6373,6 +6479,7 @@ def test_restore_roles_accepts_settings_the_file_declares(
     monkeypatch.setattr(
         restore, "_psql", _restore_psql(settings=["app_tenant = statement_timeout"])
     )
+    monkeypatch.setattr(restore, "_psql_mutation", _successful_restore_mutation)
     monkeypatch.setattr(
         restore,
         "_run_with_file",
@@ -7050,6 +7157,7 @@ def test_restore_roles_rejects_privileged_attributes(
         "CREATE ROLE app_tenant;\nCREATE ROLE app_platform;\n", encoding="utf-8"
     )
     monkeypatch.setattr(restore, "_psql", _restore_psql(privileged=["app_tenant"]))
+    monkeypatch.setattr(restore, "_psql_mutation", _successful_restore_mutation)
     monkeypatch.setattr(
         restore,
         "_run_with_file",

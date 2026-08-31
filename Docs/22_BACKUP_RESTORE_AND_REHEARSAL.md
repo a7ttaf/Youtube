@@ -1081,11 +1081,12 @@ with a unique `PGAPPNAME` plus server-side `statement_timeout` and `lock_timeout
 shorter than the host timeout. If `docker exec` times out, the script finds that exact
 `pg_stat_activity` backend, cancels and terminates it, and requires two absent observations
 before taking a catalog snapshot. Recovery decisions therefore come from settled server
-state, not from whether the Docker client returned. The initial `roles.sql` replay uses
-the same tagged, bounded backend. Outer role rollback and staging cleanup proceed only
-after that backend is proven stopped; otherwise the error identifies its exact
-`application_name` and leaves state untouched for operator quiescence. The file replay
-itself remains non-transactional. The error prints both captured OIDs, their exact
+state, not from whether the Docker client returned. The protected roles' cluster-level
+`RESET ALL` normalization runs in one tagged `BEGIN`/`COMMIT` transaction, and the initial
+`roles.sql` replay uses a separate tagged, bounded backend. Outer role rollback and staging
+cleanup proceed only after either backend is proven stopped; otherwise the error identifies
+its exact `application_name` and leaves state untouched for operator quiescence. The file
+replay itself remains non-transactional. The error prints both captured OIDs, their exact
 last-observed names/admission flags, any unexpected occupant of a reserved
 name, and whether catalog-reconciled rollback completed. If backend quiescence or the
 independent query fails, state is explicitly `UNAVAILABLE` and no speculative rename
@@ -1187,7 +1188,7 @@ that a live two-rename cutover was rehearsed on this final snapshot.
 | `uv sync --extra dev --extra test --extra lint` | success — 89 packages resolved, 86 checked |
 | `uv run ruff check backend tests scripts` | `All checks passed!` |
 | `uv run mypy scripts/backup_database.py scripts/restore_database.py` | `Success: no issues found in 2 source files` |
-| `uv run pytest -q tests/scripts/test_backup_content_gate.py` | **315 passed** — includes missing/empty stacked-seed refusal, rejected-run retention isolation, private restore staging, replacement-before-cutover ordering, late-backend quiescence for `roles.sql`, rename, `ALLOW_CONNECTIONS`, and role COMMIT timeouts, no cleanup mutation when quiescence is unavailable, OID-based commit-then-timeout reconciliation, query-only guidance when state cannot be observed, rollback of original database-scoped role settings before admission, dotted custom GUC preservation, ACL/locale/roles and large-object gates |
+| `uv run pytest -q tests/scripts/test_backup_content_gate.py` | **316 passed** — includes missing/empty stacked-seed refusal, rejected-run retention isolation, private restore staging, replacement-before-cutover ordering, late-backend quiescence for protected-role `RESET ALL`, `roles.sql`, rename, `ALLOW_CONNECTIONS`, and role COMMIT timeouts, no cleanup mutation when quiescence is unavailable, OID-based commit-then-timeout reconciliation, query-only guidance when state cannot be observed, rollback of original database-scoped role settings before admission, dotted custom GUC preservation, ACL/locale/roles and large-object gates |
 | `git diff --check` | success |
 | `uv run pytest -q` | **not a pass** — `UMS_TEST_DATABASE_URL` was unset, the suite reached its explicit real-Postgres setup errors, and the non-actionable run was stopped at 65% when the repair owner requested immediate closeout |
 
