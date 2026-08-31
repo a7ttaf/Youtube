@@ -668,6 +668,26 @@ def test_csv_adapter_rejects_negative_completed_monthly_total() -> None:
         )
 
 
+def test_csv_adapter_rejects_out_of_context_exponent_as_typed_row_error() -> None:
+    """A finite but astronomically-exponented amount is a row failure, not a run abort.
+
+    ``Decimal("1E+999999999")`` constructs and passes ``is_finite()``, but adding
+    it to the running monthly total traps ``decimal.Overflow`` and would abort
+    the whole run. The adjusted-exponent bound must reject the row with the
+    same typed connector error as every other malformed CSV value.
+    """
+    with pytest.raises(GoogleApiResponseError, match="exponent out of range"):
+        _csv_to_parser_payload(
+            raw_bytes=(
+                b"date,channel_id,estimated_partner_revenue,currencyCode\n"
+                b"2026-05-01,UC_orch_alpha,1E+999999999,USD\n"
+            ),
+            report_id="r-huge-exponent",
+            report_type="content_owner_estimated_revenue_a1",
+            month="2026-05",
+        )
+
+
 def test_csv_adapter_preserves_camel_case_revenue_payload_shape() -> None:
     """The existing ``estimatedRevenue`` alias remains a valid finance input."""
     payload = _csv_to_parser_payload(

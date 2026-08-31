@@ -223,6 +223,14 @@ _CSV_REVENUE_COLUMNS = (
     "estimatedrevenue",
 )
 _CSV_CURRENCY_COLUMNS = ("currency_code", "currencyCode")
+# FIX: A finite Decimal can still carry an out-of-context exponent (``1E+999999999``):
+# construction and ``is_finite()`` both succeed, but adding it to the running
+# total traps ``decimal.Overflow`` and aborts the whole run. Row-level bound on
+# the adjusted exponent (most-significant-digit power): revenue never lives
+# outside +/-1e18, and bounded addends keep every monthly total far below the
+# default context's Emax, so the accumulation can no longer trap.
+_CSV_MIN_AMOUNT_ADJUSTED_EXPONENT = -18
+_CSV_MAX_AMOUNT_ADJUSTED_EXPONENT = 18
 _CSV_DEFAULT_CURRENCY_BY_REPORT_TYPE = {
     # Google's documented YouTube Reporting estimated-revenue bulk schema has
     # no currency field; this project ingests those Reporting amounts as USD
@@ -3018,6 +3026,18 @@ def _accumulate_csv_row(
         raise _parser_payload_error(
             report_id=report_id,
             reason=f"csv row revenue {amount!r} not finite",
+        )
+    # See _CSV_MIN_AMOUNT_ADJUSTED_EXPONENT: reject before the accumulation
+    # traps Overflow, as a typed per-row failure instead of a run abort.
+    amount_exponent = amount_decimal.adjusted()
+    if not (
+        _CSV_MIN_AMOUNT_ADJUSTED_EXPONENT
+        <= amount_exponent
+        <= _CSV_MAX_AMOUNT_ADJUSTED_EXPONENT
+    ):
+        raise _parser_payload_error(
+            report_id=report_id,
+            reason=f"csv row revenue {amount!r} exponent out of range",
         )
     currency = _first_present(csv_row, *_CSV_CURRENCY_COLUMNS)
     if not currency:
