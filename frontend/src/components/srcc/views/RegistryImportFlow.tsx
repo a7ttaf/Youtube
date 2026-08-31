@@ -1526,8 +1526,9 @@ export const RegistryImportFlow = ({
   // ==========================================================================
   // Purpose: Translate an apply failure into the THREE things it can mean, and
   //   settle the durable pending-apply record accordingly. Every failure lands
-  //   in exactly one branch: a plan-bearing rejection, an indeterminate
-  //   outcome, or a definite rejection.
+  //   in exactly one branch: a pre-dispatch setup failure (nothing left the
+  //   browser, so it is definite and safely retryable), a plan-bearing
+  //   rejection, an indeterminate outcome, or a definite rejection.
   // Database/ORM: None (frontend). It writes no request; what it settles is
   //   the client-side duplicate-import guard over a write already answered.
   // Standards: BOTH plan-bearing statuses take the first branch, not just the
@@ -1557,7 +1558,16 @@ export const RegistryImportFlow = ({
   //   - File: backend/ums_smart_revenue/api/channels.py -> the route emitting
   //       the 409/422 whose `detail` carries the refreshed plan.
   // ==========================================================================
-  const handleApplyFailure = async (caught: unknown) => {
+  const handleApplyFailure = async (caught: unknown, dispatched: boolean) => {
+    // A pre-dispatch throw never left the browser: nothing could have
+    // committed, so retire this apply's admission, surface the failure, and
+    // leave Preview ready for a safe retry — not the reload-only
+    // indeterminate lockout that owns everything from the request onward.
+    if (!dispatched) {
+      settleThisApply();
+      setError(describeImportError(caught));
+      return;
+    }
     const race = await applyRaceDetail(caught, ownerId);
     if (race) {
       // Replacing the preview also re-binds the fingerprint: the next Apply
@@ -1796,17 +1806,8 @@ export const RegistryImportFlow = ({
       setApplied(result);
       setStep("applied");
     } catch (caught) {
-      if (!dispatched) {
-        // DEFINITE non-dispatch: no request left the browser, so nothing
-        // committed — retire this apply's admission, surface the failure, and
-        // leave Preview ready for a safe retry instead of the reload-only
-        // indeterminate lockout.
-        settleThisApply();
-        setError(describeImportError(caught));
-        return;
-      }
       // Stay on Preview; the Apply button re-enables in finally for a retry.
-      await handleApplyFailure(caught);
+      await handleApplyFailure(caught, dispatched);
     } finally {
       setBusy(false);
       setApplying(false);
