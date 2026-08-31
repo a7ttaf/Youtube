@@ -11,7 +11,6 @@ import { DEFAULT_MONTH, MONTH_OPTIONS } from "@/components/srcc/shared";
 import { SessionProvider } from "@/contexts/SessionContext";
 import { TenantProvider } from "@/contexts/TenantContext";
 import type { SessionMe } from "@/lib/api/types";
-import { monthKeyLabel } from "@/lib/months";
 import { withDisplayDigest } from "../../helpers/displayDigestFixtures";
 
 const ORIGINAL_FETCH = globalThis.fetch;
@@ -819,25 +818,35 @@ describe("AppShell production session hydration", () => {
   });
 });
 
-// ------------------------------------------------------------- month chrome
+// ------------------------------------------------------------- month ownership
 
-describe("AppShell topbar month filter", () => {
-  it("MONTH CHROME: options and the default derive from the rolling window", async () => {
-    (globalThis.fetch as ReturnType<typeof vi.fn>).mockImplementation(
-      routeFetchWithSession(() => jsonResponse(sessionBody({ canViewRevenue: true }))),
-    );
+describe("AppShell month ownership", () => {
+  it("keeps month selection in the owning view and binds each change to its request", async () => {
+    const requestedMonths: string[] = [];
+    const routed = routeFetchWithSession(() => jsonResponse(sessionBody({ canViewRevenue: true })));
+    (globalThis.fetch as ReturnType<typeof vi.fn>).mockImplementation((input: unknown) => {
+      const path = requestPathOf(input);
+      const match = path.match(/^\/revenue\/months\/([^/]+)\/net-revenue$/);
+      if (match) {
+        const month = decodeURIComponent(match[1]);
+        requestedMonths.push(month);
+        return Promise.resolve(jsonResponse({ ...NET_REVENUE_BODY, month }));
+      }
+      return routed(input);
+    });
     renderShell();
 
-    // The wired CommandView carries its own aria-label="Month" selector, so
-    // scope to the topbar's "Report filters" control row before querying.
-    const reportFilters = await screen.findByLabelText("Report filters");
-    const monthSelect = within(reportFilters).getByLabelText("Month") as HTMLSelectElement;
-    const renderedLabels = within(monthSelect)
-      .getAllByRole("option")
-      .map((option) => option.textContent);
-    // Same source as every wired view's selector — no second hardcoded list.
-    expect(renderedLabels).toEqual(MONTH_OPTIONS.map(monthKeyLabel));
-    expect(monthSelect.value).toBe(monthKeyLabel(DEFAULT_MONTH));
+    const filters = await screen.findByLabelText("Net revenue filters");
+    expect(screen.queryByRole("group", { name: "Report filters" })).not.toBeInTheDocument();
+    const monthSelect = within(filters).getByLabelText("Month") as HTMLSelectElement;
+    expect(monthSelect.value).toBe(DEFAULT_MONTH);
+    await waitFor(() => expect(requestedMonths).toContain(DEFAULT_MONTH));
+
+    const nextMonth = MONTH_OPTIONS[1];
+    fireEvent.change(monthSelect, { target: { value: nextMonth } });
+    await waitFor(() => expect(requestedMonths).toContain(nextMonth));
+    expect(monthSelect.value).toBe(nextMonth);
+    expect(requestedMonths.filter((month) => month === nextMonth)).toHaveLength(1);
   });
 });
 

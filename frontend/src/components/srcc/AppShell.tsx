@@ -29,12 +29,9 @@ import { GroupsView } from "./views/GroupsView";
 import RegistryView from "./views/RegistryView";
 import { importScopeFor } from "@/contexts/UnsettledImportContext";
 import TraceView from "./views/TraceView";
-import { monthKeyLabel } from "@/lib/months";
 import {
   Badge,
-  DEFAULT_MONTH,
   Dot,
-  MONTH_OPTIONS,
 } from "./shared";
 
 /* ------------------------------------------------------------------ shared */
@@ -563,17 +560,19 @@ const Sidebar = ({
 /* ------------------------------------------------------------------ topbar */
 
 // ============================================================================
-// Purpose: Render the routed page title and the shared rolling-month selector.
-// Database/ORM: None (frontend route metadata and display filter).
-// Standards: The selector is derived from the current calendar month through
-//            shared MONTH_OPTIONS; the shell does not invent scope, currency,
-//            status, or finance values without an API source.
+// Purpose: Render the routed page title; month and scope controls belong to the
+//          API-backed view that owns the corresponding request.
+// Database/ORM: None (frontend route metadata only).
+// Standards: Keep shell chrome free of inert filters whose values do not feed a
+//            request; each view owns its selected month and query lifecycle.
 // Blast Radius: Presentation-only header; no request or finance calculation.
 // Connections:
-//   - File: frontend/src/components/srcc/shared.tsx -> rolling month options.
-//   - File: frontend/src/components/srcc/views/* -> each view owns its wired
-//       month query and mutation controls.
+//   - File: frontend/src/config/navigation.ts -> title and subtitle copy.
+//   - File: frontend/src/components/srcc/views/* -> owning month controls and
+//       API requests.
 // ============================================================================
+// FIX: Removed the shell-level Month selector because its value never reached
+// any request; the API-backed view selector is now the only visible authority.
 const Topbar = ({ title, subtitle }: { title: string; subtitle: string }) => {
   return (
     <header className="topbar">
@@ -582,13 +581,6 @@ const Topbar = ({ title, subtitle }: { title: string; subtitle: string }) => {
           <h1>{title}</h1>
         </div>
         <p>{subtitle}</p>
-      </div>
-      <div className="control-row" role="group" aria-label="Report filters">
-        <select className="control" aria-label="Month" defaultValue={monthKeyLabel(DEFAULT_MONTH)}>
-          {MONTH_OPTIONS.map((monthValue) => (
-            <option key={monthValue}>{monthKeyLabel(monthValue)}</option>
-          ))}
-        </select>
       </div>
     </header>
   );

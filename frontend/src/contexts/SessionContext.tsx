@@ -7,10 +7,16 @@ import {
   useState,
   type ReactNode,
 } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 
 import type { ApiError } from "@/lib/api/client";
 import type { SessionMe } from "@/lib/api/types";
-import { useSessionMeQuery } from "@/lib/query/session";
+import {
+  createSessionQueryScope,
+  SESSION_ME_QUERY_KEY,
+  useSessionMeQuery,
+} from "@/lib/query/session";
+import type { SessionQueryScope } from "@/lib/query/session";
 
 // The hydration lifecycle of the authenticated session.
 //   loading -> the shared GET /session/me query has not yet settled
@@ -27,6 +33,8 @@ type SessionState = {
 type SessionContextValue = SessionState & {
   hydrate: (payload: SessionMe) => void;
   fail: (error: ApiError | Error) => void;
+  clearSession: () => void;
+  queryScope: SessionQueryScope;
 };
 
 const INITIAL_STATE: SessionState = {
@@ -67,6 +75,8 @@ export const SessionProvider = ({
   // network round-trip. Production main.tsx uses the null default and bootstraps.
   initialSession?: SessionMe | null;
 }) => {
+  const queryClient = useQueryClient();
+  const [queryScope] = useState(createSessionQueryScope);
   const [state, setState] = useState<SessionState>(() =>
     initialSession
       ? { status: "ready", session: initialSession, error: null }
@@ -83,9 +93,39 @@ export const SessionProvider = ({
     setState({ status: "error", session: null, error });
   }, []);
 
+  // ============================================================================
+  // Purpose: Clear the session query and hydrated principal at an explicit
+  //          logout/auth-boundary transition before any replacement identity
+  //          can be observed by the shell.
+  // Database/ORM: None (frontend query cache and context state only).
+  // Standards: Remove every session-prefixed query, then reset to the
+  //            fail-closed loading state; no stale principal survives logout.
+  // Blast Radius: Authorization state and session cache only; no API request.
+  // Connections:
+  //   - File: frontend/src/lib/query/session.ts -> session query-key prefix.
+  //   - File: frontend/src/components/srcc/AppShell.tsx -> loading/error gates
+  //     before any capability-controlled view renders.
+  // ============================================================================
+  const clearSession = useCallback(() => {
+    // FIX: The former constant-key cache survived auth transitions; purge every
+    // scoped entry before reopening bootstrap in the fail-closed loading state.
+    queryClient.removeQueries({ queryKey: SESSION_ME_QUERY_KEY });
+    setState(INITIAL_STATE);
+  }, [queryClient]);
+
+  // A provider unmount ends this authenticated lifetime. Remove every tenant
+  // key in its namespace so the old principal cannot remain in a shared
+  // QueryClient while a replacement provider mounts.
+  useEffect(() => {
+    const key = [...SESSION_ME_QUERY_KEY, queryScope] as const;
+    return () => {
+      queryClient.removeQueries({ queryKey: key });
+    };
+  }, [queryClient, queryScope]);
+
   const value = useMemo<SessionContextValue>(
-    () => ({ ...state, hydrate, fail }),
-    [state, hydrate, fail],
+    () => ({ ...state, hydrate, fail, clearSession, queryScope }),
+    [state, hydrate, fail, clearSession, queryScope],
   );
 
   return (
@@ -122,8 +162,8 @@ export type SessionBootstrap = {
 // ============================================================================
 export const useSessionBootstrap = (): SessionBootstrap => {
   const session = useSession();
-  const { status, hydrate, fail } = session;
-  const query = useSessionMeQuery(status !== "ready");
+  const { status, hydrate, fail, queryScope } = session;
+  const query = useSessionMeQuery(status === "loading", queryScope);
 
   useEffect(() => {
     if (status !== "loading") return;

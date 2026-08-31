@@ -1,15 +1,52 @@
 import { useQuery } from "@tanstack/react-query";
+import { useState } from "react";
 
+import { useTenant } from "@/contexts/TenantContext";
 import { useApiClient } from "@/lib/api/client";
 import type { SessionMe } from "@/lib/api/types";
 
 export const SESSION_ME_QUERY_KEY = ["session", "me"] as const;
 
+export type SessionQueryScope = number;
+
+let nextSessionQueryScope = 0;
+
+// ============================================================================
+// Purpose: Allocate a process-local namespace for one authenticated provider
+//          lifetime so a remounted/login-boundary session cannot reuse a prior
+//          principal's query entry.
+// Database/ORM: None (frontend query-cache identity only).
+// Standards: The counter is opaque and never an authorization claim; it only
+//            separates cache entries. A provider cleanup removes its entry.
+// Blast Radius: Authorization cache isolation; no API or finance mutation.
+// Connections:
+//   - File: frontend/src/contexts/SessionContext.tsx -> owns one scope per
+//     SessionProvider lifetime and clears it on explicit session reset.
+//   - File: frontend/tests/lib/query/session.test.tsx -> pins cross-principal
+//     and cross-tenant cache isolation.
+// ============================================================================
+/** Allocate an opaque cache namespace for one session-provider lifetime. */
+export const createSessionQueryScope = (): SessionQueryScope => {
+  nextSessionQueryScope += 1;
+  return nextSessionQueryScope;
+};
+
+/** Build the exact cache key for one authenticated provider lifetime. */
+export const sessionMeQueryKey = (
+  scope: SessionQueryScope,
+  tenantSlug: string,
+): readonly ["session", "me", SessionQueryScope, string] => [
+  ...SESSION_ME_QUERY_KEY,
+  scope,
+  tenantSlug,
+];
+
 // ============================================================================
 // Purpose: Expose the backend session contract through the shared query cache.
 // Database/ORM: None; GET /session/me reads the trusted gateway principal.
-// Standards: Disable retries for fail-closed bootstrap and allow callers to
-//            disable the request when a seeded session is already authoritative.
+// Standards: Namespace cache data by provider lifetime and tenant, override the
+//            application stale window, disable retries for fail-closed bootstrap,
+//            and allow a seeded authoritative session to disable the request.
 // Blast Radius: Authorization (session identity and capability gating).
 // Connections:
 //   - File: frontend/src/contexts/SessionContext.tsx -> hydrates/fails from
@@ -17,11 +54,33 @@ export const SESSION_ME_QUERY_KEY = ["session", "me"] as const;
 //   - File: backend/ums_smart_revenue/api/session.py -> GET /session/me.
 // ============================================================================
 /** Read the authoritative session once through TanStack Query. */
-export const useSessionMeQuery = (enabled = true) => {
+export const useSessionMeQuery = (
+  enabled = true,
+  scope?: SessionQueryScope,
+) => {
+  const { tenantSlug } = useTenant();
   const api = useApiClient();
+  // Direct hook consumers still receive a fresh boundary. The provider passes
+  // its stable scope so AppShell route remounts can reuse only that provider's
+  // own authenticated result.
+  const [localScope] = useState(createSessionQueryScope);
+  const queryScope = scope ?? localScope;
   return useQuery({
-    queryKey: SESSION_ME_QUERY_KEY,
+    // FIX: The former constant key could synchronously replay a still-fresh
+    // principal after remount/login. Scope + tenant make that cache unreachable.
+    queryKey: sessionMeQueryKey(queryScope, tenantSlug),
     enabled,
+    // Never inherit main.tsx's 30-second freshness window for identity data.
+    // The opaque scope prevents reuse across provider lifetimes; zero GC drops
+    // the scoped entry as soon as its final consumer unmounts.
+    staleTime: 0,
+    gcTime: 0,
+    // A route transition may remount the bootstrap consumer. Reusing the result
+    // is safe inside one opaque provider scope; a new provider scope always
+    // fetches afresh.
+    refetchOnMount: false,
+    refetchOnWindowFocus: false,
+    refetchOnReconnect: false,
     retry: false,
     queryFn: () => api.get<SessionMe>("/session/me"),
   });
