@@ -52,6 +52,11 @@ DATA_STEWARD
   exact `manual-upload` or `manual_upload` connector key paired with
   `MANUAL_UPLOAD`; it does not imply connector execution. The submitted alias
   is preserved as the connector scope and in the audit record.
+- Alembic revision `20260825_0002` is an irreversible authorization floor.
+  Downgrading below it would restore broad connector-job execution to
+  `BETA_OPERATOR`, even on an empty database. Rollback therefore requires a
+  reviewed database reset/redeploy plan; do not use `alembic downgrade` to
+  cross this revision.
 
 ## Authorization modes
 

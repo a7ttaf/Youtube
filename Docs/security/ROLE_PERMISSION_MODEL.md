@@ -136,6 +136,11 @@ Sensitive actions include:
   case-sensitive `manual-upload` or `manual_upload` connector key paired with
   `MANUAL_UPLOAD`, and a `REPORT_IMPORTED` audit event. The submitted alias is
   preserved as the connector scope and in the audit record.
+- Authorization migration `20260825_0002` is an irreversible security floor:
+  rolling below it would restore `connectors.run_jobs` to Beta Operator.
+  Recovery requires a reviewed database reset/redeploy, not an Alembic
+  downgrade across that revision. Downstream migrations may downgrade only to
+  `20260825_0002` or later.
 - Connector administration requires `MANAGE_CONNECTORS`; running jobs requires `RUN_CONNECTOR_JOBS`.
 - User account creation and updates require `users.manage`, a reason, and a `USER_ACCOUNT_CHANGED` audit event.
 - User account list and access-profile reads require `users.manage`; account lists use bounded cursor pagination and access profiles expose only active role assignments and direct grants for administration workflows.
