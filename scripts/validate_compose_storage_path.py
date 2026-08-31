@@ -25,6 +25,8 @@ STORAGE_ENV_VAR = "UMS_APP_DATA_HOST"
 STORAGE_CHILDREN = ("artifacts", "blobs")
 STORAGE_SENTINEL_NAME = ".ums-smart-revenue-storage"
 STORAGE_SENTINEL_VERSION = "UMS Smart Revenue storage v1"
+APP_UID = 10001
+APP_GID = 10001
 
 
 class StoragePathError(ValueError):
@@ -314,9 +316,18 @@ class StorageIdentityGuard:
     """An open identity boundary retained while Docker resolves the bind."""
 
     canonical_path: Path
-    docker_source: Path
     identity: tuple[tuple[str, int, int], ...]
+    child_docker_sources: tuple[tuple[str, Path], ...]
     _descriptors: tuple[int, ...] = ()
+
+    def child_source(self, name: str) -> Path:
+        """Return the directly pinned Docker source for one reviewed child."""
+
+        sources = dict(self.child_docker_sources)
+        try:
+            return sources[name]
+        except KeyError as exc:
+            raise StoragePathError(f"storage identity guard has no child {name!r}") from exc
 
     def assert_current(self) -> None:
         """Fail if any guarded root/direct child no longer has its proven identity."""
@@ -457,8 +468,8 @@ def _open_posix_identity_descriptors(
 # Purpose: Retain the proven storage identities until Docker has resolved and
 #   created every container that receives the bind source.
 # Database/ORM: None.
-# Standards: Windows handles deny delete sharing; POSIX uses no-follow open
-#   descriptors and exposes the root descriptor through procfs to the daemon.
+# Standards: Windows handles deny delete sharing; POSIX exposes the no-follow
+#   direct-child descriptors through procfs until every daemon action returns.
 # Blast Radius: Durable artifacts/blob bind identity during container creation.
 # Connections:
 #   - File: scripts/compose.py -> Holds this guard through probe and final up.
@@ -475,7 +486,11 @@ def hold_storage_identity(path: Path) -> Iterator[StorageIdentityGuard]:
         try:
             if storage_tree_identity(canonical) != identity:
                 raise StoragePathError("storage identity changed while acquiring the Windows guard")
-            guard = StorageIdentityGuard(canonical, canonical, identity)
+            guard = StorageIdentityGuard(
+                canonical,
+                identity,
+                tuple((name, canonical / name) for name in STORAGE_CHILDREN),
+            )
             yield guard
             guard.assert_current()
         finally:
@@ -483,15 +498,17 @@ def hold_storage_identity(path: Path) -> Iterator[StorageIdentityGuard]:
         return
 
     descriptors = _open_posix_identity_descriptors(canonical, identity)
-    root_descriptor = descriptors[0]
-    proc_source = Path(f"/proc/{os.getpid()}/fd/{root_descriptor}")
+    child_sources = tuple(
+        (name, Path(f"/proc/{os.getpid()}/fd/{descriptors[index]}"))
+        for index, name in enumerate(STORAGE_CHILDREN, start=1)
+    )
     try:
-        if not proc_source.exists():
-            raise StoragePathError("procfs cannot expose the guarded storage descriptor to Docker")
+        if any(not source.exists() for _name, source in child_sources):
+            raise StoragePathError("procfs cannot expose every guarded child descriptor to Docker")
         guard = StorageIdentityGuard(
             canonical,
-            proc_source,
             identity,
+            child_sources,
             descriptors,
         )
         guard.assert_current()
@@ -550,11 +567,89 @@ def _require_operator_group_access(path: Path) -> None:
         source_gid = path.stat().st_gid
     except OSError as exc:
         raise StoragePathError(f"cannot inspect storage ownership for {path!s}") from exc
-    if getattr(os, "geteuid", lambda: 1)() != 0 and source_gid not in operator_groups:
+    if (
+        getattr(os, "geteuid", lambda: 1)() != 0
+        and source_gid not in operator_groups
+        and source_gid != APP_GID
+    ):
         raise StoragePathError(
-            f"storage directory group {source_gid} is not an operator group; "
+            f"storage directory group {source_gid} is neither an operator nor app group; "
             "set the directory group before starting Compose"
         )
+
+
+# ============================================================================
+# Purpose: Prove every POSIX storage descendant is a regular file/directory
+#   owned only by the current operator or the non-root application principal.
+# Database/ORM: None.
+# Standards: No world permissions, foreign uid/gid, special file, setuid, or
+#   sticky entry is accepted; operator recovery access is checked recursively.
+# Blast Radius: Durable artifact/blob confidentiality and recoverability.
+# Connections:
+#   - File: Dockerfile -> Declares the application uid/gid 10001 contract.
+#   - File: scripts/compose.py -> Runs this before direct child bind mounts.
+# ============================================================================
+def _require_posix_storage_policy(path: Path) -> None:
+    """Enforce recursive POSIX ownership and least-permission boundaries."""
+
+    if os.name == "nt":
+        return
+    try:
+        operator_uid = os.geteuid()
+        operator_groups = {os.getegid(), *os.getgroups()}
+    except OSError as exc:
+        raise StoragePathError("cannot inspect the POSIX operator identity") from exc
+    allowed_uids = {operator_uid, APP_UID}
+    allowed_gids = {*operator_groups, APP_GID}
+    pending = [path]
+    while pending:
+        current = pending.pop()
+        try:
+            metadata = current.stat(follow_symlinks=False)
+        except OSError as exc:
+            raise StoragePathError(f"cannot inspect POSIX storage policy for {current!s}") from exc
+        is_directory = stat.S_ISDIR(metadata.st_mode)
+        is_regular = stat.S_ISREG(metadata.st_mode)
+        if not (is_directory or is_regular):
+            raise StoragePathError(
+                f"POSIX storage contains a non-file/non-directory entry: {current!s}"
+            )
+        if metadata.st_uid not in allowed_uids:
+            raise StoragePathError(
+                f"POSIX storage owner uid {metadata.st_uid} is not the operator or app uid: "
+                f"{current!s}"
+            )
+        if metadata.st_gid not in allowed_gids:
+            raise StoragePathError(
+                f"POSIX storage group gid {metadata.st_gid} is not an operator or app group: "
+                f"{current!s}"
+            )
+        mode = stat.S_IMODE(metadata.st_mode)
+        if mode & 0o007:
+            raise StoragePathError(
+                f"POSIX storage grants world permissions ({mode:#05o}): {current!s}"
+            )
+        if mode & (stat.S_ISUID | stat.S_ISVTX):
+            raise StoragePathError(
+                f"POSIX storage has forbidden setuid/sticky mode ({mode:#05o}): {current!s}"
+            )
+        if mode & stat.S_ISGID and not is_directory:
+            raise StoragePathError(
+                f"POSIX storage regular file has forbidden setgid mode: {current!s}"
+            )
+        required_access = os.R_OK | (os.W_OK | os.X_OK if is_directory else 0)
+        try:
+            operator_access = os.access(current, required_access)
+        except OSError as exc:
+            raise StoragePathError(
+                f"cannot prove operator access to POSIX storage {current!s}"
+            ) from exc
+        if not operator_access:
+            raise StoragePathError(
+                f"current operator cannot recover POSIX storage entry {current!s}"
+            )
+        if is_directory:
+            pending.extend(_directory_entries(current))
 
 
 _WINDOWS_ACL_QUERY = r"""
@@ -978,6 +1073,7 @@ def validate_storage_path(
     _reject_storage_submounts(canonical)
     _reject_nested_reparse_points(canonical)
     _validate_sentinel(canonical, required=require_attestation)
+    _require_posix_storage_policy(canonical)
     _require_operator_group_access(canonical)
     _require_windows_host_acl(canonical)
     return canonical
@@ -1078,6 +1174,7 @@ def prepare_storage_path(
                 "with --create --adopt-existing"
             )
 
+    _require_posix_storage_policy(canonical)
     _require_operator_group_access(canonical)
     _require_windows_host_acl(canonical)
     root_identity = _real_directory_identity(canonical)

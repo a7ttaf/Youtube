@@ -21,6 +21,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 
 from validate_compose_storage_path import (
+    STORAGE_CHILDREN,
     StoragePathError,
     hold_storage_identity,
     prepare_storage_path,
@@ -32,12 +33,24 @@ COMPOSE_FILE = PROJECT_ROOT / "docker-compose.yml"
 PROJECT_NAME = "ums-smart-revenue"
 STORAGE_IMAGE = "ums-smart-revenue:dev"
 STORAGE_TARGET = "/var/lib/ums"
+STORAGE_TARGETS = {
+    "artifacts": f"{STORAGE_TARGET}/artifacts",
+    "blobs": f"{STORAGE_TARGET}/blobs",
+}
+STORAGE_SOURCE_ENV = {
+    "artifacts": "UMS_APP_ARTIFACTS_HOST",
+    "blobs": "UMS_APP_BLOBS_HOST",
+}
+RESERVED_LAUNCHER_ENV = {
+    "UMS_APP_IMAGE",
+    *STORAGE_SOURCE_ENV.values(),
+}
 EXPECTED_SERVICES = {"postgres", "redis", "migrate", "app", "app-dev"}
 APP_SERVICES = {"app", "app-dev"}
 APPLICATION_IMAGE_SERVICES = {"migrate", "app", "app-dev"}
 DAEMON_ACTIONS = {"up", "run", "logs", "stop", "down", "ps"}
 _IMAGE_ID = re.compile(r"sha256:[0-9a-f]{64}")
-_ENV_ASSIGNMENT = re.compile(r"^\s*(?:export\s+)?(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*(?:=|$)")
+_ENV_ASSIGNMENT = re.compile(r"^\s*(?:export\s+)?(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*(?:=|:|$)")
 
 # FIX: PID-derived probe names could be pre-created and truncated. The probe
 # now runs as the exact uid/gid declared by the rendered app service and
@@ -292,12 +305,12 @@ def _compose_environment(source: dict[str, str]) -> dict[str, str]:
         raise StoragePathError(
             "ambient COMPOSE_* controls are unsupported: " + ", ".join(compose_controls)
         )
-    reserved_image = next(
-        (key for key in source if key.upper() == "UMS_APP_IMAGE"),
+    reserved_name = next(
+        (key for key in source if key.upper() in RESERVED_LAUNCHER_ENV),
         None,
     )
-    if reserved_image is not None:
-        raise StoragePathError("UMS_APP_IMAGE is reserved for immutable launcher provenance")
+    if reserved_name is not None:
+        raise StoragePathError(f"{reserved_name.upper()} is reserved for launcher-owned provenance")
     environment = dict(source)
     environment.update(
         {
@@ -360,7 +373,7 @@ def _validated_env_bytes(path: Path) -> bytes:
         if match is None:
             continue
         name = match.group("name").upper()
-        if name.startswith("COMPOSE_") or name == "UMS_APP_IMAGE":
+        if name.startswith("COMPOSE_") or name in RESERVED_LAUNCHER_ENV:
             raise StoragePathError(
                 f"the selected env file assigns reserved launcher variable {name}"
             )
@@ -601,7 +614,7 @@ def _validate_rendered_model(
     *,
     project_root: Path,
     expected_image: str = STORAGE_IMAGE,
-    expected_storage_source: Path | None = None,
+    expected_storage_sources: dict[str, Path] | None = None,
 ) -> Path:
     """Validate the exact storage projection and return its canonical source."""
 
@@ -613,7 +626,9 @@ def _validate_rendered_model(
     if set(services) != EXPECTED_SERVICES:
         raise StoragePathError("rendered Compose service set differs from the reviewed model")
 
-    root_mounts: dict[str, dict[str, object]] = {}
+    storage_mounts: dict[str, dict[str, dict[str, object]]] = {
+        service_name: {} for service_name in APP_SERVICES
+    }
     for service_name, service in services.items():
         if not isinstance(service, dict):
             raise StoragePathError(f"rendered service {service_name} is not an object")
@@ -624,38 +639,60 @@ def _validate_rendered_model(
             if not isinstance(volume, dict):
                 raise StoragePathError(f"rendered service {service_name} has a non-object volume")
             target = _normalized_target(volume.get("target"))
-            if target == STORAGE_TARGET:
-                if volume.get("target") != STORAGE_TARGET:
+            matching_children = [
+                child
+                for child, expected_target in STORAGE_TARGETS.items()
+                if target == expected_target
+            ]
+            if matching_children:
+                child = matching_children[0]
+                if volume.get("target") != STORAGE_TARGETS[child]:
                     raise StoragePathError("rendered storage target uses an ambiguous spelling")
                 if service_name not in APP_SERVICES:
                     raise StoragePathError(
                         f"rendered service {service_name} touches application storage"
                     )
-                if service_name in root_mounts:
+                if child in storage_mounts[service_name]:
                     raise StoragePathError(
-                        f"rendered service {service_name} repeats the storage mount"
+                        f"rendered service {service_name} repeats the {child} storage mount"
                     )
-                root_mounts[service_name] = volume
-            elif target.startswith(f"{STORAGE_TARGET}/"):
+                storage_mounts[service_name][child] = volume
+            elif target == STORAGE_TARGET or target.startswith(f"{STORAGE_TARGET}/"):
                 raise StoragePathError(
-                    f"rendered service {service_name} adds a nested storage mount"
+                    f"rendered service {service_name} adds an unreviewed storage mount"
                 )
 
-    if set(root_mounts) != APP_SERVICES:
-        raise StoragePathError("both app services must retain one storage bind")
-    sources = {_canonical_model_source(volume.get("source")) for volume in root_mounts.values()}
-    if len(sources) != 1:
-        raise StoragePathError("app and app-dev render different storage sources")
-    storage_path = sources.pop()
-    if expected_storage_source is not None:
-        expected_spelling = os.path.normcase(str(expected_storage_source))
-        rendered_spellings = {
-            os.path.normcase(str(volume.get("source"))) for volume in root_mounts.values()
+    if any(set(mounts) != set(STORAGE_CHILDREN) for mounts in storage_mounts.values()):
+        raise StoragePathError("both app services must retain both direct child binds")
+    canonical_children: dict[str, Path] = {}
+    for child in STORAGE_CHILDREN:
+        sources = {
+            _canonical_model_source(storage_mounts[service][child].get("source"))
+            for service in APP_SERVICES
         }
-        if rendered_spellings != {expected_spelling}:
-            raise StoragePathError(
-                "Compose rewrote the OS-pinned storage source before daemon handoff"
-            )
+        if len(sources) != 1:
+            raise StoragePathError(f"app and app-dev render different {child} sources")
+        canonical = sources.pop()
+        if canonical.name != child:
+            raise StoragePathError(f"rendered {child} source does not name its exact store")
+        canonical_children[child] = canonical
+    storage_roots = {source.parent for source in canonical_children.values()}
+    if len(storage_roots) != 1:
+        raise StoragePathError("rendered child binds do not share one storage root")
+    storage_path = storage_roots.pop()
+    if expected_storage_sources is not None:
+        if set(expected_storage_sources) != set(STORAGE_CHILDREN):
+            raise StoragePathError("launcher did not provide every pinned child source")
+        for child in STORAGE_CHILDREN:
+            expected_spelling = os.path.normcase(str(expected_storage_sources[child]))
+            rendered_spellings = {
+                os.path.normcase(str(storage_mounts[service][child].get("source")))
+                for service in APP_SERVICES
+            }
+            if rendered_spellings != {expected_spelling}:
+                raise StoragePathError(
+                    f"Compose rewrote the OS-pinned {child} source before daemon handoff"
+                )
 
     for service_name, service in services.items():
         if not isinstance(service, dict):
@@ -669,8 +706,18 @@ def _validate_rendered_model(
             source_value = volume.get("source")
             source = _canonical_model_source(source_value) if volume.get("type") == "bind" else None
             target = _normalized_target(volume.get("target"))
-            is_expected_root = service_name in APP_SERVICES and target == STORAGE_TARGET
-            if source is not None and _path_overlap(source, storage_path) and not is_expected_root:
+            expected_child = next(
+                (
+                    child
+                    for child, expected_target in STORAGE_TARGETS.items()
+                    if service_name in APP_SERVICES and target == expected_target
+                ),
+                None,
+            )
+            is_expected_child = (
+                expected_child is not None and source == canonical_children[expected_child]
+            )
+            if source is not None and _path_overlap(source, storage_path) and not is_expected_child:
                 raise StoragePathError(
                     f"rendered service {service_name} has alternate access to storage"
                 )
@@ -733,28 +780,37 @@ def _validate_rendered_model(
                 raise StoragePathError("rendered migrate service adds an unexpected volume")
             continue
 
-        mount = root_mounts[service_name]
-        if mount.get("type") != "bind":
-            raise StoragePathError(
-                f"rendered service {service_name} changes storage to a non-bind volume"
-            )
-        if mount.get("bind") != {"create_host_path": False}:
-            raise StoragePathError(f"rendered service {service_name} changes safe bind options")
-        if mount.get("read_only") not in (None, False):
-            raise StoragePathError(
-                f"rendered service {service_name} makes application storage read-only"
-            )
+        for child, mount in storage_mounts[service_name].items():
+            if mount.get("type") != "bind":
+                raise StoragePathError(
+                    f"rendered service {service_name} changes {child} to a non-bind volume"
+                )
+            if mount.get("bind") != {"create_host_path": False}:
+                raise StoragePathError(
+                    f"rendered service {service_name} changes safe {child} bind options"
+                )
+            if mount.get("read_only") not in (None, False):
+                raise StoragePathError(
+                    f"rendered service {service_name} makes {child} storage read-only"
+                )
 
         volumes = service.get("volumes")
         if not isinstance(volumes, list):
             raise StoragePathError(f"rendered service {service_name} has invalid volumes")
-        expected_volume_count = 2 if service_name == "app-dev" else 1
+        expected_volume_count = 3 if service_name == "app-dev" else 2
         if len(volumes) != expected_volume_count:
             raise StoragePathError(
                 f"rendered service {service_name} changes its exact volume layout"
             )
         if service_name == "app-dev":
-            backend_mount = volumes[0]
+            backend_mounts = [
+                volume
+                for volume in volumes
+                if isinstance(volume, dict) and volume.get("target") == "/srv/app/backend"
+            ]
+            if len(backend_mounts) != 1:
+                raise StoragePathError("rendered app-dev backend bind is missing or repeated")
+            backend_mount = backend_mounts[0]
             if not isinstance(backend_mount, dict):
                 raise StoragePathError("rendered app-dev backend bind is invalid")
             if (
@@ -945,7 +1001,11 @@ def main(argv: list[str] | None = None) -> int:
                     project_root=PROJECT_ROOT,
                 )
                 with hold_storage_identity(storage_path) as identity_guard:
-                    environment["UMS_APP_DATA_HOST"] = str(identity_guard.docker_source)
+                    pinned_child_sources = {
+                        child: identity_guard.child_source(child) for child in STORAGE_CHILDREN
+                    }
+                    for child, source in pinned_child_sources.items():
+                        environment[STORAGE_SOURCE_ENV[child]] = str(source)
                     guarded_model = _render_model(
                         request,
                         cwd=PROJECT_ROOT,
@@ -955,7 +1015,7 @@ def main(argv: list[str] | None = None) -> int:
                         guarded_model,
                         project_root=project_root,
                         expected_image=expected_image,
-                        expected_storage_source=identity_guard.docker_source,
+                        expected_storage_sources=pinned_child_sources,
                     )
                     if guarded_path != storage_path:
                         raise StoragePathError(
@@ -982,6 +1042,18 @@ def main(argv: list[str] | None = None) -> int:
                     return completed.returncode
 
             command = ["docker", "compose", *request.compose_args]
+            if request.action == "config":
+                completed = _run_checked(
+                    command,
+                    cwd=PROJECT_ROOT,
+                    env=environment,
+                    capture=True,
+                )
+                if completed.returncode != 0:
+                    raise StoragePathError(
+                        "the pinned Compose configuration is invalid; inspect the env file syntax"
+                    )
+                return 0
             if request.action in DAEMON_ACTIONS:
                 completed = _run_daemon_checked(
                     command,

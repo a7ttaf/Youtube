@@ -10,9 +10,9 @@
 # The launcher is a host-side safety boundary. It canonicalizes
 # UMS_APP_DATA_HOST, requires the path-bound application sentinel, rejects
 # roots/system paths/non-default checkout descendants/symlinks/submounts,
-# validates the final rendered Compose model, and creates only the safe default
-# before a container is invoked. This file intentionally contains NO root-capable
-# storage initializer: direct `docker compose` cannot trigger a root
+# validates the final rendered Compose model, and replaces both child sources
+# with OS-pinned identities before a container is invoked. This file intentionally
+# contains NO root-capable storage initializer: direct `docker compose` cannot trigger a root
 # chown/chmod of an arbitrary host path. Direct Compose is unsupported for
 # starting the app because it skips the host preflight and non-root write probe;
 # use `python scripts/compose.py`.
@@ -39,9 +39,9 @@
 #         anyway because this list has to stay exhaustive — the slice that
 #         starts using Redis inherits this warning, and nobody re-reads a
 #         teardown warning they already believe they understand.
-#     Artifact/blob storage uses a **host bind mount** (`UMS_APP_DATA_HOST`,
-#     default `./data/ums`) — it is NOT in this named-volume list and survives
-#     `down -v`. A production backup/restore procedure is intentionally not
+#     Artifact/blob storage uses two direct **host bind mounts** below
+#     `UMS_APP_DATA_HOST` (default `./data/ums`) — they are NOT in this named-
+#     volume list and survive `down -v`. A production backup/restore procedure is intentionally not
 #     claimed by PR #221: live-writer quiescence, atomic staging, archive
 #     traversal checks, path-bound sentinel rebinding, recursive permissions,
 #     NTFS ACLs, and the Postgres roles dump belong in the separately reviewed
@@ -272,16 +272,15 @@ x-app-env: &app-env
 # connector blob destroys the raw evidence behind already-ingested revenue
 # rows. Pointing both at one durable mount fixes it with no Python change.
 #
-# One mount, two subdirectories: the two stores never share a filename
-# space, and backing both up means backing up one directory tree. This
-# anchor is merged ONLY into the services that actually mount the data
-# mount, so a storage path can never be configured without its mount
-# behind it. `migrate` deliberately gets neither — alembic writes no
-# artifacts or blobs.
+# One host tree, two directly bound subdirectories: the stores never share a
+# filename space, and each child identity stays kernel-pinned through container
+# creation. This anchor is merged ONLY into the services that receive both
+# child mounts. `migrate` deliberately gets neither — alembic writes no artifacts
+# or blobs.
 #
-# The mount is a HOST BIND (UMS_APP_DATA_HOST, default ./data/ums ->
-# /var/lib/ums), chosen over a named volume because `down -v` would destroy
-# a named one alongside postgres-data. A bind mount does NOT inherit
+# The stores are HOST BINDS (UMS_APP_DATA_HOST, default ./data/ums, with direct
+# artifacts/blob children), chosen over named volumes because `down -v` would
+# destroy named ones alongside postgres-data. A bind mount does NOT inherit
 # image-time ownership — the Dockerfile's pre-created, chowned /var/lib/ums
 # is overlaid by whatever the host directory holds. The host launcher creates
 # only the two bounded children with the current operator's authority, then
@@ -298,10 +297,9 @@ x-app-env: &app-env
 # as an explicit operator action, then retry; never treat container mode bits
 # as a substitute for the NTFS DACL.
 # ---------------------------------------------------------------------------
-# Paths are pinned under the durable bind mount at ``/var/lib/ums``. Do NOT
-# interpolate host overrides here: Compose only mounts UMS_APP_DATA_HOST at
-# ``/var/lib/ums``, so an operator-set path like ``/srv/app/artifacts`` would
-# write into the container writable layer and vanish on recreate.
+# Container paths are pinned below ``/var/lib/ums``. Operators select only the
+# root ``UMS_APP_DATA_HOST``; the launcher owns the two child-source variables
+# and injects direct OS-pinned identities after validating the rendered model.
 x-app-storage-env: &app-storage-env
   UMS_EXPORT_ARTIFACT_DIR: /var/lib/ums/artifacts
   UMS_BLOB_BACKEND: ${UMS_BLOB_BACKEND:-file-store}
@@ -419,8 +417,13 @@ services:
       - "127.0.0.1:${UMS_APP_PORT:-8000}:8000"
     volumes:
       - type: bind
-        source: ${UMS_APP_DATA_HOST:-./data/ums}
-        target: /var/lib/ums
+        source: ${UMS_APP_ARTIFACTS_HOST:-${UMS_APP_DATA_HOST:-./data/ums}/artifacts}
+        target: /var/lib/ums/artifacts
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${UMS_APP_BLOBS_HOST:-${UMS_APP_DATA_HOST:-./data/ums}/blobs}
+        target: /var/lib/ums/blobs
         bind:
           create_host_path: false
     healthcheck:
@@ -483,12 +486,18 @@ services:
       - "127.0.0.1:${UMS_APP_DEV_PORT:-8001}:8000"
     volumes:
       - ./backend:/srv/app/backend:ro
-      # Same volume as `app` on purpose: app-dev is an alternative to app, not a
-      # companion, and an operator who switches between them should not find
-      # yesterday's export missing.
+      # Same two stores as `app` on purpose: app-dev is an alternative to app,
+      # not a companion, and an operator who switches between them should not
+      # find yesterday's export missing. The launcher replaces these defaults
+      # with direct OS-pinned child sources before either container is created.
       - type: bind
-        source: ${UMS_APP_DATA_HOST:-./data/ums}
-        target: /var/lib/ums
+        source: ${UMS_APP_ARTIFACTS_HOST:-${UMS_APP_DATA_HOST:-./data/ums}/artifacts}
+        target: /var/lib/ums/artifacts
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${UMS_APP_BLOBS_HOST:-${UMS_APP_DATA_HOST:-./data/ums}/blobs}
+        target: /var/lib/ums/blobs
         bind:
           create_host_path: false
     command:
@@ -510,8 +519,8 @@ services:
 volumes:
   postgres-data:
   redis-data:
-  # Export artifacts + connector blobs use a HOST bind mount (see app / app-dev
-  # services: UMS_APP_DATA_HOST, default ./data/ums). NOT a named volume — plain
+# Export artifacts + connector blobs use direct HOST bind mounts (see app /
+# app-dev services: UMS_APP_DATA_HOST, default ./data/ums). NOT named volumes — plain
   # `docker compose down -v` destroys postgres-data and redis-data; the reviewed
   # backup/recovery procedure is deferred to runbook #222.
 

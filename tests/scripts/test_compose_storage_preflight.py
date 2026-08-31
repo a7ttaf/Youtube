@@ -6,6 +6,7 @@ import json
 import os
 import subprocess
 import sys
+import textwrap
 from copy import deepcopy
 from pathlib import Path
 from types import SimpleNamespace
@@ -45,14 +46,15 @@ def _storage_model(source: Path) -> dict[str, object]:
                     "bind": {},
                 }
             )
-        volumes.append(
-            {
-                "type": "bind",
-                "source": str(source),
-                "target": "/var/lib/ums",
-                "bind": {"create_host_path": False},
-            }
-        )
+        for child in storage.STORAGE_CHILDREN:
+            volumes.append(
+                {
+                    "type": "bind",
+                    "source": str(source / child),
+                    "target": compose_launcher.STORAGE_TARGETS[child],
+                    "bind": {"create_host_path": False},
+                }
+            )
         service: dict[str, object] = {
             "build": {
                 "context": str(PROJECT_ROOT),
@@ -221,6 +223,34 @@ def _remove_directory_link(link: Path) -> None:
         link.rmdir()
     else:
         link.unlink()
+
+
+def _run_real_posix_script(script: str, *, wsl_as_root: bool = False) -> None:
+    """Run a real POSIX counterexample, using Ubuntu WSL on Windows."""
+
+    if os.name == "nt":
+        converted = subprocess.run(
+            ["wsl.exe", "--exec", "wslpath", "-a", str(PROJECT_ROOT)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert converted.returncode == 0, converted.stderr or converted.stdout
+        posix_scripts = f"{converted.stdout.strip()}/scripts"
+        command = ["wsl.exe"]
+        if wsl_as_root:
+            command.extend(["--user", "root"])
+        command.extend(["--exec", "python3", "-c", script.replace("__SCRIPTS__", posix_scripts)])
+    else:
+        command = [sys.executable, "-c", script.replace("__SCRIPTS__", str(SCRIPT_DIRECTORY))]
+    result = subprocess.run(
+        command,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stderr or result.stdout
 
 
 def test_prepare_creates_only_the_path_attested_default_store(
@@ -433,7 +463,7 @@ def test_real_storage_identity_guard_survives_until_mount_resolution(
 
     if os.name == "nt":
         with storage.hold_storage_identity(source) as guard:
-            assert guard.docker_source == source.resolve()
+            assert guard.child_source("artifacts") == (source / "artifacts").resolve()
             with pytest.raises(OSError):
                 source.rename(moved)
             with pytest.raises(OSError):
@@ -443,13 +473,164 @@ def test_real_storage_identity_guard_survives_until_mount_resolution(
         moved.rename(source)
         return
 
+    original_child_identity = original_identity[1][1:]
     with storage.hold_storage_identity(source) as guard:
-        proc_source = guard.docker_source
-        source.rename(moved)
+        proc_source = guard.child_source("artifacts")
+        artifacts = source / "artifacts"
+        moved_artifacts = source / "artifacts-original"
+        artifacts.rename(moved_artifacts)
+        artifacts.mkdir()
         guard.assert_current()
         metadata = proc_source.stat()
-        assert (metadata.st_dev, metadata.st_ino) == original_identity[0][1:]
+        replacement = artifacts.stat()
+        assert (metadata.st_dev, metadata.st_ino) == original_child_identity
+        assert (replacement.st_dev, replacement.st_ino) != original_child_identity
     assert not proc_source.exists()
+
+
+def test_real_wsl_child_descriptor_survives_name_replacement() -> None:
+    """The exact child source stays on the original inode after name replacement."""
+
+    script = textwrap.dedent(
+        """
+        import shutil
+        import sys
+        import tempfile
+        from pathlib import Path
+
+        sys.path.insert(0, "__SCRIPTS__")
+        import validate_compose_storage_path as storage
+
+        root = Path(tempfile.mkdtemp(prefix="ums-child-fd-")) / "store"
+        try:
+            (root / "artifacts").mkdir(parents=True)
+            (root / "blobs").mkdir()
+            storage._create_sentinel(root)
+            original = (root / "artifacts").stat()
+            with storage.hold_storage_identity(root) as guard:
+                pinned = guard.child_source("artifacts")
+                assert str(pinned).startswith("/proc/")
+                (root / "artifacts").rename(root / "artifacts-original")
+                (root / "artifacts").mkdir()
+                held = pinned.stat()
+                replacement = (root / "artifacts").stat()
+                assert (held.st_dev, held.st_ino) == (original.st_dev, original.st_ino)
+                assert (replacement.st_dev, replacement.st_ino) != (
+                    original.st_dev,
+                    original.st_ino,
+                )
+                guard.assert_current()
+            assert not pinned.exists()
+        finally:
+            shutil.rmtree(root.parent)
+        """
+    )
+    _run_real_posix_script(script)
+
+
+def test_real_wsl_recursive_posix_policy_rejects_world_and_foreign_ownership() -> None:
+    """Real POSIX metadata rejects 0777 and non-operator/non-app uid/gid."""
+
+    script = textwrap.dedent(
+        """
+        import os
+        import shutil
+        import sys
+        import tempfile
+        from pathlib import Path
+
+        sys.path.insert(0, "__SCRIPTS__")
+        import validate_compose_storage_path as storage
+
+        root = Path(tempfile.mkdtemp(prefix="ums-posix-policy-")) / "store"
+        try:
+            (root / "artifacts" / "nested").mkdir(parents=True)
+            (root / "blobs").mkdir()
+            payload = root / "artifacts" / "nested" / "payload.bin"
+            payload.write_bytes(b"proof")
+            storage._create_sentinel(root)
+            privileged = os.geteuid() == 0
+            secure_uid = storage.APP_UID if privileged else os.geteuid()
+            secure_gid = storage.APP_GID if privileged else os.getegid()
+            for entry in [root, *root.rglob("*")]:
+                if privileged:
+                    os.chown(entry, secure_uid, secure_gid)
+                os.chmod(entry, 0o700 if entry.is_dir() else 0o600)
+            storage.validate_storage_path(root, project_root=Path("__SCRIPTS__").parent)
+
+            os.chmod(payload, 0o777)
+            try:
+                storage.validate_storage_path(root, project_root=Path("__SCRIPTS__").parent)
+            except storage.StoragePathError as exc:
+                assert "world permissions" in str(exc)
+            else:
+                raise AssertionError("0777 descendant passed the POSIX policy")
+
+            if privileged:
+                os.chmod(payload, 0o600)
+                os.chown(payload, storage.APP_UID, 42424)
+                try:
+                    storage.validate_storage_path(root, project_root=Path("__SCRIPTS__").parent)
+                except storage.StoragePathError as exc:
+                    assert "group gid 42424" in str(exc)
+                else:
+                    raise AssertionError("foreign group passed the POSIX policy")
+
+                os.chown(payload, 42424, storage.APP_GID)
+                try:
+                    storage.validate_storage_path(root, project_root=Path("__SCRIPTS__").parent)
+                except storage.StoragePathError as exc:
+                    assert "owner uid 42424" in str(exc)
+                else:
+                    raise AssertionError("foreign owner passed the POSIX policy")
+        finally:
+            shutil.rmtree(root.parent)
+        """
+    )
+    _run_real_posix_script(script, wsl_as_root=True)
+
+
+@pytest.mark.parametrize(
+    ("child_uid", "child_gid", "message"),
+    [
+        (42424, storage.APP_GID, "owner uid 42424"),
+        (storage.APP_UID, 42424, "group gid 42424"),
+    ],
+)
+def test_recursive_posix_policy_rejects_synthetic_foreign_principal(
+    monkeypatch: pytest.MonkeyPatch,
+    child_uid: int,
+    child_gid: int,
+    message: str,
+) -> None:
+    """Foreign uid/gid metadata fails on hosts where tests cannot call chown."""
+
+    class MetadataEntry:
+        def __init__(self, name: str, mode: int, uid: int, gid: int) -> None:
+            self.name = name
+            self._metadata = SimpleNamespace(st_mode=mode, st_uid=uid, st_gid=gid)
+
+        def stat(self, *, follow_symlinks: bool) -> SimpleNamespace:
+            assert follow_symlinks is False
+            return self._metadata
+
+        def __str__(self) -> str:
+            return self.name
+
+    root = MetadataEntry("root", storage.stat.S_IFDIR | 0o700, 1000, 1000)
+    child = MetadataEntry("child", storage.stat.S_IFREG | 0o600, child_uid, child_gid)
+    monkeypatch.setattr(storage.os, "name", "posix")
+    monkeypatch.setattr(storage.os, "geteuid", lambda: 1000, raising=False)
+    monkeypatch.setattr(storage.os, "getegid", lambda: 1000, raising=False)
+    monkeypatch.setattr(storage.os, "getgroups", lambda: [1001], raising=False)
+    monkeypatch.setattr(storage.os, "access", lambda *_args: True)
+    monkeypatch.setattr(
+        storage,
+        "_directory_entries",
+        lambda current: [child] if current is root else [],
+    )
+    with pytest.raises(storage.StoragePathError, match=message):
+        storage._require_posix_storage_policy(root)  # type: ignore[arg-type]
 
 
 def test_nested_mount_inventory_is_rejected(
@@ -584,8 +765,8 @@ def test_compose_has_no_root_initializer_or_forgeable_marker() -> None:
 
     compose = (PROJECT_ROOT / "docker-compose.yml").read_text(encoding="utf-8")
     launcher = (SCRIPT_DIRECTORY / "compose.py").read_text(encoding="utf-8")
-    assert compose.count("type: bind") == 2
-    assert compose.count("create_host_path: false") == 2
+    assert compose.count("type: bind") == 4
+    assert compose.count("create_host_path: false") == 4
     assert compose.count("image: ${UMS_APP_IMAGE:-ums-smart-revenue:dev}") == 3
     assert compose.count("pull_policy: never") == 3
     assert compose.count('user: "10001:10001"') == 3
@@ -649,10 +830,10 @@ def test_rendered_model_requires_same_immutable_image_for_all_app_actions(
 def test_guarded_model_rejects_source_rewrite_even_when_canonical_path_matches(
     tmp_path: Path,
 ) -> None:
-    """POSIX proc-fd spelling must survive Compose instead of falling back to a path."""
+    """Each POSIX child-fd spelling must survive Compose without path fallback."""
 
     source = (tmp_path / "store").resolve()
-    rewritten = source / "transient" / ".."
+    rewritten = source / "transient" / ".." / "blobs"
     model = _storage_model(source)
     services = model["services"]
     assert isinstance(services, dict)
@@ -664,12 +845,12 @@ def test_guarded_model_rejects_source_rewrite_even_when_canonical_path_matches(
         mount = volumes[-1]
         assert isinstance(mount, dict)
         mount["source"] = str(rewritten)
-    assert rewritten.resolve(strict=False) == source
+    assert rewritten.resolve(strict=False) == source / "blobs"
     with pytest.raises(compose_launcher.StoragePathError, match="rewrote"):
         compose_launcher._validate_rendered_model(
             model,
             project_root=PROJECT_ROOT,
-            expected_storage_source=source,
+            expected_storage_sources={child: source / child for child in storage.STORAGE_CHILDREN},
         )
 
 
@@ -761,12 +942,12 @@ def test_rendered_model_mutations_fail_closed(tmp_path: Path, mutation: str) -> 
             {
                 "type": "bind",
                 "source": str(tmp_path / "other"),
-                "target": "/var/lib/ums/artifacts",
+                "target": "/var/lib/ums/artifacts/nested",
                 "bind": {"create_host_path": False},
             }
         )
     elif mutation == "ambiguous-root-target":
-        app_mount["target"] = "/var/lib/ums/."
+        app_mount["target"] = "/var/lib/ums/artifacts/."
     elif mutation == "alternate-source-access":
         migrate = services["migrate"]
         assert isinstance(migrate, dict)
@@ -963,7 +1144,13 @@ def test_compose_environment_pins_all_launcher_owned_controls() -> None:
         "COMPOSE_PROJECT_NAME=rogue",
         "COMPOSE_ENV_FILES=second.env",
         "COMPOSE_PATH_SEPARATOR=,",
+        "COMPOSE_REMOVE_ORPHANS: true",
+        "  compose_remove_orphans : false",
+        "export COMPOSE_PARALLEL_LIMIT : 99",
+        "COMPOSE_EXPERIMENTAL",
         "UMS_APP_IMAGE=attacker:latest",
+        "UMS_APP_ARTIFACTS_HOST: /tmp/attacker",
+        "UMS_APP_BLOBS_HOST = /tmp/attacker",
     ],
 )
 def test_env_file_cannot_restore_reserved_compose_behavior(
@@ -1004,11 +1191,18 @@ def test_config_executes_only_quiet_and_never_contacts_daemon(
 ) -> None:
     """Secret-bearing rendered YAML has no supported stdout-producing route."""
 
-    calls: list[list[str]] = []
+    calls: list[tuple[list[str], bool]] = []
 
-    def fake_checked(command: list[str], **_kwargs: object) -> SimpleNamespace:
-        calls.append(command)
-        return SimpleNamespace(returncode=0)
+    def fake_checked(
+        command: list[str],
+        *,
+        cwd: Path,
+        env: dict[str, str],
+        capture: bool = False,
+    ) -> SimpleNamespace:
+        del cwd, env
+        calls.append((command, capture))
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
 
     monkeypatch.setattr(compose_launcher, "PROJECT_ROOT", tmp_path)
     monkeypatch.setattr(compose_launcher, "COMPOSE_FILE", tmp_path / "docker-compose.yml")
@@ -1019,7 +1213,44 @@ def test_config_executes_only_quiet_and_never_contacts_daemon(
         lambda **_kwargs: pytest.fail("config --quiet must not contact the daemon"),
     )
     assert compose_launcher.main(["config", "--quiet"]) == 0
-    assert calls == [["docker", "compose", "config", "--quiet"]]
+    assert calls == [(["docker", "compose", "config", "--quiet"], True)]
+
+
+def test_public_config_failure_captures_and_redacts_malformed_secret(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Malformed quoted secrets from Compose stderr never reach the terminal."""
+
+    secret = "TOP-SECRET-UNTERMINATED-QUOTE"
+
+    def fake_checked(
+        _command: list[str],
+        *,
+        cwd: Path,
+        env: dict[str, str],
+        capture: bool = False,
+    ) -> SimpleNamespace:
+        del cwd, env
+        assert capture is True
+        return SimpleNamespace(
+            returncode=1,
+            stdout="",
+            stderr=f'unexpected character in UMS_DB_PASSWORD="{secret}',
+        )
+
+    monkeypatch.setattr(compose_launcher, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(compose_launcher, "COMPOSE_FILE", tmp_path / "docker-compose.yml")
+    monkeypatch.setattr(compose_launcher, "_run_checked", fake_checked)
+    assert compose_launcher.main(["config", "--quiet"]) == 2
+    output = capsys.readouterr()
+    assert secret not in output.out + output.err
+    assert output.out == ""
+    assert output.err == (
+        "storage preflight failed: the pinned Compose configuration is invalid; "
+        "inspect the env file syntax\n"
+    )
 
 
 def test_internal_config_failure_never_replays_captured_secrets(
@@ -1290,8 +1521,7 @@ def test_main_keeps_identity_and_immutable_image_pinned_through_final_up(
         env: dict[str, str],
     ) -> dict[str, object]:
         assert cwd == tmp_path
-        raw_source = Path(env.get("UMS_APP_DATA_HOST", str(source)))
-        model = _storage_model(raw_source)
+        model = _storage_model(source)
         services = model["services"]
         assert isinstance(services, dict)
         for name in compose_launcher.APPLICATION_IMAGE_SERVICES:
@@ -1308,10 +1538,24 @@ def test_main_keeps_identity_and_immutable_image_pinned_through_final_up(
         backend_mount = volumes[0]
         assert isinstance(backend_mount, dict)
         backend_mount["source"] = str(tmp_path / "backend")
+        for service_name in compose_launcher.APP_SERVICES:
+            service = services[service_name]
+            assert isinstance(service, dict)
+            service_volumes = service["volumes"]
+            assert isinstance(service_volumes, list)
+            for mount in service_volumes:
+                assert isinstance(mount, dict)
+                for child, target in compose_launcher.STORAGE_TARGETS.items():
+                    if mount.get("target") == target:
+                        mount["source"] = env.get(
+                            compose_launcher.STORAGE_SOURCE_ENV[child],
+                            str(source / child),
+                        )
         return model
 
     class Guard:
-        docker_source = source
+        def child_source(self, name: str) -> Path:
+            return source / name
 
         def __enter__(self) -> Guard:
             state["guard_active"] = True
@@ -1335,7 +1579,8 @@ def test_main_keeps_identity_and_immutable_image_pinned_through_final_up(
         assert command == ["docker", "compose", "up", "app"]
         assert cwd == tmp_path
         assert env["UMS_APP_IMAGE"] == image_id
-        assert env["UMS_APP_DATA_HOST"] == str(source)
+        assert env["UMS_APP_ARTIFACTS_HOST"] == str(source / "artifacts")
+        assert env["UMS_APP_BLOBS_HOST"] == str(source / "blobs")
         assert capture is False
         state["final_calls"] += 1
         return SimpleNamespace(returncode=23)
