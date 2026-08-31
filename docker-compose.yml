@@ -16,6 +16,13 @@
 # for the app DSN when the password contains URI-reserved characters.
 # This branch supports the single-box compose deployment only. No Helm chart or
 # External Secrets Operator integration is included here.
+#
+# Until .env.example contains the complete Compose inputs, this file is the
+# authoritative list of required, no-default variables: UMS_DB_USER,
+# UMS_DB_PASSWORD, UMS_DB_PASSWORD_URLENC, UMS_DB_NAME, and
+# UMS_TRUSTED_GATEWAY_TOKEN. UMS_DB_PASSWORD is the literal Postgres value;
+# UMS_DB_PASSWORD_URLENC is its URI-encoded DSN form. Validate the complete
+# substitution before startup with `docker compose --env-file <file> config`.
 
 name: ums-smart-revenue
 

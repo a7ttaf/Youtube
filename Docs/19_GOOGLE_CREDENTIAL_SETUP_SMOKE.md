@@ -86,12 +86,25 @@ Current production resolver support:
    - Complete the approved Google OAuth authorization flow.
    - Store the OAuth payload in GCP Secret Manager.
    - Record the created numeric version id. Grant the UMS runtime identity
-     `roles/secretmanager.secretAccessor` on the Secret resource. SecretVersion
-     resources do not accept IAM bindings directly; if approval requires access
-     to only that version, add and verify an IAM Condition matching its resource
-     name. Otherwise record that the grant covers every version of that secret.
+     `roles/secretmanager.secretAccessor` on that specific secret rather than
+     project-wide — the predefined role's lowest grant level is a secret.
+     SecretVersion resources do not accept IAM bindings directly; if approval
+     requires access to only that version, add and verify an owner-approved IAM
+     Condition matching its resource name. Otherwise record that the grant covers
+     every version of that secret. Independently, the immutable numeric version
+     in the UMS reference pins the version UMS requests.
 
-2. Register the external reference in UMS.
+2. Verify the operator, then register the external reference in UMS.
+
+For the credential-registration request, the trusted `X-User-ID` must be the UUID
+of an existing operator row in the same tenant; a syntactically valid but absent
+UUID fails with `422 actor_user_id does not reference an existing user`.
+Header-bootstrap mode enforces same-tenant actor existence at the credential
+repository boundary, while database auth additionally fails closed for disabled
+principals before the route runs. On a freshly migrated local database, provision
+an active human operator through the audited `POST /users` flow before this
+request. The detailed local sequence below creates the row, assigns
+`connector_admin`, and only then registers the credential.
 
 ```http
 POST /connectors/credentials
@@ -114,6 +127,10 @@ Expected result:
 - Response does not include `encrypted_secret_ref`, raw secret payload, refresh
   token, client secret, or API key.
 - A `CONNECTOR_SETTINGS_CHANGED` audit row records the reference creation.
+- The stored reference ends in the exact numeric version approved and uploaded
+  for this smoke. Although the resolver supports the moving `latest` alias, this
+  runbook forbids registering it because a later rotation would bypass the
+  reference-change audit and fresh-smoke boundary.
 
 This registration precedes service-actor provisioning. Creating a service actor
 does not register connector credentials and is not a substitute for this audited
@@ -136,7 +153,7 @@ Expected result:
 
 ```powershell
 $env:UMS_DATABASE_URL = "<operator-approved-database-url>"
-uv run python scripts/check_google_connector_credential.py --tenant <tenant-uuid> --connector youtube-reporting --account <content-owner-id>
+uv run python scripts/check_google_connector_credential.py --tenant "<tenant-uuid>" --connector youtube-reporting --account "<content-owner-id>"
 ```
 
 Expected result:
@@ -190,7 +207,7 @@ Preferred smoke path:
 
 ```powershell
 $env:UMS_DATABASE_URL = "<operator-approved-database-url>"
-uv run python scripts/run_google_connector.py --tenant <tenant-uuid> --connector youtube-reporting --account <content-owner-id> --month <YYYY-MM> --dry-run
+uv run python scripts/run_google_connector.py --tenant "<tenant-uuid>" --connector youtube-reporting --account "<content-owner-id>" --month "<YYYY-MM>" --dry-run
 ```
 
 Expected result:
@@ -314,8 +331,9 @@ Before the first `dry_run: false` job:
 - Disable or destroy the affected GCP Secret Manager version after confirming no
   other UMS environment uses it.
 - Until a credential lifecycle API exists, disabling an already-registered UMS
-  credential row requires an owner-approved database/admin operation against
-  `api_connector_credentials.status`.
+  credential row requires an owner-approved recovery-only database/admin
+  operation against `api_connector_credentials.status`; use the break-glass
+  boundary below, not ad-hoc setup SQL.
 - Re-run the credential probe after any rotation. Do not reuse old smoke
   evidence for a new secret version.
 
@@ -362,6 +380,243 @@ the approved operator tracker or secret store, not in repository docs.
 8. Run at most one owner-approved live smoke month, confirm the month is open,
    verify facts and audit rows, and stop before any backfill. The current finance
    path is USD-only; do not represent the smoke as EGP-ready.
+
+## Verified operator workflow for a local smoke
+
+This checklist is deliberately limited to the code and dependencies present on this
+branch. Keep credential payloads and operator-specific paths in the approved secret
+store and operator tracker, not in this repository. Confirm command flags against the
+installed tools before a live run.
+
+> ⚠️ **Currency sequencing (decided 2026-08-25: main currency = EGP).** The connector
+> currently ingests **USD**. Run at most ONE smoke month through this checklist as
+> disposable plumbing proof, then **STOP — no multi-month backfill, no daily sync —
+> until the separately approved multi-currency work lands. Backfilled USD months can
+> never match an EGP workbook acceptance baseline and would all be re-ingested.
+
+**Step 0 — ROTATE the Google OAuth credential first (~1–2h incl. the consent round-trip).**
+If a credential payload or client-secret file may have been exposed, mint a fresh client
+secret and refresh token BEFORE any upload — enshrining a compromised credential in
+Secret Manager is worse than retaining it locally. Keep local filenames and workstation
+paths out of tickets and repository docs. Consent screen must not be in "Testing" status
+(7-day token expiry; see the get_revenue.py docstring's own warning).
+
+**Step 1 — install the Google Cloud SDK, then upload.** Install + `gcloud init` when the
+SDK is unavailable, or use the Cloud Console UI instead. Verify the command syntax
+against the installed SDK. Payload contract per this doc's "Secret payload contract"
+section: UTF-8 JSON with `refresh_token`, `client_id`, `client_secret`, `token_uri`
+(optional `scopes`).
+
+```powershell
+$projectId = "<project-id>"
+$secretId = "ums-google-oauth"
+
+# Run create only on first setup. If the secret already exists in this exact
+# project, verify it with `gcloud secrets describe` and add a new version below.
+gcloud secrets create $secretId --project=$projectId --replication-policy=automatic
+
+$secretVersionResource = gcloud secrets versions add $secretId `
+  --project=$projectId `
+  --data-file="C:\<secure-path>\payload.json" `
+  --format="value(name)"
+if ($LASTEXITCODE -ne 0) {
+  throw "Secret Manager version upload failed"
+}
+$secretVersionResource = "$secretVersionResource".Trim()
+if ($secretVersionResource -notmatch '^projects/[^/]+/secrets/[^/]+/versions/(?<version>[1-9][0-9]*)$') {
+  throw "Secret Manager did not return one numeric version resource name"
+}
+$approvedSecretVersion = $Matches.version
+$approvedSecretRef = "secret-manager://$secretVersionResource"
+```
+
+Record `$projectId`, `$secretId`, `$approvedSecretVersion`, and
+`$approvedSecretRef` in the secure operator tracker. These values are metadata,
+not the payload, but the approval must still identify them exactly. Never replace
+the numeric suffix with `latest`: a new version would then become live without a
+credential-reference audit event or a fresh probe. Delete the local payload file
+after the upload succeeds.
+
+**Step 2 — GCP auth for the resolver (the missing fourth piece).**
+
+*Host CLI path (Steps 2/4):* `gcloud auth application-default login` on the
+Windows host, or set host `GOOGLE_APPLICATION_CREDENTIALS` to a service-account
+key. The identity needs `roles/secretmanager.secretAccessor`. Without this, the
+host credential probe exits 2 with `SecretFetchError`.
+
+*Compose `app` / in-process jobs:* host ADC is **not** visible inside the
+container. `docker-compose.yml` does not mount ADC or forward
+`GOOGLE_APPLICATION_CREDENTIALS`. Before treating Step 2 as sufficient for
+Compose live runs, mount a service-account key (or ADC directory) into `app`
+and set `GOOGLE_APPLICATION_CREDENTIALS` via an untracked
+`docker-compose.override.yml` (same override pattern as
+[Supplying the service actor under `docker compose`](#supplying-the-service-actor-under-docker-compose)).
+Otherwise the host probe can pass while API credential tests and connector jobs
+fail with `SecretFetchError` inside the container.
+
+**Step 3 — provision the administrator and operator, then register through the
+audited APIs.** The fresh local database has no user row, and credential creation
+rejects an unknown actor before writing anything. For this local smoke only, start
+the API in `UMS_AUTHZ_SOURCE=headers` bootstrap mode and use the trusted gateway
+token once to create a durable bootstrap administrator row. That administrator
+then creates the human connector operator and assigns `connector_admin`.
+Production/database mode must instead start from an already provisioned SQL
+principal; never switch production back to header role claims to run this
+checklist.
+
+```powershell
+$bootstrapActorId = [guid]::NewGuid().ToString()
+$bootstrapHeaders = @{
+  "X-User-ID" = $bootstrapActorId
+  "X-User-Email" = "<bootstrap-admin-email>"
+  "X-Role" = "super_owner"
+  "X-Scope-Type" = "global"
+  "X-UMS-Trusted-Gateway-Token" = $env:UMS_TRUSTED_GATEWAY_TOKEN
+  "X-UMS-Tenant" = "<tenant-slug>"
+}
+$bootstrapAdminPayload = @{
+  email = "<bootstrap-admin-email>"
+  display_name = "<bootstrap-admin-display-name>"
+  reason = "Provision bootstrap administrator for local credential smoke"
+} | ConvertTo-Json
+$bootstrapAdmin = Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:8000/users" `
+  -Headers $bootstrapHeaders -ContentType "application/json" -Body $bootstrapAdminPayload
+if ($bootstrapAdmin.status -ne "active" -or $bootstrapAdmin.is_service_account -or
+    $bootstrapAdmin.audit_event.event_type -ne "USER_ACCOUNT_CHANGED") {
+  throw "Audited bootstrap-administrator provisioning did not complete"
+}
+$bootstrapAdminUserId = [guid]::Parse($bootstrapAdmin.id).ToString()
+
+$bootstrapAdminHeaders = $bootstrapHeaders.Clone()
+$bootstrapAdminHeaders["X-User-ID"] = $bootstrapAdminUserId
+$bootstrapAdminHeaders["X-User-Email"] = "<bootstrap-admin-email>"
+
+$operatorPayload = @{
+  email = "<operator-email>"
+  display_name = "<operator-display-name>"
+  reason = "Provision connector operator for local credential smoke"
+} | ConvertTo-Json
+$operator = Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:8000/users" `
+  -Headers $bootstrapAdminHeaders -ContentType "application/json" -Body $operatorPayload
+if ($operator.status -ne "active" -or $operator.is_service_account -or
+    $operator.audit_event.event_type -ne "USER_ACCOUNT_CHANGED") {
+  throw "Audited human-operator provisioning did not complete"
+}
+$operatorUserId = [guid]::Parse($operator.id).ToString()
+
+# The administrator actor exists, so this role write has a real actor FK and audit event.
+$rolePayload = @{
+  role_key = "connector_admin"
+  scope_type = "global"
+  reason = "Grant connector administration for local credential smoke"
+} | ConvertTo-Json
+$roleAssignment = Invoke-RestMethod -Method Post `
+  -Uri "http://127.0.0.1:8000/users/$operatorUserId/roles" `
+  -Headers $bootstrapAdminHeaders -ContentType "application/json" -Body $rolePayload
+if ($roleAssignment.role_key -ne "connector_admin" -or
+    $roleAssignment.audit_event.event_type -ne "USER_ROLE_CHANGED") {
+  throw "Audited connector-admin assignment did not complete"
+}
+```
+
+Record `$bootstrapActorId` with the named bootstrap administrator in the secure
+operator tracker. The first `USER_ACCOUNT_CHANGED` event retains that external
+gateway actor in its details because no local user row existed yet. The operator
+creation and role-assignment events use `$bootstrapAdminUserId` as their
+database-backed actor FK; only credential-registration events use
+`$operatorUserId`.
+
+If the bootstrap administrator or human operator already exists, do not create a
+duplicate. Use an authorized `GET /users` lookup, verify that the row is active,
+human, and in this tenant, and retain its exact UUID. The create block above is
+the fresh-database path.
+
+Only after the operator row and role assignment exist, register the credential.
+Do not insert it with a database superuser. Reuse `$approvedSecretRef` from Step 1;
+if the shell changed, reconstruct it from the recorded numeric version, never from
+`latest`:
+
+```powershell
+$headers = @{
+  "X-User-ID" = $operatorUserId
+  "X-User-Email" = "<operator-email>"
+  "X-Role" = "connector_admin"
+  "X-Scope-Type" = "global"
+  "X-UMS-Trusted-Gateway-Token" = $env:UMS_TRUSTED_GATEWAY_TOKEN
+  "X-UMS-Tenant" = "<tenant-slug>"
+}
+if ($approvedSecretRef -notmatch '^secret-manager://projects/[^/]+/secrets/[^/]+/versions/[1-9][0-9]*$') {
+  throw "Step 1 exact numeric Secret Manager version reference is required; latest is forbidden"
+}
+$youtubeAnalyticsConnector = "youtube-analytics"
+$payload = @{
+  connector_key = $youtubeAnalyticsConnector
+  account_id = "<content-owner-or-account-id>"
+  encrypted_secret_ref = $approvedSecretRef
+  reason = "Register owner-approved Google credential reference for smoke"
+} | ConvertTo-Json
+Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:8000/connectors/credentials" `
+  -Headers $headers -ContentType "application/json" -Body $payload
+```
+
+Expected status `201`, `has_secret_ref: true`, and a `CONNECTOR_SETTINGS_CHANGED`
+audit event. The response must not contain the external secret reference or raw
+credential payload. A duplicate returns `409`; use the approved credential lifecycle
+operation for rotation rather than a second insert.
+
+**Recovery-only database intervention — not normal setup.** If the audited API is
+unavailable, stop and open an approved break-glass incident before touching Postgres.
+A database operator may restore or reconcile an already-approved credential row only
+with the exact tenant, connector, account, and external reference recorded in that
+incident. Direct database access bypasses gateway authentication, RBAC, RLS, actor
+stamping, and the `CONNECTOR_SETTINGS_CHANGED` audit write; it is therefore not a
+credential-registration path. Reconcile the missing audit evidence through the
+approved incident process and verify the row through the API before any connector run.
+No copy-paste SQL is provided here intentionally.
+
+**Step 4 — prove it** (host process; target the Compose Postgres published on localhost
+when the API and database run in the compose stack):
+
+```powershell
+# Use 127.0.0.1 and the published port (UMS_POSTGRES_PORT, default 5432), not hostname postgres.
+$env:UMS_DATABASE_URL = "postgresql+psycopg://<UMS_DB_USER>:<UMS_DB_PASSWORD_URLENC>@127.0.0.1:<UMS_POSTGRES_PORT>/<UMS_DB_NAME>"
+uv run python scripts/check_google_connector_credential.py --tenant 00000000-0000-0000-0000-000000000001 --connector youtube-analytics --account "<CONTENT_OWNER_ID>"
+```
+
+Expected exit 0 with `OK … token_expiry=<iso>`. This commits the telemetry that arms the
+live-run gate for roughly one hour. Exit-2 first lines map to causes:
+`SecretFetchError` → Step 2/IAM; `SecretNotFoundError` → the ref path;
+`MalformedSecretPayloadError` → payload JSON; `OAuthRefreshError` → Step 0's token;
+`CredentialNotFoundError` → Step 3.
+
+**Step 5 — service actor (live runs only).** Provision a dedicated service
+account (not a human operator): Super Owner `POST /users` with
+`is_service_account: true`, grant the service-only `system_integration_user`
+role (which carries `connectors.run_jobs`), then set
+`UMS_GOOGLE_CONNECTOR_SERVICE_ACTOR_ID` to that UUID. Do **not** reuse the human
+`$operatorUserId` provisioned in Step 3; using it would attribute unattended
+connector audit rows to the operator. Never substitute a placeholder UUID.
+Under Compose, supply the UUID via the override documented in
+[Supplying the service actor under `docker compose`](#supplying-the-service-actor-under-docker-compose).
+
+**Step 6 — optional dry-run.** Costs the same ~54 API calls as a live run.
+⚠️ *Not* free of side effects: the dry-run performs the full credential resolve, and a
+transient `OAuthRefreshError` here commits a FAILED telemetry stamp that **disarms the
+gate Step 4 just armed** — Step 7 then exits 2 even inside the hour. Recovery: re-run
+Step 4.
+
+**Step 7 — ONE live smoke month, within ~1h of Step 4.** First confirm the target month
+is **not closed/locked** (this doc's own smoke-month rule): the locked-month prefilter
+skips silently, so a locked month exits 0 `SUCCEEDED` with **zero facts written** —
+reading as success while proving nothing. Expected on an open month: exit 0,
+`SUCCEEDED … failures=[]`, facts written (in USD — disposable, per the sequencing box).
+`PARTIAL` = zero facts, source rows only. Never run two copies concurrently (no
+CLI-side lock). **Then stop until EGP Phase 4.**
+
+Ops total: **~3–5.5h** including the SDK install and a realistic consent round-trip.
+The scripts, resolver, schema, and gates referenced here exist on this branch. Durable
+application storage, deployment-readiness planning, and structured logging are separate
+prerequisites and are not implied by this checklist.
 
 ## Validation references
 
