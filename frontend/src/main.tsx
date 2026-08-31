@@ -2,9 +2,7 @@ import { StrictMode, type ErrorInfo } from "react";
 import { createRoot } from "react-dom/client";
 
 import AppShell from "@/components/srcc/AppShell";
-import {
-  safeErrorReportOf,
-} from "@/components/srcc/ErrorBoundary";
+import { safeErrorReportOf } from "@/components/srcc/ErrorBoundary";
 import { SessionProvider } from "@/contexts/SessionContext";
 import { TenantProvider } from "@/contexts/TenantContext";
 import "@/styles.css";
@@ -49,7 +47,9 @@ export const onRecoverableError = (error: unknown, _info: ErrorInfo): void => {
 };
 
 const rootEl = document.getElementById("root");
-if (!rootEl) throw new Error("Root element #root not found in document");
+if (!rootEl) {
+  throw new Error("Root element #root not found in document");
+}
 createRoot(rootEl, {
   onCaughtError,
   onUncaughtError,

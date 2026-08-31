@@ -1,10 +1,15 @@
-import { fireEvent, render, screen, within } from "@testing-library/react";
-import type { ReactNode } from "react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { useState, type ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import ErrorBoundary, {
   correlationIdOf,
 } from "@/components/srcc/ErrorBoundary";
+import {
+  WriteInFlightProvider,
+  useWriteInFlightControl,
+  useWriteInFlightLatch,
+} from "@/contexts/WriteInFlightContext";
 
 // ============================================================================
 // Purpose: Prove the boundary's safe category/report contract, accessible
@@ -76,7 +81,9 @@ describe("ErrorBoundary", () => {
     ];
     const getRandomValues = vi.fn((buffer: Uint32Array): Uint32Array => {
       const next = values.shift();
-      if (!next) throw new Error("test entropy exhausted");
+      if (!next) {
+        throw new Error("test entropy exhausted");
+      }
       buffer.set(next);
       return buffer;
     });
@@ -243,6 +250,57 @@ describe("ErrorBoundary", () => {
     // so an already-committed write cannot be duplicated by this click.
     expect(screen.getByTestId("view-error-fallback")).toBeInTheDocument();
     expect(committedWrite).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps the shell write latch armed until a crashed writer's request settles", async () => {
+    let settleWrite!: () => void;
+    const pendingWrite = new Promise<void>((resolve) => {
+      settleWrite = resolve;
+    });
+
+    const PendingWriter = (): ReactNode => {
+      const navLatch = useWriteInFlightControl();
+      const [crashed, setCrashed] = useState(false);
+      if (crashed) {
+        throw new TypeError("render failed while import remained pending");
+      }
+
+      const startWriteAndCrash = (): void => {
+        navLatch.arm("The import is still running and cannot be aborted.");
+        void pendingWrite.finally(navLatch.release);
+        setCrashed(true);
+      };
+
+      return <button onClick={startWriteAndCrash}>Start pending import</button>;
+    };
+
+    const ShellHarness = (): ReactNode => {
+      const writeLatch = useWriteInFlightLatch();
+      return (
+        <WriteInFlightProvider value={writeLatch}>
+          <output data-testid="write-latch-state">{writeLatch.reason ?? "idle"}</output>
+          <ErrorBoundary resetKey="registry">
+            <PendingWriter />
+          </ErrorBoundary>
+        </WriteInFlightProvider>
+      );
+    };
+
+    render(<ShellHarness />);
+    fireEvent.click(screen.getByRole("button", { name: "Start pending import" }));
+
+    expect(screen.getByTestId("view-error-fallback")).toBeInTheDocument();
+    expect(screen.getByTestId("write-latch-state")).toHaveTextContent(
+      "The import is still running and cannot be aborted.",
+    );
+
+    await act(async () => {
+      settleWrite();
+      await pendingWrite;
+    });
+    await waitFor(() =>
+      expect(screen.getByTestId("write-latch-state")).toHaveTextContent("idle"),
+    );
   });
 
   it("clears a stale fallback when the reset key changes without remounting", () => {

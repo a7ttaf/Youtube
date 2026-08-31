@@ -625,7 +625,8 @@ closed unmerged and superseded by the consolidated batch in #156.
   one themed panel with an allowlisted error category and correlation ID;
   recovery performs a full document reload/re-fetch and warns that a write may
   already have committed. Remaining: provider/root, Sidebar, and Topbar
-  renders are still outside this boundary; the registry import flow is covered.
+  renders are still outside this boundary; a registry import's shell latch now
+  stays armed through a view crash until the pending request settles.
 - ⏳ Rolling month window (item P1.2, branch `feat/p1-rolling-months`) — the
   frozen `DEFAULT_MONTH = "2026-03"` / `MONTH_OPTIONS` literals and the AppShell
   topbar month `<select>` now all derive from `frontend/src/lib/months.ts`:

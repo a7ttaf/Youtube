@@ -44,7 +44,9 @@ beforeAll(async () => {
   await import("@/main");
 
   const options = createRootMock.mock.calls[0]?.[1];
-  if (options === undefined) throw new Error("createRoot options were not captured");
+  if (options === undefined) {
+    throw new Error("createRoot options were not captured");
+  }
   rootOptions = options as RootOptions;
 });
 

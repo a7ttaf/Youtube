@@ -61,8 +61,8 @@ import {
 //   abandoned import that the backend went on to commit. The guard keys off
 //   `applying`, not `busy`: only the apply commits, so a read-only dry-run
 //   stays abandonable. `applying` clears in the request's `finally` on success
-//   and failure alike, and the latch also releases on unmount, so nothing
-//   traps the operator or strands the shell.
+//   and failure alike. That same `finally` owns latch release even if a render
+//   crash unmounts this flow while the shell survives.
 //   An apply whose response never arrived is INDETERMINATE, not failed: Apply
 //   is disabled (a blind retry would append a second unconditional
 //   CHANNEL_IMPORTED), Back is frozen (Upload owns the inputs the check
@@ -1305,8 +1305,8 @@ export const RegistryImportFlow = ({
   // sidebar sits outside this tree and would unmount the flow regardless
   // (review #184). Armed IMPERATIVELY from the apply handler rather than from
   // an effect — an effect arms a commit late, leaving a window in which the
-  // request is already running but the nav is still live. It also releases on
-  // unmount, so a teardown mid-request cannot strand the shell.
+  // request is already running but the nav is still live. Release belongs to
+  // the request's `finally`, which still runs if a boundary unmounts this flow.
   const navLatch = useWriteInFlightControl();
   // Raised BEFORE the apply is dispatched and cleared only once the response
   // establishes an outcome. The nav latch lives in this document; this one

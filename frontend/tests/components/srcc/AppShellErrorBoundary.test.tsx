@@ -101,16 +101,24 @@ const jsonResponse = (body: unknown, status = 200): Response =>
 
 /** Normalize a fetch input (string | URL | Request) to its URL string. */
 const urlOf = (input: unknown): string => {
-  if (typeof input === "string") return input;
-  if (input instanceof URL) return input.toString();
-  if (input instanceof Request) return input.url;
+  if (typeof input === "string") {
+    return input;
+  }
+  if (input instanceof URL) {
+    return input.toString();
+  }
+  if (input instanceof Request) {
+    return input.url;
+  }
   return String(input);
 };
 
 /** Route the shell's two bootstrap reads; everything else gets net-revenue. */
 const routeShellFetch = (input: unknown): Promise<Response> => {
   const url = urlOf(input);
-  if (url.includes("/session/me")) return Promise.resolve(jsonResponse(FULL_SESSION));
+  if (url.includes("/session/me")) {
+    return Promise.resolve(jsonResponse(FULL_SESSION));
+  }
   if (url.includes("/tenants/me")) {
     return Promise.resolve(
       jsonResponse({ id: "t1", slug: "ums", display_name: "UMS" }),
@@ -155,7 +163,9 @@ const renderShell = () =>
 const navButton = (label: string): HTMLElement => {
   const sidebar = screen.getByRole("complementary", { name: "Primary navigation" });
   const button = within(sidebar).getByText(label).closest("button");
-  if (button === null) throw new Error(`no nav button for ${label}`);
+  if (button === null) {
+    throw new Error(`no nav button for ${label}`);
+  }
   return button;
 };
 

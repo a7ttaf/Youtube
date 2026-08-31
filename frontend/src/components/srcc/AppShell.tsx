@@ -1061,50 +1061,48 @@ const AppShell = () => {
   //   - File: frontend/src/components/srcc/ErrorBoundary.tsx -> safe fallback,
   //     redacted report, focus target, and reload action.
   //   - File: frontend/src/contexts/WriteInFlightContext.tsx -> existing import
-  //     navigation latch remains outside the guarded view state.
+  //     navigation latch remains outside the guarded view state and stays armed
+  //     until a pending request settles even if the boundary unmounts its flow.
   // ============================================================================
 
   return (
     <WriteInFlightProvider value={writeInFlight}>
-    <div className="app">
-      {import.meta.env.DEV && <TenantProofTag label={proofLabel} />}
-      <Sidebar
-        view={view}
-        onSelectView={handleViewChange}
-        previewRole={previewRole}
-        onSelectPreviewRole={setPreviewRole}
-        displayedRole={displayedRole}
-        canViewFinance={canViewFinance}
-        blockedReason={navBlockedReason}
-      />
-      <main className="main">
-        <Topbar
-          title={copy.title}
-          subtitle={copy.subtitle}
-          canViewFinance={canViewFinance}
-          canCreateExport={canCreateAnyExport(permissions)}
-        />
-        <ErrorBoundary
-          resetKey={view}
-          onReload={reloadDocumentForRecovery}
-        >
-        <ViewRouter
+      <div className="app">
+        {import.meta.env.DEV && <TenantProofTag label={proofLabel} />}
+        <Sidebar
           view={view}
-          permissions={permissions}
-          canViewFinance={canViewFinance}
+          onSelectView={handleViewChange}
+          previewRole={previewRole}
+          onSelectPreviewRole={setPreviewRole}
           displayedRole={displayedRole}
-          traceChannelId={traceChannelId}
-          importScope={importScope}
-          importScopeSettled={importScopeSettled}
-          onOpenTrace={(channelId) => {
-            setTraceChannelId(channelId);
-            setView("trace");
-          }}
+          canViewFinance={canViewFinance}
+          blockedReason={navBlockedReason}
         />
-        {view === "command" && <WorkflowRail />}
-        </ErrorBoundary>
-      </main>
-    </div>
+        <main className="main">
+          <Topbar
+            title={copy.title}
+            subtitle={copy.subtitle}
+            canViewFinance={canViewFinance}
+            canCreateExport={canCreateAnyExport(permissions)}
+          />
+          <ErrorBoundary resetKey={view} onReload={reloadDocumentForRecovery}>
+            <ViewRouter
+              view={view}
+              permissions={permissions}
+              canViewFinance={canViewFinance}
+              displayedRole={displayedRole}
+              traceChannelId={traceChannelId}
+              importScope={importScope}
+              importScopeSettled={importScopeSettled}
+              onOpenTrace={(channelId) => {
+                setTraceChannelId(channelId);
+                setView("trace");
+              }}
+            />
+            {view === "command" && <WorkflowRail />}
+          </ErrorBoundary>
+        </main>
+      </div>
     </WriteInFlightProvider>
   );
 };

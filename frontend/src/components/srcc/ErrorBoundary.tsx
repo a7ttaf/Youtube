@@ -4,7 +4,9 @@ import { Badge } from "./shared";
 
 // ============================================================================
 // Purpose: Contain a render-time crash to the guarded view subtree while the
-//   surrounding authenticated shell remains mounted and usable.
+//   surrounding authenticated shell remains mounted. Navigation remains
+//   subject to the shell's active-write latch while an unabortable request is
+//   unresolved.
 // Database/ORM: None (frontend presentation only).
 // Standards: Class lifecycle hooks are required for render-error boundaries.
 //   Error reporting is a safe event containing only an allowlisted category and
@@ -77,18 +79,7 @@ const CORRELATION_UUID_PATTERN =
 const CORRELATION_SENTINEL = 0xa5a5a5a5;
 let correlationSequence = 0;
 
-// ============================================================================
-// Purpose: Read fresh per-event browser entropy and retain a safe final
-//   fallback for restricted or hostile execution contexts.
-// Database/ORM: None.
-// Standards: Never use raw error data or a timestamp/counter pair as the
-//   primary identity; every source failure is contained without throwing.
-// Blast Radius: Correlation uniqueness and telemetry support only.
-// Connections:
-//   - File: frontend/src/components/srcc/ErrorBoundary.tsx -> correlationIdOf.
-//   - File: frontend/tests/components/srcc/ErrorBoundary.test.tsx -> injected
-//     deterministic values and hostile-source regression coverage.
-// ============================================================================
+/** Read browser crypto without trusting access to the global getter. */
 const browserEntropySource = (): CorrelationEntropySource | undefined => {
   try {
     return globalThis.crypto as unknown as CorrelationEntropySource;
@@ -102,7 +93,9 @@ const randomValuesPartOf = (
   source: CorrelationEntropySource | undefined,
 ): string | null => {
   try {
-    if (typeof source?.getRandomValues !== "function") return null;
+    if (typeof source?.getRandomValues !== "function") {
+      return null;
+    }
     const words = new Uint32Array([
       CORRELATION_SENTINEL,
       CORRELATION_SENTINEL,
@@ -110,7 +103,9 @@ const randomValuesPartOf = (
       CORRELATION_SENTINEL,
     ]);
     source.getRandomValues(words);
-    if (words.every((word) => word === CORRELATION_SENTINEL)) return null;
+    if (words.every((word) => word === CORRELATION_SENTINEL)) {
+      return null;
+    }
     return Array.from(words, (word) => word.toString(16).padStart(8, "0")).join(
       "",
     );
@@ -133,18 +128,7 @@ const lastResortEntropyPart = (): string => {
   return "noentropy";
 };
 
-// ============================================================================
-// Purpose: Generate a non-sensitive reference for one caught render failure.
-// Database/ORM: None.
-// Standards: Prefer UUID, then fresh crypto.getRandomValues entropy, then a
-//   nonthrowing last resort; callers can inject the source for deterministic
-//   tests and the value contains no user, tenant, or error data.
-// Blast Radius: Telemetry correlation and operator support only.
-// Connections:
-//   - File: frontend/src/components/srcc/ErrorBoundary.tsx -> report payload
-//     and the fallback reference text.
-//   - File: frontend/src/main.tsx -> sanitized handlers for root-level errors.
-// ============================================================================
+/** Generate a non-sensitive reference without retaining raw error data. */
 export const correlationIdOf = (
   source: CorrelationEntropySource | undefined = browserEntropySource(),
 ): string => {
@@ -166,22 +150,16 @@ export const correlationIdOf = (
   return `view-error-${lastResortEntropyPart()}-${correlationSequence.toString(36)}`;
 };
 
-// ============================================================================
-// Purpose: Normalize any thrown value to a safe, allowlisted error category.
-// Database/ORM: None.
-// Standards: Treat hostile or malformed Error.name values, including throwing
-//   accessors, as ordinary Error values; never expose arbitrary names in UI or
-//   telemetry.
-// Blast Radius: Fallback availability and privacy of the error card.
-// Connections:
-//   - File: frontend/tests/components/srcc/ErrorBoundary.test.tsx -> malformed
-//     name/getter regression coverage.
-// ============================================================================
+/** Normalize any thrown value to a safe, allowlisted category. */
 export const errorCategoryOf = (error: unknown): ErrorBoundaryCategory => {
   try {
-    if (!(error instanceof Error)) return "Error";
+    if (!(error instanceof Error)) {
+      return "Error";
+    }
     const candidate = error.name;
-    if (typeof candidate !== "string") return "Error";
+    if (typeof candidate !== "string") {
+      return "Error";
+    }
     const normalized = candidate.trim();
     return ERROR_CATEGORY_ALLOWLIST.has(normalized)
       ? (normalized as ErrorBoundaryCategory)
@@ -191,18 +169,7 @@ export const errorCategoryOf = (error: unknown): ErrorBoundaryCategory => {
   }
 };
 
-// ============================================================================
-// Purpose: Build the only error payload allowed to cross a render-error
-//   reporting boundary, shared by the view boundary and React root handlers.
-// Database/ORM: None.
-// Standards: Normalize the thrown value and generate a fresh opaque reference;
-//   raw Error, message, name, and component-stack fields are never retained.
-// Blast Radius: Client-side telemetry shape and operator correlation only.
-// Connections:
-//   - File: frontend/src/main.tsx -> root-level React error callbacks.
-//   - File: frontend/tests/components/srcc/ErrorBoundary.test.tsx -> category,
-//     malformed getter, and deterministic entropy coverage.
-// ============================================================================
+/** Build the only payload allowed across the render-error reporting boundary. */
 export const safeErrorReportOf = (
   error: unknown,
   source?: CorrelationEntropySource,
@@ -216,16 +183,7 @@ export const safeErrorReportOf = (
 const resetKeyOf = ({ resetKey }: ErrorBoundaryProps): string =>
   resetKey ?? DEFAULT_RESET_KEY;
 
-// ============================================================================
-// Purpose: Request a complete SPA document reload for reconciliation-safe
-//   recovery after a render failure whose related write outcome is unknown.
-// Database/ORM: None; the subsequent application bootstrap re-fetches state.
-// Standards: Do not retry a child subtree in place or invent client-side write
-//   state; let the server remain authoritative after the browser reloads.
-// Blast Radius: Full frontend reload, with no backend mutation by this helper.
-// Connections:
-//   - File: frontend/src/components/srcc/AppShell.tsx -> fallback action.
-// ============================================================================
+/** Reload the document so recovery re-fetches server-backed state. */
 export const reloadDocumentForRecovery = (): void => {
   window.location.reload();
 };
