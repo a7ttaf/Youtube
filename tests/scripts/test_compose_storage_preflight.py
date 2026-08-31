@@ -474,22 +474,21 @@ def test_real_storage_identity_guard_survives_until_mount_resolution(
         return
 
     original_child_identity = original_identity[1][1:]
-    with storage.hold_storage_identity(source) as guard:
-        proc_source = guard.child_source("artifacts")
-        artifacts = source / "artifacts"
-        moved_artifacts = source / "artifacts-original"
-        artifacts.rename(moved_artifacts)
-        artifacts.mkdir()
-        guard.assert_current()
-        metadata = proc_source.stat()
-        replacement = artifacts.stat()
-        assert (metadata.st_dev, metadata.st_ino) == original_child_identity
-        assert (replacement.st_dev, replacement.st_ino) != original_child_identity
-    assert not proc_source.exists()
+    with pytest.raises(storage.StoragePathError, match="identity changed"):
+        with storage.hold_storage_identity(source) as guard:
+            stable_source = guard.child_source("artifacts")
+            artifacts = source / "artifacts"
+            artifacts.rename(source / "artifacts-original")
+            artifacts.mkdir()
+            held = os.fstat(guard._descriptors[1])
+            assert (held.st_dev, held.st_ino) == original_child_identity
+            assert stable_source == artifacts.resolve()
+            guard.assert_current()
+    assert stable_source.exists()
 
 
-def test_real_wsl_child_descriptor_survives_name_replacement() -> None:
-    """The exact child source stays on the original inode after name replacement."""
+def test_real_wsl_child_sources_are_durable_after_guard_exit() -> None:
+    """Restart-time bind sources remain canonical and live after descriptors close."""
 
     script = textwrap.dedent(
         """
@@ -506,21 +505,54 @@ def test_real_wsl_child_descriptor_survives_name_replacement() -> None:
             (root / "artifacts").mkdir(parents=True)
             (root / "blobs").mkdir()
             storage._create_sentinel(root)
-            original = (root / "artifacts").stat()
             with storage.hold_storage_identity(root) as guard:
-                pinned = guard.child_source("artifacts")
-                assert str(pinned).startswith("/proc/")
-                (root / "artifacts").rename(root / "artifacts-original")
-                (root / "artifacts").mkdir()
-                held = pinned.stat()
-                replacement = (root / "artifacts").stat()
-                assert (held.st_dev, held.st_ino) == (original.st_dev, original.st_ino)
-                assert (replacement.st_dev, replacement.st_ino) != (
-                    original.st_dev,
-                    original.st_ino,
-                )
+                sources = {name: guard.child_source(name) for name in storage.STORAGE_CHILDREN}
+                assert sources == {name: root / name for name in storage.STORAGE_CHILDREN}
+                assert all(source.exists() for source in sources.values())
+                assert all(not str(source).startswith("/proc/") for source in sources.values())
                 guard.assert_current()
-            assert not pinned.exists()
+            assert all(source.exists() for source in sources.values())
+            assert all(source.is_dir() for source in sources.values())
+        finally:
+            shutil.rmtree(root.parent)
+        """
+    )
+    _run_real_posix_script(script)
+
+
+def test_real_wsl_open_child_descriptor_detects_name_replacement() -> None:
+    """A held child fd plus pathname recheck rejects replacement before creation."""
+
+    script = textwrap.dedent(
+        """
+        import os
+        import shutil
+        import sys
+        import tempfile
+        from pathlib import Path
+
+        sys.path.insert(0, "__SCRIPTS__")
+        import validate_compose_storage_path as storage
+
+        root = Path(tempfile.mkdtemp(prefix="ums-child-fd-")) / "store"
+        try:
+            (root / "artifacts").mkdir(parents=True)
+            (root / "blobs").mkdir()
+            storage._create_sentinel(root)
+            original = (root / "artifacts").stat()
+            try:
+                with storage.hold_storage_identity(root) as guard:
+                    source = guard.child_source("artifacts")
+                    assert source == root / "artifacts"
+                    held = os.fstat(guard._descriptors[1])
+                    assert (held.st_dev, held.st_ino) == (original.st_dev, original.st_ino)
+                    (root / "artifacts").rename(root / "artifacts-original")
+                    (root / "artifacts").mkdir()
+                    guard.assert_current()
+            except storage.StoragePathError as exc:
+                assert "identity changed" in str(exc)
+            else:
+                raise AssertionError("child replacement passed the held-fd identity guard")
         finally:
             shutil.rmtree(root.parent)
         """
@@ -534,35 +566,43 @@ def test_real_wsl_recursive_posix_policy_rejects_world_and_foreign_ownership() -
     script = textwrap.dedent(
         """
         import os
+        import secrets
         import shutil
         import sys
-        import tempfile
         from pathlib import Path
 
         sys.path.insert(0, "__SCRIPTS__")
         import validate_compose_storage_path as storage
 
-        root = Path(tempfile.mkdtemp(prefix="ums-posix-policy-")) / "store"
+        privileged = os.geteuid() == 0
+        if not privileged:
+            storage.APP_UID = os.geteuid()
+            storage.APP_GID = os.getegid()
+        base_parent = Path("/home") if privileged else Path.home()
+        base = base_parent / ("ums-posix-policy-" + secrets.token_hex(12))
+        assert base.is_absolute() and base.parent == base_parent
+        base.mkdir(mode=0o700)
+        root = base / "store"
         try:
             (root / "artifacts" / "nested").mkdir(parents=True)
             (root / "blobs").mkdir()
             payload = root / "artifacts" / "nested" / "payload.bin"
             payload.write_bytes(b"proof")
             storage._create_sentinel(root)
-            privileged = os.geteuid() == 0
-            secure_uid = storage.APP_UID if privileged else os.geteuid()
-            secure_gid = storage.APP_GID if privileged else os.getegid()
             for entry in [root, *root.rglob("*")]:
-                if privileged:
-                    os.chown(entry, secure_uid, secure_gid)
                 os.chmod(entry, 0o700 if entry.is_dir() else 0o600)
+            for child_name in storage.STORAGE_CHILDREN:
+                child = root / child_name
+                for entry in [child, *child.rglob("*")]:
+                    if privileged:
+                        os.chown(entry, storage.APP_UID, storage.APP_GID)
             storage.validate_storage_path(root, project_root=Path("__SCRIPTS__").parent)
 
             os.chmod(payload, 0o777)
             try:
                 storage.validate_storage_path(root, project_root=Path("__SCRIPTS__").parent)
             except storage.StoragePathError as exc:
-                assert "world permissions" in str(exc)
+                assert "group/world write" in str(exc)
             else:
                 raise AssertionError("0777 descendant passed the POSIX policy")
 
@@ -583,8 +623,39 @@ def test_real_wsl_recursive_posix_policy_rejects_world_and_foreign_ownership() -
                     assert "owner uid 42424" in str(exc)
                 else:
                     raise AssertionError("foreign owner passed the POSIX policy")
+
+                os.chown(payload, storage.APP_UID, storage.APP_GID)
+                os.chown(root / "artifacts", os.geteuid(), os.getegid())
+                try:
+                    storage.validate_storage_path(root, project_root=Path("__SCRIPTS__").parent)
+                except storage.StoragePathError as exc:
+                    assert "storage artifacts must be owned" in str(exc)
+                else:
+                    raise AssertionError("operator-owned direct child passed the POSIX boundary")
+                os.chown(root / "artifacts", storage.APP_UID, storage.APP_GID)
+
+            os.chmod(base, 0o770)
+            try:
+                storage.validate_storage_path(root, project_root=Path("__SCRIPTS__").parent)
+            except storage.StoragePathError as exc:
+                assert "ancestor is group/world writable" in str(exc)
+            else:
+                raise AssertionError("writable ancestor passed the POSIX boundary")
+            os.chmod(base, 0o700)
+            if privileged:
+                os.chown(base, 42424, os.getegid())
+                try:
+                    storage.validate_storage_path(
+                        root,
+                        project_root=Path("__SCRIPTS__").parent,
+                    )
+                except storage.StoragePathError as exc:
+                    assert "ancestor owner uid 42424" in str(exc)
+                else:
+                    raise AssertionError("foreign-owned ancestor passed the POSIX boundary")
+                os.chown(base, os.geteuid(), os.getegid())
         finally:
-            shutil.rmtree(root.parent)
+            shutil.rmtree(base)
         """
     )
     _run_real_posix_script(script, wsl_as_root=True)
@@ -624,6 +695,8 @@ def test_recursive_posix_policy_rejects_synthetic_foreign_principal(
     monkeypatch.setattr(storage.os, "getegid", lambda: 1000, raising=False)
     monkeypatch.setattr(storage.os, "getgroups", lambda: [1001], raising=False)
     monkeypatch.setattr(storage.os, "access", lambda *_args: True)
+    monkeypatch.setattr(storage, "_require_posix_ancestor_boundary", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(storage, "_require_posix_boundary_owners", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(
         storage,
         "_directory_entries",
@@ -1060,6 +1133,17 @@ def test_image_build_is_required_exactly_when_an_app_image_can_start(
     """Migrate and app starts pin a build ID; lifecycle reads never rebuild."""
 
     assert compose_launcher._parse_request(arguments).requires_image is requires_image
+
+
+def test_storage_up_identifies_exactly_one_container_for_post_create_inspection() -> None:
+    """Every accepted storage start maps to one exact Compose service inventory."""
+
+    assert compose_launcher._parse_request(["up"]).storage_services == ("app",)
+    assert compose_launcher._parse_request(["up", "app"]).storage_services == ("app",)
+    assert compose_launcher._parse_request(
+        ["--profile", "dev", "up", "app-dev"]
+    ).storage_services == ("app-dev",)
+    assert compose_launcher._parse_request(["up", "postgres"]).storage_services == ()
 
 
 def test_local_docker_transport_rejects_arbitrary_named_pipes() -> None:
@@ -1504,15 +1588,95 @@ def test_non_root_probe_has_no_host_mount_string_or_privilege_override(
     assert str(comma_source) not in probe
 
 
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        ("wrong-source", "wrong artifacts source"),
+        ("process-fd", "bind source|wrong artifacts source"),
+        ("read-only", "artifacts bind mode"),
+        ("missing-child", "missing a durable child bind"),
+    ],
+)
+def test_post_create_mount_mismatch_removes_only_the_scoped_app_container(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mutation: str,
+    message: str,
+) -> None:
+    """Docker's persisted mount projection must match or the app is removed."""
+
+    source = (tmp_path / "store").resolve()
+    expected_sources = {child: source / child for child in storage.STORAGE_CHILDREN}
+    request = compose_launcher._parse_request(["up", "--detach", "app"])
+    container_id = "d" * 64
+    calls: list[tuple[list[str], bool]] = []
+
+    class Guard:
+        def assert_current(self) -> None:
+            return
+
+    mounts = [
+        {
+            "Type": "bind",
+            "Source": str(expected_sources[child]),
+            "Destination": target,
+            "RW": True,
+        }
+        for child, target in compose_launcher.STORAGE_TARGETS.items()
+    ]
+    if mutation == "wrong-source":
+        mounts[0]["Source"] = str(tmp_path / "attacker")
+    elif mutation == "process-fd":
+        mounts[0]["Source"] = "/proc/4242/fd/7"
+    elif mutation == "read-only":
+        mounts[0]["RW"] = False
+    elif mutation == "missing-child":
+        mounts.pop()
+    else:
+        raise AssertionError(f"unhandled mutation: {mutation}")
+
+    def fake_daemon(
+        command: list[str],
+        *,
+        cwd: Path,
+        env: dict[str, str],
+        capture: bool = False,
+    ) -> SimpleNamespace:
+        del cwd, env
+        calls.append((command, capture))
+        if command == ["docker", "compose", "up", "--detach", "app"]:
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        if command == ["docker", "compose", "ps", "--all", "--quiet", "app"]:
+            return SimpleNamespace(returncode=0, stdout=f"{container_id}\n", stderr="")
+        if command[:3] == ["docker", "container", "inspect"]:
+            return SimpleNamespace(returncode=0, stdout=json.dumps(mounts), stderr="")
+        if command == ["docker", "container", "rm", "--force", container_id]:
+            return SimpleNamespace(returncode=0, stdout=container_id, stderr="")
+        raise AssertionError(f"unexpected daemon command: {command!r}")
+
+    monkeypatch.setattr(compose_launcher, "_run_daemon_checked", fake_daemon)
+    with pytest.raises(compose_launcher.StoragePathError, match=message):
+        compose_launcher._run_guarded_storage_up(
+            request,
+            cwd=tmp_path,
+            env={"DOCKER_HOST": "npipe:////./pipe/docker_engine"},
+            identity_guard=Guard(),  # type: ignore[arg-type]
+            expected_sources=expected_sources,
+        )
+    removal = [command for command, _capture in calls if command[1:3] == ["container", "rm"]]
+    assert removal == [["docker", "container", "rm", "--force", container_id]]
+    assert all("--volumes" not in command and "-v" not in command for command, _ in calls)
+
+
 def test_main_keeps_identity_and_immutable_image_pinned_through_final_up(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The final container creation occurs inside the same guard as its probe."""
+    """Creation and restart-stable mount inspection stay inside the same guard."""
 
     source = (tmp_path / "store").resolve()
     image_id = "sha256:" + "c" * 64
-    state = {"guard_active": False, "assertions": 0, "final_calls": 0}
+    state = {"guard_active": False, "assertions": 0, "final_calls": 0, "inspections": 0}
 
     def rendered_model(
         _request: compose_launcher.LaunchRequest,
@@ -1576,14 +1740,42 @@ def test_main_keeps_identity_and_immutable_image_pinned_through_final_up(
         capture: bool = False,
     ) -> SimpleNamespace:
         assert state["guard_active"]
-        assert command == ["docker", "compose", "up", "app"]
         assert cwd == tmp_path
         assert env["UMS_APP_IMAGE"] == image_id
         assert env["UMS_APP_ARTIFACTS_HOST"] == str(source / "artifacts")
         assert env["UMS_APP_BLOBS_HOST"] == str(source / "blobs")
-        assert capture is False
-        state["final_calls"] += 1
-        return SimpleNamespace(returncode=23)
+        if command == ["docker", "compose", "up", "--detach", "app"]:
+            assert capture is False
+            state["final_calls"] += 1
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        if command == ["docker", "compose", "up", "app"]:
+            assert capture is False
+            state["final_calls"] += 1
+            return SimpleNamespace(returncode=23, stdout="", stderr="")
+        if command == ["docker", "compose", "ps", "--all", "--quiet", "app"]:
+            assert capture is True
+            return SimpleNamespace(returncode=0, stdout=f"{'a' * 64}\n", stderr="")
+        if command == [
+            "docker",
+            "container",
+            "inspect",
+            "a" * 64,
+            "--format",
+            "{{json .Mounts}}",
+        ]:
+            assert capture is True
+            state["inspections"] += 1
+            mounts = [
+                {
+                    "Type": "bind",
+                    "Source": str(source / child),
+                    "Destination": target,
+                    "RW": True,
+                }
+                for child, target in compose_launcher.STORAGE_TARGETS.items()
+            ]
+            return SimpleNamespace(returncode=0, stdout=json.dumps(mounts), stderr="")
+        raise AssertionError(f"unexpected daemon command: {command!r}")
 
     monkeypatch.setattr(compose_launcher, "PROJECT_ROOT", tmp_path)
     monkeypatch.setattr(compose_launcher, "COMPOSE_FILE", tmp_path / "docker-compose.yml")
@@ -1609,4 +1801,9 @@ def test_main_keeps_identity_and_immutable_image_pinned_through_final_up(
     monkeypatch.setattr(compose_launcher, "_run_daemon_checked", final_daemon)
 
     assert compose_launcher.main(["up", "app"]) == 23
-    assert state == {"guard_active": False, "assertions": 3, "final_calls": 1}
+    assert state == {
+        "guard_active": False,
+        "assertions": 7,
+        "final_calls": 2,
+        "inspections": 2,
+    }

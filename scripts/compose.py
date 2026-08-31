@@ -22,6 +22,7 @@ from pathlib import Path
 
 from validate_compose_storage_path import (
     STORAGE_CHILDREN,
+    StorageIdentityGuard,
     StoragePathError,
     hold_storage_identity,
     prepare_storage_path,
@@ -50,6 +51,7 @@ APP_SERVICES = {"app", "app-dev"}
 APPLICATION_IMAGE_SERVICES = {"migrate", "app", "app-dev"}
 DAEMON_ACTIONS = {"up", "run", "logs", "stop", "down", "ps"}
 _IMAGE_ID = re.compile(r"sha256:[0-9a-f]{64}")
+_CONTAINER_ID = re.compile(r"[0-9a-f]{12,64}")
 _ENV_ASSIGNMENT = re.compile(r"^\s*(?:export\s+)?(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*(?:=|:|$)")
 
 # FIX: PID-derived probe names could be pre-created and truncated. The probe
@@ -120,6 +122,7 @@ class LaunchRequest:
     requires_storage: bool
     requires_image: bool
     internal_storage_path: bool = False
+    storage_services: tuple[str, ...] = ()
 
 
 def _option_value(
@@ -226,6 +229,7 @@ def _parse_request(arguments: list[str]) -> LaunchRequest:
     normalized_tail: list[str]
     requires_storage = False
     requires_image = False
+    services: tuple[str, ...] = ()
     if action == "up":
         normalized_tail = []
         tail_index = 0
@@ -294,6 +298,11 @@ def _parse_request(arguments: list[str]) -> LaunchRequest:
         action=action,
         requires_storage=requires_storage,
         requires_image=requires_image,
+        storage_services=(
+            tuple(service for service in services if service in APP_SERVICES)
+            if services
+            else (("app",) if requires_storage else ())
+        ),
     )
 
 
@@ -925,12 +934,269 @@ def _probe_storage_writable(
         )
 
 
+def _detached_storage_up_args(request: LaunchRequest) -> tuple[str, ...]:
+    """Return the reviewed up command with a deterministic create phase."""
+
+    action_index = len(request.global_args)
+    arguments = list(request.compose_args)
+    if request.action != "up" or arguments[action_index] != "up":
+        raise StoragePathError("storage container creation requires the reviewed up action")
+    if "--detach" not in arguments[action_index + 1 :]:
+        arguments.insert(action_index + 1, "--detach")
+    return tuple(arguments)
+
+
+def _inspected_host_source(raw_source: object) -> Path:
+    """Normalize one Docker-reported source spelling back to a host path."""
+
+    if not isinstance(raw_source, str):
+        raise StoragePathError("Docker reported a non-string bind source")
+    normalized = raw_source
+    if os.name == "nt":
+        normalized = raw_source.replace("\\", "/")
+        match = re.fullmatch(
+            r"/(?:host_mnt|run/desktop/mnt/host)/(?P<drive>[A-Za-z])(?:/(?P<tail>.*))?",
+            normalized,
+        )
+        if match is not None:
+            tail = match.group("tail") or ""
+            normalized = f"{match.group('drive')}:{os.sep}{tail.replace('/', os.sep)}"
+    source = Path(normalized)
+    if not source.is_absolute():
+        raise StoragePathError("Docker reported a non-absolute bind source")
+    return source
+
+
+def _storage_container_ids(
+    request: LaunchRequest,
+    *,
+    cwd: Path,
+    env: dict[str, str],
+) -> tuple[str, ...]:
+    """Return validated IDs for the one application service this request starts."""
+
+    if len(request.storage_services) != 1:
+        raise StoragePathError("storage startup does not identify exactly one app service")
+    result = _run_daemon_checked(
+        [
+            "docker",
+            "compose",
+            *request.global_args,
+            "ps",
+            "--all",
+            "--quiet",
+            request.storage_services[0],
+        ],
+        cwd=cwd,
+        env=env,
+        capture=True,
+    )
+    if result.returncode != 0:
+        raise StoragePathError("cannot enumerate the created application container")
+    identifiers = tuple(line.strip() for line in (result.stdout or "").splitlines() if line.strip())
+    if any(_CONTAINER_ID.fullmatch(identifier) is None for identifier in identifiers):
+        raise StoragePathError("Docker returned an invalid application container identity")
+    return identifiers
+
+
+def _remove_container_ids(
+    identifiers: tuple[str, ...],
+    *,
+    cwd: Path,
+    env: dict[str, str],
+) -> None:
+    """Remove only application containers whose IDs were proven by Compose ps."""
+
+    if not identifiers:
+        return
+    removed = _run_daemon_checked(
+        ["docker", "container", "rm", "--force", *identifiers],
+        cwd=cwd,
+        env=env,
+        capture=True,
+    )
+    if removed.returncode != 0:
+        raise StoragePathError("automatic removal of an unsafe application container failed")
+
+
 # ============================================================================
-# Purpose: Validate the pinned model and host store, run a non-root write
-#   probe, then execute one normalized allowlisted Compose workflow.
+# Purpose: Inspect Docker's persisted mount inventory after container creation
+#   and prove both storage targets retain their durable canonical host sources.
 # Database/ORM: None.
-# Standards: Routes no arbitrary Compose flags; local daemon only; final model
-#   and tree identities are rechecked after preparation/probing.
+# Standards: Machine-readable daemon output only; exact service/container IDs;
+#   wrong, missing, duplicate, or read-only binds fail closed.
+# Blast Radius: Application container lifecycle and durable artifact/blob paths.
+# Connections:
+#   - File: docker-compose.yml -> Declares the two reviewed child bind targets.
+#   - File: scripts/validate_compose_storage_path.py -> Supplies proven sources.
+# ============================================================================
+def _verify_created_storage_mounts(
+    request: LaunchRequest,
+    *,
+    cwd: Path,
+    env: dict[str, str],
+    expected_sources: dict[str, Path],
+) -> None:
+    """Prove Docker persisted the two durable canonical child binds."""
+
+    identifiers = _storage_container_ids(request, cwd=cwd, env=env)
+    if len(identifiers) != 1:
+        raise StoragePathError("Compose did not create exactly one reviewed application container")
+    inspected = _run_daemon_checked(
+        [
+            "docker",
+            "container",
+            "inspect",
+            identifiers[0],
+            "--format",
+            "{{json .Mounts}}",
+        ],
+        cwd=cwd,
+        env=env,
+        capture=True,
+    )
+    if inspected.returncode != 0:
+        raise StoragePathError("cannot inspect the created application container mounts")
+    try:
+        mounts = json.loads((inspected.stdout or "").strip())
+    except (TypeError, ValueError) as exc:
+        raise StoragePathError(
+            "created application container mounts were not machine-readable"
+        ) from exc
+    if not isinstance(mounts, list):
+        raise StoragePathError("created application container has no mount inventory")
+
+    observed: dict[str, dict[str, object]] = {}
+    for mount in mounts:
+        if not isinstance(mount, dict):
+            raise StoragePathError("created application container has an invalid mount")
+        target = _normalized_target(mount.get("Destination"))
+        if target in STORAGE_TARGETS.values():
+            if mount.get("Destination") != target or target in observed:
+                raise StoragePathError(
+                    "created application container repeats or rewrites a storage target"
+                )
+            observed[target] = mount
+        elif target == STORAGE_TARGET or target.startswith(f"{STORAGE_TARGET}/"):
+            raise StoragePathError("created application container has an unreviewed storage mount")
+    if set(observed) != set(STORAGE_TARGETS.values()):
+        raise StoragePathError("created application container is missing a durable child bind")
+    for child, target in STORAGE_TARGETS.items():
+        mount = observed[target]
+        if mount.get("Type") != "bind" or mount.get("RW") is not True:
+            raise StoragePathError(f"created application container changed the {child} bind mode")
+        inspected_source = _inspected_host_source(mount.get("Source"))
+        expected_source = expected_sources[child]
+        exact_spelling = os.path.normcase(os.path.normpath(str(inspected_source)))
+        expected_spelling = os.path.normcase(os.path.normpath(str(expected_source)))
+        if (
+            exact_spelling != expected_spelling
+            or inspected_source.resolve(strict=False) != expected_source
+        ):
+            raise StoragePathError(
+                f"created application container persisted the wrong {child} source"
+            )
+
+
+def _remove_request_storage_containers(
+    request: LaunchRequest,
+    *,
+    cwd: Path,
+    env: dict[str, str],
+) -> None:
+    """Remove the request's application container after an identity failure."""
+
+    identifiers = _storage_container_ids(request, cwd=cwd, env=env)
+    _remove_container_ids(identifiers, cwd=cwd, env=env)
+
+
+# FIX: `/proc/<launcher-pid>/fd/<child-fd>` kept the initial mount identity but
+# left a dead or reusable source in Docker's restart configuration. Containers
+# now persist canonical child paths; held descriptors, trusted parent modes,
+# pathname identity checks, and Docker inspect protect the creation boundary.
+# ============================================================================
+# Purpose: Reconcile one storage-bearing app container in a detached create
+#   phase, prove its persisted mounts, then preserve requested attach behavior.
+# Database/ORM: None.
+# Standards: Identity checks bracket every Compose up; mount mismatches remove
+#   only Compose-discovered app container IDs and never named volumes.
+# Blast Radius: Application container creation, restart, and storage durability.
+# Connections:
+#   - File: docker-compose.yml -> Supplies restart policy and canonical binds.
+#   - File: tests/scripts/test_compose_storage_preflight.py -> Lifecycle proofs.
+# ============================================================================
+def _run_guarded_storage_up(
+    request: LaunchRequest,
+    *,
+    cwd: Path,
+    env: dict[str, str],
+    identity_guard: StorageIdentityGuard,
+    expected_sources: dict[str, Path],
+) -> subprocess.CompletedProcess[str]:
+    """Create, inspect, and optionally attach to one durable app container."""
+
+    create_args = _detached_storage_up_args(request)
+    identity_guard.assert_current()
+    created = _run_daemon_checked(
+        ["docker", "compose", *create_args],
+        cwd=cwd,
+        env=env,
+    )
+    if created.returncode != 0:
+        identity_guard.assert_current()
+        return created
+    try:
+        identity_guard.assert_current()
+        _verify_created_storage_mounts(
+            request,
+            cwd=cwd,
+            env=env,
+            expected_sources=expected_sources,
+        )
+        identity_guard.assert_current()
+    except StoragePathError:
+        try:
+            _remove_request_storage_containers(request, cwd=cwd, env=env)
+        except StoragePathError as cleanup_error:
+            raise StoragePathError(
+                "storage identity verification failed and automatic removal also failed"
+            ) from cleanup_error
+        raise
+
+    if create_args == request.compose_args:
+        return created
+
+    identity_guard.assert_current()
+    attached = _run_daemon_checked(
+        ["docker", "compose", *request.compose_args],
+        cwd=cwd,
+        env=env,
+    )
+    try:
+        identity_guard.assert_current()
+        _verify_created_storage_mounts(
+            request,
+            cwd=cwd,
+            env=env,
+            expected_sources=expected_sources,
+        )
+    except StoragePathError:
+        try:
+            _remove_request_storage_containers(request, cwd=cwd, env=env)
+        except StoragePathError as cleanup_error:
+            raise StoragePathError(
+                "attached storage verification failed and automatic removal also failed"
+            ) from cleanup_error
+        raise
+    return attached
+
+
+# ============================================================================
+# Purpose: Validate the pinned model and host store, run a non-root write probe,
+#   then create and inspect one normalized storage-bearing Compose workflow.
+# Database/ORM: None.
+# Standards: Routes no arbitrary Compose flags; local daemon only; final model,
+#   path identities, and Docker's persisted Mounts are rechecked before success.
 # Blast Radius: Container lifecycle and durable artifact/blob host storage.
 # Connections:
 #   - File: scripts/validate_compose_storage_path.py -> Host path/ACL contract.
@@ -1001,10 +1267,10 @@ def main(argv: list[str] | None = None) -> int:
                     project_root=PROJECT_ROOT,
                 )
                 with hold_storage_identity(storage_path) as identity_guard:
-                    pinned_child_sources = {
+                    guarded_child_sources = {
                         child: identity_guard.child_source(child) for child in STORAGE_CHILDREN
                     }
-                    for child, source in pinned_child_sources.items():
+                    for child, source in guarded_child_sources.items():
                         environment[STORAGE_SOURCE_ENV[child]] = str(source)
                     guarded_model = _render_model(
                         request,
@@ -1015,7 +1281,7 @@ def main(argv: list[str] | None = None) -> int:
                         guarded_model,
                         project_root=project_root,
                         expected_image=expected_image,
-                        expected_storage_sources=pinned_child_sources,
+                        expected_storage_sources=guarded_child_sources,
                     )
                     if guarded_path != storage_path:
                         raise StoragePathError(
@@ -1032,11 +1298,12 @@ def main(argv: list[str] | None = None) -> int:
                         project_root=PROJECT_ROOT,
                         require_exists=True,
                     )
-                    identity_guard.assert_current()
-                    completed = _run_daemon_checked(
-                        ["docker", "compose", *request.compose_args],
+                    completed = _run_guarded_storage_up(
+                        request,
                         cwd=PROJECT_ROOT,
                         env=environment,
+                        identity_guard=identity_guard,
+                        expected_sources=guarded_child_sources,
                     )
                     identity_guard.assert_current()
                     return completed.returncode

@@ -10,9 +10,10 @@
 # The launcher is a host-side safety boundary. It canonicalizes
 # UMS_APP_DATA_HOST, requires the path-bound application sentinel, rejects
 # roots/system paths/non-default checkout descendants/symlinks/submounts,
-# validates the final rendered Compose model, and replaces both child sources
-# with OS-pinned identities before a container is invoked. This file intentionally
-# contains NO root-capable storage initializer: direct `docker compose` cannot trigger a root
+# validates the final rendered Compose model, holds both child identities during
+# creation, and inspects Docker's persisted canonical bind sources before success.
+# This file intentionally contains NO root-capable storage initializer: direct
+# `docker compose` cannot trigger a root
 # chown/chmod of an arbitrary host path. Direct Compose is unsupported for
 # starting the app because it skips the host preflight and non-root write probe;
 # use `python scripts/compose.py`.
@@ -26,6 +27,10 @@
 # project name has a different named-volume namespace. Preserve those volumes
 # and use a reviewed dump/restore migration before the first pinned-project
 # `up`; the launcher never guesses at or silently adopts legacy finance data.
+# On POSIX, root, the launcher uid, and Docker-socket holders are trusted actors:
+# each can already replace application containers or their data. Ancestor ownership
+# and write-mode checks exclude other host principals; transient `/proc/<pid>/fd`
+# paths are never persisted because they cannot survive an engine restart.
 #
 # ⚠️  `docker compose down -v` is NOT an ordinary teardown — do not reach for it
 #     out of habit. The `-v` flag DELETES EVERY named volume declared at the
@@ -273,10 +278,10 @@ x-app-env: &app-env
 # rows. Pointing both at one durable mount fixes it with no Python change.
 #
 # One host tree, two directly bound subdirectories: the stores never share a
-# filename space, and each child identity stays kernel-pinned through container
-# creation. This anchor is merged ONLY into the services that receive both
-# child mounts. `migrate` deliberately gets neither — alembic writes no artifacts
-# or blobs.
+# filename space, and each canonical child path is identity-guarded through
+# container creation and checked against Docker inspect. This anchor is merged
+# ONLY into the services that receive both child mounts. `migrate` deliberately
+# gets neither — alembic writes no artifacts or blobs.
 #
 # The stores are HOST BINDS (UMS_APP_DATA_HOST, default ./data/ums, with direct
 # artifacts/blob children), chosen over named volumes because `down -v` would
@@ -286,8 +291,10 @@ x-app-env: &app-env
 # only the two bounded children with the current operator's authority, then
 # proves uid 10001 can write them through the non-root app service. It does not
 # chown/chmod through Docker, and this Compose file intentionally contains no
-# root-capable init service. Linux operators must explicitly provision any bind
-# that host ownership does not expose to uid/gid 10001. On Windows, host NTFS
+# root-capable init service. Native POSIX operators must own the storage root,
+# provision both direct children as 10001:10001 without group/world write, and
+# retain read/traverse access (normally as root or through the app group). The
+# launcher never chowns existing data. On Windows, host NTFS
 # ACL validation is the confidentiality control: Docker
 # Desktop's container `stat` mode is not a Windows ACL proof. Keep these paths
 # and the Dockerfile's APP_DATA_HOME in sync. The launcher walks the entire
@@ -298,8 +305,9 @@ x-app-env: &app-env
 # as a substitute for the NTFS DACL.
 # ---------------------------------------------------------------------------
 # Container paths are pinned below ``/var/lib/ums``. Operators select only the
-# root ``UMS_APP_DATA_HOST``; the launcher owns the two child-source variables
-# and injects direct OS-pinned identities after validating the rendered model.
+# root ``UMS_APP_DATA_HOST``; the launcher owns the two child-source variables,
+# injects durable canonical paths, and holds no-follow descriptors while Docker
+# resolves them. The stored container configuration never contains process fds.
 x-app-storage-env: &app-storage-env
   UMS_EXPORT_ARTIFACT_DIR: /var/lib/ums/artifacts
   UMS_BLOB_BACKEND: ${UMS_BLOB_BACKEND:-file-store}
@@ -489,7 +497,7 @@ services:
       # Same two stores as `app` on purpose: app-dev is an alternative to app,
       # not a companion, and an operator who switches between them should not
       # find yesterday's export missing. The launcher replaces these defaults
-      # with direct OS-pinned child sources before either container is created.
+      # with guarded canonical child sources before either container is created.
       - type: bind
         source: ${UMS_APP_ARTIFACTS_HOST:-${UMS_APP_DATA_HOST:-./data/ums}/artifacts}
         target: /var/lib/ums/artifacts

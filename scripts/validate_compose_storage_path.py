@@ -330,7 +330,7 @@ class StorageIdentityGuard:
             raise StoragePathError(f"storage identity guard has no child {name!r}") from exc
 
     def assert_current(self) -> None:
-        """Fail if any guarded root/direct child no longer has its proven identity."""
+        """Fail if an open or pathname identity no longer matches the proof."""
 
         if self._descriptors:
             for expected, descriptor in zip(self.identity, self._descriptors, strict=True):
@@ -344,7 +344,6 @@ class StorageIdentityGuard:
                     expected_inode,
                 ):
                     raise StoragePathError(f"open storage identity changed unexpectedly: {name}")
-            return
         if storage_tree_identity(self.canonical_path) != self.identity:
             raise StoragePathError(
                 "storage root or direct child identity changed while Docker was starting"
@@ -468,8 +467,8 @@ def _open_posix_identity_descriptors(
 # Purpose: Retain the proven storage identities until Docker has resolved and
 #   created every container that receives the bind source.
 # Database/ORM: None.
-# Standards: Windows handles deny delete sharing; POSIX exposes the no-follow
-#   direct-child descriptors through procfs until every daemon action returns.
+# Standards: Windows handles deny delete sharing; POSIX holds no-follow root,
+#   child, and sentinel descriptors while Docker receives durable canonical paths.
 # Blast Radius: Durable artifacts/blob bind identity during container creation.
 # Connections:
 #   - File: scripts/compose.py -> Holds this guard through probe and final up.
@@ -498,13 +497,8 @@ def hold_storage_identity(path: Path) -> Iterator[StorageIdentityGuard]:
         return
 
     descriptors = _open_posix_identity_descriptors(canonical, identity)
-    child_sources = tuple(
-        (name, Path(f"/proc/{os.getpid()}/fd/{descriptors[index]}"))
-        for index, name in enumerate(STORAGE_CHILDREN, start=1)
-    )
+    child_sources = tuple((name, canonical / name) for name in STORAGE_CHILDREN)
     try:
-        if any(not source.exists() for _name, source in child_sources):
-            raise StoragePathError("procfs cannot expose every guarded child descriptor to Docker")
         guard = StorageIdentityGuard(
             canonical,
             identity,
@@ -578,12 +572,74 @@ def _require_operator_group_access(path: Path) -> None:
         )
 
 
+def _require_posix_ancestor_boundary(path: Path, *, operator_uid: int) -> None:
+    """Reject an ancestor that another host principal can replace through."""
+
+    ancestor = path.parent
+    while True:
+        try:
+            metadata = ancestor.stat(follow_symlinks=False)
+        except OSError as exc:
+            raise StoragePathError(f"cannot inspect POSIX storage ancestor {ancestor!s}") from exc
+        mode = stat.S_IMODE(metadata.st_mode)
+        if not stat.S_ISDIR(metadata.st_mode):
+            raise StoragePathError(f"POSIX storage ancestor is not a directory: {ancestor!s}")
+        if metadata.st_uid not in {0, operator_uid}:
+            raise StoragePathError(
+                f"POSIX storage ancestor owner uid {metadata.st_uid} is not root or the "
+                f"operator: {ancestor!s}"
+            )
+        if mode & 0o022:
+            raise StoragePathError(
+                f"POSIX storage ancestor is group/world writable ({mode:#05o}): {ancestor!s}"
+            )
+        if ancestor.parent == ancestor:
+            break
+        ancestor = ancestor.parent
+
+
+def _require_posix_boundary_owners(
+    path: Path,
+    *,
+    operator_uid: int,
+    operator_groups: set[int],
+) -> None:
+    """Require exact owners for the replaceable root and direct child names."""
+
+    allowed_gids = {*operator_groups, APP_GID}
+    expected_owners: list[tuple[str, Path, set[int], set[int]]] = [
+        ("root", path, {operator_uid}, operator_groups)
+    ]
+    expected_owners.extend(
+        (name, path / name, {APP_UID}, {APP_GID})
+        for name in STORAGE_CHILDREN
+        if (path / name).exists()
+    )
+    sentinel = path / STORAGE_SENTINEL_NAME
+    if sentinel.exists():
+        expected_owners.append((STORAGE_SENTINEL_NAME, sentinel, {operator_uid}, allowed_gids))
+    for name, entry, expected_uids, expected_gids in expected_owners:
+        try:
+            metadata = entry.stat(follow_symlinks=False)
+        except OSError as exc:
+            raise StoragePathError(f"cannot inspect POSIX storage owner {entry!s}") from exc
+        if metadata.st_uid not in expected_uids or metadata.st_gid not in expected_gids:
+            expected_uid_text = "/".join(str(value) for value in sorted(expected_uids))
+            expected_gid_text = "/".join(str(value) for value in sorted(expected_gids))
+            raise StoragePathError(
+                f"POSIX storage {name} must be owned by uid {expected_uid_text} and gid "
+                f"{expected_gid_text}, not {metadata.st_uid}:{metadata.st_gid}: {entry!s}"
+            )
+
+
 # ============================================================================
 # Purpose: Prove every POSIX storage descendant is a regular file/directory
-#   owned only by the current operator or the non-root application principal.
+#   owned only by the current operator or the non-root application principal,
+#   behind an ancestor/root boundary other users cannot rename or replace.
 # Database/ORM: None.
-# Standards: No world permissions, foreign uid/gid, special file, setuid, or
-#   sticky entry is accepted; operator recovery access is checked recursively.
+# Standards: Root/sentinel ownership stays with the operator, direct children
+#   are uid/gid 10001, no group/world writer or special entry is accepted, and
+#   operator read/traverse recovery access is checked recursively.
 # Blast Radius: Durable artifact/blob confidentiality and recoverability.
 # Connections:
 #   - File: Dockerfile -> Declares the application uid/gid 10001 contract.
@@ -601,6 +657,13 @@ def _require_posix_storage_policy(path: Path) -> None:
         raise StoragePathError("cannot inspect the POSIX operator identity") from exc
     allowed_uids = {operator_uid, APP_UID}
     allowed_gids = {*operator_groups, APP_GID}
+    _require_posix_ancestor_boundary(path, operator_uid=operator_uid)
+    _require_posix_boundary_owners(
+        path,
+        operator_uid=operator_uid,
+        operator_groups=operator_groups,
+    )
+
     pending = [path]
     while pending:
         current = pending.pop()
@@ -625,6 +688,10 @@ def _require_posix_storage_policy(path: Path) -> None:
                 f"{current!s}"
             )
         mode = stat.S_IMODE(metadata.st_mode)
+        if mode & 0o022:
+            raise StoragePathError(
+                f"POSIX storage grants group/world write ({mode:#05o}): {current!s}"
+            )
         if mode & 0o007:
             raise StoragePathError(
                 f"POSIX storage grants world permissions ({mode:#05o}): {current!s}"
@@ -637,7 +704,7 @@ def _require_posix_storage_policy(path: Path) -> None:
             raise StoragePathError(
                 f"POSIX storage regular file has forbidden setgid mode: {current!s}"
             )
-        required_access = os.R_OK | (os.W_OK | os.X_OK if is_directory else 0)
+        required_access = os.R_OK | (os.X_OK if is_directory else 0)
         try:
             operator_access = os.access(current, required_access)
         except OSError as exc:
@@ -646,7 +713,7 @@ def _require_posix_storage_policy(path: Path) -> None:
             ) from exc
         if not operator_access:
             raise StoragePathError(
-                f"current operator cannot recover POSIX storage entry {current!s}"
+                f"current operator cannot read/traverse POSIX storage entry {current!s}"
             )
         if is_directory:
             pending.extend(_directory_entries(current))
