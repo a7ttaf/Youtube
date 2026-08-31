@@ -967,9 +967,7 @@ def test_no_plan_promises_a_group_effect_the_write_pass_will_not_perform() -> No
     # the legal cms-radio association would satisfy the assertion above while
     # losing the roster's actual intent.
     assert plan.counts[ChannelImportOutcome.ERROR.value] == 2
-    surviving = [
-        entry for entry in plan.entries if entry.outcome is not ChannelImportOutcome.ERROR
-    ]
+    surviving = [entry for entry in plan.entries if entry.outcome is not ChannelImportOutcome.ERROR]
     assert [entry.group_id for entry in surviving] == ["cms-radio"]
 
 

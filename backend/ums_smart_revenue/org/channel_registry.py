@@ -391,9 +391,7 @@ class ChannelRegistry:
             self._txn, "undo", None
         )
         if undo is not None:
-            undo.append(
-                (youtube_channel_id, self._channels.get(youtube_channel_id), written)
-            )
+            undo.append((youtube_channel_id, self._channels.get(youtube_channel_id), written))
 
     # ========================================================================
     # Purpose: In-memory read — every ACTIVE channel, sorted by id.
@@ -444,8 +442,7 @@ class ChannelRegistry:
                 [
                     channel
                     for channel_id, channel in list(self._channels.items())
-                    if channel_id in youtube_channel_ids
-                    and (channel.active or include_inactive)
+                    if channel_id in youtube_channel_ids and (channel.active or include_inactive)
                 ],
                 key=lambda channel: channel.youtube_channel_id,
             )
@@ -490,9 +487,7 @@ class ChannelRegistry:
         normalized_company_id = _parse_optional_uuid(primary_company_id, "primary_company_id")
         with self._lock:
             if youtube_channel_id in self._channels:
-                raise ChannelRegistryConflictError(
-                    f"Channel already exists: {youtube_channel_id}"
-                )
+                raise ChannelRegistryConflictError(f"Channel already exists: {youtube_channel_id}")
             initial_revenue_source_status = (
                 "MISSING_REVENUE_SOURCE" if revenue_required else "PERFORMANCE_ONLY"
             )

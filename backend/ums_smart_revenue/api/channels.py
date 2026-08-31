@@ -745,10 +745,7 @@ def import_channels(
     # carrying another plan's tokens no longer has a token the client will
     # echo. The two checks are deliberately independent: either token alone
     # binds the apply, and the SPA sends both (review #184, C1).
-    if (
-        expected_display_digest is not None
-        and expected_display_digest != payload["display_digest"]
-    ):
+    if expected_display_digest is not None and expected_display_digest != payload["display_digest"]:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=payload)
 
     if plan.has_errors:

@@ -376,8 +376,7 @@ class SqlAlchemyChannelRegistry:
                 # until the boundary's rollback-to, so classification there
                 # rests on the dialect string matcher above alone and an
                 # unmatched error re-raises into the boundary rollback.
-                not self._txn_active
-                and self._get_row(youtube_channel_id) is not None
+                not self._txn_active and self._get_row(youtube_channel_id) is not None
             ):
                 raise ChannelRegistryConflictError(
                     f"Channel already exists: {youtube_channel_id}"
