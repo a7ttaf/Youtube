@@ -446,7 +446,7 @@ gate). None of the three is optional for that step, and the beta needs none of t
 
 | # | Decision | Recommendation |
 | --- | --- | --- |
-| D-A1 | Which roles see the Admin nav | Show when `users.manage` or `roles.assign` is effective, represented by `can_manage_users || can_assign_roles`; finance_admin gets assignment-only UI with `users.read_scoped`, never lifecycle controls |
+| D-A1 | Which roles see the Admin nav | Show when `users.manage` or `roles.assign` is effective, represented by `can_manage_users` OR `can_assign_roles`; finance_admin gets assignment-only UI with `users.read_scoped`, never lifecycle controls |
 | D-A2 | Gate for the catalog reads (`/security/*`) | Move to `users.manage` alongside the matrix UI; `audit.view` was a placeholder |
 | D-A3 | A4 status endpoint scope | Read-only allowlist, `platform.manage_settings` gate |
 | D-A4 | When A1 lands | Immediately after the P1 band merges, before beta polish |

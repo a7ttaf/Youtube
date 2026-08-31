@@ -39,14 +39,13 @@ corrections are recorded rather than quietly dropped.
 
 **The plan built from this audit is [`21_BETA_IMPLEMENTATION_PLAN.md`](21_BETA_IMPLEMENTATION_PLAN.md).**
 
-### Related plans (program triad)
+### Related plans (program bundle)
 
 | Doc | Where | Role |
 | --- | --- | --- |
-| Docs/21 (frozen costing snapshot) | PR #220 until successor merges | Historical planning evidence; Docs/25 + live GitHub own execution status |
+| [`21_BETA_IMPLEMENTATION_PLAN.md`](21_BETA_IMPLEMENTATION_PLAN.md) | PR #220 (frozen snapshot) | Original costed beta plan at `d8418cea2`; Docs/25 + live GitHub own execution status |
 | Docs/22 backup rehearsal | P0-b / PR #222 | Backup/restore runbook; PR still open |
 | [`25_PROGRAM_DEPENDENCY_GRAPH.md`](25_PROGRAM_DEPENDENCY_GRAPH.md) | this PR | Execution DAG |
-| [`21_BETA_IMPLEMENTATION_PLAN.md`](21_BETA_IMPLEMENTATION_PLAN.md) | this PR (snapshot) | Original costed beta plan at `d8418cea2` |
 | [`23_ADMIN_ACCESS_AND_CONFIG_PLAN.md`](23_ADMIN_ACCESS_AND_CONFIG_PLAN.md) | this PR | Admin / access / config UI (Docs/21 is silent here) |
 | [`24_US_WITHHOLDING_AND_US_REVENUE_PLAN.md`](24_US_WITHHOLDING_AND_US_REVENUE_PLAN.md) | this PR | US revenue slice + withholding estimate (fills P3 rate gap) |
 
