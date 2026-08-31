@@ -290,6 +290,13 @@ describe("OutsideCmsMonitorPanel in CommandView", () => {
     await waitFor(() =>
       expect(screen.getAllByText(/no permission/i).length).toBeGreaterThan(0),
     );
+    expect(
+      screen.getByText("Your role cannot view outside-CMS coverage for this scope."),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText("Your role cannot view channel issues for this scope."),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/cannot view net revenue/i)).not.toBeInTheDocument();
     // Masking authz as "no issues" / "all clear" is forbidden.
     expect(screen.queryByText(/no issues/i)).not.toBeInTheDocument();
     expect(screen.queryByText(/all clear/i)).not.toBeInTheDocument();

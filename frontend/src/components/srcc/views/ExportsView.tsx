@@ -521,7 +521,7 @@ const RequestExportForm = ({
 
 /** Inline alert banner shown when an export request POST fails. */
 const RequestError = ({ error }: { error: ApiError | Error }) => {
-  const { title, detail } = describeError(error);
+  const { title, detail } = describeError(error, "Your role cannot create this export.");
   return (
     <div className="permission-band" role="alert" style={{ margin: 13 }}>
       <Dot tone="red" />
@@ -638,7 +638,7 @@ const ExportJobsTableBody = ({
   canViewRevenue: boolean;
 }) => {
   if (error) {
-    const { title, detail } = describeError(error);
+    const { title, detail } = describeError(error, "Your role cannot view export jobs.");
     return (
       <div className="table-wrap" role="alert">
         <div style={{ padding: 16 }}>

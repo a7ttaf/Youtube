@@ -194,7 +194,9 @@ describe("CloseView wired to finance-close", () => {
     expect(within(summary).getByText(OPEN_STATUS.month)).toBeInTheDocument();
     expect(within(summary).getByText("Ready")).toBeInTheDocument();
     expect(within(summary).getByText("No blockers")).toBeInTheDocument();
-    expect(screen.getByText("No unresolved close blockers for 2026-03.")).toBeInTheDocument();
+    expect(
+      screen.getByText(`No unresolved close blockers for ${DEFAULT_MONTH}.`),
+    ).toBeInTheDocument();
   });
 
   it("renders a ready banner and a LOCKED status with timestamps", async () => {
@@ -229,12 +231,12 @@ describe("CloseView wired to finance-close", () => {
 
     expect(
       await screen.findByText(
-        "Your role cannot view month-close status for this finance month.",
+        "Your role cannot view month-close status for this month.",
       ),
     ).toBeInTheDocument();
     expect(
       screen.getByText(
-        "Your role cannot view month-close readiness for this finance month.",
+        "Your role cannot view month-close readiness for this month.",
       ),
     ).toBeInTheDocument();
     expect(screen.queryByText(/cannot view net revenue/iu)).not.toBeInTheDocument();
@@ -474,7 +476,7 @@ describe("CloseView wired to finance-close", () => {
     renderCloseView(false, true);
 
     await screen.findByText(
-      "Your role cannot view month-close readiness for this finance month.",
+      "Your role cannot view month-close readiness for this month.",
     );
     const unlockButton = screen.getByRole("button", { name: /^unlock month$/i });
     const lockButton = screen.getByRole("button", { name: /^lock month$/i });
@@ -567,6 +569,39 @@ describe("CloseView wired to finance-close", () => {
     expect(JSON.parse(String(lockInit?.body))).toMatchObject({
       reason: "March close complete",
     });
+  });
+
+  it("maps a lock POST 403 to close-action copy without a false state transition", async () => {
+    fetchMock().mockImplementation(
+      routeFetch({
+        status: () => jsonResponse(OPEN_STATUS),
+        readiness: () => jsonResponse(READINESS_READY),
+        lock: () =>
+          jsonResponse({ detail: "internal-permission-name-must-not-render" }, 403),
+      }),
+    );
+
+    renderCloseView();
+    const lockButton = await screen.findByRole("button", { name: /^lock month$/i });
+    fireEvent.change(screen.getByLabelText(/reason \(required, audited\)/i), {
+      target: { value: "Denied close" },
+    });
+    fireEvent.click(lockButton);
+    fireEvent.click(
+      await screen.findByRole("button", { name: CONFIRM_LOCK_LABEL }),
+    );
+
+    expect(
+      await screen.findByText("Your role cannot lock or unlock this finance month."),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("internal-permission-name-must-not-render"))
+      .not.toBeInTheDocument();
+    expect(screen.queryByText(/cannot view net revenue/i)).not.toBeInTheDocument();
+    expect(
+      fetchMock().mock.calls.filter(([input]) => urlOf(input).endsWith("/lock")),
+    ).toHaveLength(1);
+    expect(screen.getAllByText("OPEN").length).toBeGreaterThan(0);
+    expect(screen.queryByText("LOCKED")).not.toBeInTheDocument();
   });
 
   it("drops a same-tick double-click on the armed confirm: exactly one /lock POST, no error banner", async () => {

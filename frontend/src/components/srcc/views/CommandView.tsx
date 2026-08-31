@@ -229,9 +229,17 @@ const channelAvatar = (channel: ChannelNetRevenue): string => {
 };
 
 // ============================================================================
-// Purpose: Map an ApiError/Error to friendly UI copy. 403 -> no-permission
-//   message (matches the finance fail-closed model); other ApiError -> the
-//   typed status + message; non-ApiError -> generic network failure.
+// Purpose: Map an ApiError/Error to friendly UI copy. A caller may provide
+//   domain-specific 403 detail instead of inheriting the net-revenue default.
+// Database/ORM: None (frontend error presentation only).
+// Standards: The 403 branch uses fixed caller-owned copy and never reflects a
+//   backend authorization detail; other typed/network failures preserve the
+//   existing shared error contract.
+// Blast Radius: Operator-facing failure copy only; no request or authorization
+//   behavior changes.
+// Connections:
+//   - File: frontend/src/components/srcc/views/CloseView.tsx -> close copy.
+//   - File: frontend/src/components/srcc/views/ExportsView.tsx -> export copy.
 // ============================================================================
 const extractApiErrorDetail = (error: ApiError): string => {
   const body = error.body as { detail?: unknown } | null;
@@ -239,12 +247,20 @@ const extractApiErrorDetail = (error: ApiError): string => {
   return error.message;
 };
 
-const describeError = (error: ApiError | Error): { title: string; detail: string } => {
+/**
+ * Map an API or network failure to safe screen copy.
+ * @param error The typed API or ordinary network error to describe.
+ * @param forbiddenDetail Domain-specific copy for a 403 response.
+ */
+const describeError = (
+  error: ApiError | Error,
+  forbiddenDetail = "Your role cannot view net revenue for this month or scope.",
+): { title: string; detail: string } => {
   if (error instanceof ApiError) {
     if (error.status === 403)
       return {
         title: "No permission",
-        detail: "Your role cannot view net revenue for this month or scope.",
+        detail: forbiddenDetail,
       };
     return { title: `Request failed (${error.status})`, detail: extractApiErrorDetail(error) };
   }
@@ -384,10 +400,9 @@ const smartAlertsErrorCopy = (
 ): { title: string; detail: string } => {
   if (error instanceof ApiError) {
     if (error.status === 403) {
-      return {
-        title: "No permission",
-        detail: "Your role cannot view Smart Alerts for this finance month.",
-      };
+      // FIX: Keep this cross-domain panel from inheriting net-revenue denial
+      // copy while retaining its fixed, non-reflective failure messages.
+      return describeError(error, "Your role cannot view smart alerts for this month.");
     }
     return {
       title: `Request failed (${error.status})`,
@@ -1882,6 +1897,7 @@ const MonitorList = ({
   empty,
   emptyTitle,
   emptySub,
+  forbiddenDetail,
   children,
 }: {
   error: ApiError | Error | null;
@@ -1889,10 +1905,11 @@ const MonitorList = ({
   empty: boolean;
   emptyTitle: string;
   emptySub: string;
+  forbiddenDetail: string;
   children: ReactNode;
 }) => {
   if (error) {
-    const { title, detail } = describeError(error);
+    const { title, detail } = describeError(error, forbiddenDetail);
     return (
       <div className="issue-list" role="alert">
         <ItemRow tone="blue" title={title} sub={detail} trailing={<Badge tone="blue">—</Badge>} />
@@ -1956,6 +1973,7 @@ const OutsideCmsHalf = ({
         empty={items.length === 0}
         emptyTitle="No outside-CMS channels"
         emptySub="Every channel in scope is inside a managed CMS."
+        forbiddenDetail="Your role cannot view outside-CMS coverage for this scope."
       >
         {items.map((item) => (
           <OutsideCmsRow key={item.youtube_channel_id} item={item} />
@@ -1991,6 +2009,7 @@ const ChannelIssuesHalf = ({
         empty={items.length === 0}
         emptyTitle="No channel issues"
         emptySub="No registry-health issues in this scope."
+        forbiddenDetail="Your role cannot view channel issues for this scope."
       >
         {items.map((issue) => (
           <ChannelIssueRow
@@ -2280,7 +2299,10 @@ const RankingsBody = ({
     enabled: scopesReady,
   });
   if (error) {
-    const { title, detail } = describeError(error);
+    const { title, detail } = describeError(
+      error,
+      "Your role cannot view rankings for this month or scope.",
+    );
     return (
       <div className="issue-list" role="alert">
         <ItemRow tone="blue" title={title} sub={detail} trailing={<Badge tone="blue">—</Badge>} />

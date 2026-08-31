@@ -62,6 +62,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `.created`, `.updated`, and `.unchanged` for source-row classification.
 
 ### Fixed
+- Frontend P1 error surfaces now use domain-specific fixed 403 copy for net
+  revenue, Smart Alerts, rankings, channel monitors, month-close status and
+  readiness, and export list/create failures instead of mislabeling every
+  denial as net-revenue access. The existing plain export anchors are retained;
+  the live PR #215 Blob download delta is intentionally excluded because the
+  analytics CSV artifact has no output-size cap and `response.blob()` would
+  buffer that uncapped artifact in SPA memory.
 - Regenerated the stale `uv.lock`. It still resolved `fastapi==0.136.3` and
   `pytest==9.0.3` while `pyproject.toml` declared `0.137.1` and `9.1.0`, so
   container images silently ran the older packages. `uv lock --check` now

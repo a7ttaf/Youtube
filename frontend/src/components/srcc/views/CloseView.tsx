@@ -170,10 +170,10 @@ const describeApiActionError = (error: ApiError): string => {
   if (error.status === 409) {
     return describeConflictBody(error.body);
   }
-  if (error.status === 403) {
-    return "Your role cannot lock or unlock this finance month.";
-  }
-  const { detail } = describeError(error);
+  const { detail } = describeError(
+    error,
+    "Your role cannot lock or unlock this finance month.",
+  );
   return detail;
 };
 
@@ -205,10 +205,9 @@ const describeCloseReadError = (
   const label = surface === "status" ? "month-close status" : "month-close readiness";
   if (error instanceof ApiError) {
     if (error.status === 403) {
-      return {
-        title: "No permission",
-        detail: `Your role cannot view ${label} for this finance month.`,
-      };
+      // FIX: Reuse the shared fixed 403 contract with copy that names the
+      // actual close read instead of net revenue.
+      return describeError(error, `Your role cannot view ${label} for this month.`);
     }
     return {
       title: `Request failed (${error.status})`,

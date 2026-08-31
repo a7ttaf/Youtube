@@ -476,7 +476,7 @@ describe("CommandView wired to net-revenue", () => {
       expect(screen.getAllByText("No permission").length).toBeGreaterThan(0),
     );
     expect(
-      screen.getAllByText(/cannot view net revenue/i).length,
+      screen.getAllByText("Your role cannot view net revenue for this month or scope.").length,
     ).toBeGreaterThan(0);
   });
 

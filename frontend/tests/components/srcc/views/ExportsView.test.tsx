@@ -293,7 +293,7 @@ describe("ExportsView wired to the exports endpoint", () => {
     expect(screen.getByRole("button", { name: /^generate$/i })).toBeEnabled();
   });
 
-  it("maps a 403 from the list to a no-permission message", async () => {
+  it("maps a 403 from the list to export-specific no-permission copy", async () => {
     fetchMock().mockResolvedValue(
       jsonResponse({ detail: "Missing permission: exports.analytics" }, 403),
     );
@@ -302,6 +302,32 @@ describe("ExportsView wired to the exports endpoint", () => {
     await waitFor(() =>
       expect(screen.getByText("No permission")).toBeInTheDocument(),
     );
+    expect(screen.getByText("Your role cannot view export jobs.")).toBeInTheDocument();
+    expect(screen.queryByText(/net revenue/i)).not.toBeInTheDocument();
+    expect(screen.getByRole("alert")).toBeInTheDocument();
+  });
+
+  it("maps a 403 from export creation to create-specific no-permission copy", async () => {
+    fetchMock().mockImplementation((input: unknown, init?: unknown) => {
+      if (urlOf(input) === "/exports" && methodOf(init) === "POST") {
+        return Promise.resolve(
+          jsonResponse({ detail: "Missing permission: exports.finance" }, 403),
+        );
+      }
+      return Promise.resolve(jsonResponse(EMPTY_LIST));
+    });
+    renderExportsView();
+
+    await screen.findByText(/No export jobs yet/i);
+    fireEvent.change(screen.getByLabelText("Reason"), {
+      target: { value: "Permission regression" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /^generate$/i }));
+
+    expect(
+      await screen.findByText(/Your role cannot create this export\./i),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/cannot view net revenue/i)).not.toBeInTheDocument();
     expect(screen.getByRole("alert")).toBeInTheDocument();
   });
 

@@ -213,8 +213,13 @@ describe("RankingsPanel in CommandView", () => {
     await waitFor(() =>
       expect(screen.getAllByText("UC-DRAMA-01").length).toBeGreaterThan(0),
     );
-    // The panel surfaces a no-permission state.
+    // The panel surfaces domain-specific no-permission copy, never the shared
+    // net-revenue default.
     expect(screen.getAllByText(/no permission/i).length).toBeGreaterThan(0);
+    expect(
+      screen.getByText("Your role cannot view rankings for this month or scope."),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/cannot view net revenue/i)).not.toBeInTheDocument();
   });
 
   it("fails independently: a rankings 500 stays contained to the panel", async () => {

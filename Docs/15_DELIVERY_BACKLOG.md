@@ -651,8 +651,13 @@ closed unmerged and superseded by the consolidated batch in #156.
   The integration also fails closed when authorized revenue scopes are missing,
   enforces selected-month grants for bank and Smart Alerts reads, and withholds
   lock until status/readiness are trustworthy and unlock until locked status is
-  trustworthy. Official finance values remain server-derived; no migration or
-  backfill is involved. The implementation scope, non-goals, validation,
+  trustworthy. Fixed 403 copy now names the actual denied Command, Close,
+  Smart Alerts, rankings, monitor, or export surface. Authenticated artifact
+  download remains blocked on a separate bounded/streamed contract: PR #215's
+  Blob approach would buffer an uncapped analytics CSV in SPA memory, so the
+  integration retains the existing plain anchors. Official finance values
+  remain server-derived; no migration or backfill is involved. The
+  implementation scope, non-goals, validation,
   PostgreSQL baseline blocker, risk, rollback, and next work are recorded in
   [`pulls/2026-08-31-pr-tbd-frontend-p1-integration-handoff.md`](pulls/2026-08-31-pr-tbd-frontend-p1-integration-handoff.md).
 
