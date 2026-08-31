@@ -19,6 +19,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Root governance: `README.md`, `SECURITY.md`, `CONTRIBUTING.md`, `CODEOWNERS`, `CODE_OF_CONDUCT.md`, `.gitignore`.
 
 ### Changed
+- The Command, Close, Registry, and Exports views no longer render fabricated
+  summary data: the seven mock summary/control datasets and their panels are
+  deleted, Registry keeps only tiles derived from fetched channel rows, and
+  export artifacts download through the authenticated API client (native
+  browser download, no client-side blob buffering) accepting only safe
+  server-provided filenames.
 - Dependency batch, consolidating Dependabot #140, #153 and #154. Runtime:
   `fastapi` 0.137.1 -> 0.140.3, `uvicorn[standard]` 0.49.0 -> 0.51.0,
   `sqlalchemy` 2.0.50 -> 2.0.51, `alembic` 1.18.4 -> 1.18.5, `redis`
