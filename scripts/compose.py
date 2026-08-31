@@ -125,6 +125,14 @@ class LaunchRequest:
     storage_services: tuple[str, ...] = ()
 
 
+@dataclass(frozen=True)
+class _StorageContainerCapture:
+    """Validated scoped IDs plus whether Compose proved the list complete."""
+
+    identifiers: tuple[str, ...]
+    complete: bool
+
+
 def _option_value(
     arguments: list[str],
     index: int,
@@ -967,13 +975,27 @@ def _inspected_host_source(raw_source: object) -> Path:
     return source
 
 
-def _storage_container_ids(
+# FIX: Compose can emit valid created IDs beside malformed output or a nonzero
+# status. Preserve only those whole-line IDs for remediation, while keeping the
+# overall enumeration untrusted so the launcher cannot return apparent safety.
+# ============================================================================
+# Purpose: Capture every syntactically valid ID emitted for the scoped app
+#   service while retaining whether Compose proved that enumeration complete.
+# Database/ORM: None.
+# Standards: Whole-line lowercase container IDs only; malformed tokens and a
+#   nonzero Compose status fail closed without discarding valid captured IDs.
+# Blast Radius: Application container inspection and automatic remediation.
+# Connections:
+#   - File: docker-compose.yml -> Supplies the one explicitly scoped service.
+#   - File: tests/scripts/test_compose_storage_preflight.py -> Partial-output proofs.
+# ============================================================================
+def _capture_storage_container_ids(
     request: LaunchRequest,
     *,
     cwd: Path,
     env: dict[str, str],
-) -> tuple[str, ...]:
-    """Return validated IDs for the one application service this request starts."""
+) -> _StorageContainerCapture:
+    """Capture only valid scoped IDs and separately report enumeration trust."""
 
     if len(request.storage_services) != 1:
         raise StoragePathError("storage startup does not identify exactly one app service")
@@ -991,12 +1013,22 @@ def _storage_container_ids(
         env=env,
         capture=True,
     )
-    if result.returncode != 0:
-        raise StoragePathError("cannot enumerate the created application container")
-    identifiers = tuple(line.strip() for line in (result.stdout or "").splitlines() if line.strip())
-    if any(_CONTAINER_ID.fullmatch(identifier) is None for identifier in identifiers):
-        raise StoragePathError("Docker returned an invalid application container identity")
-    return identifiers
+    raw_output = result.stdout
+    if raw_output is not None and not isinstance(raw_output, str):
+        return _StorageContainerCapture(identifiers=(), complete=False)
+
+    identifiers: list[str] = []
+    complete = result.returncode == 0
+    for line in (raw_output or "").splitlines():
+        identifier = line.strip()
+        if not identifier:
+            continue
+        if _CONTAINER_ID.fullmatch(identifier) is None:
+            complete = False
+            continue
+        if identifier not in identifiers:
+            identifiers.append(identifier)
+    return _StorageContainerCapture(identifiers=tuple(identifiers), complete=complete)
 
 
 def _remove_container_ids(
@@ -1116,7 +1148,8 @@ def _audit_current_storage_containers(
 ) -> StoragePathError | None:
     """Inspect captured app IDs and remove only IDs that violate the contract."""
 
-    identifiers = _storage_container_ids(request, cwd=cwd, env=env)
+    capture = _capture_storage_container_ids(request, cwd=cwd, env=env)
+    identifiers = capture.identifiers
     issue: StoragePathError | None = None
     mismatching: list[str] = []
     if require_exactly_one and len(identifiers) != 1:
@@ -1145,6 +1178,10 @@ def _audit_current_storage_containers(
             raise StoragePathError(
                 "container mount verification failed and scoped removal also failed"
             ) from cleanup_error
+    if not capture.complete:
+        raise StoragePathError(
+            "cannot prove complete enumeration of the scoped application container"
+        )
     return issue
 
 
@@ -1174,10 +1211,14 @@ def _remove_request_storage_containers(
     cwd: Path,
     env: dict[str, str],
 ) -> None:
-    """Remove the request's application container after an identity failure."""
+    """Remove captured scoped app containers after an identity failure."""
 
-    identifiers = _storage_container_ids(request, cwd=cwd, env=env)
-    _remove_container_ids(identifiers, cwd=cwd, env=env)
+    capture = _capture_storage_container_ids(request, cwd=cwd, env=env)
+    _remove_container_ids(capture.identifiers, cwd=cwd, env=env)
+    if not capture.complete:
+        raise StoragePathError(
+            "cannot prove complete enumeration of the scoped application container"
+        )
 
 
 # ============================================================================
@@ -1426,7 +1467,19 @@ def main(argv: list[str] | None = None) -> int:
                         identity_guard=identity_guard,
                         expected_sources=guarded_child_sources,
                     )
-                    identity_guard.assert_current()
+                    # FIX: A final identity race used to escape after a
+                    # successful guarded up without removing its restartable
+                    # app container. Final verification now uses scoped cleanup.
+                    _assert_storage_identity_or_remove(
+                        request,
+                        cwd=PROJECT_ROOT,
+                        env=environment,
+                        identity_guard=identity_guard,
+                        cleanup_message=(
+                            "final storage identity verification failed and automatic removal "
+                            "also failed"
+                        ),
+                    )
                     return completed.returncode
 
             command = ["docker", "compose", *request.compose_args]

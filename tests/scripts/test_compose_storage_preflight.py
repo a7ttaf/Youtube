@@ -1770,6 +1770,109 @@ def test_nonzero_partial_create_audits_all_ids_and_removes_only_mismatch(
     assert all("--volumes" not in command and "-v" not in command for command, _ in calls)
 
 
+@pytest.mark.parametrize(
+    ("ps_returncode", "malformed_line"),
+    [
+        (0, "not-an-id"),
+        (17, None),
+    ],
+    ids=["mixed-malformed-output", "nonzero-with-valid-output"],
+)
+def test_failed_create_remediates_valid_ids_before_untrusted_ps_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    ps_returncode: int,
+    malformed_line: str | None,
+) -> None:
+    """Partial ps output must not hide a valid unsafe app container ID."""
+
+    source = (tmp_path / "store").resolve()
+    expected_sources = {child: source / child for child in storage.STORAGE_CHILDREN}
+    request = compose_launcher._parse_request(["up", "app"])
+    container_id = "b" * 64
+    ps_lines = [container_id]
+    if malformed_line is not None:
+        ps_lines.append(malformed_line)
+    calls: list[tuple[list[str], bool]] = []
+    mounts = [
+        {
+            "Type": "bind",
+            "Source": str(expected_sources[child]),
+            "Destination": target,
+            "RW": True,
+        }
+        for child, target in compose_launcher.STORAGE_TARGETS.items()
+    ]
+    mounts[0]["Source"] = str(tmp_path / "attacker")
+
+    class Guard:
+        def assert_current(self) -> None:
+            return
+
+    def fake_daemon(
+        command: list[str],
+        *,
+        cwd: Path,
+        env: dict[str, str],
+        capture: bool = False,
+    ) -> SimpleNamespace:
+        del cwd, env
+        calls.append((command, capture))
+        if command == ["docker", "compose", "up", "--detach", "app"]:
+            assert capture is False
+            return SimpleNamespace(returncode=41, stdout="", stderr="partial failure")
+        if command == ["docker", "compose", "ps", "--all", "--quiet", "app"]:
+            assert capture is True
+            return SimpleNamespace(
+                returncode=ps_returncode,
+                stdout="\n".join(ps_lines) + "\n",
+                stderr="enumeration failed" if ps_returncode else "",
+            )
+        if command == [
+            "docker",
+            "container",
+            "inspect",
+            container_id,
+            "--format",
+            "{{json .Mounts}}",
+        ]:
+            assert capture is True
+            return SimpleNamespace(returncode=0, stdout=json.dumps(mounts), stderr="")
+        if command == ["docker", "container", "rm", "--force", container_id]:
+            assert capture is True
+            return SimpleNamespace(returncode=0, stdout=container_id, stderr="")
+        raise AssertionError(f"unexpected daemon command: {command!r}")
+
+    monkeypatch.setattr(compose_launcher, "_run_daemon_checked", fake_daemon)
+    with pytest.raises(
+        compose_launcher.StoragePathError,
+        match="cannot prove complete enumeration",
+    ):
+        compose_launcher._run_guarded_storage_up(
+            request,
+            cwd=tmp_path,
+            env={"DOCKER_HOST": "npipe:////./pipe/docker_engine"},
+            identity_guard=Guard(),  # type: ignore[arg-type]
+            expected_sources=expected_sources,
+        )
+
+    inspections = [command for command, _ in calls if command[1:3] == ["container", "inspect"]]
+    assert inspections == [
+        [
+            "docker",
+            "container",
+            "inspect",
+            container_id,
+            "--format",
+            "{{json .Mounts}}",
+        ]
+    ]
+    removals = [command for command, _ in calls if command[1:3] == ["container", "rm"]]
+    assert removals == [["docker", "container", "rm", "--force", container_id]]
+    assert all("not-an-id" not in command for command, _ in calls)
+    assert all("--volumes" not in command and "-v" not in command for command, _ in calls)
+
+
 def test_main_keeps_identity_and_immutable_image_pinned_through_final_up(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1909,3 +2012,110 @@ def test_main_keeps_identity_and_immutable_image_pinned_through_final_up(
         "final_calls": 2,
         "inspections": 2,
     }
+
+
+@pytest.mark.parametrize("cleanup_returncode", [0, 29], ids=["removed", "cleanup-failed"])
+def test_main_final_identity_race_removes_scoped_app_and_returns_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    cleanup_returncode: int,
+) -> None:
+    """The final identity check must tear down the restartable app or fail closed."""
+
+    source = (tmp_path / "store").resolve()
+    image_id = "sha256:" + "c" * 64
+    container_id = "a" * 64
+    state = {"guard_active": False, "assertions": 0, "guarded_up": 0}
+    calls: list[tuple[list[str], bool]] = []
+
+    class Guard:
+        def child_source(self, name: str) -> Path:
+            return source / name
+
+        def __enter__(self) -> Guard:
+            state["guard_active"] = True
+            return self
+
+        def assert_current(self) -> None:
+            assert state["guard_active"]
+            state["assertions"] += 1
+            if state["assertions"] == 2:
+                raise compose_launcher.StoragePathError("final identity race")
+
+        def __exit__(self, *_args: object) -> None:
+            state["guard_active"] = False
+
+    def guarded_up(
+        request: compose_launcher.LaunchRequest,
+        *,
+        cwd: Path,
+        env: dict[str, str],
+        identity_guard: object,
+        expected_sources: dict[str, Path],
+    ) -> SimpleNamespace:
+        assert request.storage_services == ("app",)
+        assert cwd == tmp_path
+        assert env["DOCKER_HOST"] == "npipe:////./pipe/docker_engine"
+        assert identity_guard is not None
+        assert expected_sources == {child: source / child for child in storage.STORAGE_CHILDREN}
+        assert state["guard_active"]
+        state["guarded_up"] += 1
+        return SimpleNamespace(returncode=0)
+
+    def cleanup_daemon(
+        command: list[str],
+        *,
+        cwd: Path,
+        env: dict[str, str],
+        capture: bool = False,
+    ) -> SimpleNamespace:
+        assert state["guard_active"]
+        assert cwd == tmp_path
+        assert env["DOCKER_HOST"] == "npipe:////./pipe/docker_engine"
+        calls.append((command, capture))
+        if command == ["docker", "compose", "ps", "--all", "--quiet", "app"]:
+            assert capture is True
+            return SimpleNamespace(returncode=0, stdout=f"{container_id}\n", stderr="")
+        if command == ["docker", "container", "rm", "--force", container_id]:
+            assert capture is True
+            return SimpleNamespace(
+                returncode=cleanup_returncode,
+                stdout=container_id if cleanup_returncode == 0 else "",
+                stderr="cleanup failed" if cleanup_returncode else "",
+            )
+        raise AssertionError(f"unexpected daemon command: {command!r}")
+
+    monkeypatch.setattr(compose_launcher, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(compose_launcher, "COMPOSE_FILE", tmp_path / "docker-compose.yml")
+    monkeypatch.setattr(compose_launcher, "_render_model", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(
+        compose_launcher,
+        "_validate_rendered_model",
+        lambda *_args, **_kwargs: source,
+    )
+    monkeypatch.setattr(
+        compose_launcher,
+        "_require_local_docker_context",
+        lambda *, cwd, env: {**env, "DOCKER_HOST": "npipe:////./pipe/docker_engine"},
+    )
+    monkeypatch.setattr(compose_launcher, "_build_reviewed_image", lambda **_kwargs: image_id)
+    monkeypatch.setattr(compose_launcher, "prepare_storage_path", lambda *_args, **_kwargs: source)
+    monkeypatch.setattr(compose_launcher, "hold_storage_identity", lambda _path: Guard())
+    monkeypatch.setattr(compose_launcher, "_probe_storage_writable", lambda **_kwargs: None)
+    monkeypatch.setattr(compose_launcher, "validate_storage_path", lambda *_args, **_kwargs: source)
+    monkeypatch.setattr(compose_launcher, "_run_guarded_storage_up", guarded_up)
+    monkeypatch.setattr(compose_launcher, "_run_daemon_checked", cleanup_daemon)
+
+    assert compose_launcher.main(["up", "--detach", "app"]) == 2
+    assert state == {"guard_active": False, "assertions": 2, "guarded_up": 1}
+    assert calls == [
+        (["docker", "compose", "ps", "--all", "--quiet", "app"], True),
+        (["docker", "container", "rm", "--force", container_id], True),
+    ]
+    assert all("--volumes" not in command and "-v" not in command for command, _ in calls)
+    stderr = capsys.readouterr().err
+    if cleanup_returncode == 0:
+        assert "final identity race" in stderr
+    else:
+        assert "final storage identity verification failed" in stderr
