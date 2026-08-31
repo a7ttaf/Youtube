@@ -20,7 +20,7 @@ describe("React root diagnostic privacy", () => {
     renderMock.mockReset();
   });
 
-  it("uses fixed categories and ignores caught, uncaught, and recoverable payloads", async () => {
+  it("reports only safe categories and opaque IDs for uncaught/recoverable errors", async () => {
     const consoleErrorSpy = vi
       .spyOn(console, "error")
       .mockImplementation(() => undefined);
@@ -37,10 +37,23 @@ describe("React root diagnostic privacy", () => {
     options.onUncaughtError(secret, { componentStack: "uncaught-component-secret" });
     options.onRecoverableError(secret, { componentStack: "recoverable-secret" });
 
-    expect(consoleErrorSpy.mock.calls).toEqual([
-      ["[ReactRoot] uncaught_render_failure"],
-      ["[ReactRoot] recoverable_render_failure"],
-    ]);
+    expect(consoleErrorSpy).toHaveBeenCalledTimes(2);
+    expect(consoleErrorSpy.mock.calls[0]?.[0]).toBe(
+      "[ReactRoot] uncaught render failure",
+    );
+    expect(consoleErrorSpy.mock.calls[1]?.[0]).toBe(
+      "[ReactRoot] recoverable render failure",
+    );
+    for (const call of consoleErrorSpy.mock.calls) {
+      expect(call).toHaveLength(2);
+      expect(call[1]).toEqual({
+        category: "Error",
+        correlationId: expect.any(String),
+      });
+      expect((call[1] as { correlationId: string }).correlationId).toMatch(
+        /^(?:[0-9a-f-]{36}|view-error-[0-9a-z-]+)$/iu,
+      );
+    }
     expect(JSON.stringify(consoleErrorSpy.mock.calls)).not.toMatch(
       /root-message-secret|root-stack-secret|component-secret|recoverable-secret/u,
     );

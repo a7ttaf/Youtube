@@ -13,12 +13,16 @@ This branch manually consolidates the safe, current-main portions of draft PRs
 
 - removing fabricated shell counts, fixed reporting copy, the workflow rail,
   inert shell controls, and seven unsupported data panels;
-- containing view render failures with fixed, payload-private operator copy and
-  keeping root diagnostics free of thrown values and component stacks;
+- containing view render failures with fixed operator copy, an allowlisted error
+  category, and an opaque correlation ID while keeping root diagnostics free of
+  thrown values and component stacks;
 - retaining the shell-wide, tab-local write-in-flight latch outside recoverable
   view boundaries so a render crash cannot permit a duplicate write; separate
   cross-document import admission remains protected by `UnsettledImportContext`
   through Web Locks with localStorage-backed unsettled state;
+- disabling recovery reload while that unabortable write remains active, then
+  reconciling through a full-document reload instead of retrying the crashed
+  write-capable subtree in place;
 - failing closed when authorized revenue scopes are pending, empty, or failed;
 - enforcing selected-month payment/bank grants for bank reconciliation and
   Smart Alerts reads;
@@ -40,18 +44,20 @@ This branch manually consolidates the safe, current-main portions of draft PRs
 
 - Shell and safety: `AppShell.tsx`, `ErrorBoundary.tsx`, `main.tsx`,
   `WriteInFlightContext.tsx`, `ActionStepper.tsx`, `icons.tsx`, `shared.tsx`, and
-  `styles.css` own the de-mocked chrome, fixed error copy, persistent write
-  latch, and presentation contracts.
+  `styles.css` own the de-mocked chrome, sanitized category/reference fallback,
+  focus transfer, persistent write latch, and reconciliation-only recovery.
 - Wired views: `CommandView.tsx`, `CloseView.tsx`, `ExportsView.tsx`, and
   `RegistryView.tsx` remove unsupported panels and enforce truthful
   authorization/readiness states.
 - Reads and month source: `useRevenueScopes.ts`, `useSmartAlerts.ts`,
   `months.ts`, and `mock/data.ts` provide fail-closed reads, exact selected-month
   behavior, and removal of obsolete fixtures.
-- Tests under `frontend/tests/` cover root/view error privacy, crash-during-write
-  recovery, authorized-scope 403/empty/pending/malformed responses, month-grant
-  mismatch, close-read failures, removed mock surfaces, rolling-month behavior,
-  and the view-owned Month selector's selected-month net-revenue URL.
+- Tests under `frontend/tests/` cover root/view error privacy, category/reference
+  allowlisting, fallback focus, crash-during-write reload withholding and
+  post-settlement recovery, authorized-scope 403/empty/pending/malformed
+  responses, month-grant mismatch, close-read failures, removed mock surfaces,
+  rolling-month behavior, and the view-owned Month selector's selected-month
+  net-revenue URL.
 - Planning/spec updates mark the superseded fabricated UI contract and record
   this integration without changing backend contracts.
 
@@ -62,7 +68,11 @@ Final branch validation:
 - `bun install --frozen-lockfile` — passed.
 - `bunx vitest run tests/components/srcc/AppShell.test.tsx --reporter=dot` —
   passed, 1 file / 36 tests.
-- `bunx vitest run --reporter=dot` — passed, 47 files / 552 tests. The run
+- Focused boundary command: `bunx vitest run`
+  `tests/components/srcc/ErrorBoundary.test.tsx`
+  `tests/components/srcc/AppShellErrorBoundary.test.tsx tests/main.test.ts`
+  `--reporter=dot` — passed, 3 files / 17 tests.
+- `bunx vitest run --reporter=dot` — passed, 47 files / 556 tests. The run
   retained the suite's existing jsdom navigation and React `act(...)` stderr
   warnings; no test failed.
 - `bun run typecheck` — passed (`tsc --noEmit`).

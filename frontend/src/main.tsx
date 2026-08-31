@@ -1,9 +1,10 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { StrictMode } from "react";
+import { StrictMode, type ErrorInfo } from "react";
 import { createRoot } from "react-dom/client";
 import { createBrowserRouter, RouterProvider } from "react-router-dom";
 
 import { AppRouter } from "@/router/AppRouter";
+import { safeErrorReportOf } from "@/components/srcc/ErrorBoundary";
 import { SessionProvider } from "@/contexts/SessionContext";
 import { TenantProvider } from "@/contexts/TenantContext";
 import "@/styles.css";
@@ -62,29 +63,51 @@ const AppProviders = () => {
   );
 };
 
+// ============================================================================
+// Purpose: Replace React 19's default root reporters with callbacks that never
+//   forward raw errors, messages, stacks, or component stacks.
+// Database/ORM: None (frontend bootstrap and observability only).
+// Standards: Boundary-owned errors are not duplicated. Uncaught/recoverable
+//   errors emit only the shared allowlisted category and opaque correlation ID;
+//   diagnostic reporting itself is non-throwing.
+// Blast Radius: Root-level diagnostic privacy only; no authorization, finance,
+//   audit, export, or write behavior changes.
+// Connections:
+//   - File: frontend/src/components/srcc/ErrorBoundary.tsx -> shared sanitized
+//     report contract.
+// ============================================================================
+const emitSafeRootReport = (
+  kind: "uncaught" | "recoverable",
+  error: unknown,
+): void => {
+  try {
+    console.error(`[ReactRoot] ${kind} render failure`, safeErrorReportOf(error));
+  } catch {
+    // FIX: A hostile diagnostic sink must not become another root failure.
+  }
+};
+
+/** The nearest ErrorBoundary owns caught-subtree reporting. */
+export const onCaughtError = (_error: unknown, _info: ErrorInfo): void => undefined;
+
+/** Report an error React could not contain inside an ErrorBoundary. */
+export const onUncaughtError = (error: unknown, _info: ErrorInfo): void => {
+  emitSafeRootReport("uncaught", error);
+};
+
+/** Replace React's raw recoverable-error reporter with a sanitized event. */
+export const onRecoverableError = (error: unknown, _info: ErrorInfo): void => {
+  emitSafeRootReport("recoverable", error);
+};
+
 const rootEl = document.getElementById("root");
 if (!rootEl) throw new Error("Root element #root not found in document");
 
-// ============================================================================
-// Purpose: Keep React root diagnostics inside fixed public categories. The
-//   nearest ErrorBoundary owns contained-view reporting; root callbacks cover
-//   failures outside that boundary without echoing thrown payloads.
-// Database/ORM: None.
-// Standards: Callback arguments are intentionally ignored. No mutable error
-//   name, message, stack, component stack, or digest reaches browser logs.
-// Blast Radius: Frontend diagnostic privacy only.
-// Connections:
-//   - File: frontend/src/components/srcc/ErrorBoundary.tsx -> contained views.
-// ============================================================================
-const root = createRoot(rootEl, {
-  // FIX: React 19's default caught reporter logs the raw Error; the boundary
-  // already emits its fixed category.
-  onCaughtError: () => undefined,
-  onUncaughtError: () => console.error("[ReactRoot] uncaught_render_failure"),
-  onRecoverableError: () => console.error("[ReactRoot] recoverable_render_failure"),
-});
-
-root.render(
+createRoot(rootEl, {
+  onCaughtError,
+  onUncaughtError,
+  onRecoverableError,
+}).render(
   <StrictMode>
     <AppProviders />
   </StrictMode>,

@@ -1039,9 +1039,9 @@ const AppShell = ({ initialView = "command" }: { initialView?: ViewKey }) => {
       <main className="main">
         <Topbar title={copy.title} subtitle={copy.subtitle} />
         {/* FIX: A render crash may unmount an import flow while its apply POST
-            keeps running. Keep both navigation and boundary retry unavailable
-            until the promise-owned write latch settles, so recovery cannot
-            hide or duplicate an unabortable audited write. */}
+            keeps running. Keep navigation and the full-document reconciliation
+            reload unavailable until the promise-owned write latch settles, so
+            recovery cannot hide or duplicate an unabortable audited write. */}
         <ErrorBoundary key={view} recoveryDisabled={navBlockedReason !== null}>
           <ViewRouter
             view={view}

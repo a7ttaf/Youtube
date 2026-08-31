@@ -641,9 +641,11 @@ closed unmerged and superseded by the consolidated batch in #156.
   both a bash and a PowerShell form.
 - 🛠 Frontend P1 integration replacement — branch
   `codex/frontend-p1-integration-20260831` consolidates the safe, current-main
-  deltas from draft PRs #212, #214, and #215: P1.1 fixed-copy per-view
-  render containment with payload-private root diagnostics; P1.3 removal of
-  fabricated shell counts, status cues, workflow rail, and inert controls;
+  deltas from draft PRs #212, #214, and #215: P1.1 fixed-copy per-view render
+  containment with allowlisted category/correlation reporting, payload-private
+  root diagnostics, fallback focus, and post-write full-document recovery;
+  P1.3 removal of fabricated shell counts, status cues, workflow rail, and inert
+  controls;
   P1.4 removal of the seven unsupported Command/Registry/Close/Exports panels.
   It does not replay PR #229 or its relocated `snapshotPanels` fixtures.
   The integration also fails closed when authorized revenue scopes are missing,

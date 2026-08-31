@@ -1,5 +1,7 @@
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { useState, type ReactNode } from "react";
+import { createMemoryRouter, RouterProvider } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import AppShell from "@/components/srcc/AppShell";
@@ -45,7 +47,7 @@ vi.mock("@/components/srcc/views/RegistryView", () => ({
 }));
 
 const ORIGINAL_FETCH = globalThis.fetch;
-const SAFE_DIAGNOSTIC = "[ErrorBoundary] view_render_failed";
+const SAFE_DIAGNOSTIC = "[ErrorBoundary] view render failed";
 let consoleErrorSpy: ReturnType<typeof vi.spyOn>;
 
 const FULL_SESSION: SessionMe = {
@@ -164,15 +166,43 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-const renderShell = () =>
-  render(
-    <SessionProvider>
-      <TenantProvider initialSlug="ums">
-        <AppShell />
-      </TenantProvider>
-    </SessionProvider>,
+const renderShell = () => {
+  // Base PR 229 foundation: SessionContext reads the shared QueryClient and
+  // AppShell arms a router transition blocker, so the shell must mount inside
+  // a QueryClientProvider and a data router, exactly like production main.tsx.
+  const queryClient = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  });
+  const router = createMemoryRouter(
+    [
+      {
+        path: "*",
+        element: (
+          <SessionProvider>
+            <TenantProvider initialSlug="ums">
+              <AppShell />
+            </TenantProvider>
+          </SessionProvider>
+        ),
+      },
+    ],
+    { initialEntries: ["/command"] },
+  );
+  const rendered = render(
+    <QueryClientProvider client={queryClient}>
+      <RouterProvider router={router} />
+    </QueryClientProvider>,
     { onCaughtError: () => undefined },
   );
+  return {
+    ...rendered,
+    router,
+    unmount: () => {
+      rendered.unmount();
+      router.dispose();
+    },
+  };
+};
 
 const navButton = (label: string): HTMLElement => {
   const sidebar = screen.getByRole("complementary", { name: "Primary navigation" });
@@ -180,6 +210,9 @@ const navButton = (label: string): HTMLElement => {
   if (!button) throw new Error(`no nav button for ${label}`);
   return button;
 };
+
+const boundaryReports = (): unknown[][] =>
+  consoleErrorSpy.mock.calls.filter((call) => call[0] === SAFE_DIAGNOSTIC);
 
 const comboboxOptionLabels = (scope: HTMLElement): string[] =>
   within(scope)
@@ -260,13 +293,25 @@ describe("AppShell view error boundary", () => {
     fireEvent.click(navButton("CMS Groups"));
 
     const fallback = await screen.findByTestId("view-error-fallback");
+    expect(fallback).toHaveFocus();
+    expect(within(fallback).getByText("Error")).toBeInTheDocument();
+    expect(screen.getByTestId("view-error-correlation-id")).toHaveTextContent(
+      /^Reference: (?:[0-9a-f-]{36}|view-error-[0-9a-z-]+)$/iu,
+    );
     expect(fallback.textContent).not.toMatch(
       /GroupsTenantSecretError|groups-message-secret|groups-stack-secret/u,
     );
     expect(screen.getByRole("complementary", { name: "Primary navigation" }))
       .toBeInTheDocument();
     expect(navButton("Command Center")).toBeEnabled();
-    expect(consoleErrorSpy.mock.calls).toEqual([[SAFE_DIAGNOSTIC]]);
+    expect(boundaryReports()).toHaveLength(1);
+    expect(boundaryReports()[0]?.[1]).toEqual({
+      category: "Error",
+      correlationId: expect.any(String),
+    });
+    expect(JSON.stringify(boundaryReports())).not.toMatch(
+      /GroupsTenantSecretError|groups-message-secret|groups-stack-secret/u,
+    );
   });
 
   it("clears the caught state when navigation remounts the keyed boundary", async () => {
@@ -292,8 +337,15 @@ describe("AppShell view error boundary", () => {
 
     const fallback = await screen.findByTestId("view-error-fallback");
     expect(fallback.textContent).not.toMatch(/apply-result-secret/iu);
+    expect(boundaryReports()).toHaveLength(1);
+    expect(boundaryReports()[0]?.[1]).toEqual({
+      category: "Error",
+      correlationId: expect.any(String),
+    });
+    expect(JSON.stringify(boundaryReports())).not.toMatch(/apply-result-secret/iu);
     expect(navButton("Command Center")).toBeDisabled();
-    expect(screen.getByRole("button", { name: "Try again" })).toBeDisabled();
+    const reconcile = screen.getByRole("button", { name: "Reload and reconcile" });
+    expect(reconcile).toBeDisabled();
     expect(fallback).toHaveTextContent(/wait for the active write to finish/iu);
 
     await act(async () => {
@@ -301,6 +353,9 @@ describe("AppShell view error boundary", () => {
       await WRITE_GATE.pending;
     });
     await waitFor(() => expect(navButton("Command Center")).toBeEnabled());
-    expect(screen.getByRole("button", { name: "Try again" })).toBeEnabled();
+    expect(reconcile).toBeEnabled();
+    // The crashed write-capable subtree stays unmounted. Recovery is now a
+    // post-settlement full-document reconciliation, never an in-place retry.
+    expect(screen.getByTestId("view-error-fallback")).toBeInTheDocument();
   });
 });
