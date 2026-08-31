@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -13,10 +14,10 @@ import {
 
 // ============================================================================
 // Purpose: Guard the development proxy route and header contracts against
-//   omissions without duplicating the implementation as the expected result.
+//   omissions without making static inference the runtime security boundary.
 // Database/ORM: None.
-// Standards: Derive requested prefixes from the TypeScript compiler AST; keep
-//   EXPECTED_ROUTES only as an explicit trust-boundary addition detector.
+// Standards: The client/proxy share trustedRoutes.ts at runtime; AST discovery
+//   is a fail-closed change detector and EXPECTED_ROUTES audits expansions.
 // Blast Radius: Test-only development proxy coverage.
 // Connections:
 //   - File: frontend/vite.config.ts -> exports proxy route/build helpers.
@@ -27,6 +28,16 @@ import {
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const FRONTEND_ROOT = path.resolve(HERE, "..");
 const SRC_DIR = path.join(FRONTEND_ROOT, "src");
+const canonicalFileIdentity = (
+  fileName: string,
+  caseSensitive = ts.sys.useCaseSensitiveFileNames,
+): string => {
+  const resolved = path.resolve(fileName);
+  return caseSensitive ? resolved : resolved.toLowerCase();
+};
+const CANONICAL_API_CLIENT_FILE = canonicalFileIdentity(
+  path.resolve(SRC_DIR, "lib", "api", "client.ts"),
+);
 const SOURCE_SUFFIXES = [".cts", ".mts", ".ts", ".tsx"];
 
 // Change-detector only; the compiler-derived assertion is the coverage proof.
@@ -73,6 +84,41 @@ const isWithinDirectory = (fileName: string, directory: string): boolean => {
   return relative !== "" &&
     !relative.startsWith("..") &&
     !path.isAbsolute(relative);
+};
+
+/** Resolve external module-script entries and reject inline/remote Vite roots. */
+const viteHtmlModuleEntries = (html: string): string[] => {
+  const entries: string[] = [];
+  for (const match of html.matchAll(/<script\b([^>]*)>/giu)) {
+    const attributes = match[1] ?? "";
+    const type = /\btype\s*=\s*["']([^"']+)["']/iu.exec(attributes)?.[1];
+    if (type?.toLowerCase() !== "module") {
+      continue;
+    }
+    const rawSource = /\bsrc\s*=\s*["']([^"']+)["']/iu.exec(attributes)?.[1];
+    if (!rawSource) {
+      throw new Error("inline Vite module entries are unsupported by route coverage");
+    }
+    const url = new URL(rawSource, "http://vite-entry.invalid/");
+    if (url.origin !== "http://vite-entry.invalid") {
+      throw new Error(`remote Vite module entry is unsupported: ${rawSource}`);
+    }
+    let decodedPath: string;
+    try {
+      decodedPath = decodeURIComponent(url.pathname);
+    } catch {
+      throw new Error(`Vite module entry has invalid encoding: ${rawSource}`);
+    }
+    const resolved = path.resolve(
+      FRONTEND_ROOT,
+      decodedPath.startsWith("/") ? `.${decodedPath}` : decodedPath,
+    );
+    entries.push(resolved);
+  }
+  if (entries.length === 0) {
+    throw new Error("frontend/index.html declares no external module entry");
+  }
+  return entries;
 };
 
 const API_CLIENT_METHOD_NAMES = [
@@ -451,6 +497,9 @@ const proveRequestRoot = (
     throw new Error(`conditional request roots disagree: ${roots.join(" vs ")}`);
   }
   if (ts.isCallExpression(expression)) {
+    if (expression.arguments.some(ts.isSpreadElement)) {
+      throw new Error("spread arguments in request path builders are unsupported");
+    }
     const symbol = resolvedSymbolAt(expression.expression, context.checker);
     if (!symbol || context.visiting.has(symbol)) {
       throw new Error("request path builder is unresolved or recursive");
@@ -459,25 +508,11 @@ const proveRequestRoot = (
     if (functions.length !== 1 || !functions[0]?.body) {
       throw new Error("request path builder must have one inspectable implementation");
     }
-    const substitutions = new Map(context.substitutions);
-    functions[0].parameters.forEach((parameter, index) => {
-      if (!ts.isIdentifier(parameter.name)) {
-        return;
-      }
-      const parameterSymbol = resolvedSymbolAt(parameter.name, context.checker);
-      const argument = expression.arguments[index];
-      if (parameterSymbol && argument) {
-        if (functionWritesSymbol(functions[0], parameterSymbol, context.checker)) {
-          throw new Error(
-            `request path builder mutates substituted parameter ${parameter.name.text}`,
-          );
-        }
-        substitutions.set(parameterSymbol, argument);
-      }
-    });
     const nestedContext: EvaluationContext = {
       checker: context.checker,
-      substitutions,
+      // Parameters are deliberately never substituted: production builders
+      // expose literal route heads, while parameter-controlled heads fail closed.
+      substitutions: context.substitutions,
       visiting: new Set([...context.visiting, symbol]),
     };
     const roots = returnExpressions(functions[0].body).map((returned) =>
@@ -538,6 +573,153 @@ const staticAccessName = (
       });
 };
 
+/** The only module allowed to own the two low-level fetch transports. */
+const isCanonicalApiClientModule = (sourceFile: ts.SourceFile): boolean =>
+  canonicalFileIdentity(sourceFile.fileName) === CANONICAL_API_CLIENT_FILE;
+
+/** Name a direct fetch call only when it sits in one canonical nested transport. */
+const sanctionedFetchOwner = (identifier: ts.Identifier): string | undefined => {
+  if (
+    !ts.isCallExpression(identifier.parent) ||
+    identifier.parent.expression !== identifier
+  ) {
+    return undefined;
+  }
+  let current: ts.Node | undefined = identifier.parent.parent;
+  let owner: ts.FunctionDeclaration | undefined;
+  while (current) {
+    if (
+      ts.isArrowFunction(current) ||
+      ts.isFunctionExpression(current) ||
+      ts.isMethodDeclaration(current) ||
+      ts.isFunctionDeclaration(current)
+    ) {
+      if (!ts.isFunctionDeclaration(current) || !current.name) {
+        return undefined;
+      }
+      owner = current;
+      break;
+    }
+    current = current.parent;
+  }
+  if (!owner?.name) {
+    return undefined;
+  }
+  const ownerName = owner.name.text;
+  if (ownerName !== "request" && ownerName !== "getBlob") {
+    return undefined;
+  }
+  current = owner.parent;
+  while (current) {
+    if (
+      ts.isVariableDeclaration(current) &&
+      ts.isIdentifier(current.name) &&
+      current.name.text === "useApiClient"
+    ) {
+      return ownerName;
+    }
+    current = current.parent;
+  }
+  return undefined;
+};
+
+const RAW_NETWORK_NAMES = new Set([
+  "EventSource",
+  "WebSocket",
+  "XMLHttpRequest",
+  "fetch",
+  "sendBeacon",
+]);
+const DYNAMIC_CODE_NAMES = new Set(["Function", "eval", "require"]);
+const FORBIDDEN_RUNTIME_NAMES = new Set([
+  ...RAW_NETWORK_NAMES,
+  ...DYNAMIC_CODE_NAMES,
+]);
+const BROWSER_GLOBAL_CONTAINERS = new Set([
+  "globalThis",
+  "navigator",
+  "self",
+  "window",
+]);
+
+/** Detect reflective/static raw-network selectors before they can be aliased. */
+const isReflectiveRawNetworkReference = (
+  node: ts.Node,
+  checker: ts.TypeChecker,
+): boolean => {
+  if (ts.isBindingElement(node) && node.propertyName) {
+    const property = node.propertyName;
+    if (ts.isIdentifier(property)) {
+      return FORBIDDEN_RUNTIME_NAMES.has(property.text);
+    }
+    if (ts.isStringLiteral(property) || ts.isNumericLiteral(property)) {
+      return FORBIDDEN_RUNTIME_NAMES.has(property.text);
+    }
+    if (ts.isComputedPropertyName(property)) {
+      const name = knownString(property.expression, {
+        checker,
+        substitutions: new Map(),
+        visiting: new Set(),
+      });
+      return name === undefined || FORBIDDEN_RUNTIME_NAMES.has(name);
+    }
+  }
+  if (!ts.isCallExpression(node)) {
+    return false;
+  }
+  const callee = unwrapExpression(node.expression);
+  if (
+    !(ts.isPropertyAccessExpression(callee) || ts.isElementAccessExpression(callee)) ||
+    staticAccessName(callee, checker) !== "get"
+  ) {
+    return false;
+  }
+  const receiver = unwrapExpression(callee.expression);
+  const target = node.arguments[0] && unwrapExpression(node.arguments[0]);
+  const selector = node.arguments[1];
+  if (
+    !ts.isIdentifier(receiver) ||
+    receiver.text === "Reflect" &&
+    (!target || !ts.isIdentifier(target) || !BROWSER_GLOBAL_CONTAINERS.has(target.text))
+  ) {
+    return false;
+  }
+  if (receiver.text !== "Reflect") {
+    return false;
+  }
+  if (!selector) {
+    return true;
+  }
+  const name = knownString(selector, {
+    checker,
+    substitutions: new Map(),
+    visiting: new Set(),
+  });
+  return name === undefined || FORBIDDEN_RUNTIME_NAMES.has(name);
+};
+
+/** Reject aliases/dynamic indexing of browser-global containers. */
+const isUnsafeBrowserGlobalReference = (
+  node: ts.Node,
+  checker: ts.TypeChecker,
+): boolean => {
+  if (!ts.isIdentifier(node) || !BROWSER_GLOBAL_CONTAINERS.has(node.text)) {
+    return false;
+  }
+  const parent = node.parent;
+  if (ts.isPropertyAccessExpression(parent) && parent.name === node) {
+    return false;
+  }
+  if (
+    (ts.isPropertyAccessExpression(parent) || ts.isElementAccessExpression(parent)) &&
+    parent.expression === node
+  ) {
+    return ts.isElementAccessExpression(parent) &&
+      staticAccessName(parent, checker) === undefined;
+  }
+  return true;
+};
+
 /** True only for a direct call to the audited API-client hook symbol. */
 const isUseApiClientCall = (
   call: ts.CallExpression,
@@ -592,23 +774,49 @@ const apiClientHookSymbols = (
   checker: ts.TypeChecker,
 ): ReadonlySet<ts.Symbol> => {
   const symbols = new Set<ts.Symbol>();
-  const visit = (node: ts.Node): void => {
-    if (ts.isIdentifier(node)) {
-      const symbol = resolvedSymbolAt(node, checker);
-      if (symbol?.getName() === "useApiClient") {
-        const hookType = checker.getTypeOfSymbolAtLocation(symbol, node);
+  for (const sourceFile of programSourceFiles) {
+    const virtualFixture = sourceFile.fileName.replaceAll("\\", "/")
+      .endsWith("/tests/virtual-route-scanner.ts");
+    const visit = (node: ts.Node): void => {
+      let name: ts.Identifier | undefined;
+      if (
+        isCanonicalApiClientModule(sourceFile) &&
+        ts.isVariableDeclaration(node) &&
+        ts.isIdentifier(node.name) &&
+        node.name.text === "useApiClient" &&
+        ts.isVariableStatement(node.parent.parent) &&
+        node.parent.parent.modifiers?.some(
+          (modifier) => modifier.kind === ts.SyntaxKind.ExportKeyword,
+        )
+      ) {
+        name = node.name;
+      } else if (
+        virtualFixture &&
+        ts.isFunctionDeclaration(node) &&
+        node.parent === sourceFile &&
+        node.name?.text === "useApiClient" &&
+        !node.body
+      ) {
+        name = node.name;
+      }
+      if (name) {
+        const symbol = resolvedSymbolAt(name, checker);
+        const hookType = symbol
+          ? checker.getTypeOfSymbolAtLocation(symbol, name)
+          : undefined;
         if (
-          hookType.getCallSignatures().some((signature) =>
+          symbol &&
+          hookType?.getCallSignatures().some((signature) =>
             isApiClientType(signature.getReturnType(), checker),
           )
         ) {
           symbols.add(symbol);
         }
       }
-    }
-    ts.forEachChild(node, visit);
-  };
-  programSourceFiles.forEach(visit);
+      ts.forEachChild(node, visit);
+    };
+    visit(sourceFile);
+  }
   if (symbols.size === 0) {
     throw new Error("canonical useApiClient hook symbol is missing");
   }
@@ -667,8 +875,9 @@ const validateDirectApiClientContract = (
   const originSet = new Set(origins);
 
   for (const origin of origins) {
-    const methodNames = checker
-      .getPropertiesOfType(checker.getNonNullableType(checker.getTypeAtLocation(origin)))
+    const clientType = checker.getNonNullableType(checker.getTypeAtLocation(origin));
+    const properties = checker.getPropertiesOfType(clientType);
+    const methodNames = properties
       .map((property) => property.getName())
       .sort();
     const expected = [...API_CLIENT_METHOD_NAMES].sort();
@@ -680,22 +889,79 @@ const validateDirectApiClientContract = (
         `API-client method surface changed: ${methodNames.join(", ") || "empty"}`,
       );
     }
+    for (const property of properties) {
+      const methodType = checker.getTypeOfSymbolAtLocation(property, origin);
+      const signatures = checker.getSignaturesOfType(methodType, ts.SignatureKind.Call);
+      const firstParameter = signatures[0]?.parameters[0];
+      const firstParameterType = firstParameter
+        ? checker.getTypeOfSymbolAtLocation(firstParameter, origin)
+        : undefined;
+      if (
+        signatures.length !== 1 ||
+        firstParameter?.getName() !== "path" ||
+        !firstParameterType ||
+        checker.typeToString(firstParameterType) !== "string"
+      ) {
+        throw new Error(
+          `API-client method ${property.getName()} must take string path as argument 0`,
+        );
+      }
+    }
   }
 
+  const clientModulePresent = programSourceFiles.some(isCanonicalApiClientModule);
+  const fetchOwnerCounts = new Map<string, number>();
   const visitUses = (node: ts.Node): void => {
     const normalizedFile = node.getSourceFile().fileName.replaceAll("\\", "/");
-    const rawFetchReference =
-      (ts.isIdentifier(node) && node.text === "fetch") ||
-      ((ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node)) &&
-        staticAccessName(node, checker) === "fetch");
+    if (ts.isNamespaceImport(node)) {
+      throw new Error(
+        `namespace imports are forbidden in scanned application sources: ${normalizedFile}`,
+      );
+    }
     if (
-      rawFetchReference &&
-      !normalizedFile.endsWith("/src/lib/api/client.ts")
+      ts.isCallExpression(node) &&
+      node.expression.kind === ts.SyntaxKind.ImportKeyword
     ) {
-      throw new Error(`raw fetch is forbidden outside API client: ${normalizedFile}`);
+      throw new Error(
+        `dynamic module loading is forbidden in scanned application sources: ${normalizedFile}`,
+      );
+    }
+    if (
+      ts.isIdentifier(node) &&
+      DYNAMIC_CODE_NAMES.has(node.text)
+    ) {
+      throw new Error(
+        `dynamic code execution is forbidden in scanned application sources: ${normalizedFile}`,
+      );
+    }
+    const rawNetworkReference =
+      (ts.isIdentifier(node) && FORBIDDEN_RUNTIME_NAMES.has(node.text)) ||
+      ((ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node)) &&
+        FORBIDDEN_RUNTIME_NAMES.has(staticAccessName(node, checker) ?? "")) ||
+      isReflectiveRawNetworkReference(node, checker) ||
+      isUnsafeBrowserGlobalReference(node, checker);
+    if (rawNetworkReference) {
+      const owner =
+        isCanonicalApiClientModule(node.getSourceFile()) &&
+        ts.isIdentifier(node) &&
+        node.text === "fetch"
+          ? sanctionedFetchOwner(node)
+          : undefined;
+      if (!owner) {
+        throw new Error(
+          `unaudited network or dynamic-code access is forbidden outside canonical client transports: ${normalizedFile}`,
+        );
+      }
+      fetchOwnerCounts.set(owner, (fetchOwnerCounts.get(owner) ?? 0) + 1);
     }
     if (ts.isIdentifier(node)) {
-      const symbol = resolvedSymbolAt(node, checker);
+      const shorthandValue =
+        ts.isShorthandPropertyAssignment(node.parent) && node.parent.name === node
+          ? checker.getShorthandAssignmentValueSymbol(node.parent)
+          : undefined;
+      const symbol = shorthandValue && (shorthandValue.flags & ts.SymbolFlags.Alias) !== 0
+        ? checker.getAliasedSymbol(shorthandValue)
+        : (shorthandValue ?? resolvedSymbolAt(node, checker));
       if (symbol && hookSymbols.has(symbol)) {
         if (isHookDeclarationReference(node)) {
           return;
@@ -737,6 +1003,18 @@ const validateDirectApiClientContract = (
     ts.forEachChild(node, visitUses);
   };
   programSourceFiles.forEach(visitUses);
+  if (clientModulePresent) {
+    for (const owner of ["request", "getBlob"]) {
+      if (fetchOwnerCounts.get(owner) !== 1) {
+        throw new Error(
+          `canonical client transport ${owner} must contain exactly one direct fetch call`,
+        );
+      }
+    }
+    if (fetchOwnerCounts.size !== 2) {
+      throw new Error("canonical API client contains an unexpected fetch transport");
+    }
+  }
   return bindings;
 };
 
@@ -1658,18 +1936,39 @@ const requestRootsInSourceFile = (
 export const discoverRequestedPrefixesInSource = (
   source: string,
   extraClientMethods: readonly string[] = [],
+  firstParameterNames: Readonly<Record<string, string>> = {},
+  canonicalClientFixture = false,
 ): string[] => {
-  const fileName = path.join(FRONTEND_ROOT, "tests", "virtual-route-scanner.ts");
-  const fixturePrelude = [
-    "type ReturnType<T> = T extends (...args: never[]) => infer R ? R : never;",
-    "interface RouteScannerApiClient {",
-    ...[...API_CLIENT_METHOD_NAMES, ...extraClientMethods].map(
-      (method) => `  ${method}(path: string, ...rest: unknown[]): unknown;`,
-    ),
-    "}",
-    "declare function useApiClient(): RouteScannerApiClient;",
-    "const client = useApiClient();",
-  ].join("\n");
+  const fileName = canonicalClientFixture
+    ? CANONICAL_API_CLIENT_FILE
+    : path.join(FRONTEND_ROOT, "tests", "virtual-route-scanner.ts");
+  const methodNames = [...API_CLIENT_METHOD_NAMES, ...extraClientMethods];
+  const fixturePrelude = canonicalClientFixture
+    ? [
+        "export const useApiClient = () => {",
+        "  function request(path: string) { return fetch(path); }",
+        "  function getBlob(path: string) { return fetch(path); }",
+        "  return {",
+        ...API_CLIENT_METHOD_NAMES.map((method) =>
+          method === "getBlob"
+            ? "    getBlob,"
+            : `    ${method}: (path: string, ...rest: unknown[]) => request(path),`,
+        ),
+        "  };",
+        "};",
+        "const client = useApiClient();",
+      ].join("\n")
+    : [
+        "type ReturnType<T> = T extends (...args: never[]) => infer R ? R : never;",
+        "interface RouteScannerApiClient {",
+        ...methodNames.map(
+          (method) =>
+            `  ${method}(${firstParameterNames[method] ?? "path"}: string, ...rest: unknown[]): unknown;`,
+        ),
+        "}",
+        "declare function useApiClient(): RouteScannerApiClient;",
+        "const client = useApiClient();",
+      ].join("\n");
   const compilerSource = `${fixturePrelude}\n${source}`;
   const options: ts.CompilerOptions = {
     module: ts.ModuleKind.ESNext,
@@ -1744,6 +2043,22 @@ export const discoverRequestedPrefixes = (): string[] => {
   );
   if (files.length === 0) {
     throw new Error("TypeScript config contains no frontend application source files");
+  }
+  const configuredRoots = new Set(
+    files.map((fileName) => canonicalFileIdentity(fileName)),
+  );
+  const htmlEntries = viteHtmlModuleEntries(
+    readFileSync(path.join(FRONTEND_ROOT, "index.html"), "utf8"),
+  );
+  for (const entry of htmlEntries) {
+    if (
+      !isWithinDirectory(entry, SRC_DIR) ||
+      !configuredRoots.has(canonicalFileIdentity(entry))
+    ) {
+      throw new Error(
+        `Vite module entry is outside the compiler-scanned src roots: ${entry}`,
+      );
+    }
   }
   const program = ts.createProgram({ options: parsed.options, rootNames: files });
   const checker = program.getTypeChecker();
@@ -1841,6 +2156,28 @@ const headerMutations = (
 };
 
 describe("dev proxy route coverage (derived from frontend/src)", () => {
+  it("keeps canonical path identity case-sensitive on case-sensitive hosts", () => {
+    const lower = path.join(FRONTEND_ROOT, "src", "lib", "api", "client.ts");
+    const upper = path.join(FRONTEND_ROOT, "src", "lib", "api", "Client.ts");
+    expect(canonicalFileIdentity(lower, true)).not.toBe(
+      canonicalFileIdentity(upper, true),
+    );
+  });
+
+  it("requires every HTML module entry to stay inside compiler-scanned src", () => {
+    const [valid] = viteHtmlModuleEntries(
+      '<script src="/src/main.tsx" type="module"></script>',
+    );
+    const [outside] = viteHtmlModuleEntries(
+      '<script type="module" src="/shared/main.ts"></script>',
+    );
+    expect(valid && isWithinDirectory(valid, SRC_DIR)).toBe(true);
+    expect(outside && isWithinDirectory(outside, SRC_DIR)).toBe(false);
+    expect(() => viteHtmlModuleEntries('<script type="module"></script>')).toThrow(
+      /inline Vite module entries are unsupported/iu,
+    );
+  });
+
   it("audits compiler-loaded .mts/.cts and application imports outside src", () => {
     const names = [
       path.join(FRONTEND_ROOT, "src", "entry.ts"),
@@ -1903,6 +2240,18 @@ describe("dev proxy route coverage (derived from frontend/src)", () => {
     ].join("\n");
     expect(() => discoverRequestedPrefixesInSource(source)).toThrow(
       /useApiClient hook reference useApiClient escapes direct origin syntax/iu,
+    );
+  });
+
+  it("fails closed on computed access through an API-client namespace import", () => {
+    const source = [
+      'import * as apiModule from "@/lib/api/client";',
+      'const hookName = "useApiClient" as const;',
+      "const api = apiModule[hookName]();",
+      'api.get("/reports/decoy");',
+    ].join("\n");
+    expect(() => discoverRequestedPrefixesInSource(source)).toThrow(
+      /namespace imports are forbidden in scanned application sources/iu,
     );
   });
 
@@ -2290,6 +2639,23 @@ describe("dev proxy route coverage (derived from frontend/src)", () => {
         "later(() => api);",
       ].join("\n"),
     ],
+    [
+      "object shorthand",
+      [
+        "const api = useApiClient();",
+        "declare function load(holder: { api: unknown }): void;",
+        "load({ api });",
+      ].join("\n"),
+    ],
+    [
+      "object-rest laundering",
+      [
+        "const api = useApiClient();",
+        "const source = { keep: true, api };",
+        "const { keep, ...rest } = source;",
+        "void rest;",
+      ].join("\n"),
+    ],
   ])("fails closed when a direct client binding escapes through %s", (_label, source) => {
     expect(() => discoverRequestedPrefixesInSource(source)).toThrow(
       /API-client binding api escapes direct method-call syntax/iu,
@@ -2305,16 +2671,89 @@ describe("dev proxy route coverage (derived from frontend/src)", () => {
         'send("/reports/raw-files");',
       ].join("\n"),
     ],
-  ])("fails closed on %s raw fetch outside the audited API client", (_label, source) => {
+    [
+      "Reflect.get alias",
+      [
+        'const send = Reflect.get(globalThis, "fetch");',
+        'send("/reports/raw-files");',
+      ].join("\n"),
+    ],
+    [
+      "XMLHttpRequest",
+      'new XMLHttpRequest().open("GET", "/reports/raw-files");',
+    ],
+    [
+      "sendBeacon",
+      'navigator.sendBeacon("/reports/raw-files", "payload");',
+    ],
+    [
+      "EventSource",
+      'new EventSource("/reports/raw-files");',
+    ],
+    [
+      "WebSocket",
+      'new WebSocket("ws://127.0.0.1/reports/raw-files");',
+    ],
+  ])("fails closed on %s raw network access", (_label, source) => {
     expect(() => discoverRequestedPrefixesInSource(source)).toThrow(
-      /raw fetch is forbidden outside API client/iu,
+      /unaudited network or dynamic-code access is forbidden outside canonical client transports/iu,
     );
+  });
+
+  it.each([
+    ["direct eval", 'eval("client.get(\\\"/hidden\\\")");'],
+    ["Function constructor", 'new Function("return fetch(\\\"/hidden\\\")");'],
+    ["computed global eval", 'globalThis["eval"]("void 0");'],
+    [
+      "computed global Function constructor",
+      'globalThis["Function"]("return void 0")();',
+    ],
+    [
+      "reflected eval",
+      'Reflect.get(globalThis, "eval")("void 0");',
+    ],
+    [
+      "reflected Function constructor",
+      'Reflect.get(globalThis, "Function")("return void 0")();',
+    ],
+  ])("fails closed on %s dynamic code", (_label, source) => {
+    expect(() => discoverRequestedPrefixesInSource(source)).toThrow(
+      /dynamic code execution is forbidden|unaudited network or dynamic-code access is forbidden/iu,
+    );
+  });
+
+  it("fails closed on an exported fetch wrapper inside the canonical client module", () => {
+    const source = 'export const loadRaw = () => fetch("/reports/raw-files");';
+    expect(() =>
+      discoverRequestedPrefixesInSource(source, [], {}, true),
+    ).toThrow(/unaudited network or dynamic-code access is forbidden outside canonical client transports/iu);
   });
 
   it("fails closed when the API-client method surface gains an unscanned transport", () => {
     expect(() => discoverRequestedPrefixesInSource("", ["trace"])).toThrow(
       /API-client method surface changed:.*trace/iu,
     );
+  });
+
+  it("fails closed when an existing method moves its path away from argument 0", () => {
+    expect(() =>
+      discoverRequestedPrefixesInSource("", [], { get: "scope" }),
+    ).toThrow(/API-client method get must take string path as argument 0/iu);
+  });
+
+  it("anchors useApiClient to the canonical declaration, not a structural shadow", () => {
+    const source = [
+      "{",
+      "  const useApiClient = () => ({",
+      ...API_CLIENT_METHOD_NAMES.map(
+        (method) => `    ${method}: (_path: string) => undefined,`,
+      ),
+      "  });",
+      "  const shadow = useApiClient();",
+      '  shadow.get("/reports/decoy");',
+      "}",
+    ].join("\n");
+    expect(discoverRequestedPrefixesInSource(source)).toEqual([]);
   });
 
   it("does not mistake a local hook lookalike for an approved React dependency sink", () => {
@@ -2364,7 +2803,7 @@ describe("dev proxy route coverage (derived from frontend/src)", () => {
       'client.get(build("reports"));',
     ].join("\n");
     expect(() => discoverRequestedPrefixesInSource(source)).toThrow(
-      /request path builder mutates substituted parameter root/iu,
+      /expression has no statically provable leading path segment/iu,
     );
   });
 
@@ -2381,7 +2820,7 @@ describe("dev proxy route coverage (derived from frontend/src)", () => {
       'client.get(build("reports"));',
     ].join("\n");
     expect(() => discoverRequestedPrefixesInSource(source)).toThrow(
-      /request path builder mutates substituted parameter root/iu,
+      /expression has no statically provable leading path segment/iu,
     );
   });
 
@@ -2394,6 +2833,17 @@ describe("dev proxy route coverage (derived from frontend/src)", () => {
     ].join("\n");
     expect(() => discoverRequestedPrefixesInSource(source)).toThrow(
       /called function alias is mutable|request path builder must have one inspectable implementation/iu,
+    );
+  });
+
+  it("fails closed when spread arguments obscure path-builder parameter positions", () => {
+    const source = [
+      'const build = (_ignored: string, root = "/hidden") => root;',
+      "const none = [] as const;",
+      'client.get(build(...none, "/reports"));',
+    ].join("\n");
+    expect(() => discoverRequestedPrefixesInSource(source)).toThrow(
+      /spread arguments in request path builders are unsupported/iu,
     );
   });
 
@@ -2449,7 +2899,7 @@ describe("dev proxy route coverage (derived from frontend/src)", () => {
       'client.get(build("reports"));',
     ].join("\n");
     expect(() => discoverRequestedPrefixesInSource(source)).toThrow(
-      /request path builder mutates substituted parameter root/iu,
+      /expression has no statically provable leading path segment/iu,
     );
   });
 
@@ -2458,7 +2908,7 @@ describe("dev proxy route coverage (derived from frontend/src)", () => {
     expect(discoverRequestedPrefixesInSource(source)).toEqual([]);
   });
 
-  it("proxies every backend prefix the application requests", () => {
+  it("proxies every statically discovered canonical-client prefix", () => {
     expect(uncoveredPrefixes(REQUESTED_PREFIXES, TENANT_SCOPED_ROUTES)).toEqual([]);
   });
 

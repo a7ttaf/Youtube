@@ -2,26 +2,18 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 
 import type { ProxyOptions } from "vite";
 
+import {
+  TENANT_SCOPED_ROUTES,
+  isSafeRouteUrl,
+} from "./src/lib/api/trustedRoutes";
+
+export {
+  TENANT_SCOPED_ROUTES,
+  isSafeRouteUrl,
+} from "./src/lib/api/trustedRoutes";
+
 export const DEFAULT_BACKEND_TARGET = "http://127.0.0.1:8000";
 export const TRUSTED_BACKEND_ORIGINS_ENV = "UMS_DEV_TRUSTED_BACKEND_ORIGINS";
-
-// Every browser API prefix that may receive the Node-side trusted principal in
-// local development. Adding a prefix expands a trust boundary and therefore
-// requires a matching test and operator-doc update.
-export const TENANT_SCOPED_ROUTES = [
-  "/tenants",
-  "/session",
-  "/revenue",
-  "/finance-close",
-  "/exports",
-  "/connectors",
-  "/adsense",
-  "/channels",
-  "/org-units",
-  "/groups",
-  "/audit",
-  "/users",
-] as const;
 
 type GatewayHeaderSource = readonly [
   header: string,
@@ -236,57 +228,6 @@ const escapeRegex = (value: string): string =>
 
 export const proxyContextForRoute = (route: string): string =>
   `^${escapeRegex(route)}(?:/|\\?|$)`;
-
-const pathPart = (requestUrl: string): string => requestUrl.split("?", 1)[0] ?? "";
-
-const hasUnsafeSegments = (value: string): boolean => {
-  if (
-    !value.startsWith("/") ||
-    value.startsWith("//") ||
-    value.includes("\\") ||
-    value.includes("\0") ||
-    value.slice(1).includes("//") ||
-    /%(?:2f|5c)/iu.test(value)
-  ) {
-    return true;
-  }
-  return value.split("/").some((segment) => segment === "." || segment === "..");
-};
-
-// ============================================================================
-// Purpose: Validate the raw request path against one exact allowlisted segment
-//   while rejecting malformed, separator-changing, and traversal encodings.
-// Database/ORM: None.
-// Standards: Decode repeatedly so nested encodings cannot become dangerous at
-//   a later intermediary; a still-changing value after five layers fails closed.
-// Blast Radius: Development proxy routing only.
-// Connections:
-//   - File: frontend/tests/devProxySecurity.test.ts -> real encoded-path cases.
-//   - File: frontend/vite.config.ts -> supplies the allowlisted route set.
-// ============================================================================
-export const isSafeRouteUrl = (requestUrl: string, route: string): boolean => {
-  let candidate = pathPart(requestUrl);
-  for (let decodeDepth = 0; decodeDepth < 5; decodeDepth += 1) {
-    if (hasUnsafeSegments(candidate)) {
-      return false;
-    }
-    const firstSegment = `/${candidate.slice(1).split("/", 1)[0] ?? ""}`;
-    if (firstSegment !== route) {
-      return false;
-    }
-    let decoded: string;
-    try {
-      decoded = decodeURIComponent(candidate);
-    } catch {
-      return false;
-    }
-    if (decoded === candidate) {
-      return true;
-    }
-    candidate = decoded;
-  }
-  return false;
-};
 
 const singleHeader = (value: string | string[] | undefined): string | undefined =>
   Array.isArray(value) ? (value.length === 1 ? value[0] : undefined) : value;

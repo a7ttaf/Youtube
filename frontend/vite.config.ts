@@ -71,7 +71,16 @@ export const isLoopbackDevServerHost = (host: string | boolean | undefined): boo
 //   - File: frontend/tests/devProxySecurity.test.ts -> real override probes.
 // ============================================================================
 const resolvedDevGatewayHostGuard = (): Plugin => {
-  const assertLoopback = (host: string | boolean | undefined): void => {
+  const assertSafeServerBoundary = (server: {
+    host?: string | boolean;
+    middlewareMode?: boolean | { server: unknown };
+  }): void => {
+    if (server.middlewareMode) {
+      throw new Error(
+        "trusted development gateway cannot run in Vite middleware mode",
+      );
+    }
+    const { host } = server;
     if (!isLoopbackDevServerHost(host)) {
       throw new Error(
         `trusted development gateway requires an explicit loopback Vite host; received ${String(host)}`,
@@ -82,11 +91,11 @@ const resolvedDevGatewayHostGuard = (): Plugin => {
     name: "ums-dev-gateway-loopback-host-guard",
     configResolved(config) {
       // FIX: Inline/CLI host overrides win after the file's server.host value;
-      // validate the resolved value before an externally reachable listener exists.
-      assertLoopback(config.server.host);
+      // middleware mode can also mount this proxy on an external HTTP server.
+      assertSafeServerBoundary(config.server);
     },
     configureServer(server) {
-      assertLoopback(server.config.server.host);
+      assertSafeServerBoundary(server.config.server);
     },
   };
 };

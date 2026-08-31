@@ -420,6 +420,28 @@ describe("development gateway config", () => {
 });
 
 describe("actual Vite serve and preview activation", () => {
+  it("rejects middleware mode before the trusted proxy can be mounted externally", async () => {
+    for (const [key, value] of Object.entries(BASE_ENV)) {
+      vi.stubEnv(key, value);
+    }
+    try {
+      await expect(
+        createViteServer({
+          configFile: path.resolve(FRONTEND_ROOT, "vite.config.ts"),
+          logLevel: "silent",
+          mode: "development",
+          root: FRONTEND_ROOT,
+          server: {
+            host: "127.0.0.1",
+            middlewareMode: true,
+          },
+        }),
+      ).rejects.toThrow(/cannot run in Vite middleware mode/iu);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
   it.each(["0.0.0.0", "::", "192.168.50.12", true] as const)(
     "rejects the final inline/CLI-equivalent host override %s before listen",
     async (host) => {

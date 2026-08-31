@@ -59,7 +59,7 @@ describe("useApiClient header injection", () => {
       jsonResponse({ ok: true }),
     );
     const { result } = renderHook(() => useApiClient(), { wrapper });
-    await result.current.get("/x");
+    await result.current.get("/tenants/x");
     const [, init] = requireFetchArgs();
     const headers = new Headers(init?.headers);
     expect(headers.get("X-UMS-Tenant")).toBe("ums");
@@ -70,7 +70,7 @@ describe("useApiClient header injection", () => {
       jsonResponse({ ok: true }),
     );
     const { result } = renderHook(() => useApiClient(), { wrapper });
-    await result.current.get("/x", { headers: { "X-UMS-Tenant": "evil" } });
+    await result.current.get("/tenants/x", { headers: { "X-UMS-Tenant": "evil" } });
     const headers = new Headers(requireFetchArgs()[1]?.headers);
     expect(headers.get("X-UMS-Tenant")).toBe("ums");
   });
@@ -84,7 +84,7 @@ describe("useApiClient header injection", () => {
       jsonResponse({ ok: true }),
     );
     const { result } = renderHook(() => useApiClient(), { wrapper });
-    await result.current.get("/x", { headers: headersInit });
+    await result.current.get("/tenants/x", { headers: headersInit });
     const sent = new Headers(requireFetchArgs()[1]?.headers);
     expect(sent.get("X-UMS-Tenant")).toBe("ums");
     expect(sent.get("X-Other")).toBe("1");
@@ -130,6 +130,16 @@ describe("useApiClient URL resolution", () => {
     expect(requireFetchArgs()[0]).toBe("/tenants/me");
   });
 
+  it("normalizes and validates a relative URL without a leading slash", async () => {
+    vi.stubEnv("VITE_API_BASE_URL", "");
+    (globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
+      jsonResponse({ ok: true }),
+    );
+    const { result } = renderHook(() => useApiClient(), { wrapper });
+    await result.current.get("tenants/me");
+    expect(requireFetchArgs()[0]).toBe("/tenants/me");
+  });
+
   it("strips trailing slash from VITE_API_BASE_URL", async () => {
     vi.stubEnv("VITE_API_BASE_URL", "https://api.example.com/");
     (globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
@@ -159,6 +169,22 @@ describe("useApiClient URL resolution", () => {
     await result.current.get("http://127.0.0.1:8000/tenants/me");
     expect(requireFetchArgs()[0]).toBe("http://127.0.0.1:8000/tenants/me");
   });
+
+  it.each([
+    "/unproxied/path",
+    "/users.evil/path",
+    "/users%2Fevil",
+    "/users/%2e%2e/tenants",
+    "/users/%252e%252e/tenants",
+    "/users\\evil",
+    "https://api.example.com/unproxied/path",
+  ])("rejects an API path outside the shared audited roots: %s", async (requestPath) => {
+    const { result } = renderHook(() => useApiClient(), { wrapper });
+    await expect(result.current.get(requestPath)).rejects.toThrow(
+      /outside the audited route roots/iu,
+    );
+    expect(globalThis.fetch).not.toHaveBeenCalled();
+  });
 });
 
 describe("useApiClient Accept header default", () => {
@@ -167,7 +193,7 @@ describe("useApiClient Accept header default", () => {
       jsonResponse({ ok: true }),
     );
     const { result } = renderHook(() => useApiClient(), { wrapper });
-    await result.current.get("/x");
+    await result.current.get("/tenants/x");
     const headers = new Headers(requireFetchArgs()[1]?.headers);
     expect(headers.get("Accept")).toBe("application/json");
   });
@@ -177,7 +203,7 @@ describe("useApiClient Accept header default", () => {
       jsonResponse({ ok: true }),
     );
     const { result } = renderHook(() => useApiClient(), { wrapper });
-    await result.current.get("/x", { headers: { Accept: "text/csv" } });
+    await result.current.get("/tenants/x", { headers: { Accept: "text/csv" } });
     const headers = new Headers(requireFetchArgs()[1]?.headers);
     expect(headers.get("Accept")).toBe("text/csv");
   });
@@ -189,7 +215,7 @@ describe("useApiClient Content-Type handling", () => {
       jsonResponse({ ok: true }),
     );
     const { result } = renderHook(() => useApiClient(), { wrapper });
-    await result.current.get("/x");
+    await result.current.get("/tenants/x");
     const headers = new Headers(requireFetchArgs()[1]?.headers);
     expect(headers.has("Content-Type")).toBe(false);
   });
@@ -199,7 +225,7 @@ describe("useApiClient Content-Type handling", () => {
       jsonResponse({ ok: true }),
     );
     const { result } = renderHook(() => useApiClient(), { wrapper });
-    await result.current.post("/x", { foo: 1 });
+    await result.current.post("/tenants/x", { foo: 1 });
     const headers = new Headers(requireFetchArgs()[1]?.headers);
     expect(headers.get("Content-Type")).toBe("application/json");
     expect(requireFetchArgs()[1]?.body).toBe(JSON.stringify({ foo: 1 }));
@@ -212,7 +238,7 @@ describe("useApiClient Content-Type handling", () => {
     const { result } = renderHook(() => useApiClient(), { wrapper });
     const fd = new FormData();
     fd.append("k", "v");
-    await result.current.post("/x", fd);
+    await result.current.post("/tenants/x", fd);
     const headers = new Headers(requireFetchArgs()[1]?.headers);
     expect(headers.has("Content-Type")).toBe(false);
   });
@@ -233,7 +259,7 @@ describe("useApiClient response handling", () => {
       new Response(null, { status: 204 }),
     );
     const { result } = renderHook(() => useApiClient(), { wrapper });
-    const payload = await result.current.delete("/x");
+    const payload = await result.current.delete("/tenants/x");
     expect(payload).toBeUndefined();
   });
 
@@ -254,7 +280,7 @@ describe("useApiClient response handling", () => {
       textResponse("upstream timed out", { status: 503 }),
     );
     const { result } = renderHook(() => useApiClient(), { wrapper });
-    await expect(result.current.get("/x")).rejects.toMatchObject({
+    await expect(result.current.get("/tenants/x")).rejects.toMatchObject({
       name: "ApiError",
       status: 503,
       body: "upstream timed out",
@@ -266,8 +292,8 @@ describe("useApiClient response handling", () => {
       new TypeError("Failed to fetch"),
     );
     const { result } = renderHook(() => useApiClient(), { wrapper });
-    await expect(result.current.get("/x")).rejects.toBeInstanceOf(TypeError);
-    await expect(result.current.get("/x")).rejects.not.toBeInstanceOf(ApiError);
+    await expect(result.current.get("/tenants/x")).rejects.toBeInstanceOf(TypeError);
+    await expect(result.current.get("/tenants/x")).rejects.not.toBeInstanceOf(ApiError);
   });
 
   it("returns undefined for an empty 200 body that claims application/json", async () => {
@@ -278,7 +304,7 @@ describe("useApiClient response handling", () => {
       }),
     );
     const { result } = renderHook(() => useApiClient(), { wrapper });
-    const payload = await result.current.get("/x");
+    const payload = await result.current.get("/tenants/x");
     expect(payload).toBeUndefined();
   });
 
@@ -290,7 +316,7 @@ describe("useApiClient response handling", () => {
       }),
     );
     const { result } = renderHook(() => useApiClient(), { wrapper });
-    await expect(result.current.get("/x")).rejects.toMatchObject({
+    await expect(result.current.get("/tenants/x")).rejects.toMatchObject({
       name: "ApiError",
       status: 500,
       body: "<html>500 internal</html>",
@@ -305,7 +331,7 @@ describe("useApiClient response handling", () => {
       }),
     );
     const { result } = renderHook(() => useApiClient(), { wrapper });
-    await expect(result.current.get("/x")).rejects.toMatchObject({
+    await expect(result.current.get("/tenants/x")).rejects.toMatchObject({
       name: "ApiError",
       status: 200,
       body: "<html>not really json</html>",

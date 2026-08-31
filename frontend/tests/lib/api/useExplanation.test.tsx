@@ -126,15 +126,31 @@ describe("useExplanation", () => {
 
     await act(async () => {
       await result.current.run({
-        channelId: "demo/alpha",
+        channelId: "demo alpha",
         month: "2026-03",
         metric: "net_revenue_usd",
       });
     });
 
     expect(requireFetchArgs()[0]).toBe(
-      "/revenue/channels/demo%2Falpha/months/2026-03/explain?metric=net_revenue_usd",
+      "/revenue/channels/demo%20alpha/months/2026-03/explain?metric=net_revenue_usd",
     );
+  });
+
+  it("rejects a channel id whose encoding would introduce a reserved path separator", async () => {
+    const { result } = renderHook(() => useExplanation(), { wrapper });
+
+    await act(async () => {
+      await expect(
+        result.current.run({
+          channelId: "demo/alpha",
+          month: "2026-03",
+          metric: "net_revenue_usd",
+        }),
+      ).rejects.toThrow(/outside the audited route roots/iu);
+    });
+
+    expect(fetchMock()).not.toHaveBeenCalled();
   });
 
   it("captures a typed ApiError (403) and clears data", async () => {

@@ -3,6 +3,8 @@ import { useMemo } from "react";
 
 import { useTenant } from "@/contexts/TenantContext";
 
+import { assertTrustedApiRoute } from "./trustedRoutes";
+
 /**
  * Typed error thrown by the API client for any non-2xx response (and for a 2xx
  * response whose declared-JSON body fails to parse). Carries the HTTP status,
@@ -37,6 +39,9 @@ export class ApiError extends Error {
  * uses instead of hard-coding a relative href against the frontend origin.
  */
 export const resolveUrl = (path: string): string => {
+  // FIX: The canonical browser client and trusted dev proxy now consume the
+  // same route-root contract; a new request cannot outrun proxy coverage.
+  assertTrustedApiRoute(path);
   if (/^https?:\/\//i.test(path)) return path;
   const raw = import.meta.env.VITE_API_BASE_URL ?? "";
   const base = raw.replace(/\/+$/, "");
