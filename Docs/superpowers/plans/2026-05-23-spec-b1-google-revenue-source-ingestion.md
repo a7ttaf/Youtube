@@ -4401,7 +4401,6 @@
 
   Refs: design `Docs/superpowers/specs/2026-05-23-spec-b1-google-revenue-source-ingestion-design.md`, plan `Docs/superpowers/plans/2026-05-23-spec-b1-google-revenue-source-ingestion.md` (both merged in PR #42).
 
-  🤖 Generated with [Claude Code](https://claude.com/claude-code)
   '@"
   ```
 
