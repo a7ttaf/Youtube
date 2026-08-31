@@ -106,7 +106,7 @@ and scoped direct grant (`auth/principals.py:142-198`).
 - [ ] No `beta_operator` global bundle: existing `finance_admin@global` plus direct `connectors.run_jobs@connector:manual-upload`
 - [ ] `/session/me` resolves the bootstrap UUID and exposes the stored assignments/grant under `UMS_AUTHZ_SOURCE=database`
 - [ ] Repo-root `.env` uses the exact printed UUID/email; the all-zero Vite fallback is not used
-- [ ] Fixture-only `POST /revenue/facts` with `connector_key=manual-upload` succeeds; a Google connector key under the same principal returns 403
+- [ ] Fixture-only `POST /revenue/facts` with the manual-upload connector identifier succeeds; a Google connector identifier under the same principal returns 403
 - [ ] The write's `audit_logs.user_id` equals the bootstrap UUID (not NULL with only `details.actor_user_id` fallback)
 - [ ] Finance views render (not 403); P0-e proxies `/org-units` and `/users`; A2 later proxies `/security`
 

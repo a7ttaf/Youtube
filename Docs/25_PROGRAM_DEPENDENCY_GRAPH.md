@@ -72,7 +72,7 @@ PR #210 is historical: it merged on 2026-08-29 into the non-main
 
 | Gate | Blocks |
 | --- | --- |
-| All current #220 review threads resolved | **Not satisfied:** 16 live unresolved threads at the 2026-08-31 repoll; local docs changes are not remote resolution |
+| All current #220 review threads resolved | Satisfied at the 2026-08-31 post-push repoll for the cleanup head; re-check after any later push |
 | P0-a…P0-e merged to `main` | A1, beta runbook, living Docs/21 status |
 | USD manifest preflight + resumable import + complete-roster/exact-fact-set comparison green | Any real manual revenue import / claim that a month is complete |
 | Proposed `ci-fast` + `ci-database` + `ci-frontend` gates in #226 | Future review-readiness gate; not active on current `main` |
