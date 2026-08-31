@@ -17,6 +17,16 @@
 # starting the app because it skips the host preflight and non-root write probe;
 # use `python scripts/compose.py`.
 #
+# The launcher also fixes the Compose project name to `ums-smart-revenue`,
+# permits only the explicit `dev` profile workflow, and rejects every
+# `COMPOSE_*` assignment from the shell, `.env`, or `--env-file`. Application
+# and migration starts build this exact checkout, capture the immutable image
+# ID, and inject that ID through the reserved `UMS_APP_IMAGE`; operators must
+# not set that variable. A stack previously launched under a directory-derived
+# project name has a different named-volume namespace. Preserve those volumes
+# and use a reviewed dump/restore migration before the first pinned-project
+# `up`; the launcher never guesses at or silently adopts legacy finance data.
+#
 # ⚠️  `docker compose down -v` is NOT an ordinary teardown — do not reach for it
 #     out of habit. The `-v` flag DELETES EVERY named volume declared at the
 #     bottom of this file. Both of them, not a selection:
@@ -63,7 +73,7 @@
 # ⚠️  `.env.example` is the tracked template, but as of this commit it is NOT a
 #     complete one for this file and copying it is not enough to boot the
 #     stack. It predates the database variables below, so
-#     `python scripts/compose.py --env-file .env.example config` exits 1 on
+#     `python scripts/compose.py --env-file .env.example config --quiet` exits 1 on
 #     "UMS_DB_USER" being required. Completing the template has not landed
 #     yet; until it does, the authoritative variable list is the one below.
 #
@@ -79,7 +89,7 @@
 #   UMS_TRUSTED_GATEWAY_TOKEN  — the shared secret the reverse proxy presents.
 #
 # Everything else this file reads has a default inline (`:-`) and can be left
-# unset. Run `python scripts/compose.py --env-file <your file> config` before
+# unset. Run `python scripts/compose.py --env-file <your file> config --quiet` before
 # the first `up`: it renders the whole stack and fails loudly on anything
 # missing.
 #
@@ -372,8 +382,10 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: ums-smart-revenue:dev
+    image: ${UMS_APP_IMAGE:-ums-smart-revenue:dev}
+    pull_policy: never
     restart: "no"
+    user: "10001:10001"
     depends_on:
       postgres:
         condition: service_healthy
@@ -389,7 +401,8 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: ums-smart-revenue:dev
+    image: ${UMS_APP_IMAGE:-ums-smart-revenue:dev}
+    pull_policy: never
     restart: unless-stopped
     user: "10001:10001"
     entrypoint: ["/usr/bin/tini", "--"]
@@ -453,7 +466,8 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: ums-smart-revenue:dev
+    image: ${UMS_APP_IMAGE:-ums-smart-revenue:dev}
+    pull_policy: never
     user: "10001:10001"
     entrypoint: ["/usr/bin/tini", "--"]
     depends_on:

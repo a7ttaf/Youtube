@@ -11,43 +11,89 @@ from __future__ import annotations
 import json
 import os
 import posixpath
+import re
 import subprocess
 import sys
-from dataclasses import dataclass
+import tempfile
+from collections.abc import Iterator
+from contextlib import contextmanager
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from validate_compose_storage_path import (
     StoragePathError,
+    hold_storage_identity,
     prepare_storage_path,
-    storage_tree_identity,
     validate_storage_path,
 )
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 COMPOSE_FILE = PROJECT_ROOT / "docker-compose.yml"
+PROJECT_NAME = "ums-smart-revenue"
 STORAGE_IMAGE = "ums-smart-revenue:dev"
 STORAGE_TARGET = "/var/lib/ums"
 EXPECTED_SERVICES = {"postgres", "redis", "migrate", "app", "app-dev"}
 APP_SERVICES = {"app", "app-dev"}
+APPLICATION_IMAGE_SERVICES = {"migrate", "app", "app-dev"}
+DAEMON_ACTIONS = {"up", "run", "logs", "stop", "down", "ps"}
+_IMAGE_ID = re.compile(r"sha256:[0-9a-f]{64}")
+_ENV_ASSIGNMENT = re.compile(r"^\s*(?:export\s+)?(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*(?:=|$)")
 
-# The probe runs with the exact uid/gid declared by the rendered app service.
-# It deliberately performs no chown/chmod/mkdir operation: the launcher never
-# gives a root container an operator-controlled host path.
+# FIX: PID-derived probe names could be pre-created and truncated. The probe
+# now runs as the exact uid/gid declared by the rendered app service and
+# opens unpredictable names with O_EXCL + O_NOFOLLOW relative to already-open
+# directory descriptors. Cleanup checks the still-open file identity first and
+# unlinks only a file this invocation proved it created.
 STORAGE_WRITE_PROBE = r"""
-set -eu
-for path in /var/lib/ums /var/lib/ums/artifacts /var/lib/ums/blobs; do
-  if [ -L "$path" ] || [ ! -d "$path" ]; then
-    echo "storage probe: expected a real directory at $path" >&2
-    exit 1
-  fi
-done
-umask 077
-artifact_probe="/var/lib/ums/artifacts/.ums-write-probe-$$"
-blob_probe="/var/lib/ums/blobs/.ums-write-probe-$$"
-cleanup() { rm -f "$artifact_probe" "$blob_probe"; }
-trap cleanup EXIT HUP INT TERM
-: > "$artifact_probe"
-: > "$blob_probe"
+import os
+import secrets
+import stat
+
+root = os.environ.get("UMS_STORAGE_PROBE_ROOT", "/var/lib/ums")
+required = ("O_CLOEXEC", "O_DIRECTORY", "O_NOFOLLOW")
+if any(not hasattr(os, name) for name in required) or os.open not in os.supports_dir_fd:
+    raise SystemExit("storage probe: no secure no-follow directory API")
+
+directory_flags = os.O_RDONLY | os.O_CLOEXEC | os.O_DIRECTORY | os.O_NOFOLLOW
+file_flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC | os.O_NOFOLLOW
+root_fd = os.open(root, directory_flags)
+directory_fds = []
+created = []
+failure = None
+try:
+    for child in ("artifacts", "blobs"):
+        directory_fd = os.open(child, directory_flags, dir_fd=root_fd)
+        directory_fds.append(directory_fd)
+        name = ".ums-write-probe-" + secrets.token_hex(32)
+        file_fd = os.open(name, file_flags, 0o600, dir_fd=directory_fd)
+        metadata = os.fstat(file_fd)
+        created.append((directory_fd, name, file_fd, metadata.st_dev, metadata.st_ino))
+        if not stat.S_ISREG(metadata.st_mode):
+            raise RuntimeError("storage probe: exclusive create was not a regular file")
+        os.write(file_fd, b"ums-storage-probe\n")
+        os.fsync(file_fd)
+finally:
+    for directory_fd, name, file_fd, device, inode in reversed(created):
+        try:
+            current = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+            if not stat.S_ISREG(current.st_mode) or (current.st_dev, current.st_ino) != (
+                device,
+                inode,
+            ):
+                failure = "storage probe: refusing to delete a replaced probe path"
+            else:
+                os.unlink(name, dir_fd=directory_fd)
+        except FileNotFoundError:
+            failure = "storage probe: created probe disappeared before cleanup"
+        except OSError:
+            failure = "storage probe: cannot safely remove its created probe"
+        finally:
+            os.close(file_fd)
+    for directory_fd in reversed(directory_fds):
+        os.close(directory_fd)
+    os.close(root_fd)
+if failure is not None:
+    raise SystemExit(failure)
 """.strip()
 
 
@@ -59,6 +105,7 @@ class LaunchRequest:
     global_args: tuple[str, ...]
     action: str
     requires_storage: bool
+    requires_image: bool
     internal_storage_path: bool = False
 
 
@@ -157,18 +204,21 @@ def _parse_request(arguments: list[str]) -> LaunchRequest:
             global_args=tuple(global_args),
             action=action,
             requires_storage=False,
+            requires_image=False,
             internal_storage_path=True,
         )
+    if profile is not None and action != "up":
+        raise StoragePathError("the dev profile is supported only for '--profile dev up app-dev'")
 
     normalized_tail: list[str]
     requires_storage = False
+    requires_image = False
     if action == "up":
         normalized_tail = []
         tail_index = 0
         while tail_index < len(tail) and tail[tail_index] in {
             "-d",
             "--detach",
-            "--build",
         }:
             option = tail[tail_index]
             canonical = "--detach" if option == "-d" else option
@@ -190,10 +240,12 @@ def _parse_request(arguments: list[str]) -> LaunchRequest:
             raise StoragePathError("app-dev requires the explicit reviewed --profile dev")
         normalized_tail.extend(services)
         requires_storage = not services or bool(APP_SERVICES.intersection(services))
+        requires_image = not services or bool(APPLICATION_IMAGE_SERVICES.intersection(services))
     elif action == "run":
         if tail != ["--rm", "migrate"]:
             raise StoragePathError("the only supported one-shot run is 'run --rm migrate'")
         normalized_tail = list(tail)
+        requires_image = True
     elif action == "logs":
         normalized_tail = []
         if tail and tail[0] in {"-f", "--follow"}:
@@ -209,8 +261,8 @@ def _parse_request(arguments: list[str]) -> LaunchRequest:
             )
         normalized_tail = []
     elif action == "config":
-        if tail not in ([], ["--quiet"]):
-            raise StoragePathError("config supports only the optional --quiet flag")
+        if tail != ["--quiet"]:
+            raise StoragePathError("config requires the output-suppressing --quiet flag")
         normalized_tail = list(tail)
     elif action == "ps":
         if tail:
@@ -228,21 +280,132 @@ def _parse_request(arguments: list[str]) -> LaunchRequest:
         global_args=tuple(global_args),
         action=action,
         requires_storage=requires_storage,
+        requires_image=requires_image,
     )
 
 
 def _compose_environment(source: dict[str, str]) -> dict[str, str]:
-    """Pin Compose to the reviewed file and discard ambient Compose controls."""
+    """Reject ambient Compose controls and pin every launcher-owned boundary."""
 
-    if source.get("COMPOSE_FILE"):
+    compose_controls = sorted(key for key in source if key.upper().startswith("COMPOSE_"))
+    if compose_controls:
         raise StoragePathError(
-            "COMPOSE_FILE overrides are unsupported; use the reviewed docker-compose.yml"
+            "ambient COMPOSE_* controls are unsupported: " + ", ".join(compose_controls)
         )
-    environment = {
-        key: value for key, value in source.items() if not key.upper().startswith("COMPOSE_")
-    }
-    environment["COMPOSE_FILE"] = str(COMPOSE_FILE)
+    reserved_image = next(
+        (key for key in source if key.upper() == "UMS_APP_IMAGE"),
+        None,
+    )
+    if reserved_image is not None:
+        raise StoragePathError("UMS_APP_IMAGE is reserved for immutable launcher provenance")
+    environment = dict(source)
+    environment.update(
+        {
+            "COMPOSE_DISABLE_ENV_FILE": "1",
+            "COMPOSE_FILE": str(COMPOSE_FILE),
+            "COMPOSE_PROFILES": "",
+            "COMPOSE_PROJECT_NAME": PROJECT_NAME,
+            "UMS_APP_IMAGE": STORAGE_IMAGE,
+        }
+    )
     return environment
+
+
+def _request_env_file(request: LaunchRequest, *, cwd: Path) -> Path | None:
+    """Resolve the explicit env file, or the conventional project .env, once."""
+
+    global_args = list(request.global_args)
+    for index in range(0, len(global_args), 2):
+        if global_args[index] == "--env-file":
+            candidate = Path(global_args[index + 1])
+            if not candidate.is_absolute():
+                candidate = cwd / candidate
+            return candidate.resolve(strict=False)
+    default = cwd / ".env"
+    return default.resolve(strict=False) if default.exists() else None
+
+
+def _replace_request_env_file(request: LaunchRequest, env_file: Path) -> LaunchRequest:
+    """Return the same parsed action with one launcher-owned env-file copy."""
+
+    original_globals = list(request.global_args)
+    profile_args: list[str] = []
+    for index in range(0, len(original_globals), 2):
+        if original_globals[index] == "--profile":
+            profile_args.extend(original_globals[index : index + 2])
+    global_args = ("--env-file", str(env_file), *profile_args)
+    action_tail = request.compose_args[len(request.global_args) :]
+    return replace(
+        request,
+        global_args=tuple(global_args),
+        compose_args=(*global_args, *action_tail),
+    )
+
+
+def _validated_env_bytes(path: Path) -> bytes:
+    """Read one env file and reject every launcher/Compose behavioral assignment."""
+
+    try:
+        payload = path.read_bytes()
+    except OSError as exc:
+        raise StoragePathError("cannot read the selected Compose env file") from exc
+    try:
+        text = payload.decode("utf-8-sig")
+    except UnicodeDecodeError as exc:
+        raise StoragePathError("the selected Compose env file is not UTF-8") from exc
+    if "\x00" in text:
+        raise StoragePathError("the selected Compose env file contains a NUL byte")
+    for line in text.splitlines():
+        match = _ENV_ASSIGNMENT.match(line)
+        if match is None:
+            continue
+        name = match.group("name").upper()
+        if name.startswith("COMPOSE_") or name == "UMS_APP_IMAGE":
+            raise StoragePathError(
+                f"the selected env file assigns reserved launcher variable {name}"
+            )
+    return payload
+
+
+# ============================================================================
+# Purpose: Snapshot the selected env file into an exclusive private copy so a
+#   post-validation replacement cannot inject Compose behavior or secrets output.
+# Database/ORM: None.
+# Standards: All COMPOSE_* and immutable-image assignments fail closed; Compose
+#   automatic .env loading is disabled and only the validated bytes are used.
+# Blast Radius: Project name, active profiles, file selection, and interpolation.
+# Connections:
+#   - File: docker-compose.yml -> Consumes only non-reserved application values.
+#   - File: tests/scripts/test_compose_storage_preflight.py -> Env counterexamples.
+# ============================================================================
+@contextmanager
+def _isolated_env_request(
+    request: LaunchRequest,
+    *,
+    cwd: Path,
+) -> Iterator[LaunchRequest]:
+    """Yield a request referencing only an immutable launcher-owned env snapshot."""
+
+    source = _request_env_file(request, cwd=cwd)
+    if source is None:
+        yield request
+        return
+    payload = _validated_env_bytes(source)
+    descriptor, raw_temp_path = tempfile.mkstemp(prefix="ums-compose-", suffix=".env")
+    temp_path = Path(raw_temp_path)
+    try:
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(payload)
+            stream.flush()
+            os.fsync(stream.fileno())
+        yield _replace_request_env_file(request, temp_path)
+    finally:
+        try:
+            temp_path.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            raise StoragePathError("cannot remove the launcher-owned env snapshot") from exc
 
 
 def _run_checked(
@@ -281,8 +444,8 @@ def _local_endpoint(endpoint: object) -> bool:
     }
 
 
-def _require_local_docker_context(*, cwd: Path, env: dict[str, str]) -> None:
-    """Refuse a daemon whose bind source is not on this workstation."""
+def _require_local_docker_context(*, cwd: Path, env: dict[str, str]) -> dict[str, str]:
+    """Prove one local endpoint and return an environment pinned to that endpoint."""
 
     explicit_host = env.get("DOCKER_HOST")
     if explicit_host and not _local_endpoint(explicit_host):
@@ -312,6 +475,28 @@ def _require_local_docker_context(*, cwd: Path, env: dict[str, str]) -> None:
         raise StoragePathError("Docker context endpoint was not machine-readable") from exc
     if not _local_endpoint(endpoint_value):
         raise StoragePathError("Docker context endpoint is remote or unapproved")
+    pinned = {
+        key: value
+        for key, value in env.items()
+        if key.upper()
+        not in {"DOCKER_CONTEXT", "DOCKER_HOST", "DOCKER_TLS_VERIFY", "DOCKER_CERT_PATH"}
+    }
+    pinned["DOCKER_HOST"] = endpoint_value
+    return pinned
+
+
+def _run_daemon_checked(
+    command: list[str],
+    *,
+    cwd: Path,
+    env: dict[str, str],
+    capture: bool = False,
+) -> subprocess.CompletedProcess[str]:
+    """Run a daemon action only with the exact endpoint returned by local proof."""
+
+    if not _local_endpoint(env.get("DOCKER_HOST")):
+        raise StoragePathError("Docker daemon action lacks a pinned local endpoint")
+    return _run_checked(command, cwd=cwd, env=env, capture=capture)
 
 
 def _render_model(
@@ -415,9 +600,13 @@ def _validate_rendered_model(
     model: dict[str, object],
     *,
     project_root: Path,
+    expected_image: str = STORAGE_IMAGE,
+    expected_storage_source: Path | None = None,
 ) -> Path:
     """Validate the exact storage projection and return its canonical source."""
 
+    if model.get("name") != PROJECT_NAME:
+        raise StoragePathError("rendered Compose project name differs from the pinned name")
     services = model.get("services")
     if not isinstance(services, dict):
         raise StoragePathError("rendered Compose model has no services object")
@@ -458,6 +647,15 @@ def _validate_rendered_model(
     if len(sources) != 1:
         raise StoragePathError("app and app-dev render different storage sources")
     storage_path = sources.pop()
+    if expected_storage_source is not None:
+        expected_spelling = os.path.normcase(str(expected_storage_source))
+        rendered_spellings = {
+            os.path.normcase(str(volume.get("source"))) for volume in root_mounts.values()
+        }
+        if rendered_spellings != {expected_spelling}:
+            raise StoragePathError(
+                "Compose rewrote the OS-pinned storage source before daemon handoff"
+            )
 
     for service_name, service in services.items():
         if not isinstance(service, dict):
@@ -477,9 +675,9 @@ def _validate_rendered_model(
                     f"rendered service {service_name} has alternate access to storage"
                 )
 
-        if service_name not in APP_SERVICES:
+        if service_name not in APPLICATION_IMAGE_SERVICES:
             continue
-        if service.get("image") != STORAGE_IMAGE:
+        if service.get("image") != expected_image:
             raise StoragePathError(f"rendered service {service_name} changes the application image")
         if service.get("user") != "10001:10001":
             raise StoragePathError(
@@ -499,6 +697,10 @@ def _validate_rendered_model(
             or build.get("dockerfile") != "Dockerfile"
         ):
             raise StoragePathError(f"rendered service {service_name} redirects the image build")
+        if service.get("pull_policy") != "never":
+            raise StoragePathError(
+                f"rendered service {service_name} permits mutable image resolution"
+            )
         expected_profiles = ["dev"] if service_name == "app-dev" else None
         if service.get("profiles") != expected_profiles:
             raise StoragePathError(f"rendered service {service_name} changes its profile boundary")
@@ -525,6 +727,12 @@ def _validate_rendered_model(
                 )
         if service.get("network_mode") == "host" or service.get("pid") == "host":
             raise StoragePathError(f"rendered service {service_name} joins a host namespace")
+
+        if service_name == "migrate":
+            if volumes:
+                raise StoragePathError("rendered migrate service adds an unexpected volume")
+            continue
+
         mount = root_mounts[service_name]
         if mount.get("type") != "bind":
             raise StoragePathError(
@@ -565,32 +773,65 @@ def _validate_rendered_model(
     return storage_path
 
 
-def _ensure_image(*, request: LaunchRequest, cwd: Path, env: dict[str, str]) -> None:
-    """Build the reviewed app image only when its local tag is absent."""
+# ============================================================================
+# Purpose: Build the exact checkout without a tag and prove the returned local
+#   content ID still names the image before any Compose container is created.
+# Database/ORM: None.
+# Standards: Captures all build/inspect output; local endpoint already pinned;
+#   mutable tags and multi-line/non-machine-readable identities fail closed.
+# Blast Radius: Application and migration container provenance.
+# Connections:
+#   - File: Dockerfile -> Exact build recipe selected by absolute path.
+#   - File: docker-compose.yml -> Receives the ID through reserved UMS_APP_IMAGE.
+# ============================================================================
+def _build_reviewed_image(*, cwd: Path, env: dict[str, str]) -> str:
+    """Build the exact reviewed context and return its immutable local image ID."""
 
-    inspected = _run_checked(
-        ["docker", "image", "inspect", STORAGE_IMAGE],
-        cwd=cwd,
+    project_root = cwd.resolve(strict=True)
+    dockerfile = (project_root / "Dockerfile").resolve(strict=True)
+    built = _run_daemon_checked(
+        [
+            "docker",
+            "build",
+            "--quiet",
+            "--pull=false",
+            "--file",
+            str(dockerfile),
+            str(project_root),
+        ],
+        cwd=project_root,
         env=env,
         capture=True,
     )
-    if inspected.returncode == 0:
-        return
-    built = _run_checked(
-        ["docker", "compose", *request.global_args, "build", "app"],
-        cwd=cwd,
-        env=env,
-    )
     if built.returncode != 0:
-        raise StoragePathError("cannot build the application image for the write probe")
+        raise StoragePathError("cannot build the reviewed application image")
+    lines = [line.strip() for line in (built.stdout or "").splitlines() if line.strip()]
+    if len(lines) != 1 or _IMAGE_ID.fullmatch(lines[0]) is None:
+        raise StoragePathError("Docker build did not return one immutable image ID")
+    image_id = lines[0]
+    inspected = _run_daemon_checked(
+        ["docker", "image", "inspect", image_id, "--format", "{{json .Id}}"],
+        cwd=project_root,
+        env=env,
+        capture=True,
+    )
+    if inspected.returncode != 0:
+        raise StoragePathError("cannot verify the built application image ID")
+    try:
+        inspected_id = json.loads((inspected.stdout or "").strip())
+    except (TypeError, ValueError) as exc:
+        raise StoragePathError("built image identity was not machine-readable") from exc
+    if inspected_id != image_id:
+        raise StoragePathError("built image identity changed before Compose pinning")
+    return image_id
 
 
 # ============================================================================
 # Purpose: Prove uid 10001 can write both durable stores through the exact
 #   rendered app service without granting a root container host-path access.
 # Database/ORM: None.
-# Standards: No shell interpolation on the host; no chown/chmod/mkdir in the
-#   container; image-inspection output is captured and never logged.
+# Standards: No shell interpolation on the host; exclusive random no-follow
+#   files only; image identity and local endpoint are already pinned.
 # Blast Radius: Two temporary probe files under artifacts and blobs.
 # Connections:
 #   - File: docker-compose.yml -> Supplies the validated app bind and user.
@@ -604,8 +845,7 @@ def _probe_storage_writable(
 ) -> None:
     """Run a bounded non-root write probe through the app service."""
 
-    _ensure_image(request=request, cwd=cwd, env=env)
-    result = _run_checked(
+    result = _run_daemon_checked(
         [
             "docker",
             "compose",
@@ -614,7 +854,7 @@ def _probe_storage_writable(
             "--rm",
             "--no-deps",
             "--entrypoint",
-            "sh",
+            "python",
             "app",
             "-c",
             STORAGE_WRITE_PROBE,
@@ -647,14 +887,25 @@ def main(argv: list[str] | None = None) -> int:
     try:
         request = _parse_request(raw_arguments)
         environment = _compose_environment(os.environ.copy())
+        with _isolated_env_request(request, cwd=PROJECT_ROOT) as request:
+            if request.action in DAEMON_ACTIONS:
+                environment = _require_local_docker_context(
+                    cwd=PROJECT_ROOT,
+                    env=environment,
+                )
 
-        if request.internal_storage_path or request.requires_storage:
-            model = _render_model(request, cwd=PROJECT_ROOT, env=environment)
-            rendered_path = _validate_rendered_model(
-                model,
-                project_root=PROJECT_ROOT.resolve(strict=True),
-            )
+            rendered_path: Path | None = None
+            project_root = PROJECT_ROOT.resolve(strict=True)
+            if request.internal_storage_path or request.action in {"up", "run"}:
+                model = _render_model(request, cwd=PROJECT_ROOT, env=environment)
+                rendered_path = _validate_rendered_model(
+                    model,
+                    project_root=project_root,
+                    expected_image=STORAGE_IMAGE,
+                )
             if request.internal_storage_path:
+                if rendered_path is None:
+                    raise StoragePathError("storage resolver has no rendered source")
                 storage_path = validate_storage_path(
                     rendered_path,
                     project_root=PROJECT_ROOT,
@@ -663,49 +914,86 @@ def main(argv: list[str] | None = None) -> int:
                 print(storage_path)
                 return 0
 
-            _require_local_docker_context(cwd=PROJECT_ROOT, env=environment)
-            storage_path = prepare_storage_path(
-                rendered_path,
-                project_root=PROJECT_ROOT,
-            )
-            environment["UMS_APP_DATA_HOST"] = str(storage_path)
-
-            canonical_model = _render_model(
-                request,
-                cwd=PROJECT_ROOT,
-                env=environment,
-            )
-            canonical_path = _validate_rendered_model(
-                canonical_model,
-                project_root=PROJECT_ROOT.resolve(strict=True),
-            )
-            if canonical_path != storage_path:
-                raise StoragePathError(
-                    "canonical storage environment does not reproduce the rendered source"
+            expected_image = STORAGE_IMAGE
+            if request.requires_image:
+                expected_image = _build_reviewed_image(
+                    cwd=PROJECT_ROOT,
+                    env=environment,
                 )
-
-            before = storage_tree_identity(storage_path)
-            _probe_storage_writable(
-                request=request,
-                cwd=PROJECT_ROOT,
-                env=environment,
-            )
-            validate_storage_path(
-                storage_path,
-                project_root=PROJECT_ROOT,
-                require_exists=True,
-            )
-            if storage_tree_identity(storage_path) != before:
-                raise StoragePathError(
-                    "storage root or direct child identity changed during the Docker probe"
+                environment["UMS_APP_IMAGE"] = expected_image
+                pinned_model = _render_model(
+                    request,
+                    cwd=PROJECT_ROOT,
+                    env=environment,
                 )
+                pinned_path = _validate_rendered_model(
+                    pinned_model,
+                    project_root=project_root,
+                    expected_image=expected_image,
+                )
+                if rendered_path is not None and pinned_path != rendered_path:
+                    raise StoragePathError(
+                        "immutable image pinning changed the rendered storage source"
+                    )
+                rendered_path = pinned_path
 
-        completed = subprocess.run(
-            ["docker", "compose", *request.compose_args],
-            cwd=PROJECT_ROOT,
-            env=environment,
-            check=False,
-        )
+            if request.requires_storage:
+                if rendered_path is None:
+                    raise StoragePathError("storage action has no rendered source")
+                storage_path = prepare_storage_path(
+                    rendered_path,
+                    project_root=PROJECT_ROOT,
+                )
+                with hold_storage_identity(storage_path) as identity_guard:
+                    environment["UMS_APP_DATA_HOST"] = str(identity_guard.docker_source)
+                    guarded_model = _render_model(
+                        request,
+                        cwd=PROJECT_ROOT,
+                        env=environment,
+                    )
+                    guarded_path = _validate_rendered_model(
+                        guarded_model,
+                        project_root=project_root,
+                        expected_image=expected_image,
+                        expected_storage_source=identity_guard.docker_source,
+                    )
+                    if guarded_path != storage_path:
+                        raise StoragePathError(
+                            "guarded storage source does not resolve to the proven identity"
+                        )
+                    identity_guard.assert_current()
+                    _probe_storage_writable(
+                        request=request,
+                        cwd=PROJECT_ROOT,
+                        env=environment,
+                    )
+                    validate_storage_path(
+                        storage_path,
+                        project_root=PROJECT_ROOT,
+                        require_exists=True,
+                    )
+                    identity_guard.assert_current()
+                    completed = _run_daemon_checked(
+                        ["docker", "compose", *request.compose_args],
+                        cwd=PROJECT_ROOT,
+                        env=environment,
+                    )
+                    identity_guard.assert_current()
+                    return completed.returncode
+
+            command = ["docker", "compose", *request.compose_args]
+            if request.action in DAEMON_ACTIONS:
+                completed = _run_daemon_checked(
+                    command,
+                    cwd=PROJECT_ROOT,
+                    env=environment,
+                )
+            else:
+                completed = _run_checked(
+                    command,
+                    cwd=PROJECT_ROOT,
+                    env=environment,
+                )
     except StoragePathError as exc:
         print(f"storage preflight failed: {exc}", file=sys.stderr)
         return 2

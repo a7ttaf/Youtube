@@ -9,12 +9,15 @@ directory name is safe.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import shutil
 import stat
 import subprocess
 import sys
+from collections.abc import Iterator
+from dataclasses import dataclass
 from pathlib import Path
 
 DEFAULT_STORAGE_SOURCE = "./data/ums"
@@ -306,6 +309,199 @@ def storage_tree_identity(path: Path) -> tuple[tuple[str, int, int], ...]:
     return tuple(identities)
 
 
+@dataclass(frozen=True)
+class StorageIdentityGuard:
+    """An open identity boundary retained while Docker resolves the bind."""
+
+    canonical_path: Path
+    docker_source: Path
+    identity: tuple[tuple[str, int, int], ...]
+    _descriptors: tuple[int, ...] = ()
+
+    def assert_current(self) -> None:
+        """Fail if any guarded root/direct child no longer has its proven identity."""
+
+        if self._descriptors:
+            for expected, descriptor in zip(self.identity, self._descriptors, strict=True):
+                name, expected_device, expected_inode = expected
+                try:
+                    metadata = os.fstat(descriptor)
+                except OSError as exc:
+                    raise StoragePathError(f"cannot recheck open storage identity {name}") from exc
+                if (metadata.st_dev, metadata.st_ino) != (
+                    expected_device,
+                    expected_inode,
+                ):
+                    raise StoragePathError(f"open storage identity changed unexpectedly: {name}")
+            return
+        if storage_tree_identity(self.canonical_path) != self.identity:
+            raise StoragePathError(
+                "storage root or direct child identity changed while Docker was starting"
+            )
+
+
+def _open_windows_identity_handles(path: Path) -> tuple[int, ...]:
+    """Open non-delete-sharing handles for every bounded Windows identity."""
+
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    create_file = kernel32.CreateFileW
+    create_file.argtypes = (
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.HANDLE,
+    )
+    create_file.restype = wintypes.HANDLE
+    close_handle = kernel32.CloseHandle
+    close_handle.argtypes = (wintypes.HANDLE,)
+    close_handle.restype = wintypes.BOOL
+
+    # FIX: An attribute-only handle does not block MoveFileEx on current
+    # Windows. DELETE access makes the absence of FILE_SHARE_DELETE load-bearing.
+    file_read_attributes_and_delete = 0x0080 | 0x00010000
+    file_share_read_write = 0x0001 | 0x0002
+    open_existing = 3
+    file_flag_backup_semantics = 0x02000000
+    file_flag_open_reparse_point = 0x00200000
+    flags = file_flag_backup_semantics | file_flag_open_reparse_point
+    invalid_handle = ctypes.c_void_p(-1).value
+    paths = (
+        path,
+        *(path / child for child in STORAGE_CHILDREN),
+        path / STORAGE_SENTINEL_NAME,
+    )
+    handles: list[int] = []
+    try:
+        for entry in paths:
+            handle = create_file(
+                str(entry),
+                file_read_attributes_and_delete,
+                file_share_read_write,
+                None,
+                open_existing,
+                flags,
+                None,
+            )
+            handle_value = int(handle) if handle is not None else invalid_handle
+            if handle_value == invalid_handle:
+                error_code = ctypes.get_last_error()
+                raise StoragePathError(
+                    f"cannot lock storage identity against replacement: {entry!s} "
+                    f"(Windows error {error_code})"
+                )
+            handles.append(handle_value)
+    except BaseException:
+        for handle in reversed(handles):
+            close_handle(wintypes.HANDLE(handle))
+        raise
+    return tuple(handles)
+
+
+def _close_windows_identity_handles(handles: tuple[int, ...]) -> None:
+    """Close handles created only by ``_open_windows_identity_handles``."""
+
+    import ctypes
+    from ctypes import wintypes
+
+    close_handle = ctypes.WinDLL("kernel32", use_last_error=True).CloseHandle
+    close_handle.argtypes = (wintypes.HANDLE,)
+    close_handle.restype = wintypes.BOOL
+    for handle in reversed(handles):
+        close_handle(wintypes.HANDLE(handle))
+
+
+def _open_posix_identity_descriptors(
+    path: Path,
+    identity: tuple[tuple[str, int, int], ...],
+) -> tuple[int, ...]:
+    """Open no-follow directory-relative descriptors for the bounded tree."""
+
+    required = ("O_CLOEXEC", "O_DIRECTORY", "O_NOFOLLOW")
+    if any(not hasattr(os, name) for name in required) or os.open not in os.supports_dir_fd:
+        raise StoragePathError(
+            "this POSIX host cannot preserve a no-follow storage identity for Docker"
+        )
+    directory_flags = os.O_RDONLY | os.O_CLOEXEC | os.O_DIRECTORY | os.O_NOFOLLOW
+    file_flags = os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW
+    descriptors: list[int] = []
+    try:
+        root_descriptor = os.open(path, directory_flags)
+        descriptors.append(root_descriptor)
+        for name in STORAGE_CHILDREN:
+            descriptors.append(os.open(name, directory_flags, dir_fd=root_descriptor))
+        descriptors.append(os.open(STORAGE_SENTINEL_NAME, file_flags, dir_fd=root_descriptor))
+        for expected, descriptor in zip(identity, descriptors, strict=True):
+            name, expected_device, expected_inode = expected
+            metadata = os.fstat(descriptor)
+            if (metadata.st_dev, metadata.st_ino) != (
+                expected_device,
+                expected_inode,
+            ):
+                raise StoragePathError(
+                    f"storage identity changed while acquiring the guard: {name}"
+                )
+    except BaseException:
+        for descriptor in reversed(descriptors):
+            os.close(descriptor)
+        raise
+    return tuple(descriptors)
+
+
+# ============================================================================
+# Purpose: Retain the proven storage identities until Docker has resolved and
+#   created every container that receives the bind source.
+# Database/ORM: None.
+# Standards: Windows handles deny delete sharing; POSIX uses no-follow open
+#   descriptors and exposes the root descriptor through procfs to the daemon.
+# Blast Radius: Durable artifacts/blob bind identity during container creation.
+# Connections:
+#   - File: scripts/compose.py -> Holds this guard through probe and final up.
+#   - File: tests/scripts/test_compose_storage_preflight.py -> Real rename proof.
+# ============================================================================
+@contextlib.contextmanager
+def hold_storage_identity(path: Path) -> Iterator[StorageIdentityGuard]:
+    """Yield a stable Docker bind source and retain its OS identity boundary."""
+
+    canonical = path.resolve(strict=True)
+    identity = storage_tree_identity(canonical)
+    if os.name == "nt":
+        handles = _open_windows_identity_handles(canonical)
+        try:
+            if storage_tree_identity(canonical) != identity:
+                raise StoragePathError("storage identity changed while acquiring the Windows guard")
+            guard = StorageIdentityGuard(canonical, canonical, identity)
+            yield guard
+            guard.assert_current()
+        finally:
+            _close_windows_identity_handles(handles)
+        return
+
+    descriptors = _open_posix_identity_descriptors(canonical, identity)
+    root_descriptor = descriptors[0]
+    proc_source = Path(f"/proc/{os.getpid()}/fd/{root_descriptor}")
+    try:
+        if not proc_source.exists():
+            raise StoragePathError("procfs cannot expose the guarded storage descriptor to Docker")
+        guard = StorageIdentityGuard(
+            canonical,
+            proc_source,
+            identity,
+            descriptors,
+        )
+        guard.assert_current()
+        yield guard
+        guard.assert_current()
+    finally:
+        for descriptor in reversed(descriptors):
+            os.close(descriptor)
+
+
 def _validate_sentinel(path: Path, *, required: bool) -> bool:
     """Check that the marker is a regular file bound to this exact path."""
 
@@ -495,7 +691,10 @@ def _windows_row_is_inheritable(row: dict[str, object]) -> bool:
         for item in str(row.get("PropagationFlags", "")).split(",")
         if item.strip()
     }
-    return _WINDOWS_INHERITANCE_FLAGS <= flags and "inheritonly" not in propagation
+    # FIX: CI/OI plus NoPropagateInherit reaches only one generation, so it
+    # cannot prove operator recovery access throughout the bounded tree.
+    disallowed_propagation = {"inheritonly", "nopropagateinherit"}
+    return _WINDOWS_INHERITANCE_FLAGS <= flags and not (disallowed_propagation & propagation)
 
 
 def _windows_path_key(value: object) -> str:
