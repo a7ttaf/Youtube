@@ -1428,59 +1428,79 @@ def main(argv: list[str] | None = None) -> int:
                     rendered_path,
                     project_root=PROJECT_ROOT,
                 )
-                with hold_storage_identity(storage_path) as identity_guard:
-                    guarded_child_sources = {
-                        child: identity_guard.child_source(child) for child in STORAGE_CHILDREN
-                    }
-                    for child, source in guarded_child_sources.items():
-                        environment[STORAGE_SOURCE_ENV[child]] = str(source)
-                    guarded_model = _render_model(
-                        request,
-                        cwd=PROJECT_ROOT,
-                        env=environment,
-                    )
-                    guarded_path = _validate_rendered_model(
-                        guarded_model,
-                        project_root=project_root,
-                        expected_image=expected_image,
-                        expected_storage_sources=guarded_child_sources,
-                    )
-                    if guarded_path != storage_path:
-                        raise StoragePathError(
-                            "guarded storage source does not resolve to the proven identity"
+                completed_storage_up: subprocess.CompletedProcess[str] | None = None
+                final_identity_verified = False
+                # FIX: The identity context performs its own post-yield check.
+                # Keep final-check cleanup inside the held guard, then arm a
+                # second cleanup boundary only for a later context-exit race.
+                try:
+                    with hold_storage_identity(storage_path) as identity_guard:
+                        guarded_child_sources = {
+                            child: identity_guard.child_source(child) for child in STORAGE_CHILDREN
+                        }
+                        for child, source in guarded_child_sources.items():
+                            environment[STORAGE_SOURCE_ENV[child]] = str(source)
+                        guarded_model = _render_model(
+                            request,
+                            cwd=PROJECT_ROOT,
+                            env=environment,
                         )
-                    identity_guard.assert_current()
-                    _probe_storage_writable(
-                        request=request,
-                        cwd=PROJECT_ROOT,
-                        env=environment,
-                    )
-                    validate_storage_path(
-                        storage_path,
-                        project_root=PROJECT_ROOT,
-                        require_exists=True,
-                    )
-                    completed = _run_guarded_storage_up(
-                        request,
-                        cwd=PROJECT_ROOT,
-                        env=environment,
-                        identity_guard=identity_guard,
-                        expected_sources=guarded_child_sources,
-                    )
-                    # FIX: A final identity race used to escape after a
-                    # successful guarded up without removing its restartable
-                    # app container. Final verification now uses scoped cleanup.
-                    _assert_storage_identity_or_remove(
-                        request,
-                        cwd=PROJECT_ROOT,
-                        env=environment,
-                        identity_guard=identity_guard,
-                        cleanup_message=(
-                            "final storage identity verification failed and automatic removal "
-                            "also failed"
-                        ),
-                    )
-                    return completed.returncode
+                        guarded_path = _validate_rendered_model(
+                            guarded_model,
+                            project_root=project_root,
+                            expected_image=expected_image,
+                            expected_storage_sources=guarded_child_sources,
+                        )
+                        if guarded_path != storage_path:
+                            raise StoragePathError(
+                                "guarded storage source does not resolve to the proven identity"
+                            )
+                        identity_guard.assert_current()
+                        _probe_storage_writable(
+                            request=request,
+                            cwd=PROJECT_ROOT,
+                            env=environment,
+                        )
+                        validate_storage_path(
+                            storage_path,
+                            project_root=PROJECT_ROOT,
+                            require_exists=True,
+                        )
+                        completed_storage_up = _run_guarded_storage_up(
+                            request,
+                            cwd=PROJECT_ROOT,
+                            env=environment,
+                            identity_guard=identity_guard,
+                            expected_sources=guarded_child_sources,
+                        )
+                        _assert_storage_identity_or_remove(
+                            request,
+                            cwd=PROJECT_ROOT,
+                            env=environment,
+                            identity_guard=identity_guard,
+                            cleanup_message=(
+                                "final storage identity verification failed and automatic "
+                                "removal also failed"
+                            ),
+                        )
+                        final_identity_verified = True
+                except StoragePathError:
+                    if completed_storage_up is None or not final_identity_verified:
+                        raise
+                    try:
+                        _remove_request_storage_containers(
+                            request,
+                            cwd=PROJECT_ROOT,
+                            env=environment,
+                        )
+                    except StoragePathError as cleanup_error:
+                        raise StoragePathError(
+                            "storage identity context exit failed and automatic removal also failed"
+                        ) from cleanup_error
+                    raise
+                if completed_storage_up is None:
+                    raise StoragePathError("storage startup returned no process status")
+                return completed_storage_up.returncode
 
             command = ["docker", "compose", *request.compose_args]
             if request.action == "config":

@@ -2014,14 +2014,16 @@ def test_main_keeps_identity_and_immutable_image_pinned_through_final_up(
     }
 
 
+@pytest.mark.parametrize("race_phase", ["final", "exit"])
 @pytest.mark.parametrize("cleanup_returncode", [0, 29], ids=["removed", "cleanup-failed"])
-def test_main_final_identity_race_removes_scoped_app_and_returns_failure(
+def test_main_late_identity_race_removes_scoped_app_and_returns_failure(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
+    race_phase: str,
     cleanup_returncode: int,
 ) -> None:
-    """The final identity check must tear down the restartable app or fail closed."""
+    """Final and context-exit races must tear down the app or fail closed."""
 
     source = (tmp_path / "store").resolve()
     image_id = "sha256:" + "c" * 64
@@ -2040,11 +2042,16 @@ def test_main_final_identity_race_removes_scoped_app_and_returns_failure(
         def assert_current(self) -> None:
             assert state["guard_active"]
             state["assertions"] += 1
-            if state["assertions"] == 2:
-                raise compose_launcher.StoragePathError("final identity race")
+            failure_assertion = 2 if race_phase == "final" else 3
+            if state["assertions"] == failure_assertion:
+                raise compose_launcher.StoragePathError(f"{race_phase} identity race")
 
-        def __exit__(self, *_args: object) -> None:
-            state["guard_active"] = False
+        def __exit__(self, exc_type: object, *_args: object) -> None:
+            try:
+                if race_phase == "exit" and exc_type is None:
+                    self.assert_current()
+            finally:
+                state["guard_active"] = False
 
     def guarded_up(
         request: compose_launcher.LaunchRequest,
@@ -2070,7 +2077,7 @@ def test_main_final_identity_race_removes_scoped_app_and_returns_failure(
         env: dict[str, str],
         capture: bool = False,
     ) -> SimpleNamespace:
-        assert state["guard_active"]
+        assert state["guard_active"] is (race_phase == "final")
         assert cwd == tmp_path
         assert env["DOCKER_HOST"] == "npipe:////./pipe/docker_engine"
         calls.append((command, capture))
@@ -2108,7 +2115,12 @@ def test_main_final_identity_race_removes_scoped_app_and_returns_failure(
     monkeypatch.setattr(compose_launcher, "_run_daemon_checked", cleanup_daemon)
 
     assert compose_launcher.main(["up", "--detach", "app"]) == 2
-    assert state == {"guard_active": False, "assertions": 2, "guarded_up": 1}
+    expected_assertions = 2 if race_phase == "final" else 3
+    assert state == {
+        "guard_active": False,
+        "assertions": expected_assertions,
+        "guarded_up": 1,
+    }
     assert calls == [
         (["docker", "compose", "ps", "--all", "--quiet", "app"], True),
         (["docker", "container", "rm", "--force", container_id], True),
@@ -2116,6 +2128,8 @@ def test_main_final_identity_race_removes_scoped_app_and_returns_failure(
     assert all("--volumes" not in command and "-v" not in command for command, _ in calls)
     stderr = capsys.readouterr().err
     if cleanup_returncode == 0:
-        assert "final identity race" in stderr
-    else:
+        assert f"{race_phase} identity race" in stderr
+    elif race_phase == "final":
         assert "final storage identity verification failed" in stderr
+    else:
+        assert "storage identity context exit failed" in stderr
