@@ -720,6 +720,46 @@ describe("RegistryImportFlow stepper (through RegistryView)", () => {
     expect(setReason).toHaveBeenLastCalledWith(null);
   });
 
+  it("releases the nav latch when apply-id generation itself throws", async () => {
+    // Structural guard for the window between `arm()` and the try whose
+    // `finally` owns the release: a setup throw there — modeled here as the
+    // apply id's entropy source failing — dispatches no request, so nothing
+    // but that `finally` can ever free the shell's navigation. Before the fix
+    // the latch stayed armed until a manual reload.
+    const setReason = vi.fn();
+    routeFetch({
+      importPost: (form) =>
+        jsonResponse(form.get("dry_run") === "true" ? DRY_RUN_PLAN : APPLY_RESULT),
+    });
+    renderRegistry({ reason: null, setReason });
+    await openImport();
+    await fillUpload();
+    fireEvent.click(within(uploadPanel()).getByRole("button", { name: /^preview$/i }));
+    await waitFor(() =>
+      expect(screen.getByRole("group", { name: "Import preview" })).toBeInTheDocument(),
+    );
+
+    const uuidSpy = vi.spyOn(globalThis.crypto, "randomUUID").mockImplementation(() => {
+      throw new Error("entropy unavailable");
+    });
+    try {
+      fireEvent.click(screen.getByRole("button", { name: /^apply$/i }));
+
+      // Armed by the click, then freed by the same handler's `finally`.
+      await waitFor(() => expect(setReason).toHaveBeenLastCalledWith(null));
+      expect(setReason.mock.calls[0][0]).toMatch(/cannot be aborted/iu);
+
+      // A non-ApiError failure is surfaced fail-closed as indeterminate: the
+      // exits recover (Cancel), Apply stays locked, and nothing strands.
+      expect(screen.getByRole("button", { name: /^cancel$/i })).toBeEnabled();
+      expect(
+        await screen.findByText(/did not return a usable result/iu),
+      ).toBeInTheDocument();
+    } finally {
+      uuidSpy.mockRestore();
+    }
+  });
+
   it("treats a LOST apply response as indeterminate, not as a failure", async () => {
     // The client raises ApiError only once an HTTP response exists, so a
     // rejected fetch means the POST was dispatched and never answered — the

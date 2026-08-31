@@ -1738,14 +1738,18 @@ export const RegistryImportFlow = ({
     // and this flow's exits disable in ONE commit, leaving no window in which
     // the request is running but navigation is still live.
     navLatch.arm(APPLY_IN_FLIGHT_NOTE);
-    // BEFORE the request leaves. From here the outcome is unknown by default,
-    // and it stays unknown until something establishes otherwise — including
-    // across a tab close or a reload, which discards this document's fetch
-    // handler while the backend goes on committing.
-    const applyId = newApplyId();
-    applyIdRef.current = applyId;
-    setError(null);
     try {
+      // FIX: id generation lives INSIDE the try whose finally releases the
+      // latch. Between arming and this point nothing may run that can throw
+      // outside that guard — a failed apply id (or any later setup step)
+      // would otherwise strand the shell's navigation disabled until reload.
+      // BEFORE the request leaves. From here the outcome is unknown by default,
+      // and it stays unknown until something establishes otherwise — including
+      // across a tab close or a reload, which discards this document's fetch
+      // handler while the backend goes on committing.
+      const applyId = newApplyId();
+      applyIdRef.current = applyId;
+      setError(null);
       // ATOMIC admission, not the render-time `unsettled` read. That read and
       // the record were two steps, so two tabs could both see "nothing
       // pending" and both dispatch; this checks and records under one

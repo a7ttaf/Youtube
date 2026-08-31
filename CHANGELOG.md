@@ -8,6 +8,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Frontend crash containment and write-latch recovery: a view that throws now
+  degrades to an in-place error card instead of unmounting the whole app; the
+  shell navigation stays alive and a write that was in flight when the crash
+  happened keeps its latch until the request's own `finally` releases it.
+  Apply-id generation moved inside that guarded block so a setup failure after
+  Apply arms the latch still frees navigation (an added regression test forces
+  the id source to throw).
 - Channel `content_owner_id` write path: `content_owner_id` is now an optional
   field on `POST /channels`, and a new `PATCH /channels/{youtube_channel_id}/content-owner`
   (gated on `MANAGE_CHANNELS`, audited as `CHANNEL_UPDATED` with old/new values,
