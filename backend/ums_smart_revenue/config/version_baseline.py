@@ -2,8 +2,9 @@
 # Purpose: Machine-readable stack version baseline for drift checks in tests.
 # Database/ORM: None.
 # Standards: Must stay aligned with TECH_VERSION_BASELINE.md and pyproject pins.
-# Blast Radius: Version validation tests only.
+# Blast Radius: Version validation tests and /health runtime metadata.
 # Connections:
+#   - File: backend/ums_smart_revenue/app.py -> Publishes selected runtime versions.
 #   - File: Docs/implementation/TECH_VERSION_BASELINE.md -> Human baseline doc.
 #   - File: tests/test_version_baseline.py -> Lockfile parity assertions.
 # ============================================================================
@@ -14,7 +15,7 @@ STACK_VERSION_BASELINE: dict[str, dict[str, str]] = {
     },
     "backend": {
         "fastapi": "0.141.1",
-        "pydantic": "2.13.4",
+        "pydantic": "2.13.5",
         "uvicorn": "0.52.4",
         "sqlalchemy": "2.0.52",
         "alembic": "1.19.1",
@@ -28,7 +29,8 @@ STACK_VERSION_BASELINE: dict[str, dict[str, str]] = {
         "google_cloud_storage": "3.13.1",
         "pytest": "9.1.1",
         "httpx2": "2.12.0",
-        "pypdf": "6.16.1",
+        "pypdf": "6.16.2",
+        "ruff": "0.16.5",
     },
     "datastores": {
         "postgresql": "18.3",

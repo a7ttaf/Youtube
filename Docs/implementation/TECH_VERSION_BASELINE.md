@@ -26,20 +26,21 @@ For this project:
 
 | Package | Version |
 |---|---:|
-| FastAPI | `0.136.1` |
-| Pydantic | `2.13.4` |
-| Uvicorn | `0.47.0` |
-| SQLAlchemy | `2.0.49` |
-| Alembic | `1.18.4` |
+| FastAPI | `0.141.1` |
+| Pydantic | `2.13.5` |
+| Uvicorn | `0.52.4` |
+| SQLAlchemy | `2.0.52` |
+| Alembic | `1.19.1` |
 | psycopg | `3.3.4` |
 | Celery | `5.6.3` |
 | Redis Python client | `7.4.0` |
 | openpyxl | `3.1.5` |
 | ReportLab | `4.5.1` |
 | python-pptx | `1.0.2` |
-| pytest | `9.0.3` |
+| pytest | `9.1.1` |
 | httpx2 | `2.12.0` |
-| pypdf | `6.11.0` |
+| pypdf | `6.16.2` |
+| Ruff | `0.16.5` |
 
 ## Frontend Target Baseline
 
@@ -90,5 +91,19 @@ httpx2 migration addendum checked on: `2026-08-22` (UTC)
   addendum date above is when the PyPI metadata was checked, not when the
   migration was made.
 
+Patch-update addendum checked on: `2026-08-31` (UTC)
+
+- FastAPI `0.141.1`: `https://github.com/fastapi/fastapi/releases/tag/0.141.1`
+- Pydantic `2.13.5`: `https://github.com/pydantic/pydantic/releases/tag/v2.13.5`
+- Uvicorn `0.52.4`: `https://github.com/encode/uvicorn/releases/tag/0.52.4`
+- SQLAlchemy `2.0.52`: `https://github.com/sqlalchemy/sqlalchemy/releases/tag/rel_2_0_52`
+- Alembic `1.19.1`: `https://github.com/sqlalchemy/alembic/releases/tag/rel_1_19_1`
+- pytest `9.1.1`: `https://github.com/pytest-dev/pytest/releases/tag/9.1.1`
+- pypdf `6.16.2`: `https://github.com/py-pdf/pypdf/releases/tag/6.16.2`
+- Ruff `0.16.5`: `https://github.com/astral-sh/ruff/releases/tag/0.16.5`
+- Release metadata for these versions remains compatible with Python 3.14; the
+  artifacts selected in `uv.lock` remain compatible with the project's
+  `>=3.14,<3.15` runtime contract.
+
 ## Local Environment Note
-The current workstation Python is `3.12`, so tests are still run against the available local interpreter. The production runtime target is `3.14.5`, and the project metadata now expresses `>=3.14,<3.15`.
+Local validation is currently run through `uv` with CPython 3.14. The production runtime target is `3.14.5`, and the project metadata expresses `>=3.14,<3.15`.
