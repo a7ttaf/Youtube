@@ -247,7 +247,17 @@ const downloadFor = (
   return { path: route.path(id), format: route.format };
 };
 
-/** Start a prepared artifact through the protected same-origin download route. */
+/**
+ * Start a prepared artifact through the protected same-origin download route.
+ *
+ * Deliberately NOT resolved through the API-origin helper: the anchor GET
+ * cannot carry the trusted-gateway headers, so it must ride the same-origin
+ * gateway that injects them — only the prepare leg (a client fetch with
+ * headers) uses the configured API origin. The pinned test
+ * "uses the configured API origin only for preparation and keeps the real
+ * GET same-origin" holds this contract. The server's Content-Disposition
+ * filename stays authoritative in every deployment shape.
+ */
 const startNativeDownload = (path: string, filename: string): void => {
   const anchor = document.createElement("a");
   try {

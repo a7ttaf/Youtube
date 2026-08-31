@@ -21,6 +21,7 @@ from starlette.responses import Response as StarletteResponse
 
 from ums_smart_revenue.api.dependencies_audit import current_audit_sink
 from ums_smart_revenue.api.exports import (
+    _artifact_download_headers,
     _artifact_metadata_audit_details,
     _persist_generated_export_artifact,
     _prepared_artifact_response,
@@ -586,6 +587,7 @@ def test_finance_workbook_prepare_is_bodyless_and_real_get_reauthorizes(
     status_when_prepare_response_started: list[str] = []
 
     async def observe_prepare_commit(response, scope, receive, send):
+        """Record the durable-metadata state when the prepare 204 starts."""
         if response.status_code == 204 and scope.get("path") == route:
             with Session(engine) as observation_session:
                 observed_job = observation_session.get(ExportJobORM, EXPORT_ID)
@@ -655,7 +657,11 @@ def test_prepared_artifact_response_fails_closed_when_commit_fails():
     """Do not expose the 204 start signal when artifact metadata is not durable."""
 
     class FailingCommitSession:
-        def commit(self) -> NoReturn:
+        """Session stand-in whose commit always fails, testing fail-close."""
+
+        @staticmethod
+        def commit() -> NoReturn:
+            """Raise, simulating a durability failure at metadata commit."""
             raise SQLAlchemyError("commit failed")
 
     with pytest.raises(HTTPException) as raised:
@@ -663,6 +669,51 @@ def test_prepared_artifact_response_fails_closed_when_commit_fails():
 
     assert raised.value.status_code == 503
     assert raised.value.detail == "Export artifact persistence unavailable"
+
+
+@pytest.mark.parametrize(
+    "poisoned",
+    [
+        'ums-finance-2026-03".xlsx',
+        "ums-finance-2026-03\\.xlsx",
+        "ums-finance-2026-03\x00.xlsx",
+        "  ",
+    ],
+)
+def test_artifact_download_headers_fail_closed_on_unsafe_persisted_filename(poisoned):
+    """A persisted filename that could inject or split Content-Disposition fails closed.
+
+    Today's generators write fixed machine names, but the header builder is the
+    last choke point every artifact passes through; a future writer must not be
+    able to smuggle a quote, backslash, or control character into the header.
+    """
+    with pytest.raises(HTTPException) as raised:
+        _artifact_download_headers(poisoned)
+
+    assert raised.value.status_code == 500
+    assert raised.value.detail == "Export artifact filename is unsafe"
+
+
+def test_openapi_documents_the_prepare_parameter_on_every_artifact_route():
+    """All four artifact GETs must publish the ``prepare`` handshake parameter."""
+    app = create_app(database_url="sqlite+pysqlite:///:memory:")
+    with TestClient(app) as client:
+        schema = client.get("/openapi.json").json()
+
+    artifact_paths = [
+        path
+        for path in schema["paths"]
+        if path.startswith("/exports/{export_id}/")
+        and (
+            path.endswith((".csv", ".xlsx", ".pdf", ".pptx"))
+        )
+    ]
+    assert len(artifact_paths) == 4, artifact_paths
+    for path in artifact_paths:
+        parameters = schema["paths"][path]["get"].get("parameters", [])
+        assert any(p.get("name") == "prepare" for p in parameters), (
+            f"{path} must document the prepare parameter"
+        )
 
 
 @pytest.mark.parametrize(
@@ -692,7 +743,9 @@ def test_finance_artifact_download_fails_closed_when_audit_commit_fails(
     response_bodies: list[bytes] = []
 
     async def observe_response_start(response, scope, receive, send):
+        """Wrap ASGI send to capture response starts and body chunks."""
         async def observe_send(message):
+            """Forward one ASGI message, recording starts and body chunks."""
             if message["type"] == "http.response.start":
                 response_starts.append(message["status"])
             if message["type"] == "http.response.body":

@@ -12,6 +12,7 @@
 #   - File: backend/ums_smart_revenue/reports/artifact_storage.py -> Artifact IO.
 # ============================================================================
 import logging
+import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Annotated
@@ -1179,8 +1180,21 @@ def _rollback_audit_sink_unit_of_work(audit_sink: AuditSink) -> None:
         expunge_all()
 
 
+# Defense in depth for the Content-Disposition choke point: every persisted
+# artifact filename is machine-written by today's generators, but this header
+# is the last boundary every artifact passes through, so a future writer that
+# persists a quote, backslash, or control character must fail closed here
+# rather than inject or split the header.
+_ARTIFACT_FILENAME_UNSAFE = re.compile(r'[\x00-\x1f\x7f-\x9f"\\]')
+
+
 def _artifact_download_headers(filename: str) -> dict[str, str]:
     """Return attachment headers that force every protected GET through the gateway."""
+    if _ARTIFACT_FILENAME_UNSAFE.search(filename) or not filename.strip():
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Export artifact filename is unsafe",
+        )
     return {
         "Cache-Control": _ARTIFACT_CACHE_CONTROL,
         "Content-Disposition": f'attachment; filename="{filename}"',

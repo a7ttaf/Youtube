@@ -1969,7 +1969,10 @@ def test_analytics_summary_csv_download_fails_closed_when_audit_commit_fails(
     response_bodies: list[bytes] = []
 
     async def observe_response_start(response, scope, receive, send):
+        """Wrap ASGI send to capture response starts and body chunks."""
+
         async def observe_send(message):
+            """Forward one ASGI message, recording starts and body chunks."""
             if message["type"] == "http.response.start":
                 response_starts.append(message["status"])
             if message["type"] == "http.response.body":
