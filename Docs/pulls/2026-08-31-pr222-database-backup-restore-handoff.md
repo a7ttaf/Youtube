@@ -114,6 +114,26 @@ is still pending and must be recorded literally.
 Superseded-head exercises are intentionally excluded from readiness evidence;
 their counts and seed totals must not be copied into code or the final record.
 
+## Post-merge audit residuals (2026-09-01)
+
+An adversarial re-audit of the merged line against the superseded fence
+commits confirmed: every subprocess is timeout-bounded with typed failure
+states; roles replay only the byte-identical canonical SQL (no RESET ALL,
+no pg_db_role_setting writes, no predefined-role mutation); concurrent
+TRUNCATE ordering, artifact TOCTOU, and rehearsal cleanup ownership are all
+guarded. Two residuals are recorded rather than fixed:
+
+- A SIGKILL on a `docker exec` client kills only the CLI process; the
+  daemon-side exec session can persist until stdin EOF, so a fully-buffered
+  replay could commit after the tool already exited with a timeout failure.
+  The failure state is explicit and the target is disposable-by-contract
+  (a retry on the same target is refused as non-empty / partially staged),
+  so the late commit lands on an abandoned target. Operators must
+  reprovision, never reuse, a target after any restore-path timeout.
+- The unused `_trusted_client` launcher and its private container remover
+  were deleted post-merge (no callers); actual clients run through plain
+  `docker exec` against the selected container.
+
 ## Final validation required
 
 1. Confirm dependency `46f3b819606c2cfeb40dc687871815ecc78a74d9` is
