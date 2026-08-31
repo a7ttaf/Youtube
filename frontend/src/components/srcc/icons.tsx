@@ -91,8 +91,6 @@ export const BrandIcon = () =>
 // Connections:
 //   - File: frontend/src/components/srcc/views/CommandView.tsx -> renders this
 //     icon for protected finance status surfaces.
-//   - File: frontend/src/components/srcc/AppShell.tsx -> keeps authorization
-//     decisions at the routed-view boundary, outside this icon.
 // ============================================================================
 /** Render the lock glyph for a protected finance surface. */
 export const LockIcon = () =>

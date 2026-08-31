@@ -15,8 +15,10 @@ This branch manually consolidates the safe, current-main portions of draft PRs
   inert shell controls, and seven unsupported data panels;
 - containing view render failures with fixed, payload-private operator copy and
   keeping root diagnostics free of thrown values and component stacks;
-- retaining the process-wide write-in-flight latch outside recoverable view
-  boundaries so a render crash cannot permit a duplicate write;
+- retaining the shell-wide, tab-local write-in-flight latch outside recoverable
+  view boundaries so a render crash cannot permit a duplicate write; separate
+  cross-document import admission remains protected by `UnsettledImportContext`
+  through Web Locks with localStorage-backed unsettled state;
 - failing closed when authorized revenue scopes are pending, empty, or failed;
 - enforcing selected-month payment/bank grants for bank reconciliation and
   Smart Alerts reads;
@@ -47,9 +49,9 @@ This branch manually consolidates the safe, current-main portions of draft PRs
   `months.ts`, and `mock/data.ts` provide fail-closed reads, exact selected-month
   behavior, and removal of obsolete fixtures.
 - Tests under `frontend/tests/` cover root/view error privacy, crash-during-write
-  recovery, scope storage failures, month-grant mismatch, close-read failures,
-  removed mock surfaces, rolling-month behavior, and the view-owned Month
-  selector's selected-month net-revenue URL.
+  recovery, authorized-scope 403/empty/pending/malformed responses, month-grant
+  mismatch, close-read failures, removed mock surfaces, rolling-month behavior,
+  and the view-owned Month selector's selected-month net-revenue URL.
 - Planning/spec updates mark the superseded fabricated UI contract and record
   this integration without changing backend contracts.
 
