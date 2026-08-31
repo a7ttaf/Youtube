@@ -1774,6 +1774,14 @@ class _TenantRecordingHealthRepository:
         on; the page is intentionally non-empty so the test proves the
         entries came through the tenant-bound read, not from a vacuous
         empty result.
+
+        Args:
+            limit: Maximum number of credentials requested by the caller.
+            offset: Number of credentials skipped by the caller.
+            connector_keys: Optional connector-key filter recorded by the stub.
+
+        Returns:
+            A one-entry ``ConnectorCredentialPage`` for the tenant-bound read.
         """
         self.connector_keys = connector_keys
         return ConnectorCredentialPage(

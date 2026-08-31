@@ -1,11 +1,21 @@
 # UMS Smart Revenue Control Center — single-box stack (also used for local dev).
 #
 # Usage:
-#   docker compose up -d                # full stack (postgres, redis, app, migrate)
-#   docker compose run --rm migrate     # apply migrations once
-#   docker compose logs -f app          # follow the app logs
-#   docker compose down                 # stop + remove containers, keep data
-#   docker compose restart app          # bounce just the API
+#   python scripts/compose.py up -d             # full stack (postgres, redis, app, migrate)
+#   python scripts/compose.py run --rm migrate  # apply migrations once
+#   python scripts/compose.py logs -f app       # follow the app logs
+#   python scripts/compose.py down              # stop + remove containers, keep data
+#   python scripts/compose.py up -d app          # reconcile just the API
+#
+# The launcher is a host-side safety boundary. It canonicalizes
+# UMS_APP_DATA_HOST, requires the path-bound application sentinel, rejects
+# roots/system paths/non-default checkout descendants/symlinks/submounts,
+# validates the final rendered Compose model, and creates only the safe default
+# before a container is invoked. This file intentionally contains NO root-capable
+# storage initializer: direct `docker compose` cannot trigger a root
+# chown/chmod of an arbitrary host path. Direct Compose is unsupported for
+# starting the app because it skips the host preflight and non-root write probe;
+# use `python scripts/compose.py`.
 #
 # ⚠️  `docker compose down -v` is NOT an ordinary teardown — do not reach for it
 #     out of habit. The `-v` flag DELETES EVERY named volume declared at the
@@ -21,56 +31,30 @@
 #         teardown warning they already believe they understand.
 #     Artifact/blob storage uses a **host bind mount** (`UMS_APP_DATA_HOST`,
 #     default `./data/ums`) — it is NOT in this named-volume list and survives
-#     `down -v`, but the operator must back it up separately, with the
-#     writers stopped (only app/app-dev mount it — stop BOTH; connector
-#     blobs are written with Path.write_bytes, so tarring under a live
-#     writer can capture a half-written raw-evidence file):
-#       docker compose stop app app-dev
-#       tar -czf ../ums-app-data-$(date +%F).tgz ./data/ums
-#     (stopping a service that is not running is a no-op, so the same
-#     command is safe when the dev profile is inactive)
-#     The archive is written OUTSIDE the checkout on purpose — a tgz of
-#     raw revenue evidence and finance exports has no business sitting in
-#     the worktree where a later `git add .` could stage it; a narrow
-#     `/ums-app-data-*.tgz` ignore exists as a backstop for anyone who
-#     redirects it inside anyway.
-#     tar ships with Windows 10+, Git Bash and Linux; adjust the path if
-#     UMS_APP_DATA_HOST is set. Scope: this covers the DEFAULT
-#     UMS_BLOB_BACKEND=file-store layout. When UMS_BLOB_BACKEND=gcs,
-#     connector blobs live in UMS_GCS_BUCKET, NOT in the bind — the tar
-#     then protects local export artifacts only, and the bucket needs
-#     its own backup in that mode. No dedicated backup/restore runbook
-#     exists yet — this header is the procedure.
-#     There is no prompt and no undo.
-#     Plain `docker compose down` is the non-destructive teardown and is what
-#     you want ~always; containers are recreated from the image on the next
-#     `up` and the data volumes are reattached untouched. Only use `-v` when
-#     you deliberately want empty volumes (postgres-data and redis-data —
-#     the artifact/blob bind directory is NOT emptied by `-v`, so a full
-#     reset additionally requires deleting ${UMS_APP_DATA_HOST:-./data/ums}
-#     by hand), and
-#     only after a verified *database* backup AND a rehearsed restore for
-#     postgres-data. Artifact blobs on the host bind mount need a separate
-#     backup — the copy command in the header above.
-#     Note that `pg_dump` alone does not capture the `app_tenant` /
-#     `app_platform` roles the RLS policies depend on, so a roles-only dump
-#     has to exist too, taken while postgres is up (run from Git Bash or
-#     PowerShell — but see the encoding note), written OUTSIDE the
-#     checkout because it contains the superuser password hash:
-#       docker compose exec postgres sh -c 'pg_dumpall --roles-only -U "$POSTGRES_USER"' > ../ums-roles.sql
-#     The quoting is deliberate: $POSTGRES_USER expands inside the
-#     container, the same variable the healthcheck below reads. In
-#     PowerShell 5.1 use `docker compose exec -T postgres sh -c '...' |
-#     Out-File -Encoding utf8 ../ums-roles.sql` instead of `>` — the shell
-#     redirect writes UTF-16 with a BOM, which psql cannot replay. On a
-#     fresh cluster replay ums-roles.sql BEFORE the pg_dump: the dump's
-#     GRANT/policy statements name those roles. ums-roles.sql contains the
-#     superuser password hash — guard it like .env; a narrow `/ums-roles.sql`
-#     ignore is a backstop for anyone who redirects it inside anyway.
+#     `down -v`. A production backup/restore procedure is intentionally not
+#     claimed by PR #221: live-writer quiescence, atomic staging, archive
+#     traversal checks, path-bound sentinel rebinding, recursive permissions,
+#     NTFS ACLs, and the Postgres roles dump belong in the separately reviewed
+#     recovery runbook (#222). Do not improvise a tar overlay or delete the
+#     last-good store. Before that runbook is available, preserve the source and
+#     use the read-only canonical resolver when identifying it:
+#       python scripts/compose.py storage-path
+#       python scripts/compose.py --env-file .env.local storage-path
+#     The resolver honors the shell variable, `.env`, and an explicit
+#     `--env-file`; it fails closed unless the path-bound sentinel and host ACL
+#     contract are present.
+#     Plain `docker compose down` is the non-destructive teardown. `down -v`
+#     destroys the Postgres and Redis named volumes; it does not empty this
+#     bind source. PR #221 deliberately provides no roles-dump or data-recovery
+#     procedure: a roles dump contains credential material and recovery needs
+#     atomic staging, SQL/archive validation, path-bound sentinel rebinding,
+#     recursive permissions, and NTFS ACL handling. Those controls belong in
+#     the separately reviewed #222 recovery runbook. Preserve the source and
+#     last-good backup rather than improvising a tar overlay.
 #
 # `app` is the FastAPI service running with --reload disabled by default.
 # For interactive dev with hot reload, use the `dev` override profile:
-#   docker compose --profile dev up app-dev
+#   python scripts/compose.py --profile dev up app-dev
 #
 # Secrets: never bake real credentials into this file. Compose variables come
 # from the invoking shell or from an env file — `.env` is read automatically,
@@ -79,7 +63,7 @@
 # ⚠️  `.env.example` is the tracked template, but as of this commit it is NOT a
 #     complete one for this file and copying it is not enough to boot the
 #     stack. It predates the database variables below, so
-#     `docker compose --env-file .env.example config` exits 1 on
+#     `python scripts/compose.py --env-file .env.example config` exits 1 on
 #     "UMS_DB_USER" being required. Completing the template has not landed
 #     yet; until it does, the authoritative variable list is the one below.
 #
@@ -95,8 +79,9 @@
 #   UMS_TRUSTED_GATEWAY_TOKEN  — the shared secret the reverse proxy presents.
 #
 # Everything else this file reads has a default inline (`:-`) and can be left
-# unset. Run `docker compose --env-file <your file> config` before the first
-# `up`: it renders the whole stack and fails loudly on anything missing.
+# unset. Run `python scripts/compose.py --env-file <your file> config` before
+# the first `up`: it renders the whole stack and fails loudly on anything
+# missing.
 #
 # Deployment target: this compose stack IS the deployment for the first beta —
 # one operator, one Windows box, every published port bound to 127.0.0.1. There
@@ -173,10 +158,10 @@ x-app-env: &app-env
   # * Scheduling ENABLED + placeholder in `.env`: create_app fails at boot
   #   (app.py raises for the template UUID exactly as for an unset one).
   #   Under `restart: unless-stopped` the `app` container restart-loops
-  #   before serving anything; `docker compose logs app` shows the
+  #   before serving anything; `python scripts/compose.py logs app` shows the
   #   ValueError naming the placeholder. Recovery: provision a real actor
   #   (or remove the placeholder line / disable scheduling) in `.env`,
-  #   then `docker compose up -d app`.
+  #   then `python scripts/compose.py up -d app`.
   # * Scheduling DISABLED, executor enabled + placeholder: the API boots
   #   and serves normally; only live connector submissions refuse —
   #   synchronously at the route pre-flight with the 503
@@ -196,8 +181,8 @@ x-app-env: &app-env
   # ⚠️  BEFORE YOU SET ANY OF THE SIX BELOW: a malformed value takes the API
   #     down and keeps it down. These pass-throughs are what made these
   #     variables reachable from `.env` at all, and settings.py parses them
-  #     while `create_app` is still running — `_load_int`, `_load_bool` and
-  #     `_load_log_level` in backend/ums_smart_revenue/config/settings.py all
+  #     while `create_app` is still running — `_load_int` and `_load_bool` in
+  #     backend/ums_smart_revenue/config/settings.py both
   #     raise rather than fall back to a default.
   #
   #     Deliberately no line numbers on those three. This citation has now
@@ -221,9 +206,9 @@ x-app-env: &app-env
   #     nothing on the terminal explaining why. The traceback naming the exact
   #     variable only exists in the container log:
   #
-  #       docker compose logs app        # read the LAST line
+  #       python scripts/compose.py logs app        # read the LAST line
   #
-  #     Fix the value in `.env`, then `docker compose up -d app`.
+  #     Fix the value in `.env`, then `python scripts/compose.py up -d app`.
   #
   #     A BLANK value is safe and is NOT what this warns about: `_load_int`
   #     returns its default on an empty string, and `""` is in settings.py's
@@ -243,11 +228,10 @@ x-app-env: &app-env
   #     UMS_LOG_LEVEL is deliberately NOT forwarded and is not a setting of
   #     this stack: nothing under backend/ reads it — no settings loader, no
   #     logging-config consumer, `grep -rn UMS_LOG_LEVEL backend/` is empty.
-  #     An earlier revision of this comment described a `_load_log_level`
-  #     parser and a config/logging_config.py THIRD_PARTY_LOG_LEVEL split
-  #     that do not exist; forwarding the variable here would have advertised
-  #     an ineffective configuration contract. The only log controls that
-  #     exist are UMS_LOG_MAX_SIZE / UMS_LOG_MAX_FILE in the x-logging anchor
+  #     An earlier revision of this comment described a process log-level
+  #     setting that is not implemented; forwarding the variable here would
+  #     advertise an ineffective configuration contract. The only log controls
+  #     that exist are UMS_LOG_MAX_SIZE / UMS_LOG_MAX_FILE in the x-logging anchor
   #     at the top of this file, which size docker's json-file ROTATION (how
   #     much log is kept on disk). If process-log verbosity is ever wanted,
   #     implement the settings consumer first, then re-add the pass-through.
@@ -289,10 +273,20 @@ x-app-env: &app-env
 # /var/lib/ums), chosen over a named volume because `down -v` would destroy
 # a named one alongside postgres-data. A bind mount does NOT inherit
 # image-time ownership — the Dockerfile's pre-created, chowned /var/lib/ums
-# is overlaid by whatever the host directory holds — so the one-shot
-# `app-data-init` service provisions the host side (subdirs + uid 10001
-# ownership + a write probe) before `app`/`app-dev` start. Keep these paths
-# and the Dockerfile's APP_DATA_HOME in sync.
+# is overlaid by whatever the host directory holds. The host launcher creates
+# only the two bounded children with the current operator's authority, then
+# proves uid 10001 can write them through the non-root app service. It does not
+# chown/chmod through Docker, and this Compose file intentionally contains no
+# root-capable init service. Linux operators must explicitly provision any bind
+# that host ownership does not expose to uid/gid 10001. On Windows, host NTFS
+# ACL validation is the confidentiality control: Docker
+# Desktop's container `stat` mode is not a Windows ACL proof. Keep these paths
+# and the Dockerfile's APP_DATA_HOME in sync. The launcher walks the entire
+# storage tree through PowerShell Get-Acl and fails closed on an unprotected
+# root, unapproved allow ACEs, missing operator write/traverse access, or deny
+# ACEs. Run the exact icacls remediation command printed by the launcher
+# as an explicit operator action, then retry; never treat container mode bits
+# as a substitute for the NTFS DACL.
 # ---------------------------------------------------------------------------
 # Paths are pinned under the durable bind mount at ``/var/lib/ums``. Do NOT
 # interpolate host overrides here: Compose only mounts UMS_APP_DATA_HOST at
@@ -342,11 +336,13 @@ services:
       # non-destructive. Keeping the mount at /var/lib/postgresql is what
       # makes the "plain `docker compose down` keeps your data" promise true.
       #
-      # No migration path is needed for existing installs: the misconfiguration
-      # meant Postgres never initialised, so there is no old cluster to move.
-      # Every revision of this file that shipped the legacy mount shipped a
-      # Postgres 18 image, and the 18 entrypoint exits before initdb whenever
-      # the legacy path is a mount, empty or not.
+      # For installations created by the stock predecessor of this file, no
+      # migration is needed: the misconfiguration made the Postgres 18
+      # entrypoint exit before initdb, so there is no old cluster to move. An
+      # operator who used a custom image/override or initialized data outside
+      # this file must take a verified backup and follow that deployment's
+      # migration procedure before changing the mount; this Compose file does
+      # not discover or migrate out-of-band clusters.
       - postgres-data:/var/lib/postgresql
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
@@ -389,68 +385,14 @@ services:
     logging: *default-logging
     networks: [ums-net]
 
-  # One-shot host-side provisioning for the bind mount the app services use.
-  # On a fresh Linux checkout the Docker daemon creates the missing
-  # ./data/ums bind source ROOT-OWNED, and a bind mount OVERLAYS the
-  # image-time ownership — unlike a named volume, the image's chown never
-  # seeds a bind source — so uid 10001 could not create artifacts/ or
-  # blobs/, and every export would fail with ExportArtifactStorageError
-  # ("artifact storage unavailable") while blob uploads fail with EACCES.
-  #
-  # This service creates the two subdirectories and hands the three
-  # directories to the app uid, then PROVES writability by writing and
-  # removing a probe file AS uid 10001 (setpriv; the image also has the
-  # `app` user for `runuser -u app --` if setpriv ever disappears). The
-  # three roots are also chmod'd 750: this is a HOST bind, not a
-  # container-only filesystem, and under the default 022 umask a 0755
-  # root lets any other local account traverse into raw connector
-  # evidence and finance exports. 750 keeps the owning uid full-access,
-  # blocks traversal for everyone else; files the app creates inside
-  # still follow its umask, but no other local user can reach them
-  # through the directory path.
-  # The
-  # probe — deliberately NOT `chown`'s exit status — is the exit gate:
-  # Docker Desktop's emulated bind filesystems can make chown fail (EPERM)
-  # or silently no-op while the directory is still writable by everyone, so
-  # gating on chown would either brick the stack on the stated beta target
-  # (a Windows box) or pass while nothing changed. chown is non-recursive
-  # on purpose: the app creates everything nested as the owning uid, so
-  # only the three mount roots need fixing, and a recursive walk would
-  # grow with the blob store and delay every `up`.
-  #
-  # If the probe fails the service exits non-zero: `docker compose up`
-  # reports app-data-init failed and `docker compose logs app-data-init`
-  # names the unwritable directory — loud and early, instead of a silent
-  # permanent 503 on every export. It mounts the same UMS_APP_DATA_HOST
-  # path as app/app-dev so an operator override is provisioned identically.
-  app-data-init:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    image: ums-smart-revenue:dev
-    restart: "no"
-    user: "0:0"
-    command:
-      - sh
-      - -c
-      - |
-        mkdir -p /var/lib/ums/artifacts /var/lib/ums/blobs
-        chown 10001:10001 /var/lib/ums /var/lib/ums/artifacts /var/lib/ums/blobs \
-          || echo "app-data-init: chown unavailable on this bind filesystem (common on Docker Desktop shares); gating on the uid-10001 write probe below instead"
-        chmod 750 /var/lib/ums /var/lib/ums/artifacts /var/lib/ums/blobs
-        setpriv --reuid=10001 --regid=10001 --clear-groups sh -c \
-          'touch /var/lib/ums/artifacts/.rw-probe && rm -f /var/lib/ums/artifacts/.rw-probe && touch /var/lib/ums/blobs/.rw-probe && rm -f /var/lib/ums/blobs/.rw-probe'
-    volumes:
-      - ${UMS_APP_DATA_HOST:-./data/ums}:/var/lib/ums
-    logging: *default-logging
-    networks: [ums-net]
-
   app:
     build:
       context: .
       dockerfile: Dockerfile
     image: ums-smart-revenue:dev
     restart: unless-stopped
+    user: "10001:10001"
+    entrypoint: ["/usr/bin/tini", "--"]
     depends_on:
       postgres:
         condition: service_healthy
@@ -458,14 +400,16 @@ services:
         condition: service_healthy
       migrate:
         condition: service_completed_successfully
-      app-data-init:
-        condition: service_completed_successfully
     environment:
       <<: [*app-env, *app-storage-env]
     ports:
       - "127.0.0.1:${UMS_APP_PORT:-8000}:8000"
     volumes:
-      - ${UMS_APP_DATA_HOST:-./data/ums}:/var/lib/ums
+      - type: bind
+        source: ${UMS_APP_DATA_HOST:-./data/ums}
+        target: /var/lib/ums
+        bind:
+          create_host_path: false
     healthcheck:
       test: ["CMD", "curl", "--fail", "--silent", "http://localhost:8000/livez"]
       interval: 15s
@@ -495,14 +439,14 @@ services:
     networks: [ums-net]
 
   # Optional dev variant with source bind-mount + reload. Activate with:
-  #   docker compose --profile dev up app-dev
-  # ⚠️ Use the TARGETED form above, not `docker compose --profile dev up -d`:
+  #   python scripts/compose.py --profile dev up app-dev
+  # ⚠️ Use the TARGETED form above, not `python scripts/compose.py --profile dev up -d`:
   #    an untargeted profile `up` also starts every UNPROFILED service, so
   #    `app` and `app-dev` run side by side. With the executor and schedule
   #    flags enabled that is TWO schedulers against one database —
   #    ConnectorJobExecutor deduplication is in-process and cannot see
   #    across containers, so every tick would be submitted twice. If both
-  #    are already running, `docker compose stop app` before relying on
+  #    are already running, `python scripts/compose.py stop app` before relying on
   #    app-dev.
   app-dev:
     profiles: ["dev"]
@@ -510,14 +454,14 @@ services:
       context: .
       dockerfile: Dockerfile
     image: ums-smart-revenue:dev
+    user: "10001:10001"
+    entrypoint: ["/usr/bin/tini", "--"]
     depends_on:
       postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
       migrate:
-        condition: service_completed_successfully
-      app-data-init:
         condition: service_completed_successfully
     environment:
       <<: [*app-env, *app-storage-env]
@@ -528,7 +472,11 @@ services:
       # Same volume as `app` on purpose: app-dev is an alternative to app, not a
       # companion, and an operator who switches between them should not find
       # yesterday's export missing.
-      - ${UMS_APP_DATA_HOST:-./data/ums}:/var/lib/ums
+      - type: bind
+        source: ${UMS_APP_DATA_HOST:-./data/ums}
+        target: /var/lib/ums
+        bind:
+          create_host_path: false
     command:
       - "python"
       - "-m"
@@ -550,9 +498,8 @@ volumes:
   redis-data:
   # Export artifacts + connector blobs use a HOST bind mount (see app / app-dev
   # services: UMS_APP_DATA_HOST, default ./data/ums). NOT a named volume — plain
-  # `docker compose down -v` destroys postgres-data and redis-data; a co-located
-  # named app volume would be destroyed with them. Back it up with the copy
-  # command in the header above; no dedicated runbook exists yet.
+  # `docker compose down -v` destroys postgres-data and redis-data; the reviewed
+  # backup/recovery procedure is deferred to runbook #222.
 
 networks:
   ums-net:

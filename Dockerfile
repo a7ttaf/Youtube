@@ -76,9 +76,12 @@ ARG APP_UID=10001
 # does NOT cover the compose HOST BIND mount: a bind mount overlays the
 # image entirely, so image-time ownership never reaches the host directory —
 # on a fresh Linux checkout the daemon even creates the missing bind source
-# root-owned. docker-compose.yml therefore runs the one-shot `app-data-init`
-# service (same image, root, same bind path) to provision the host side and
-# prove uid ${APP_UID} writability with a probe file before `app` starts.
+# root-owned. The supported launcher prevents daemon-side path creation,
+# prepares only bounded children with the current HOST operator's authority,
+# and proves uid 10001 writability through the non-root app service. It never
+# gives a root container an operator-controlled host path. Linux operators must
+# explicitly provision a custom bind for uid/gid 10001 when host ownership does
+# not already permit the non-root probe.
 # Without either mechanism every export would fail with
 # ExportArtifactStorageError("artifact storage unavailable"), surfacing as a
 # permanent 503 on download, because FileSystemExportArtifactStore.save()
