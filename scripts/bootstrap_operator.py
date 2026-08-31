@@ -190,7 +190,7 @@ class _OrgUnitOutcome:
 
 
 class _BootstrapCommitOutcomeUnknownError(RuntimeError):
-    """The database disconnected while COMMIT acknowledgement was in flight."""
+    """The database driver errored while COMMIT outcome was unknowable."""
 
 
 def _ensure_backend_path() -> None:
@@ -206,7 +206,6 @@ def _load_dependencies() -> dict[str, Any]:
     # sys.path before importing the backend package (mirrors seed_demo_month.py).
     _ensure_backend_path()
 
-    from sqlalchemy import text
     from sqlalchemy.exc import DBAPIError, SQLAlchemyError
 
     from ums_smart_revenue.auth.audit import AuditEventType
@@ -268,7 +267,6 @@ def _load_dependencies() -> dict[str, Any]:
         "build_session_factory": build_session_factory,
         "load_app_settings": load_app_settings,
         "record_audit_event": record_audit_event,
-        "sql_text": text,
     }
 
 
@@ -1091,8 +1089,8 @@ def _load_active_tenant(
 #   ``org_units`` — all tenant-scoped, all FORCE RLS after 20260612_0002.
 # Standards: One session, one commit; the session context manager rolls back on
 #   any exception, and the contextvar token is reset on every exit path so the
-#   process never leaks a tenant into later work. A disconnect while COMMIT is
-#   being acknowledged is reported as UNKNOWN, never falsely as rolled back;
+#   process never leaks a tenant into later work. Any DBAPI error while COMMIT
+#   is in progress is reported as UNKNOWN, never falsely as rolled back;
 #   deterministic ids and lookup-before-create make the prescribed retry safe.
 # Blast Radius: Authorization (identity + optional role), audit
 #   (``USER_ROLE_CHANGED`` on new ``--role`` grants), and registry (org units).
@@ -1123,26 +1121,13 @@ def _run_bootstrap(
         for attempt_index in range(2):
             try:
                 with session_factory() as session:
-                    # FIX: Establish a real outer transaction BEFORE any repository
-                    # ``begin_nested()`` (``create_user`` / ``assign_role``). On SQLite
-                    # StaticPool, calling ``begin_nested()`` as the first session
-                    # operation leaves writes that ``session.rollback()`` cannot undo
-                    # (connection stays ``in_transaction`` after Session rollback, and
-                    # engine dispose / sqlite3 close then persists the user row). That
-                    # broke the "nothing was committed" promise when ``--org-skeleton``
-                    # failed after account creation (no ``org_units`` table).
+                    # FIX: Establish the caller-owned outer transaction before any
+                    # repository ``begin_nested()`` (``create_user`` / ``assign_role``).
+                    # The SQLite engine begin hook emits the one physical BEGIN at
+                    # checkout, so SAVEPOINT release cannot commit ahead of this
+                    # transaction. PostgreSQL retains its normal BEGIN/RLS hook.
                     if not session.in_transaction():
                         session.begin()
-                    # FIX: SQLite defers the physical BEGIN even after
-                    # Session.begin(). If the first database statement is a
-                    # repository begin_nested(), its SAVEPOINT can become the
-                    # outermost physical transaction; releasing it persists the
-                    # account, and a later org failure cannot roll it back. Force
-                    # a real BEGIN before any nested repository write. PostgreSQL
-                    # is intentionally excluded: its first statement starts a
-                    # physical transaction and the session hook must own SET ROLE.
-                    if session.get_bind().dialect.name == "sqlite":
-                        session.execute(deps["sql_text"]("BEGIN"))
                     if role_key is not None:
                         message = _require_seeded_role(session, deps, role_key)
                         if message is not None:
@@ -1194,14 +1179,11 @@ def _run_bootstrap(
                     try:
                         session.commit()
                     except deps["DBAPIError"] as exc:
-                        # FIX: A connection-invalidated DBAPIError while COMMIT
-                        # is in flight cannot prove whether PostgreSQL committed
-                        # before the acknowledgement was lost. Calling this a
-                        # rollback can make an operator create a second account
-                        # manually. Surface UNKNOWN and rely on the exact-command
-                        # idempotent replay to reconcile the durable state.
-                        if not exc.connection_invalidated:
-                            raise
+                        # FIX: ``connection_invalidated`` is a dialect disconnect
+                        # classification, not a durability signal. Any DBAPIError
+                        # escaping COMMIT can follow a durable commit, so calling
+                        # it a rollback can make an operator duplicate state.
+                        # Surface UNKNOWN and rely on the exact-command replay.
                         raise _BootstrapCommitOutcomeUnknownError from exc
                     return users, org_units
             except storage_error:
@@ -1445,7 +1427,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     except _BootstrapCommitOutcomeUnknownError:
         print(
-            "Database connection was lost while COMMIT was being acknowledged; "
+            "The database driver raised an error while COMMIT was in progress; "
             "the transaction outcome is UNKNOWN. Re-run the exact same bootstrap "
             "command. Deterministic org ids and lookup-before-create semantics "
             "will report durable rows as EXISTING and create only missing rows.",

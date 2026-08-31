@@ -1,4 +1,4 @@
-"""Frozen authorization catalog snapshot for revision 20260825_0001.
+"""Frozen authorization catalog snapshot for revision 20260825_0002.
 
 Generated from the live registries at migration authoring time. Historical
 revisions must not import auth modules that can change after merge; a later
@@ -22,7 +22,7 @@ FROZEN_ROLE_ROWS = [
     {
         "key": "beta_operator",
         "label": "Beta Operator",
-        "description": "First-beta finance operator with manual-import connector access.",
+        "description": "First-beta finance operator with manual revenue-upload access.",
         "service_only": False,
     },
     {
@@ -186,6 +186,12 @@ FROZEN_PERMISSION_ROWS = [
         "audit_on_use": True,
     },
     {
+        "key": "finance.import_manual_revenue",
+        "label": "Import manual revenue facts",
+        "sensitive": True,
+        "audit_on_use": True,
+    },
+    {
         "key": "finance.lock_month",
         "label": "Lock finance month",
         "sensitive": True,
@@ -262,12 +268,12 @@ FROZEN_ROLE_PERMISSION_ROWS = [
     {"role_key": "beta_operator", "permission_key": "analytics.view"},
     {"role_key": "beta_operator", "permission_key": "analytics.view_confidence"},
     {"role_key": "beta_operator", "permission_key": "audit.view"},
-    {"role_key": "beta_operator", "permission_key": "connectors.run_jobs"},
     {"role_key": "beta_operator", "permission_key": "exports.analytics"},
     {"role_key": "beta_operator", "permission_key": "exports.revenue"},
     {"role_key": "beta_operator", "permission_key": "finance.approve_manual_override"},
     {"role_key": "beta_operator", "permission_key": "finance.change_allocation_rule"},
     {"role_key": "beta_operator", "permission_key": "finance.create_manual_override"},
+    {"role_key": "beta_operator", "permission_key": "finance.import_manual_revenue"},
     {"role_key": "beta_operator", "permission_key": "finance.lock_month"},
     {"role_key": "beta_operator", "permission_key": "finance.manage_bank_reconciliation"},
     {"role_key": "beta_operator", "permission_key": "finance.unlock_month"},
@@ -359,6 +365,7 @@ FROZEN_ROLE_PERMISSION_ROWS = [
     {"role_key": "super_owner", "permission_key": "finance.approve_manual_override"},
     {"role_key": "super_owner", "permission_key": "finance.change_allocation_rule"},
     {"role_key": "super_owner", "permission_key": "finance.create_manual_override"},
+    {"role_key": "super_owner", "permission_key": "finance.import_manual_revenue"},
     {"role_key": "super_owner", "permission_key": "finance.lock_month"},
     {"role_key": "super_owner", "permission_key": "finance.manage_bank_reconciliation"},
     {"role_key": "super_owner", "permission_key": "finance.unlock_month"},

@@ -2188,7 +2188,10 @@ single P-tier above.
   `DROP ROLE`; SQLite engine uses `StaticPool` (single writer) to end the
   audit-session "database is locked" contention; tenant-context getter test
   compares typed `uuid`; version baseline realigned to pyproject pins. Full
-  suite 1956 passed.
+  suite 1956 passed. That then-current StaticPool topology was later superseded
+  by a one-slot QueuePool: overlapping StaticPool Sessions could share one live
+  DBAPI transaction, allowing one request rollback to erase another request's
+  write even after the first request reported a successful commit.
 
 - ✅ Track F (PR #87, 2026-06-09) — **Smart revenue reconciliation workflow DONE.**
   Pure compute core derives US tax + YouTube->AdSense fee + AdSense->bank fee+FX

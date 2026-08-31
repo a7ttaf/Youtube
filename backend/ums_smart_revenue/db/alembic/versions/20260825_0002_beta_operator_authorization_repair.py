@@ -1,102 +1,47 @@
-"""Seed the roles / permissions / role-permission catalog.
+"""Converge the beta-operator authorization catalog without rewriting history.
 
-Revision ID: 20260825_0001
-Revises: 20260805_0001
-Create Date: 2026-08-25
+Revision ID: 20260825_0002
+Revises: 20260825_0001
+Create Date: 2026-08-31
 
-Why this revision exists
-------------------------
-``backend/ums_smart_revenue/db/security_seed.sql`` has always carried these rows,
-but **nothing in the repository ran it** — no migration, no Makefile target, no
-compose one-shot. A fresh ``alembic upgrade head`` therefore produced a database
-with zero roles and zero permissions, which is an FK prerequisite for assigning
-any role (``user_role_assignments.role_key -> roles.key``,
-``user_permission_grants.permission_key -> permissions.key``) and makes
-``UMS_AUTHZ_SOURCE=database`` unusable. Recorded as H1 in
-``Docs/20_DEPLOYMENT_READINESS_AUDIT.md`` and as P0.7 in
-``Docs/21_BETA_IMPLEMENTATION_PLAN.md``.
+``20260825_0001`` and ``db/frozen_security_catalog.py`` may already be stamped
+and are therefore immutable. That historical snapshot contains 17 roles, 26
+permissions, and 121 role-permission edges. In particular, it grants
+``beta_operator`` the broad ``connectors.run_jobs`` permission and does not know
+the bounded ``finance.import_manual_revenue`` permission.
 
-Source of truth
----------------
-The rows were derived from the **live Python registries** at authoring time and
-then frozen in ``db/frozen_security_catalog.py``. A later registry change must
-ship a forward migration instead of redefining this already-stamped revision:
+This forward-only repair supports both database states that can exist in the
+field: the original historical seed and a database that ran the briefly amended
+copy of that same revision. Upgrade is idempotent in both cases. It refreshes the
+current role/permission metadata, inserts missing canonical rows, removes only
+the unsafe beta-operator connector edge, and preserves every other custom edge.
+The immutable snapshot for this revision lives in
+``db/frozen_security_catalog_20260825_0002.py``; later registry changes require
+another revision and another snapshot.
 
-* ``auth/roles.py::ROLE_DEFINITIONS``      -> ``roles``
-* ``auth/permissions.py::PERMISSION_DEFINITIONS`` -> ``permissions``
-* ``auth/seed.py::initial_role_permission_rows`` -> ``role_permission_assignments``
+The three catalog tables are platform-wide and outside tenant RLS. The active
+assignment checks used by downgrade are read-only. Downgrade never restores the
+unsafe connector edge and never deletes catalog rows whose provenance cannot be
+recovered. It refuses active beta-role or direct manual-revenue grants so a
+single Alembic command cannot cross the immutable ``20260825_0001`` boundary and
+leave older application enums unable to deserialize durable authorization data.
 
-This migration imports only the frozen snapshot, never mutable runtime auth
-modules. ``20260825_0002`` is the forward repair that converges the historical
-catalog to the bounded beta-operator authorization contract.
-
-Idempotency
------------
-Mirrors ``security_seed.sql``'s ``ON CONFLICT DO UPDATE`` semantics without
-depending on a dialect-specific upsert: existing keys are refreshed in place and
-only missing keys are inserted, so re-running against a database that already ran
-the raw SQL seed (or an earlier copy of this revision) is a no-op plus a metadata
-refresh.
-
-What this revision deliberately does NOT seed
----------------------------------------------
-* ``access_scopes`` — the ``'global'`` scope row in ``security_seed.sql`` is
-  **tenant-scoped** (``db/rls.py::TENANT_SCOPED_TABLES``) and carries FORCE ROW
-  LEVEL SECURITY after ``20260612_0002``. It is created on demand, per tenant, by
-  ``auth/user_roles.py::_get_or_create_scope`` and
-  ``auth/user_permissions.py::_get_or_create_scope``, so seeding it from a
-  tenant-blind migration would be both unnecessary and wrong.
-* The ``graph.view`` / ``graph.view_finance`` retirement DELETEs — already owned
-  by ``20260513_0002_retire_graph_permissions``.
-
-The three tables written here are platform-wide catalogs with no ``tenant_id``
-column, so they are outside every RLS policy and this revision needs no tenant
-context.
-
-This revision redefines "a virgin database" (read before editing)
------------------------------------------------------------------
-Seeding rows is not a local act. Before this revision a freshly migrated
-database held 180 rows in three tables, and **zero** rows outside
-``scripts/backup_database.py::SEED_TABLES``. After it a virgin
-``alembic upgrade head`` measures 38 tables / 344 rows, of which 164 sit in the
-three tables below. That difference is not cosmetic: the backup content gate
-uses "every table outside ``SEED_TABLES`` is empty" as the one signal that tells
-a healthy database from one that was wiped and re-migrated, and it is a
-fail-closed refusal with no override. Adding these rows silently satisfied that
-signal and switched the refusal off, in a file this revision never mentions.
-
-``SEED_TABLES`` therefore now lists ``roles``, ``permissions`` and
-``role_permission_assignments``, and
-``tests/scripts/test_backup_content_gate.py`` keeps the two in step by parsing
-the migrations rather than re-typing the names. That parser recognises exactly
-two idioms: ``op.bulk_insert`` whose first argument is an ``sa.table(...)`` —
-inline, or a module-level binding such as ``_ROLES`` below — and a literal
-SQL insert statement handed to ``op.execute``. Every seeding path here uses the
-first. Rewriting them into a third idiom (``bind.execute(_ROLES.insert(), rows)``
-is the tempting one, since the refresh half already uses ``bind.execute``) drops
-the table from the parser's view; the guard fails loudly rather than silently,
-but the fix is to keep the idiom or to update the parser deliberately.
-
-Prose in this file is parsed too. The parser walks every string constant in the
-module, docstrings included, so writing a sample insert statement here can
-register a table that does not exist — it did exactly that on the first draft of
-this section, which is why the sample is described rather than quoted.
-
-So: if a later revision seeds another table, or this one changes how it inserts,
-re-measure the virgin state in the same commit.
+Fresh upgrade through both revisions converges to 17 roles, 27 permissions, and
+122 role-permission edges (166 catalog rows). No finance fact, formula, lock,
+override, reconciliation, payment, or export row is read or changed.
 """
 
 import sqlalchemy as sa
 from alembic import op
 
-from ums_smart_revenue.db.frozen_security_catalog import (
+from ums_smart_revenue.db.frozen_security_catalog_20260825_0002 import (
     FROZEN_PERMISSION_ROWS,
     FROZEN_ROLE_PERMISSION_ROWS,
     FROZEN_ROLE_ROWS,
 )
 
-revision = "20260825_0001"
-down_revision = "20260805_0001"
+revision = "20260825_0002"
+down_revision = "20260825_0001"
 branch_labels = None
 depends_on = None
 
@@ -119,6 +64,24 @@ _ROLE_PERMISSIONS = sa.table(
     sa.column("role_key", sa.Text()),
     sa.column("permission_key", sa.Text()),
 )
+_USER_ROLE_ASSIGNMENTS = sa.table(
+    "user_role_assignments",
+    sa.column("role_key", sa.Text()),
+    sa.column("active", sa.Boolean()),
+)
+_USER_PERMISSION_GRANTS = sa.table(
+    "user_permission_grants",
+    sa.column("permission_key", sa.Text()),
+    sa.column("active", sa.Boolean()),
+)
+
+_BETA_OPERATOR_ROLE = "beta_operator"
+_IMPORT_MANUAL_REVENUE_PERMISSION = "finance.import_manual_revenue"
+_UNSAFE_BETA_CONNECTOR_PERMISSION = "connectors.run_jobs"
+
+
+class UnsafeAuthorizationDowngradeError(RuntimeError):
+    """Downgrade would cross history with incompatible active assignments."""
 
 
 def role_seed_rows() -> list[dict[str, object]]:
@@ -141,36 +104,45 @@ def upgrade() -> None:
     bind = op.get_bind()
     _seed_roles(bind)
     _seed_permissions(bind)
+    _remove_unsafe_beta_connector_edge(bind)
     _seed_role_permission_assignments(bind)
 
 
 # ============================================================================
-# Purpose: Data-only rollback for this revision is intentionally non-destructive.
+# Purpose: Data-only rollback is non-destructive, but refuses while an active
+#   assignment would make a rollback crossing the immutable 20260825_0001
+#   boundary unsafe. That prior revision knows beta_operator but has a no-op
+#   downgrade, so this is the last safe place to block a multi-revision rollback.
+#   The prior revision does not know the manual-revenue permission. Catalog rows
+#   remain because their provenance cannot be recovered safely.
 #   Upgrade is insert-missing + metadata refresh: on a database that already ran
 #   ``security_seed.sql`` (a state upgrade explicitly supports) it inserts zero
 #   catalog rows. Provenance of any given canonical pair cannot be recovered later,
 #   so deleting ``role_permission_seed_rows()`` on downgrade would destroy
 #   pre-existing authorization catalog state this revision did not create.
 #   Operator-added non-canonical pairs would survive a registry wipe, but the
-#   H1/P0.7 catalog itself would not. Leaving the catalog in place keeps
+#   canonical catalog itself would not. Leaving the catalog in place keeps
 #   PostgreSQL authorization parents intact; re-upgrade remains idempotent.
-# Database/ORM: ``roles``, ``permissions``, ``role_permission_assignments`` —
-#   left unchanged. No Alembic ``op.*`` DDL.
-# Standards: Fail-closed for authorization catalog integrity over perfect
-#   reverse symmetry. Documented irreversible data seed (same family as other
-#   seed revisions that refuse a destructive reverse).
+# Database/ORM: Reads ``user_role_assignments`` and ``user_permission_grants``;
+#   catalog rows are left unchanged.
+# Standards: Parameterized SQLAlchemy expressions and a typed refusal. The
+#   operator must revoke incompatible active grants before retrying downgrade.
 # Blast Radius: Authorization catalog rows persist after ``alembic downgrade`` of
 #   this revision. No finance numbers, no RLS widening, no permission softening.
 # Connections:
-#   - File: Docs/20_DEPLOYMENT_READINESS_AUDIT.md -> H1 / P0.7.
+#   - File: backend/ums_smart_revenue/db/alembic/versions/
+#     20260825_0001_security_role_permission_seed.py -> immutable predecessor.
 #   - File: tests/db/test_security_role_permission_seed_migration.py -> guards.
 # ============================================================================
 def downgrade() -> None:
-    """Leave the authorization catalog in place; this seed is not reversed."""
-    # Non-destructive by design: upgrade is insert-missing + metadata refresh, so
-    # provenance of canonical pairs cannot be recovered. Touch the bind so this
-    # path is an intentional no-op statement rather than an empty body.
-    _ = op.get_bind()
+    """Refuse incompatible active grants, then leave the catalog in place."""
+    bind = op.get_bind()
+    if _has_incompatible_active_grants(bind):
+        raise UnsafeAuthorizationDowngradeError(
+            "Cannot downgrade 20260825_0002 while active assignments depend on "
+            "beta_operator or finance.import_manual_revenue. Revoke those active "
+            "role/direct-permission grants, then retry the downgrade."
+        )
 
 
 # ============================================================================
@@ -249,6 +221,77 @@ def _seed_permissions(bind: sa.engine.Connection) -> None:
                 audit_on_use=row["audit_on_use"],
             )
         )
+
+
+# ============================================================================
+# Purpose: Remove the exact unsafe edge shipped by the earlier PR #223 draft.
+#   ``connectors.run_jobs`` authorizes every connector and is not a substitute
+#   for the bounded manual revenue-upload workflow.
+# Database/ORM: ``role_permission_assignments`` only.
+# Standards: Parameterized SQLAlchemy delete scoped to one known role/permission
+#   pair; no user-supplied SQL and no widening of any other role.
+# Blast Radius: Authorization tightens beta_operator; connector admins and
+#   service integrations retain their connector execution grants.
+# Connections:
+#   - File: backend/ums_smart_revenue/auth/seed.py -> corrected beta role grants.
+#   - File: backend/ums_smart_revenue/api/revenue.py -> dedicated manual-fact gate.
+# ============================================================================
+def _remove_unsafe_beta_connector_edge(bind: sa.engine.Connection) -> None:
+    """Delete only beta_operator's obsolete global connector execution edge."""
+    bind.execute(
+        _ROLE_PERMISSIONS.delete().where(
+            sa.and_(
+                _ROLE_PERMISSIONS.c.role_key == _BETA_OPERATOR_ROLE,
+                _ROLE_PERMISSIONS.c.permission_key == _UNSAFE_BETA_CONNECTOR_PERMISSION,
+            )
+        )
+    )
+
+
+# ============================================================================
+# Purpose: Detect active assignments that make a rollback across the historical
+#   seed unsafe: beta_operator is incompatible below 20260825_0001, while direct
+#   active grants of the new manual-revenue permission are incompatible with the
+#   immediately preceding application enum. Ordinary roles (including
+#   super_owner) remain compatible because policy derives role permissions from
+#   the old code's registry rather than deserializing catalog edges.
+# Database/ORM: ``user_role_assignments`` and ``user_permission_grants``;
+#   read-only.
+# Standards: Fail closed with parameterized SQLAlchemy expressions. Inactive
+#   historical rows do not block because principal loading ignores them.
+# Blast Radius: Deployment rollback safety for authorization only.
+# Connections:
+#   - File: backend/ums_smart_revenue/auth/roles.py -> beta RoleKey.
+#   - File: backend/ums_smart_revenue/auth/permissions.py -> typed permission.
+# ============================================================================
+def _has_incompatible_active_grants(bind: sa.engine.Connection) -> bool:
+    """Return whether an active grant requires post-revision enum values."""
+    active_beta = bind.execute(
+        sa.select(sa.literal(1))
+        .select_from(_USER_ROLE_ASSIGNMENTS)
+        .where(
+            sa.and_(
+                _USER_ROLE_ASSIGNMENTS.c.active.is_(True),
+                _USER_ROLE_ASSIGNMENTS.c.role_key == _BETA_OPERATOR_ROLE,
+            )
+        )
+        .limit(1)
+    ).first()
+    if active_beta is not None:
+        return True
+
+    active_direct_import = bind.execute(
+        sa.select(sa.literal(1))
+        .select_from(_USER_PERMISSION_GRANTS)
+        .where(
+            sa.and_(
+                _USER_PERMISSION_GRANTS.c.active.is_(True),
+                _USER_PERMISSION_GRANTS.c.permission_key == _IMPORT_MANUAL_REVENUE_PERMISSION,
+            )
+        )
+        .limit(1)
+    ).first()
+    return active_direct_import is not None
 
 
 # ============================================================================

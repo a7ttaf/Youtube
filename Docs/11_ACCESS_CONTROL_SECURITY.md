@@ -49,7 +49,9 @@ DATA_STEWARD
 - Month unlock requires reason.
 - `BETA_OPERATOR` is a Finance Admin/Super Owner-controlled global role. Its
   manual revenue grant applies only to `POST /revenue/facts` with the
-  `manual-upload`/`MANUAL_UPLOAD` pair and does not imply connector execution.
+  exact `manual-upload` or `manual_upload` connector key paired with
+  `MANUAL_UPLOAD`; it does not imply connector execution. The submitted alias
+  is preserved as the connector scope and in the audit record.
 
 ## Authorization modes
 

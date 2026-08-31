@@ -55,10 +55,15 @@ from ums_smart_revenue.tenancy.context import get_current_tenant
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 _SCRIPT_PATH = _PROJECT_ROOT / "scripts" / "bootstrap_operator.py"
-_MIGRATION_PATH = (
+_HISTORICAL_MIGRATION_PATH = (
     _PROJECT_ROOT
     / "backend/ums_smart_revenue/db/alembic/versions/"
     / "20260825_0001_security_role_permission_seed.py"
+)
+_REPAIR_MIGRATION_PATH = (
+    _PROJECT_ROOT
+    / "backend/ums_smart_revenue/db/alembic/versions/"
+    / "20260825_0002_beta_operator_authorization_repair.py"
 )
 _TENANT_ID = UUID(UMS_TENANT_ID)
 _OPERATOR_EMAIL = "ops@example.com"
@@ -110,19 +115,23 @@ def _make_database(tmp_path: Path, *, with_org_schema: bool = True) -> str:
 
 
 def _seed_role_catalog(database_url: str) -> None:
-    """Apply the P0.7 seed migration so role assignment has its FK parents."""
+    """Apply the historical seed and forward repair so FK parents are current."""
     from alembic.migration import MigrationContext
     from alembic.operations import Operations
 
-    spec = importlib.util.spec_from_file_location("m_20260825_0001", _MIGRATION_PATH)
-    assert spec is not None and spec.loader is not None
-    migration = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(migration)
-
     engine = create_engine(database_url)
     with engine.begin() as connection:
-        migration.op = Operations(MigrationContext.configure(connection))
-        migration.upgrade()
+        operations = Operations(MigrationContext.configure(connection))
+        for name, path in (
+            ("m_20260825_0001", _HISTORICAL_MIGRATION_PATH),
+            ("m_20260825_0002", _REPAIR_MIGRATION_PATH),
+        ):
+            spec = importlib.util.spec_from_file_location(name, path)
+            assert spec is not None and spec.loader is not None
+            migration = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(migration)
+            migration.op = operations
+            migration.upgrade()
     engine.dispose()
 
 
@@ -756,8 +765,9 @@ def test_bootstrap_reports_a_database_failure_instead_of_a_traceback(tmp_path, c
     assert _users(database_url) == []
 
 
-def test_commit_disconnect_reports_unknown_and_exact_retry_recovers_idempotently(
-    tmp_path, capsys, monkeypatch
+@pytest.mark.parametrize("connection_invalidated", [False, True])
+def test_commit_dbapi_error_reports_unknown_and_exact_retry_recovers_idempotently(
+    tmp_path, capsys, monkeypatch, connection_invalidated
 ):
     """A lost COMMIT acknowledgement must not be reported as a definite rollback."""
     module = _load_script()
@@ -787,7 +797,7 @@ def test_commit_disconnect_reports_unknown_and_exact_retry_recovers_idempotently
                 statement=None,
                 params=None,
                 orig=ConnectionError("commit acknowledgement lost"),
-                connection_invalidated=True,
+                connection_invalidated=connection_invalidated,
             )
 
     monkeypatch.setitem(deps, "build_session_factory", lambda _url: _DisconnectAfterCommit)
@@ -798,6 +808,7 @@ def test_commit_disconnect_reports_unknown_and_exact_retry_recovers_idempotently
     assert "outcome is UNKNOWN" in first_stderr
     assert "Re-run the exact same bootstrap command" in first_stderr
     assert "nothing was committed" not in first_stderr
+    assert "Database connection was lost" not in first_stderr
     # The server committed before the acknowledgement was lost.
     assert len(_users(database_url)) == 1
     assert len(_org_units(database_url)) == 2
@@ -1406,7 +1417,7 @@ def test_seed_migration_catalog_covers_every_permission(tmp_path):
 
     assert "finance_admin" in role_keys
     # Derived from the registries, not typed as a literal count. A count only
-    # says "26 rows landed"; the set equality says WHICH, so a catalog that
+    # says "27 rows landed"; the set equality says WHICH, so a catalog that
     # seeded the right number of the wrong keys still fails.
     assert role_keys == {role.value for role in RoleKey}
     assert permission_keys == {permission.value for permission in Permission}
