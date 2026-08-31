@@ -263,6 +263,10 @@ scan_commit_object_delta() {
   if ! new_type="$(git cat-file -t "$new_oid" 2>/dev/null)"; then
     security_infra_failure "Security could not read committed object: $new_oid ($(security_path_for_log "$path"))"
   fi
+  # `git diff-tree -t` includes tree entries so an empty directory name is not
+  # invisible merely because it has no recursive leaf. Its path was scanned
+  # above; only blobs have payload bytes to materialize.
+  [ "$new_type" = "tree" ] && return 0
   [ "$new_type" = "blob" ] \
     || security_infra_failure "Security expected a committed blob for: $(security_path_for_log "$path")"
   if ! git cat-file blob "$new_oid" > "$security_temp_dir/blob-new"; then
@@ -330,11 +334,11 @@ scan_commit_delta() {
   local metadata="" path="" old_mode="" new_mode="" old_oid="" new_oid="" status="" extra=""
 
   if [ -n "$base_commit" ]; then
-    git diff-tree --raw --no-abbrev --no-commit-id --no-renames --diff-filter=ACMRTUXB \
+    git diff-tree -t --raw --no-abbrev --no-commit-id --no-renames --diff-filter=ACMRTUXB \
       -r -z "$base_commit" "$commit" -- > "$security_temp_dir/paths" \
       || security_infra_failure "Security could not enumerate $failure_context: $commit"
   else
-    git diff-tree --root --raw --no-abbrev --no-commit-id --no-renames \
+    git diff-tree --root -t --raw --no-abbrev --no-commit-id --no-renames \
       --diff-filter=ACMRTUXB -r -z "$commit" -- > "$security_temp_dir/paths" \
       || security_infra_failure "Security could not enumerate $failure_context: $commit"
   fi
@@ -354,6 +358,33 @@ scan_commit_delta() {
     fi
     scan_commit_object_delta "$old_oid" "$new_oid" "$old_mode" "$new_mode" "$path"
   done 3< "$security_temp_dir/paths"
+}
+
+scan_commit_tree_state() {
+  local commit="$1" failure_context="$2" entry="" metadata="" path=""
+  local mode="" object_type="" oid="" extra="" raw_hits=""
+
+  git ls-tree -r -t -z --full-tree "$commit" -- > "$security_temp_dir/tree-state" \
+    || security_infra_failure "Security could not enumerate $failure_context: $commit"
+  while IFS= read -r -d '' entry; do
+    metadata="${entry%%$'\t'*}"
+    path="${entry#*$'\t'}"
+    [ "$metadata" != "$entry" ] \
+      || security_infra_failure "Security received an incomplete tree entry: $commit"
+    read -r mode object_type oid extra <<< "$metadata"
+    if [ -n "${extra:-}" ] \
+      || [[ ! "$mode" =~ ^[0-7]{6}$ ]] \
+      || [[ ! "$oid" =~ ^[0-9a-f]{40,64}$ ]] \
+      || [[ ! "$object_type" =~ ^(blob|tree|commit)$ ]]; then
+      security_infra_failure "Security received an ambiguous tree entry: $commit"
+    fi
+    scan_sensitive_path "$path"
+    [ "$object_type" = "blob" ] || continue
+    git cat-file blob "$oid" > "$security_temp_dir/tree-state-blob" \
+      || security_infra_failure "Security could not read tree-state blob: $(security_path_for_log "$path")"
+    raw_hits="$(scan_searchable_file "$path" "$security_temp_dir/tree-state-blob" tree-state)"
+    record_secret_hits "$path" "$raw_hits"
+  done < "$security_temp_dir/tree-state"
 }
 
 scan_metadata_file() {
@@ -523,6 +554,23 @@ scan_outgoing_ref_tips() {
     scan_tag_chain "$object_oid"
     scan_outgoing_tip_history "$scanned_tip_commit"
   done
+
+  # Notes are mutable annotations, not immutable labels. Moving a notes ref
+  # backward changes the note content users see even when the old commit object
+  # remains reachable from the destination's current notes history. Scan the
+  # complete target state as well as newly published history so rollback cannot
+  # resurrect a credential-bearing note blob.
+  # shellcheck disable=SC2086
+  for tip in ${CI_GATE_PUSH_NOTES_TIPS:-}; do
+    object_oid="$(git rev-parse --verify "$tip" 2>/dev/null)" \
+      || security_infra_failure "Security outgoing notes tip is missing or unreadable: $tip"
+    [[ "$object_oid" =~ ^[0-9a-f]{40,64}$ ]] \
+      || security_infra_failure "Security outgoing notes tip is ambiguous: $tip"
+    scan_tag_chain "$object_oid"
+    scan_commit_metadata "$scanned_tip_commit"
+    scan_commit_tree_state "$scanned_tip_commit" "outgoing notes state"
+    scan_outgoing_tip_history "$scanned_tip_commit"
+  done
 }
 
 scan_local_paths() {
@@ -589,7 +637,7 @@ if [ -n "${CI_GATE_PUSH_OLD_SHA:-}${CI_GATE_PUSH_NEW_SHA:-}" ]; then
   scan_commit_history "$old_commit" "$new_commit"
 fi
 
-if [ -n "${CI_GATE_PUSH_TAG_TIPS:-}${CI_GATE_PUSH_OTHER_TIPS:-}" ]; then
+if [ -n "${CI_GATE_PUSH_TAG_TIPS:-}${CI_GATE_PUSH_OTHER_TIPS:-}${CI_GATE_PUSH_NOTES_TIPS:-}" ]; then
   push_context_seen=1
   scan_outgoing_ref_tips
 fi
@@ -599,16 +647,26 @@ if [ -n "${CI_GATE_PUSH_BRANCH_TIPS:-}" ] \
   security_infra_failure "Security received branch tips without an authoritative branch range."
 fi
 
-if [ -n "${CI_GATE_PUSH_REMOTE_REFS+set}${CI_GATE_PUSH_BRANCH_TIPS+set}${CI_GATE_PUSH_TAG_TIPS+set}${CI_GATE_PUSH_OTHER_TIPS+set}" ]; then
+outgoing_ref_names="${CI_GATE_PUSH_OUTGOING_REFS-${CI_GATE_PUSH_REMOTE_REFS:-}}"
+if [ -n "$outgoing_ref_names" ]; then
   push_context_seen=1
-  if security_data_has_secret "${CI_GATE_PUSH_REMOTE_REFS:-}"; then
+  if security_data_has_secret "$outgoing_ref_names"; then
     echo "Potential secret-like content in outgoing ref name: [redacted-secret-like-ref]"
     matches=1
   fi
 fi
 
-if [ -n "${CI_GATE_PUSH_REMOTE_REFS:-}" ] \
-  && [ -z "${CI_GATE_PUSH_NEW_SHA:-}${CI_GATE_PUSH_BRANCH_TIPS:-}${CI_GATE_PUSH_TAG_TIPS:-}${CI_GATE_PUSH_OTHER_TIPS:-}" ] \
+# hook-dispatch exports its ref lists as empty when git supplies no push
+# records. That is not an authoritative empty content set: it can also mean a
+# hook runner failed to forward stdin, so the hook deliberately gates the
+# checked-out tree. Only its explicit application-content-free marker may
+# suppress that fallback; notes still supply NOTES_TIPS and are scanned above.
+if [ "${CI_GATE_PUSH_DELETIONS_ONLY:-0}" = "1" ]; then
+  push_context_seen=1
+fi
+
+if [ -n "$outgoing_ref_names" ] \
+  && [ -z "${CI_GATE_PUSH_NEW_SHA:-}${CI_GATE_PUSH_BRANCH_TIPS:-}${CI_GATE_PUSH_TAG_TIPS:-}${CI_GATE_PUSH_OTHER_TIPS:-}${CI_GATE_PUSH_NOTES_TIPS:-}" ] \
   && [ "${CI_GATE_PUSH_DELETIONS_ONLY:-0}" != "1" ]; then
   security_infra_failure "Security received outgoing ref names without their object tips."
 fi

@@ -917,6 +917,16 @@ run_ship_deletion_only_checks() {
   run_phase "branch-protection:./ci/checks/branch-protection.sh"
 }
 
+# Notes do not publish an application tree, but they do publish Git objects.
+# Keep the expensive application lanes skipped while still scanning the notes
+# commit message, tree paths, and note blobs before they reach the destination.
+run_ship_notes_only_checks() {
+  echo "Push publishes only Git notes; application content lanes do not apply."
+  echo "  Destination protection and security object scanning still run."
+  run_phase "branch-protection:./ci/checks/branch-protection.sh" \
+            "security:./ci/checks/security.sh"
+}
+
 # The other push that carries no content: one that publishes only a name.
 #
 # `git tag v1.2 <commit the destination already has>; git push origin v1.2`
@@ -925,14 +935,15 @@ run_ship_deletion_only_checks() {
 # the complete ship plan anyway, because deletions were the only content-free
 # case it knew. So test-layout, the node lane, python, the build and the shell
 # suites all ran against whatever happened to be checked out, and any failure
-# already sitting there blocked an ordinary release. Same reasoning as the
-# deletions path above, and the same exception: destination protection still
-# runs, because where a push is going is a question a label-only push still
-# answers.
+# already sitting there blocked an ordinary release. Destination protection
+# still runs because where a push is going remains relevant; security also runs
+# because the newly published ref name and annotated-tag object are new bytes
+# even when the target commit is already present on the destination.
 run_ship_label_only_checks() {
   echo "Push publishes only refs the destination already carries; no tree is going out."
-  echo "  Destination protection still runs."
-  run_phase "branch-protection:./ci/checks/branch-protection.sh"
+  echo "  Destination protection and security ref-object scanning still run."
+  run_phase "branch-protection:./ci/checks/branch-protection.sh" \
+            "security:./ci/checks/security.sh"
 }
 
 # ci/checks/typecheck.sh is scheduled here, and was not scheduled anywhere.
@@ -988,7 +999,11 @@ run_mode() {
   # a rule that will be true in one place, which is the shape of nearly every
   # finding on this branch.
   if [ "$MODE" = "ship" ] && [ "${CI_GATE_PUSH_DELETIONS_ONLY:-0}" = "1" ]; then
-    run_ship_deletion_only_checks
+    if [ -n "${CI_GATE_PUSH_NOTES_TIPS:-}" ]; then
+      run_ship_notes_only_checks
+    else
+      run_ship_deletion_only_checks
+    fi
     return 0
   fi
   if [ "$MODE" = "ship" ] && ci::git::push_is_label_only; then

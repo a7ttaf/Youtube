@@ -2002,6 +2002,19 @@ YML
   [[ "$output" != *build* ]]
   [[ "$output" != *security* ]]
 
+  # Notes publish no application tree, but their commit/tree/blob objects can
+  # carry credentials. The short path therefore retains security without
+  # widening back to the application or shell-self-test lanes.
+  run _pf_lanes CI_GATE_PUSH_DELETIONS_ONLY=1 CI_GATE_PUSH_NOTES_TIPS=HEAD \
+                CI_GATE_PUSH_OUTGOING_REFS=refs/notes/commits
+  [ "$status" -eq 0 ]
+  [[ "$output" == *branch-protection* ]]
+  [[ "$output" == *security* ]]
+  [[ "$output" != *node* ]]
+  [[ "$output" != *test-layout* ]]
+  [[ "$output" != *tests-shell* ]]
+  [[ "$output" != *build* ]]
+
   # And `full` is a deliberate whole-tree run. It is not a push at all, so an
   # environment variable left over from one must not narrow it.
   MODE_UNDER_TEST=full
@@ -2314,8 +2327,21 @@ YML
   [ "$status" -eq 0 ]
   [[ "$output" == *branch-protection* ]] \
     || { echo "lanes.conf mode skipped destination protection for a tag: $output" >&2; rm -rf "$sb"; return 1; }
+  [[ "$output" == *security* ]] \
+    || { echo "label-only ref objects skipped security: $output" >&2; rm -rf "$sb"; return 1; }
   [[ "$output" != *test-layout* ]] \
     || { echo "a label-only push ran the content lanes under lanes.conf: $output" >&2; rm -rf "$sb"; return 1; }
+
+  # A published label beside notes still takes the narrow application path,
+  # but notes are mutable Git content and must retain the security object scan.
+  run _pf_lanes ship CI_GATE_USE_LANES=1 CI_GATE_PUSH_REMOTE=origin \
+                CI_GATE_PUSH_REMOTE_REFS= CI_GATE_PUSH_TAG_TIPS="$published" \
+                CI_GATE_PUSH_NOTES_TIPS="$published"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *branch-protection* ]]
+  [[ "$output" == *security* ]]
+  [[ "$output" != *test-layout* ]]
+  [[ "$output" != *node* ]]
 
   # The control that the hoist did not widen the rule: `full` is a deliberate
   # whole-tree run, not a push, so a leftover push variable must not narrow it
@@ -2966,6 +2992,8 @@ YML
   [ "$status" -eq 0 ]
   [[ "$output" == *branch-protection* ]] \
     || { echo "destination protection was skipped: $output" >&2; rm -rf "$sb"; return 1; }
+  [[ "$output" == *security* ]] \
+    || { echo "label-only ref objects skipped security: $output" >&2; rm -rf "$sb"; return 1; }
   [[ "$output" != *test-layout* ]] \
     || { echo "a label-only push still ran the content lanes: $output" >&2; rm -rf "$sb"; return 1; }
   [[ "$output" != *tests-shell* ]]
@@ -2976,8 +3004,8 @@ YML
   # Asserted on test-layout alone. tests-shell is changeset-filtered and
   # these rows supply no push range, so its absence would say nothing about
   # the rule; test-layout is on the always-run list, and the short path runs
-  # branch-protection and nothing else -- so test-layout present is exactly
-  # "the short path was not taken".
+  # branch-protection plus security ref-object scanning -- so test-layout
+  # present is exactly "the short path was not taken".
   #
   # A tag on a commit the destination does not have is carrying that commit out,
   # and the lanes over the checkout are exactly the right thing to run.

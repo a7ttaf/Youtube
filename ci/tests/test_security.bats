@@ -6,7 +6,13 @@ setup() {
   mkdir -p "$SECURITY_SB/ci/checks" "$SECURITY_SB/ci/lib"
   cp "$REPO_ROOT/ci/checks/security.sh" "$REPO_ROOT/ci/checks/common.sh" \
     "$SECURITY_SB/ci/checks/"
+  cp "$REPO_ROOT/ci/hook-dispatch.sh" "$SECURITY_SB/ci/"
   cp "$REPO_ROOT/ci/lib/common.sh" "$SECURITY_SB/ci/lib/"
+  cat > "$SECURITY_SB/ci/preflight.sh" <<'SH'
+#!/usr/bin/env bash
+exec ci/checks/security.sh
+SH
+  chmod +x "$SECURITY_SB/ci/preflight.sh"
   (
     cd "$SECURITY_SB"
     git init -q -b feature/security .
@@ -229,6 +235,27 @@ security_utf16_secret() {
   secret_path="-$token"
   printf 'safe blob\n' > "$SECURITY_SB/$secret_path"
   security_commit committed-secret-path
+  tip="$(cd "$SECURITY_SB" && git rev-parse HEAD)"
+
+  run bash -c "cd '$SECURITY_SB' && CI_GATE_PUSH_OLD_SHA='$base' \
+    CI_GATE_PUSH_NEW_SHA='$tip' bash ci/checks/security.sh 2>&1"
+
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"Potential secret-like content in path: [redacted-secret-like-path]"* ]]
+  [[ "$output" != *"$token"* ]]
+}
+
+@test "security: committed empty-tree path bytes are scanned" {
+  base="$(cd "$SECURITY_SB" && git rev-parse HEAD)"
+  token="$(security_github_token)"
+  (
+    cd "$SECURITY_SB"
+    empty_tree="$(git mktree </dev/null)"
+    root_tree="$({ git ls-tree HEAD; printf '040000 tree %s\t%s\n' "$empty_tree" "$token"; } | git mktree)"
+    tip="$(printf 'add empty tree\n' | \
+      git -c user.email=t@t -c user.name=t commit-tree "$root_tree" -p HEAD)"
+    git reset -q --hard "$tip"
+  )
   tip="$(cd "$SECURITY_SB" && git rev-parse HEAD)"
 
   run bash -c "cd '$SECURITY_SB' && CI_GATE_PUSH_OLD_SHA='$base' \
@@ -512,7 +539,7 @@ security_utf16_secret() {
 
   run bash -c "cd '$SECURITY_SB' && CI_GATE_PUSH_REMOTE=origin \
     CI_GATE_PUSH_REMOTE_TIPS_FOR=origin CI_GATE_PUSH_REMOTE_TIPS='$base' \
-    CI_GATE_PUSH_REMOTE_REFS=refs/tags/security-tag \
+    CI_GATE_PUSH_OUTGOING_REFS=refs/tags/security-tag \
     CI_GATE_PUSH_TAG_TIPS='$tag_oid' bash ci/checks/security.sh 2>&1"
 
   [ "$status" -eq 20 ]
@@ -533,7 +560,7 @@ security_utf16_secret() {
 
   run bash -c "cd '$SECURITY_SB' && CI_GATE_PUSH_REMOTE=origin \
     CI_GATE_PUSH_REMOTE_TIPS_FOR=origin CI_GATE_PUSH_REMOTE_TIPS='$base' \
-    CI_GATE_PUSH_REMOTE_REFS=refs/tags/outer-security-tag \
+    CI_GATE_PUSH_OUTGOING_REFS=refs/tags/outer-security-tag \
     CI_GATE_PUSH_TAG_TIPS='$outer_oid' bash ci/checks/security.sh 2>&1"
 
   [ "$status" -eq 20 ]
@@ -554,11 +581,28 @@ security_utf16_secret() {
 
   run bash -c "cd '$SECURITY_SB' && CI_GATE_PUSH_REMOTE=origin \
     CI_GATE_PUSH_REMOTE_TIPS_FOR=origin CI_GATE_PUSH_REMOTE_TIPS='$base' \
-    CI_GATE_PUSH_REMOTE_REFS=refs/tags/lightweight-security \
+    CI_GATE_PUSH_OUTGOING_REFS=refs/tags/lightweight-security \
     CI_GATE_PUSH_TAG_TIPS='$tag_tip' bash ci/checks/security.sh 2>&1"
 
   [ "$status" -eq 20 ]
   [[ "$output" == *"Potential secret-like content in tag-transient.txt"* ]]
+}
+
+@test "security: label-only tag does not rescan destination-reachable history" {
+  security_secret_line > "$SECURITY_SB/already-published-secret.txt"
+  security_commit published-add-secret
+  secret_tip="$(cd "$SECURITY_SB" && git rev-parse HEAD)"
+  rm "$SECURITY_SB/already-published-secret.txt"
+  security_commit published-delete-secret
+  remote_tip="$(cd "$SECURITY_SB" && git rev-parse HEAD)"
+
+  run bash -c "cd '$SECURITY_SB' && CI_GATE_PUSH_REMOTE=origin \
+    CI_GATE_PUSH_REMOTE_TIPS_FOR=origin CI_GATE_PUSH_REMOTE_TIPS='$remote_tip' \
+    CI_GATE_PUSH_OUTGOING_REFS=refs/tags/old-published-state \
+    CI_GATE_PUSH_TAG_TIPS='$secret_tip' bash ci/checks/security.sh 2>&1"
+
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Security checks passed."* ]]
 }
 
 @test "security: other-ref tips scan unpublished reachable history" {
@@ -571,7 +615,7 @@ security_utf16_secret() {
 
   run bash -c "cd '$SECURITY_SB' && CI_GATE_PUSH_REMOTE=origin \
     CI_GATE_PUSH_REMOTE_TIPS_FOR=origin CI_GATE_PUSH_REMOTE_TIPS='$base' \
-    CI_GATE_PUSH_REMOTE_REFS=refs/notes/security \
+    CI_GATE_PUSH_OUTGOING_REFS=refs/publish/security \
     CI_GATE_PUSH_OTHER_TIPS='$tip' bash ci/checks/security.sh 2>&1"
 
   [ "$status" -eq 20 ]
@@ -579,11 +623,162 @@ security_utf16_secret() {
 }
 
 @test "security: hook ref names without object tips fail closed" {
-  run bash -c "cd '$SECURITY_SB' && CI_GATE_PUSH_REMOTE_REFS=refs/tags/missing-tip \
+  run bash -c "cd '$SECURITY_SB' && CI_GATE_PUSH_OUTGOING_REFS=refs/tags/missing-tip \
     bash ci/checks/security.sh 2>&1"
 
   [ "$status" -eq 30 ]
   [[ "$output" == *"without their object tips"* ]]
+}
+
+@test "security: actual notes-only hook context scans note objects" {
+  note_message="$(security_secret_line)"
+  (
+    cd "$SECURITY_SB"
+    git -c user.email=t@t -c user.name=t notes --ref=commits add -m "$note_message" HEAD
+  )
+  note_tip="$(cd "$SECURITY_SB" && git rev-parse refs/notes/commits)"
+  zero=0000000000000000000000000000000000000000
+
+  run bash -c "cd '$SECURITY_SB' && printf 'refs/notes/commits %s refs/notes/commits %s\\n' \
+    '$note_tip' '$zero' | bash ci/hook-dispatch.sh pre-push origin file:///x 2>&1"
+
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"Potential secret-like content in"* ]]
+}
+
+@test "security: notes rollback scans the complete visible note state" {
+  note_message="$(security_secret_line)"
+  (
+    cd "$SECURITY_SB"
+    git -c user.email=t@t -c user.name=t notes --ref=commits add -m "$note_message" HEAD
+    other_object="$(printf 'other object\n' | git hash-object -w --stdin)"
+    git -c user.email=t@t -c user.name=t notes --ref=commits add -m safe-note "$other_object"
+  )
+  secret_tip="$(cd "$SECURITY_SB" && git rev-parse refs/notes/commits)"
+  (
+    cd "$SECURITY_SB"
+    git -c user.email=t@t -c user.name=t notes --ref=commits remove HEAD
+    git init -q --bare remote.git
+    git remote add origin "$SECURITY_SB/remote.git"
+    git push -q origin refs/notes/commits
+  )
+  remote_tip="$(cd "$SECURITY_SB" && git rev-parse refs/notes/commits)"
+  (cd "$SECURITY_SB" && git update-ref refs/notes/commits "$secret_tip")
+
+  run bash -c "cd '$SECURITY_SB' && printf 'refs/notes/commits %s refs/notes/commits %s\\n' \
+    '$secret_tip' '$remote_tip' | bash ci/hook-dispatch.sh pre-push origin '$SECURITY_SB/remote.git' 2>&1"
+
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"Potential secret-like content in"* ]]
+}
+
+@test "security: notes state scans empty-tree path bytes" {
+  token="$(security_github_token)"
+  (
+    cd "$SECURITY_SB"
+    empty_tree="$(git mktree </dev/null)"
+    secret_tree="$(printf '040000 tree %s\t%s\n' "$empty_tree" "$token" | git mktree)"
+    secret_tip="$(printf 'secret notes state\n' | \
+      git -c user.email=t@t -c user.name=t commit-tree "$secret_tree")"
+    safe_tree="$(git mktree </dev/null)"
+    remote_tip="$(printf 'safe notes descendant\n' | \
+      git -c user.email=t@t -c user.name=t commit-tree "$safe_tree" -p "$secret_tip")"
+    printf '%s %s\n' "$secret_tip" "$remote_tip" > .note-state-shas
+  )
+  read -r secret_tip remote_tip < "$SECURITY_SB/.note-state-shas"
+
+  run bash -c "cd '$SECURITY_SB' && CI_GATE_PUSH_REMOTE=origin \
+    CI_GATE_PUSH_REMOTE_TIPS_FOR=origin CI_GATE_PUSH_REMOTE_TIPS='$remote_tip' \
+    CI_GATE_PUSH_OUTGOING_REFS=refs/notes/commits \
+    CI_GATE_PUSH_NOTES_TIPS='$secret_tip' bash ci/checks/security.sh 2>&1"
+
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"Potential secret-like content in path: [redacted-secret-like-path]"* ]]
+  [[ "$output" != *"$token"* ]]
+}
+
+@test "security: actual hook scans secret-like non-branch ref names" {
+  token="$(security_github_token)"
+  outgoing_ref="refs/tags/release-$token"
+  tip="$(cd "$SECURITY_SB" && git rev-parse HEAD)"
+  zero=0000000000000000000000000000000000000000
+  (
+    cd "$SECURITY_SB"
+    git init -q --bare remote.git
+    git remote add origin "$SECURITY_SB/remote.git"
+    git push -q origin HEAD:refs/heads/main
+  )
+
+  run bash -c "cd '$SECURITY_SB' && printf '%s %s %s %s\\n' \
+    '$outgoing_ref' '$tip' '$outgoing_ref' '$zero' | \
+    bash ci/hook-dispatch.sh pre-push origin '$SECURITY_SB/remote.git' 2>&1"
+
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"Potential secret-like content in outgoing ref name: [redacted-secret-like-ref]"* ]]
+  [[ "$output" != *"$token"* ]]
+}
+
+@test "security: real label-only preflight runs the ref-object scan" {
+  plan_sb="$BATS_TEST_TMPDIR/label-only-plan"
+  mkdir -p "$plan_sb"
+  cp -R "$REPO_ROOT/ci" "$plan_sb/ci"
+  rm -rf "$plan_sb/ci/reports" "$plan_sb/ci/artifacts"
+  local check_file check_name
+  for check_file in "$plan_sb"/ci/checks/*.sh; do
+    check_name="$(basename "$check_file")"
+    case "$check_name" in
+      common.sh|security.sh) continue ;;
+    esac
+    printf '#!/usr/bin/env bash\nexit 0\n' > "$check_file"
+    chmod +x "$check_file"
+  done
+  (
+    cd "$plan_sb"
+    git init -q -b main .
+    printf 'safe\n' > safe.txt
+    git add -A
+    git -c user.email=t@t -c user.name=t commit -qm baseline
+    git init -q --bare remote.git
+    git remote add origin "$plan_sb/remote.git"
+    git push -q origin HEAD:refs/heads/main
+    tag_message="$(security_secret_line)"
+    git -c user.email=t@t -c user.name=t tag -a release-secret -m "$tag_message" HEAD
+  )
+  tag_oid="$(cd "$plan_sb" && git rev-parse refs/tags/release-secret)"
+  zero=0000000000000000000000000000000000000000
+
+  run bash -c "cd '$plan_sb' && printf 'refs/tags/release-secret %s refs/tags/release-secret %s\\n' \
+    '$tag_oid' '$zero' | CI_GATE_USE_LANES=0 bash ci/hook-dispatch.sh \
+    pre-push origin '$plan_sb/remote.git' 2>&1"
+
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"Result [security]: FAIL_NEW_ISSUE"* ]]
+  [[ "$output" == *"Potential secret-like content in tag-metadata-$tag_oid"* ]]
+}
+
+@test "security: empty hook ref lists fall back to the checked-out tree" {
+  security_secret_line > "$SECURITY_SB/safe.txt"
+
+  run bash -c "cd '$SECURITY_SB' && CI_GATE_PUSH_REMOTE_REFS= \
+    CI_GATE_PUSH_BRANCH_TIPS= CI_GATE_PUSH_TAG_TIPS= CI_GATE_PUSH_OTHER_TIPS= \
+    CI_GATE_PUSH_NOTES_TIPS= CI_GATE_PUSH_OUTGOING_REFS= \
+    bash ci/checks/security.sh 2>&1"
+
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"Potential secret-like content in safe.txt"* ]]
+}
+
+@test "security: explicit content-free hook context does not scan the checkout" {
+  security_secret_line > "$SECURITY_SB/safe.txt"
+  secret_ref="$(security_github_token)"
+
+  run bash -c "cd '$SECURITY_SB' && CI_GATE_PUSH_REMOTE_REFS='$secret_ref' \
+    CI_GATE_PUSH_BRANCH_TIPS= CI_GATE_PUSH_TAG_TIPS= CI_GATE_PUSH_OTHER_TIPS= \
+    CI_GATE_PUSH_NOTES_TIPS= CI_GATE_PUSH_OUTGOING_REFS= \
+    CI_GATE_PUSH_DELETIONS_ONLY=1 bash ci/checks/security.sh 2>&1"
+
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Security checks passed."* ]]
 }
 
 @test "security: a zero destination scans the complete new history" {

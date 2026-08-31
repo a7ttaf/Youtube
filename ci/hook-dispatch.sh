@@ -69,7 +69,7 @@ case "$HOOK_NAME" in
     # would misdirect a range or a tip the same way.
     unset CI_GATE_PUSH_DELETIONS_ONLY CI_GATE_PUSH_NEW_SHA CI_GATE_PUSH_OLD_SHA
     unset CI_GATE_PUSH_REMOTE_REFS CI_GATE_PUSH_BRANCH_TIPS CI_GATE_PUSH_TAG_TIPS
-    unset CI_GATE_PUSH_OTHER_TIPS
+    unset CI_GATE_PUSH_OTHER_TIPS CI_GATE_PUSH_NOTES_TIPS CI_GATE_PUSH_OUTGOING_REFS
     unset CI_GATE_PUSH_REMOTE_TIPS CI_GATE_PUSH_REMOTE_TIPS_FOR
     # The destination remote *name*, which is what scopes the tag-publication
     # check: without it that check asked whether any remote-tracking branch
@@ -100,7 +100,8 @@ case "$HOOK_NAME" in
     # HEAD — and here that means leaving the base empty so it can.
     if [ ! -t 0 ]; then
       _push_old="" _push_new="" _push_nobase=0 _push_unrelated="" _push_dests="" _push_any_content=0
-      _push_btips="" _push_ttips="" _push_otips="" _push_records=0 _push_is_notes=0
+      _push_btips="" _push_ttips="" _push_otips="" _push_ntips="" _push_outrefs=""
+      _push_records=0 _push_is_notes=0
       while read -r _lref _lsha _rref _rsha; do
         [ -n "${_lsha:-}" ] || continue
         # Counted separately from content, because "every record was a deletion"
@@ -137,6 +138,14 @@ case "$HOOK_NAME" in
         if [ "$_push_has_content" -eq 0 ]; then
           continue
         fi
+
+        # Security scans every name this push publishes, not only branch
+        # destinations. Git ref names cannot contain whitespace, so the same
+        # space-delimited contract used for object IDs is unambiguous here.
+        case " ${_push_outrefs} " in
+          *" ${_rref} "*) ;;
+          *) _push_outrefs="${_push_outrefs} ${_rref}" ;;
+        esac
 
         # Every commit a branch destination is being moved to, distinctly.
         #
@@ -183,9 +192,11 @@ case "$HOOK_NAME" in
             ;;
           # Notes are annotations, not project source. `git push origin
           # refs/notes/commits` publishes a commit whose tree is note blobs,
-          # which no content lane reads and none needs to -- and the covers rule
-          # refused it, with advice ("check out the commit being pushed") that
-          # cannot be followed for a notes commit.
+          # which application content lanes do not read. Security is different:
+          # it consumes the dedicated notes-tip list below so note messages,
+          # trees, paths, and blobs are still inspected before publication. The
+          # checkout-coverage rule must not judge a notes commit; its advice to
+          # "check out the commit being pushed" cannot be followed for notes.
           # Content-free, not merely skipped. `_push_any_content` used to be
           # raised above this case, so this arm's own conclusion arrived too
           # late: a notes-only push exported neither a tip nor the
@@ -195,7 +206,13 @@ case "$HOOK_NAME" in
           # project content. It is raised below this decision now. A mixed
           # notes-and-branch push is unaffected: the branch record raises the
           # flag for itself.
-          refs/notes/*) _push_is_notes=1 ;;
+          refs/notes/*)
+            _push_is_notes=1
+            case " ${_push_ntips} " in
+              *" ${_lsha} "*) ;;
+              *) _push_ntips="${_push_ntips} ${_lsha}" ;;
+            esac
+            ;;
           # Everything else. Gerrit's refs/for/*, a refs/publish/* deployment
           # pointer, refs/meta/config: destinations this gate has no model of,
           # and they were invisible to both lists above, so the record
@@ -349,13 +366,14 @@ case "$HOOK_NAME" in
       export CI_GATE_PUSH_BRANCH_TIPS="${_push_btips# }"
       export CI_GATE_PUSH_TAG_TIPS="${_push_ttips# }"
       export CI_GATE_PUSH_OTHER_TIPS="${_push_otips# }"
-      # A push whose every record is a deletion carries no content, and there is
-      # nothing for a content or history check to report on. Stated explicitly
-      # rather than left as "no new sha", because that is indistinguishable from
-      # "nobody told us" and resolves to HEAD -- the checked-out branch, which
-      # is not being pushed anywhere. Destination protection still runs off
-      # CI_GATE_PUSH_REMOTE_REFS above: deleting `main` is exactly the push that
-      # must still be refused.
+      export CI_GATE_PUSH_NOTES_TIPS="${_push_ntips# }"
+      export CI_GATE_PUSH_OUTGOING_REFS="${_push_outrefs# }"
+      # A push whose records are all deletions or notes carries no application
+      # tree. Stated explicitly rather than left as "no new sha", because that
+      # is indistinguishable from "nobody told us" and resolves to HEAD -- the
+      # checked-out branch, which is not being pushed anywhere. Destination
+      # protection still runs for deletions; notes additionally retain the
+      # security object scan through CI_GATE_PUSH_NOTES_TIPS above.
       #
       # `_push_records -gt 0` is the whole of the difference between a statement
       # and a shrug. `_push_any_content` starts at 0 and only rises inside the

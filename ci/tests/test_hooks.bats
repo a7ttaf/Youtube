@@ -60,6 +60,8 @@ echo "DEST=${CI_GATE_PUSH_REMOTE_REFS-<unset>}"
 echo "TIPS=${CI_GATE_PUSH_BRANCH_TIPS-<unset>}"
 echo "TAGS=${CI_GATE_PUSH_TAG_TIPS-<unset>}"
 echo "OTHER=${CI_GATE_PUSH_OTHER_TIPS-<unset>}"
+echo "NOTES=${CI_GATE_PUSH_NOTES_TIPS-<unset>}"
+echo "OUTREFS=${CI_GATE_PUSH_OUTGOING_REFS-<unset>}"
 echo "DELONLY=${CI_GATE_PUSH_DELETIONS_ONLY-<unset>}"
 exit 0
 SH
@@ -666,6 +668,8 @@ refs/heads/old %s refs/publish/prod %s
   [[ "$output" != *"OTHER=$HD_ROOT"* ]]
   [[ "$output" == *"TAGS="* ]]
   [[ "$output" != *"TAGS=$HD_ROOT"* ]]
+  [[ "$output" == *"NOTES=$HD_ROOT"* ]]
+  [[ "$output" == *"OUTREFS=refs/notes/commits"* ]]
   rm -rf "$HD_SB"
 }
 
@@ -679,7 +683,9 @@ refs/heads/old %s refs/publish/prod %s
   # test-layout, the node lane, the build and the shell suites all skipped.
   _hd_sandbox
   run bash -c "cd '$HD_SB' && printf 'refs/heads/main %s refs/heads/main %s
-' '$HD_TIP' '$HD_BASE' | CI_GATE_PUSH_DELETIONS_ONLY=1 CI_GATE_PUSH_TAG_TIPS=stale CI_GATE_PUSH_NEW_SHA=stale bash ci/hook-dispatch.sh pre-push origin file:///x 2>&1"
+' '$HD_TIP' '$HD_BASE' | CI_GATE_PUSH_DELETIONS_ONLY=1 CI_GATE_PUSH_TAG_TIPS=stale \
+CI_GATE_PUSH_NOTES_TIPS=stale CI_GATE_PUSH_OUTGOING_REFS=stale \
+CI_GATE_PUSH_NEW_SHA=stale bash ci/hook-dispatch.sh pre-push origin file:///x 2>&1"
   [ "$status" -eq 0 ]
   [[ "$output" == *"DELONLY=<unset>"* ]]
   [[ "$output" == *"NEW=$HD_TIP"* ]]
@@ -692,6 +698,8 @@ refs/heads/old %s refs/publish/prod %s
 ' '$zero' '$HD_BASE' | bash ci/hook-dispatch.sh pre-push origin file:///x 2>&1"
   [ "$status" -eq 0 ]
   [[ "$output" == *"DELONLY=1"* ]]
+  [[ "$output" == *"NOTES="* ]]
+  [[ "$output" != *"NOTES=$HD_ROOT"* ]]
   rm -rf "$HD_SB"
 }
 
@@ -708,6 +716,7 @@ refs/heads/old %s refs/publish/prod %s
 ' '$HD_ROOT' '$zero' | bash ci/hook-dispatch.sh pre-push origin file:///x 2>&1"
   [ "$status" -eq 0 ]
   [[ "$output" == *"DELONLY=1"* ]]
+  [[ "$output" == *"NOTES=$HD_ROOT"* ]]
 
   # The control: a branch record beside the notes one raises the flag for
   # itself, and that push is gated in full.
