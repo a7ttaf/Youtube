@@ -97,7 +97,10 @@ def test_sqlite_request_rollback_undoes_released_repository_savepoint(tmp_path):
         connection.exec_driver_sql("CREATE TABLE request_rollback_probe (id INTEGER PRIMARY KEY)")
 
     request_session = session_dependency(factory)()
-    session = next(request_session)
+    try:
+        session = next(request_session)
+    except StopIteration:
+        raise AssertionError("expected the request dependency to yield a session") from None
     with session.begin_nested():
         session.execute(sa.text("INSERT INTO request_rollback_probe (id) VALUES (1)"))
 
@@ -128,7 +131,10 @@ def test_sqlite_concurrent_request_rollback_cannot_erase_committed_owner(
         connection.exec_driver_sql("CREATE TABLE concurrent_probe (id INTEGER PRIMARY KEY)")
 
     first_request = session_dependency(factory)()
-    first_session = next(first_request)
+    try:
+        first_session = next(first_request)
+    except StopIteration:
+        raise AssertionError("expected the first request to yield a session") from None
     with first_session.begin_nested():
         first_session.execute(sa.text("INSERT INTO concurrent_probe (id) VALUES (1)"))
 
@@ -139,7 +145,10 @@ def test_sqlite_concurrent_request_rollback_cannot_erase_committed_owner(
         """Acquire after request one, write, then exercise dependency rollback."""
         second_request = session_dependency(factory)()
         second_attempting.set()
-        second_session = next(second_request)
+        try:
+            second_session = next(second_request)
+        except StopIteration:
+            raise AssertionError("expected the second request to yield a session") from None
         second_acquired.set()
         with second_session.begin_nested():
             second_session.execute(sa.text("INSERT INTO concurrent_probe (id) VALUES (2)"))
@@ -199,19 +208,25 @@ def test_no_context_clears_stale_context_when_clear_helper_is_absent():
     """Missing clear helper must not leave a stale tenant row on pooled backends."""
 
     class _Result:
+        """Result stub whose scalar() returns the value captured at build time."""
+
         def __init__(self, value=None):
             self._value = value
 
         def scalar(self):
+            """Return the value this stub was constructed with."""
             return self._value
 
     class _Connection:
+        """Connection stub that records every driver statement it receives."""
+
         dialect = type("Dialect", (), {"name": "postgresql"})()
 
         def __init__(self):
             self.calls = []
 
         def exec_driver_sql(self, sql, parameters=None):
+            """Record the statement, answering False for the clear-helper probe."""
             self.calls.append((sql, parameters))
             if sql == "SELECT to_regprocedure(%s) IS NOT NULL":
                 return _Result(False)

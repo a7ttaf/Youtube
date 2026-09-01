@@ -66,6 +66,8 @@ def _require_claim(kind: str, value: str) -> str:
 
 @dataclass(frozen=True)
 class ExternalIdentityRecord:
+    """Immutable projection of one external identity mapping row."""
+
     provider: str
     provider_subject: str
     normalized_email: str
@@ -94,6 +96,7 @@ class SqlAlchemyExternalIdentityRepository:
         provider: str,
         provider_subject: str,
     ) -> UUID | None:
+        """Return the user id mapped to one exact provider subject, or None."""
         _require_claim("provider", provider)
         _require_claim("provider_subject", provider_subject)
         try:
@@ -126,6 +129,7 @@ class SqlAlchemyExternalIdentityRepository:
         provider: str,
         normalized_email: str,
     ) -> UUID | None:
+        """Return the user id mapped to a case-insensitive email, or None."""
         _require_claim("provider", provider)
         _require_claim("normalized_email", normalized_email)
         try:

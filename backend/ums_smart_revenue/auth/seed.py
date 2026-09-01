@@ -168,6 +168,7 @@ ROLE_PERMISSIONS: dict[RoleKey, frozenset[Permission]] = {
 
 
 def initial_role_permission_rows() -> list[dict[str, str]]:
+    """Flatten the role/permission registry into deterministic seed rows."""
     rows: list[dict[str, str]] = []
     for role, permissions in sorted(ROLE_PERMISSIONS.items(), key=lambda item: item[0].value):
         for permission in sorted(permissions, key=lambda item: item.value):

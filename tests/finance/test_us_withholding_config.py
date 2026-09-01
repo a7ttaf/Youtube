@@ -36,6 +36,7 @@ ACCOUNT_B = "pub-pr228-b"
 
 @pytest.fixture()
 def session(tmp_path) -> Session:
+    """Yield a SQLite session over the security schema with the finance user seeded."""
     engine = create_engine(f"sqlite+pysqlite:///{(tmp_path / 'wh.db').as_posix()}")
     SecurityBase.metadata.create_all(engine)
     with Session(engine) as db:
@@ -66,22 +67,26 @@ def test_validate_us_withholding_rate_rejects_invalid_numeric_values(
     rate: Decimal,
     message: str,
 ) -> None:
+    """Out-of-range, too-precise, and non-finite rates each raise a matching ValueError."""
     with pytest.raises(ValueError, match=message):
         validate_us_withholding_rate(rate)
 
 
 @pytest.mark.parametrize("rate", [Decimal("0"), Decimal("0.123456"), Decimal("0.30")])
 def test_validate_us_withholding_rate_accepts_numeric_boundaries(rate: Decimal) -> None:
+    """Zero, six-decimal, and the 0.30 cap rates all validate."""
     validate_us_withholding_rate(rate)
 
 
 def test_validate_us_withholding_rate_is_independent_of_ambient_decimal_context() -> None:
+    """Validation ignores a hostile ambient decimal context (prec=5)."""
     with localcontext() as context:
         context.prec = 5
         validate_us_withholding_rate(Decimal("0.123456"))
 
 
 def test_get_effective_rate_returns_none_without_config(session: Session) -> None:
+    """No stored config means get_effective_rate returns None."""
     repo = SqlAlchemyUsWithholdingConfigRepository(session)
     assert (
         repo.get_effective_rate(
@@ -94,6 +99,7 @@ def test_get_effective_rate_returns_none_without_config(session: Session) -> Non
 
 
 def test_get_effective_rate_picks_latest_effective_from(session: Session) -> None:
+    """The read returns the newest revision whose effective_from is on or before as_of."""
     repo = SqlAlchemyUsWithholdingConfigRepository(session)
     repo.record_confirmed_rate(
         tenant_id=TENANT_ID,
@@ -131,6 +137,7 @@ def test_get_effective_rate_picks_latest_effective_from(session: Session) -> Non
 def test_get_effective_rate_uses_revision_when_timestamp_and_uuid_order_conflict(
     session: Session,
 ) -> None:
+    """Tied created_at timestamps fall back to revision order, not UUID order."""
     tied_at = datetime(2026, 4, 1, 12, tzinfo=UTC)
     older_high_id = UUID("ffffffff-ffff-ffff-ffff-ffffffffffff")
     later_low_id = UUID("00000000-0000-0000-0000-000000000001")
@@ -177,6 +184,7 @@ def test_get_effective_rate_uses_revision_when_timestamp_and_uuid_order_conflict
 def test_record_confirmed_rate_allocates_append_only_same_date_revisions(
     session: Session,
 ) -> None:
+    """Same-date reconfirmations append revisions 1 and 2, and reads resolve to revision 2."""
     repo = SqlAlchemyUsWithholdingConfigRepository(session)
 
     first = repo.record_confirmed_rate(
@@ -210,6 +218,7 @@ def test_record_confirmed_rate_allocates_append_only_same_date_revisions(
 
 
 def test_effective_rate_is_isolated_by_source_account(session: Session) -> None:
+    """Each source account resolves only its own rate, both at revision 1."""
     repo = SqlAlchemyUsWithholdingConfigRepository(session)
     for source_account_id, rate in (
         (ACCOUNT_A, Decimal("0.15")),
@@ -244,6 +253,7 @@ def test_effective_rate_is_isolated_by_source_account(session: Session) -> None:
 
 
 def test_missing_exact_source_account_has_no_tenant_wide_fallback(session: Session) -> None:
+    """An account with no rows gets None; no tenant-wide default leaks in."""
     repo = SqlAlchemyUsWithholdingConfigRepository(session)
     repo.record_confirmed_rate(
         tenant_id=TENANT_ID,
@@ -289,6 +299,7 @@ def test_source_account_id_must_be_nonblank_and_canonical(
     session: Session,
     source_account_id: str,
 ) -> None:
+    """Blank and non-canonical source_account_id spellings are rejected."""
     repo = SqlAlchemyUsWithholdingConfigRepository(session)
     with pytest.raises(InvalidUsWithholdingConfigError, match="source_account_id"):
         repo.get_effective_rate(
@@ -299,6 +310,7 @@ def test_source_account_id_must_be_nonblank_and_canonical(
 
 
 def test_account_resource_alias_uses_one_canonical_revision_history(session: Session) -> None:
+    """accounts/ aliases canonicalize onto one shared revision history per account."""
     repo = SqlAlchemyUsWithholdingConfigRepository(session)
     first = repo.record_confirmed_rate(
         tenant_id=TENANT_ID,
@@ -333,6 +345,7 @@ def test_account_resource_alias_uses_one_canonical_revision_history(session: Ses
 
 
 def test_record_confirmed_rate_raises_typed_validation_error(session: Session) -> None:
+    """An unknown account_type raises the typed validation error."""
     repo = SqlAlchemyUsWithholdingConfigRepository(session)
     with pytest.raises(InvalidUsWithholdingConfigError, match="account_type"):
         repo.record_confirmed_rate(
@@ -349,6 +362,7 @@ def test_record_confirmed_rate_translates_unique_conflict(
     session: Session,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """A forced revision collision surfaces as the typed conflict error."""
     repo = SqlAlchemyUsWithholdingConfigRepository(session)
     repo.record_confirmed_rate(
         tenant_id=TENANT_ID,
@@ -377,9 +391,11 @@ def test_get_effective_rate_translates_storage_error(
     session: Session,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """A raw storage failure on read surfaces as the typed storage error."""
     repo = SqlAlchemyUsWithholdingConfigRepository(session)
 
     def raise_storage_error(*_args, **_kwargs):
+        """Raise the simulated storage-layer failure."""
         raise SQLAlchemyError("database unavailable")
 
     monkeypatch.setattr(session, "scalar", raise_storage_error)
@@ -392,6 +408,7 @@ def test_get_effective_rate_translates_storage_error(
 
 
 def test_no_default_rate_row_seeded(session: Session) -> None:
+    """The schema seeds no default withholding rate."""
     count = session.query(UsWithholdingRateConfigORM).count()
     assert count == 0
 
@@ -405,6 +422,7 @@ def test_no_default_rate_row_seeded(session: Session) -> None:
 def test_next_revision_refuses_higher_isolation_levels(
     session: Session, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Postgres above READ COMMITTED refuses to allocate a revision."""
     repo = SqlAlchemyUsWithholdingConfigRepository(session)
     postgres_bind = SimpleNamespace(dialect=SimpleNamespace(name="postgresql"))
     monkeypatch.setattr(session, "get_bind", lambda: postgres_bind)
@@ -424,12 +442,21 @@ def test_next_revision_refuses_higher_isolation_levels(
 def test_next_revision_allows_read_committed_contract(
     session: Session, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Postgres at READ COMMITTED returns the stored max revision plus one."""
     repo = SqlAlchemyUsWithholdingConfigRepository(session)
     postgres_bind = SimpleNamespace(dialect=SimpleNamespace(name="postgresql"))
     scalar_results = iter(["read committed", 3])
+
+    def _scalar(*_a, **_k):
+        """Pop the next queued scalar stub result, failing loudly if the queue runs dry."""
+        try:
+            return next(scalar_results)
+        except StopIteration:
+            raise AssertionError("expected isolation level then max revision") from None
+
     monkeypatch.setattr(session, "get_bind", lambda: postgres_bind)
     monkeypatch.setattr(session, "execute", lambda *_a, **_k: None)
-    monkeypatch.setattr(session, "scalar", lambda *_a, **_k: next(scalar_results))
+    monkeypatch.setattr(session, "scalar", _scalar)
     revision = repo._next_revision(
         tenant_id=TENANT_ID,
         source_account_id=ACCOUNT_A,
@@ -439,6 +466,7 @@ def test_next_revision_allows_read_committed_contract(
 
 
 def test_recorded_rate_quantizes_trailing_zero_excess(session: Session) -> None:
+    """Trailing-zero excess is quantized to 6 decimals and survives a reload."""
     repo = SqlAlchemyUsWithholdingConfigRepository(session)
     snapshot = repo.record_confirmed_rate(
         tenant_id=TENANT_ID,

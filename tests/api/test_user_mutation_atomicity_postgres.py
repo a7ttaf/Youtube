@@ -443,14 +443,16 @@ def test_user_mutation_and_audit_share_lost_commit_fate_on_postgres(
             )
         )
 
-    with patch.object(SqlAlchemyAuditSink, "append", append_and_observe):
-        with TestClient(app) as client:
-            response = client.request(
-                case.method,
-                case.path,
-                headers=_auth_headers(),
-                json=dict(case.payload),
-            )
+    with (
+        patch.object(SqlAlchemyAuditSink, "append", append_and_observe),
+        TestClient(app) as client,
+    ):
+        response = client.request(
+            case.method,
+            case.path,
+            headers=_auth_headers(),
+            json=dict(case.payload),
+        )
 
     assert response.status_code == case.expected_status, response.text
     response_body = response.json()

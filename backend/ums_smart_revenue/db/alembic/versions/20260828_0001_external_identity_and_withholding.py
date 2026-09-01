@@ -64,6 +64,7 @@ _TENANT_TABLE_GRANTS: dict[str, dict[str, str]] = {
 #   - File: backend/ums_smart_revenue/db/security_models.py -> ORM index mirror.
 # ============================================================================
 def _drop_sqlite_user_email_index_before_batch(bind) -> None:
+    """Drop the SQLite email expression index before batch reflection."""
     if bind.dialect.name != "sqlite":
         return
     # FIX: Remove the expression index before batch reflection so Alembic does
@@ -72,6 +73,7 @@ def _drop_sqlite_user_email_index_before_batch(bind) -> None:
 
 
 def _restore_sqlite_user_email_index(bind) -> None:
+    """Recreate the canonical SQLite email expression index after batch."""
     if bind.dialect.name != "sqlite":
         return
     op.create_index(
@@ -94,6 +96,7 @@ def _restore_sqlite_user_email_index(bind) -> None:
 #   - File: tests/db/test_external_identity_withholding_migration_postgres.py -> Live proof.
 # ============================================================================
 def _configure_tenant_isolation(bind) -> None:
+    """Enable and force RLS with least-privilege grants on PostgreSQL only."""
     if bind.dialect.name != "postgresql":
         return
 

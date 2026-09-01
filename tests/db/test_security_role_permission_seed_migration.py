@@ -281,10 +281,12 @@ def _migration_module(path: Path, name: str) -> ModuleType:
 
 
 def _historical_migration_module() -> ModuleType:
+    """Load the stamped 20260825_0001 seed migration module by path."""
     return _migration_module(HISTORICAL_MIGRATION_PATH, "m_20260825_0001")
 
 
 def _repair_migration_module() -> ModuleType:
+    """Load the 20260825_0002 authorization-repair migration module by path."""
     return _migration_module(REPAIR_MIGRATION_PATH, "m_20260825_0002")
 
 
@@ -860,7 +862,11 @@ def test_repair_snapshot_matches_live_registries_and_exact_literals() -> None:
     assert _role_permission_map(migration_pairs) == _EXPECTED_CURRENT_ROLE_PERMISSIONS
     assert _role_permission_map(frozen_pairs) == _EXPECTED_CURRENT_ROLE_PERMISSIONS
     assert _MANUAL_PERMISSION_ROW in REPAIR_PERMISSION_ROWS
-    assert next(row for row in REPAIR_ROLE_ROWS if row["key"] == "beta_operator") == {
+    try:
+        beta_operator_row = next(row for row in REPAIR_ROLE_ROWS if row["key"] == "beta_operator")
+    except StopIteration:
+        raise AssertionError("expected a beta_operator row in REPAIR_ROLE_ROWS") from None
+    assert beta_operator_row == {
         "key": "beta_operator",
         "label": "Beta Operator",
         "description": _REPAIR_BETA_DESCRIPTION,

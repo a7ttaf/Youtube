@@ -43,6 +43,7 @@ _ACCOUNT_B = "pub-pr228-b"
 
 
 def _alembic_config(url: str) -> Config:
+    """Build an Alembic Config aimed at the disposable database URL."""
     config = Config()
     config.set_main_option("sqlalchemy.url", url)
     config.set_main_option("script_location", "backend/ums_smart_revenue/db/alembic")
@@ -84,6 +85,7 @@ def _has_privilege(
     table: str,
     privilege: str,
 ) -> bool:
+    """Return whether PostgreSQL reports one table privilege for a role."""
     return bool(
         connection.execute(
             sa.text("SELECT has_table_privilege(:role, :table, :privilege)"),
@@ -98,6 +100,7 @@ def _direct_privileges(
     role: str,
     table: str,
 ) -> set[str]:
+    """Return the directly granted privilege types one role holds on a table."""
     return set(
         connection.execute(
             sa.text(
@@ -111,6 +114,7 @@ def _direct_privileges(
 
 
 def _seed_two_tenants(connection: sa.Connection) -> None:
+    """Insert one user, identity, and withholding row for each tenant."""
     connection.execute(
         sa.text(
             "INSERT INTO tenants (id, slug, display_name, primary_currency, status) "
@@ -179,6 +183,7 @@ def _seed_two_tenants(connection: sa.Connection) -> None:
 #   - File: tests/db/test_external_identity_withholding_migration.py -> SQLite DDL parity.
 # ============================================================================
 def _assert_composite_foreign_keys_reject_cross_tenant(connection: sa.Connection) -> None:
+    """Assert each composite foreign key rejects a cross-tenant reference."""
     connection.execute(
         sa.text(
             "INSERT INTO org_units (id, tenant_id, type, name) VALUES "
@@ -225,6 +230,7 @@ def _assert_composite_foreign_keys_reject_cross_tenant(connection: sa.Connection
 
 
 def _assert_identity_and_withholding_constraints(connection: sa.Connection) -> None:
+    """Assert identity uniqueness and withholding checks reject every bad row."""
     counterexamples = (
         (
             "INSERT INTO external_identities "
@@ -318,6 +324,7 @@ def _assert_identity_and_withholding_constraints(connection: sa.Connection) -> N
 
 
 def _assert_rls_and_grants(connection: sa.Connection) -> None:
+    """Assert RLS is forced, policies scope by tenant, and grants stay SELECT-only."""
     for table in ("external_identities", "us_withholding_rate_configs"):
         enabled, forced = connection.execute(
             sa.text(
@@ -414,6 +421,7 @@ def _assert_rls_and_grants(connection: sa.Connection) -> None:
 
 
 def _assert_tenant_a_rls_visibility_and_checks(connection: sa.Connection) -> None:
+    """Assert tenant A's lane sees only its rows and blocks cross-tenant writes."""
     # The production grant is SELECT-only until the audited writer ships. Add
     # transaction-local probe grants only after exact ACL assertions so the
     # policy's WITH CHECK behavior is still proven independently of the ACL.
@@ -496,11 +504,13 @@ def _assert_tenant_a_rls_visibility_and_checks(connection: sa.Connection) -> Non
 #   - File: backend/ums_smart_revenue/db/security_models.py -> Revision unique key.
 # ============================================================================
 def _assert_concurrent_rate_revisions(engine: sa.Engine) -> None:
+    """Assert same-key writers serialize into chronological committed revisions."""
     first_has_lock = Event()
     second_started = Event()
     release_first = Event()
 
     def record_first() -> int:
+        """Record revision one and hold its transaction lock until released."""
         with Session(engine) as session:
             snapshot = SqlAlchemyUsWithholdingConfigRepository(session).record_confirmed_rate(
                 tenant_id=UUID(_TENANT_A),
@@ -516,6 +526,7 @@ def _assert_concurrent_rate_revisions(engine: sa.Engine) -> None:
             return snapshot.revision
 
     def record_second() -> int:
+        """Record revision two only after the first writer releases its lock."""
         assert first_has_lock.wait(timeout=10)
         second_started.set()
         with Session(engine) as session:
@@ -570,6 +581,7 @@ def _assert_concurrent_rate_revisions(engine: sa.Engine) -> None:
 #     20260828_0001_external_identity_and_withholding.py -> Downgrade under test.
 # ============================================================================
 def _cleanup_seeded_rows(engine: sa.Engine) -> None:
+    """Delete the seeded rows so the downgrade starts from a clean head."""
     with engine.begin() as connection:
         params = {"tenant_a": _TENANT_A, "tenant_b": _TENANT_B}
         for table in ("us_withholding_rate_configs", "external_identities"):
@@ -591,6 +603,7 @@ def _cleanup_seeded_rows(engine: sa.Engine) -> None:
 
 
 def test_postgres_revision_is_single_head_roundtrips_and_enforces_rls() -> None:
+    """Prove the revision is single-head and its round trip enforces tenant RLS."""
     url = require_postgres_url()
     config = _alembic_config(url)
     script = ScriptDirectory.from_config(config)

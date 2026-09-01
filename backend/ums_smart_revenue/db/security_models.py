@@ -27,8 +27,6 @@ from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
 class SecurityBase(DeclarativeBase):
     """Declarative base for authorization and audit SQL tables."""
 
-    pass
-
 
 # Shared ``server_default`` text expression for the ``tenant_id`` column
 # added by migration 20260517_0001. Sourcing it from a single constant

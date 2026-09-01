@@ -59,6 +59,7 @@ CREATE INDEX ix_users_tenant_id ON users (tenant_id);
 
 
 def _load_migration() -> ModuleType:
+    """Load the PR #228 migration module directly from its file path."""
     spec = importlib.util.spec_from_file_location("m_20260828_0001", MIGRATION_PATH)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
@@ -67,10 +68,12 @@ def _load_migration() -> ModuleType:
 
 
 def _bind_migration(module: ModuleType, connection: sa.Connection) -> None:
+    """Point the migration module's ``op`` proxy at a live connection."""
     module.op = Operations(MigrationContext.configure(connection))
 
 
 def _sqlite_object_sql(connection: sa.Connection, *, kind: str, name: str) -> str:
+    """Return one sqlite_master object's DDL normalized to single spaces."""
     sql = connection.execute(
         sa.text("SELECT sql FROM sqlite_master WHERE type = :kind AND name = :name"),
         {"kind": kind, "name": name},
@@ -80,6 +83,7 @@ def _sqlite_object_sql(connection: sa.Connection, *, kind: str, name: str) -> st
 
 
 def _assert_case_variant_user_email_rejected(connection: sa.Connection) -> None:
+    """Assert the lower(email) unique index rejects a case-variant duplicate."""
     with pytest.raises(sa.exc.IntegrityError):
         connection.execute(
             sa.text(
@@ -93,6 +97,7 @@ def _assert_case_variant_user_email_rejected(connection: sa.Connection) -> None:
 
 
 def _assert_existing_user_schema_preserved(connection: sa.Connection) -> None:
+    """Assert the pre-migration users indexes and checks survive the revision."""
     inspector = sa.inspect(connection)
     index_names = set(
         connection.execute(
@@ -109,6 +114,7 @@ def _assert_integrity_error(
     statement: str,
     params: dict[str, object] | None = None,
 ) -> None:
+    """Assert one statement raises IntegrityError inside a rolled-back savepoint."""
     savepoint = connection.begin_nested()
     try:
         with pytest.raises(sa.exc.IntegrityError):
@@ -118,6 +124,7 @@ def _assert_integrity_error(
 
 
 def _assert_new_sqlite_constraints_enforced(connection: sa.Connection) -> None:
+    """Assert the migrated tables reject every constraint-violating row."""
     tenant_id = "00000000000000000000000000000001"
     user_id = "00000000000000000000000000088111"
     connection.execute(
@@ -219,6 +226,7 @@ def _assert_new_sqlite_constraints_enforced(connection: sa.Connection) -> None:
 
 
 def test_sqlite_upgrade_and_downgrade_preserve_user_email_expression_index() -> None:
+    """Prove the SQLite round trip keeps the email index, data, and old schema."""
     module = _load_migration()
     engine = sa.create_engine("sqlite+pysqlite:///:memory:")
 
@@ -293,15 +301,25 @@ def test_sqlite_upgrade_and_downgrade_preserve_user_email_expression_index() -> 
             "revision",
         ]
         for table in ("external_identities", "us_withholding_rate_configs"):
-            tenant_column = next(
-                column for column in inspector.get_columns(table) if column["name"] == "tenant_id"
-            )
+            try:
+                tenant_column = next(
+                    column
+                    for column in inspector.get_columns(table)
+                    if column["name"] == "tenant_id"
+                )
+            except StopIteration:
+                raise AssertionError(f"expected tenant_id column on {table}") from None
             assert tenant_column["default"] is None
-        source_account_column = next(
-            column
-            for column in inspector.get_columns("us_withholding_rate_configs")
-            if column["name"] == "source_account_id"
-        )
+        try:
+            source_account_column = next(
+                column
+                for column in inspector.get_columns("us_withholding_rate_configs")
+                if column["name"] == "source_account_id"
+            )
+        except StopIteration:
+            raise AssertionError(
+                "expected source_account_id column on us_withholding_rate_configs"
+            ) from None
         assert source_account_column["nullable"] is False
         assert source_account_column["default"] is None
         assert connection.execute(sa.text("SELECT count(*) FROM users")).scalar_one() == 1
@@ -335,20 +353,26 @@ def test_sqlite_upgrade_and_downgrade_preserve_user_email_expression_index() -> 
 
 
 class _RecordingDialect:
+    """Dialect stub whose name makes the migration emit its PostgreSQL DDL."""
+
     name = "postgresql"
 
 
 class _RecordingBind:
+    """Connection stub that records every statement the migration executes."""
+
     dialect = _RecordingDialect()
 
     def __init__(self) -> None:
         self.statements: list[str] = []
 
     def execute(self, statement: object) -> None:
+        """Record the string form of one executed DDL statement."""
         self.statements.append(str(statement))
 
 
 def test_postgres_rls_sql_contains_force_policy_checks_and_exact_grants() -> None:
+    """Prove the recorded DDL forces RLS, scopes policies, and grants SELECT only."""
     module = _load_migration()
     bind = _RecordingBind()
 

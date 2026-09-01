@@ -29,6 +29,7 @@ USER_ID = UUID("00000000-0000-0000-0000-000000088001")
 
 @pytest.fixture()
 def session(tmp_path) -> Session:
+    """Provide a SQLite session with one seeded user row."""
     engine = create_engine(f"sqlite+pysqlite:///{(tmp_path / 'ext_id.db').as_posix()}")
     SecurityBase.metadata.create_all(engine)
     with Session(engine) as db:
@@ -45,6 +46,7 @@ def session(tmp_path) -> Session:
 
 
 def test_external_identity_resolves_provider_subject(session: Session) -> None:
+    """An exact provider subject maps to its user; unknown subjects return None."""
     session.add(
         ExternalIdentityORM(
             id=uuid4(),
@@ -76,6 +78,7 @@ def test_external_identity_resolves_provider_subject(session: Session) -> None:
 
 
 def test_external_identity_resolves_normalized_email(session: Session) -> None:
+    """Email lookup is case-insensitive against the stored normalized value."""
     session.add(
         ExternalIdentityORM(
             id=uuid4(),
@@ -119,6 +122,7 @@ def test_external_identity_resolves_normalized_email(session: Session) -> None:
 def test_resolve_user_id_rejects_malformed_claims(
     session: Session, provider: str, provider_subject: str
 ) -> None:
+    """Malformed provider/subject claims raise before any lookup runs."""
     repo = SqlAlchemyExternalIdentityRepository(session)
     with pytest.raises(InvalidExternalIdentityClaimError):
         repo.resolve_user_id(
@@ -142,6 +146,7 @@ def test_resolve_user_id_rejects_malformed_claims(
 def test_resolve_by_email_rejects_malformed_claims(
     session: Session, provider: str, normalized_email: str
 ) -> None:
+    """Malformed provider/email claims raise before any lookup runs."""
     repo = SqlAlchemyExternalIdentityRepository(session)
     with pytest.raises(InvalidExternalIdentityClaimError):
         repo.resolve_by_email(
@@ -152,10 +157,12 @@ def test_resolve_by_email_rejects_malformed_claims(
 
 
 def test_malformed_claims_do_not_query_storage(session: Session) -> None:
+    """Claim validation fails closed without issuing any storage read."""
     repo = SqlAlchemyExternalIdentityRepository(session)
     original_scalar = session.scalar
 
     def guarded_scalar(*_args, **_kwargs):
+        """Fail loudly if a malformed claim reaches the session."""
         raise AssertionError("malformed claims must fail before any storage read")
 
     session.scalar = guarded_scalar
@@ -171,9 +178,11 @@ def test_malformed_claims_do_not_query_storage(session: Session) -> None:
 def test_resolve_user_id_translates_storage_error(
     session: Session, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Storage failures surface as the typed ExternalIdentityStorageError."""
     repo = SqlAlchemyExternalIdentityRepository(session)
 
     def raise_storage_error(*_args, **_kwargs):
+        """Simulate an unavailable database."""
         raise SQLAlchemyError("database unavailable")
 
     monkeypatch.setattr(session, "scalar", raise_storage_error)
@@ -186,9 +195,11 @@ def test_resolve_user_id_translates_storage_error(
 def test_resolve_by_email_translates_storage_error(
     session: Session, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Email-lookup storage failures surface as the typed storage error."""
     repo = SqlAlchemyExternalIdentityRepository(session)
 
     def raise_storage_error(*_args, **_kwargs):
+        """Simulate an unavailable database."""
         raise SQLAlchemyError("database unavailable")
 
     monkeypatch.setattr(session, "scalar", raise_storage_error)
@@ -199,6 +210,7 @@ def test_resolve_by_email_translates_storage_error(
 
 
 def test_storage_rejects_blank_claim_rows(session: Session) -> None:
+    """Owner-loaded blank claim rows are rejected by storage constraints."""
     # The review counterexample: an owner-loaded row with provider="" and
     # provider_subject="" must be impossible to store, not merely ignored.
     session.add(

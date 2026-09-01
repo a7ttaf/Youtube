@@ -24,6 +24,7 @@ USER_ID = UUID("00000000-0000-0000-0000-000000006401")
 
 
 def auth_headers(role: str, scope_type: str, scope_id: str | None = None) -> dict[str, str]:
+    """Build trust-gateway auth headers for the given role, scope type, and optional scope id."""
     headers = {
         "x-user-id": str(USER_ID),
         "x-user-email": "revenue-facts@example.com",
@@ -37,10 +38,12 @@ def auth_headers(role: str, scope_type: str, scope_id: str | None = None) -> dic
 
 
 def build_database_url(tmp_path) -> str:
+    """Return the SQLite URL for an isolated per-test revenue facts database under tmp_path."""
     return f"sqlite+pysqlite:///{(tmp_path / f'{uuid4()}.db').as_posix()}"
 
 
 def seed_database(database_url: str, *, locked_month: bool = False) -> None:
+    """Create schema tables and seed org units, channels, and the test user for revenue tests."""
     engine = create_engine(database_url)
     OrgBase.metadata.create_all(engine)
     SecurityBase.metadata.create_all(engine)
@@ -94,6 +97,7 @@ def seed_database(database_url: str, *, locked_month: bool = False) -> None:
 
 
 def test_system_integration_user_imports_monthly_revenue_fact_with_audit(tmp_path):
+    """A connector-scoped system user imports a fact and a sensitive REPORT_IMPORTED audit row."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -243,6 +247,7 @@ def test_beta_operator_cannot_import_connector_sourced_revenue(tmp_path):
 
 
 def test_import_rejects_connector_source_kind_mismatch(tmp_path):
+    """Import is rejected with 422 when the source kind does not match the connector key."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -268,6 +273,7 @@ def test_import_rejects_connector_source_kind_mismatch(tmp_path):
 
 
 def test_finance_viewer_reads_channel_month_facts_with_revenue_audit(tmp_path):
+    """Finance viewers read channel-month facts and trigger a sensitive REVENUE_VIEWED audit."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     engine = create_engine(database_url)
@@ -309,6 +315,7 @@ def test_finance_viewer_reads_channel_month_facts_with_revenue_audit(tmp_path):
 
 
 def test_import_rejects_revenue_breakdown_above_gross(tmp_path):
+    """Import fails with 422 and persists nothing when the breakdown exceeds gross revenue."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -345,6 +352,7 @@ def test_import_rejects_revenue_breakdown_above_gross(tmp_path):
 
 
 def test_company_manager_cannot_read_revenue_facts(tmp_path):
+    """A company manager is denied revenue facts with 403 for missing finance.view_revenue."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -359,6 +367,7 @@ def test_company_manager_cannot_read_revenue_facts(tmp_path):
 
 
 def test_finance_viewer_reads_reconciliation_preview(tmp_path):
+    """A finance viewer's preview flags VARIANCE_DETECTED with a GROSS_REVENUE_VARIANCE issue."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     engine = create_engine(database_url)
@@ -408,6 +417,7 @@ def test_finance_viewer_reads_reconciliation_preview(tmp_path):
 
 
 def test_company_manager_cannot_read_reconciliation_preview(tmp_path):
+    """A company manager cannot read the reconciliation preview without finance.view_revenue."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -424,6 +434,7 @@ def test_company_manager_cannot_read_reconciliation_preview(tmp_path):
 def test_finance_viewer_reads_month_reconciliation_issue_queue_for_allowed_company(
     tmp_path,
 ):
+    """The monthly queue returns only the viewer's company issues and audits the sensitive read."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     engine = create_engine(database_url)
@@ -502,6 +513,7 @@ def test_finance_viewer_reads_month_reconciliation_issue_queue_for_allowed_compa
 
 
 def test_finance_viewer_pages_month_reconciliation_issue_queue_by_channel(tmp_path):
+    """The issue queue pages by channel with next_offset and has_more across sector scope."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     engine = create_engine(database_url)
@@ -585,6 +597,7 @@ def test_finance_viewer_pages_month_reconciliation_issue_queue_by_channel(tmp_pa
 
 
 def test_company_manager_cannot_read_month_reconciliation_issue_queue(tmp_path):
+    """A company manager is denied the monthly issue queue without finance.view_revenue."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -599,6 +612,7 @@ def test_company_manager_cannot_read_month_reconciliation_issue_queue(tmp_path):
 
 
 def test_import_rejects_locked_finance_month(tmp_path):
+    """Import into a locked finance month fails with 409 and persists no fact."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url, locked_month=True)
     client = TestClient(create_app(database_url=database_url))
@@ -627,6 +641,7 @@ def test_import_rejects_locked_finance_month(tmp_path):
 
 
 def test_import_rejects_missing_channel(tmp_path):
+    """Import for an unknown channel is rejected because it must reference an active channel."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -650,6 +665,7 @@ def test_import_rejects_missing_channel(tmp_path):
 
 
 def test_import_rejects_invalid_source_kind(tmp_path):
+    """Import is rejected with 422 when the source_kind is not a known revenue source."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -673,6 +689,7 @@ def test_import_rejects_invalid_source_kind(tmp_path):
 
 
 def test_import_accepts_gateway_subject_actor_id(tmp_path):
+    """A non-UUID gateway subject maps to a deterministic uuid5 and is persisted as imported_by."""
     # Header-auth deployments can deliver non-UUID gateway subjects via
     # x-user-id (e.g. service-account slugs). The revenue-fact repository
     # used to reject these with 422; per the shared actor_identity_uuid

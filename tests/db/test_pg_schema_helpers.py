@@ -51,6 +51,7 @@ def test_non_test_database_is_rejected_before_connection(
     connected = False
 
     def unexpected_create_engine(*args: object, **kwargs: object) -> None:
+        """Canary that records any create_engine call reaching this boundary."""
         nonlocal connected
         connected = True
 
