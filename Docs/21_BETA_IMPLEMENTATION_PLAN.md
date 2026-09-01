@@ -235,23 +235,33 @@ The beta import runner and API boundary must fail closed as one contract:
    presented as complete or eligible for close.
 
 **Acceptance criteria (P0.2a):**
-- [ ] Missing/mixed/EGP source metadata turns the preflight RED with zero facts written
+- [x] Missing/mixed/EGP source metadata turns the preflight RED with zero facts written
+  (implemented + tested: non-USD rejection and exactly-USD-literal tests)
 - [ ] Kill-after-N test leaves a partial month; rerun converges to the exact intended set without duplicates
-- [ ] Reduced-manifest test starts with an extra stale manual fact; audited open-month
+  (runner script shipped but not yet test-driven — open until a runner-level test exists)
+- [x] Reduced-manifest test starts with an extra stale manual fact; audited open-month
   replacement removes/supersedes that extra and retry remains idempotent
+  (implemented + tested: provenance-preserving removal, replay idempotency)
 - [ ] Post-import comparison covers the complete active roster, proves every active
   `revenue_required` channel is in the manifest, and rejects stale manual facts outside it
+  (roster post-check implemented in `scripts/import_manual_manifest.py`; open until a
+  runner-level test proves it end-to-end)
 - [ ] The runner reports complete only when the exact set/amount/report-id/control-total
   comparison passes; absence of `CHANNELS_MISSING_REVENUE_FACTS` alone is never proof
-- [ ] Batch output records source hash/id and the attributed bootstrap UUID without storing secrets
-- [ ] Replacement/import idempotency is backed by an immutable PostgreSQL batch
+  (service-boundary totals/counts are tested; the runner's own completion rule is open
+  until a runner-level test exists)
+- [x] Batch output records source hash/id and the attributed bootstrap UUID without storing secrets
+  (implemented + tested: ledger-row fields, actor, completion, hash canonicalization)
+- [x] Replacement/import idempotency is backed by an immutable PostgreSQL batch
   ledger (or an equivalent append-only audit ledger) recording batch key,
   manifest hash, report/source ids, status, actor, and completion time inside
   the replacement transaction; stale delayed retries must compare against that
   ledger before they can rewrite facts
-- [ ] The dependency graph and hard gate list include that ledger as part of the
+  (implemented + tested: single-ledger-row replay, hash-conflict refusal,
+  constrained migration + RLS)
+- [x] The dependency graph and hard gate list include that ledger as part of the
   manual-import gate; the implementation cannot be marked unblocked by the
-  runner checks alone
+  runner checks alone (the hard-gate row in Docs/25 names the implementation)
 
 **Migration/API impact (P0.2a):** the implementation PR requires a PostgreSQL
 migration for the immutable import-batch ledger described above; no historical

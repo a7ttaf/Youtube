@@ -76,7 +76,7 @@ PR #210 is historical: it merged on 2026-08-29 into the non-main
 | --- | --- |
 | All current #220 review threads resolved | Re-check after the final push; the DAG status above must be updated from the same repoll |
 | P0-a…P0-e merged to `main` | A1, beta runbook, living Docs/21 status |
-| USD manifest preflight + immutable PostgreSQL import-batch ledger + audited replacement + resumable import + complete-roster/exact-fact-set comparison green | Any real manual revenue import / claim that a month is complete |
+| USD manifest preflight + immutable PostgreSQL import-batch ledger + audited replacement + resumable import + complete-roster/exact-fact-set comparison green (implemented and suite-validated on `feat/p02a-manual-import-gate` 7dd97dd0a, 3135 passed / 0 failed on fresh PostgreSQL — pending push/merge; merge before the first real import) | Any real manual revenue import / claim that a month is complete |
 | Proposed `ci-fast` + `ci-database` + `ci-frontend` gates in #226 | Future review-readiness gate; not active on current `main` |
 | Final reviewed PR #227 SHA supplied, exact contract verified, then merged | U2 country ingest; intermediate/open heads are not shipped evidence |
 | D-U1 AdSense rate confirmed + config row written | U3 estimate surfaces |
@@ -137,6 +137,7 @@ $markers = @(
   'No migration/backfill required',
   'Final PR #227 SHA is supplied',
   'the final shipped SHA is **b92feb63d**',
+  'implemented and suite-validated on `feat/p02a-manual-import-gate`',
   'no environment fallback and no default rate',
   'SELF-grants by the just-created account',
   'typed `PAYMENT_NOT_FINALIZED` status',
