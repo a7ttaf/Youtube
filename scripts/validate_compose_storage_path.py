@@ -35,7 +35,6 @@ class StoragePathError(ValueError):
 
 def _is_relative_to(path: Path, parent: Path) -> bool:
     """Return whether ``path`` is ``parent`` or a descendant of ``parent``."""
-
     try:
         path.relative_to(parent)
     except ValueError:
@@ -45,31 +44,26 @@ def _is_relative_to(path: Path, parent: Path) -> bool:
 
 def _canonical_identity(path: Path) -> str:
     """Return the stable path spelling stored in the application sentinel."""
-
     return os.path.normcase(str(path))
 
 
 def storage_path_identity(path: Path) -> str:
     """Expose the exact canonical identity used by the storage sentinel."""
-
     return _canonical_identity(path)
 
 
 def storage_sentinel_content(path: Path) -> str:
     """Return the exact marker content bound to one canonical storage path."""
-
     return f"{STORAGE_SENTINEL_VERSION}\ncanonical_path={_canonical_identity(path)}\n"
 
 
 def _default_storage_path(root: Path) -> Path:
     """Return the one checkout-local path explicitly reserved for this app."""
-
     return (root / DEFAULT_STORAGE_SOURCE).resolve(strict=False)
 
 
 def _system_roots() -> tuple[Path, ...]:
     """Return host paths that are never valid application-data roots."""
-
     if os.name == "nt":
         system_root = Path(os.environ.get("SystemRoot", r"C:\Windows"))
         roots = [system_root]
@@ -96,7 +90,8 @@ def _system_roots() -> tuple[Path, ...]:
             "/usr",
             "/var/cache",
             "/var/log",
-            "/var/tmp",
+            # Rejected-root blocklist: the literal is the control itself.
+            "/var/tmp",  # skipcq: BAN-B108
             "/var/lib/containers",
             "/var/lib/docker",
             "/var/lib/kubelet",
@@ -110,7 +105,6 @@ def _system_roots() -> tuple[Path, ...]:
 
 def _reject_dotdot_segments(raw_value: str) -> None:
     """Reject parent traversal while allowing the documented ``./data`` form."""
-
     slash_normalized = raw_value.replace("\\", "/")
     segments = slash_normalized.split("/")
     has_nonleading_dot = any(
@@ -129,7 +123,6 @@ def _reject_dotdot_segments(raw_value: str) -> None:
 
 def _is_link(path: Path) -> bool:
     """Return whether a path is a symbolic link or Windows junction."""
-
     if path.is_symlink() or bool(getattr(path, "is_junction", lambda: False)()):
         return True
     try:
@@ -143,7 +136,6 @@ def _is_link(path: Path) -> bool:
 
 def _first_symlink(path: Path) -> Path | None:
     """Find a symlink in ``path`` or any existing ancestor without following it."""
-
     cursor = path
     while True:
         try:
@@ -158,7 +150,6 @@ def _first_symlink(path: Path) -> Path | None:
 
 def _directory_entries(path: Path) -> tuple[Path, ...]:
     """List a storage root without following child links."""
-
     try:
         children = tuple(path.iterdir())
     except OSError as exc:
@@ -178,7 +169,6 @@ def _directory_entries(path: Path) -> tuple[Path, ...]:
 
 def _reject_unexpected_entries(path: Path) -> tuple[Path, ...]:
     """Require a dedicated root containing only the sentinel and known stores."""
-
     children = _directory_entries(path)
     allowed = {
         STORAGE_SENTINEL_NAME.casefold(),
@@ -202,7 +192,6 @@ def _reject_unexpected_entries(path: Path) -> tuple[Path, ...]:
 
 def _mountpoints_under(path: Path) -> tuple[Path, ...]:
     """Find mounted filesystems below a storage root without traversing data."""
-
     if os.name == "nt":
         return ()
     mountinfo = Path("/proc/self/mountinfo")
@@ -235,7 +224,6 @@ def _mountpoints_under(path: Path) -> tuple[Path, ...]:
 
 def _reject_storage_submounts(path: Path) -> None:
     """Reject mounts/reparse points below the directories root init may touch."""
-
     for child_name in STORAGE_CHILDREN:
         child = path / child_name
         if not child.exists():
@@ -253,7 +241,6 @@ def _reject_storage_submounts(path: Path) -> None:
 
 def _reject_nested_reparse_points(path: Path) -> None:
     """Walk expected stores and reject every nested mount/link escape."""
-
     for child_name in STORAGE_CHILDREN:
         child = path / child_name
         if not child.exists():
@@ -289,7 +276,6 @@ def _reject_nested_reparse_points(path: Path) -> None:
 # ============================================================================
 def storage_tree_identity(path: Path) -> tuple[tuple[str, int, int], ...]:
     """Return stable ``(name, device, inode)`` identities for bounded roots."""
-
     entries = (
         (".", path, stat.S_ISDIR),
         *((name, path / name, stat.S_ISDIR) for name in STORAGE_CHILDREN),
@@ -322,7 +308,6 @@ class StorageIdentityGuard:
 
     def child_source(self, name: str) -> Path:
         """Return the directly pinned Docker source for one reviewed child."""
-
         sources = dict(self.child_docker_sources)
         try:
             return sources[name]
@@ -331,7 +316,6 @@ class StorageIdentityGuard:
 
     def assert_current(self) -> None:
         """Fail if an open or pathname identity no longer matches the proof."""
-
         if self._descriptors:
             for expected, descriptor in zip(self.identity, self._descriptors, strict=True):
                 name, expected_device, expected_inode = expected
@@ -352,7 +336,6 @@ class StorageIdentityGuard:
 
 def _open_windows_identity_handles(path: Path) -> tuple[int, ...]:
     """Open non-delete-sharing handles for every bounded Windows identity."""
-
     import ctypes
     from ctypes import wintypes
 
@@ -380,7 +363,8 @@ def _open_windows_identity_handles(path: Path) -> tuple[int, ...]:
     file_flag_backup_semantics = 0x02000000
     file_flag_open_reparse_point = 0x00200000
     flags = file_flag_backup_semantics | file_flag_open_reparse_point
-    invalid_handle = ctypes.c_void_p(-1).value
+    invalid_handle_raw = ctypes.c_void_p(-1).value
+    invalid_handle = invalid_handle_raw if invalid_handle_raw is not None else -1
     paths = (
         path,
         *(path / child for child in STORAGE_CHILDREN),
@@ -415,7 +399,6 @@ def _open_windows_identity_handles(path: Path) -> tuple[int, ...]:
 
 def _close_windows_identity_handles(handles: tuple[int, ...]) -> None:
     """Close handles created only by ``_open_windows_identity_handles``."""
-
     import ctypes
     from ctypes import wintypes
 
@@ -431,7 +414,6 @@ def _open_posix_identity_descriptors(
     identity: tuple[tuple[str, int, int], ...],
 ) -> tuple[int, ...]:
     """Open no-follow directory-relative descriptors for the bounded tree."""
-
     required = ("O_CLOEXEC", "O_DIRECTORY", "O_NOFOLLOW")
     if any(not hasattr(os, name) for name in required) or os.open not in os.supports_dir_fd:
         raise StoragePathError(
@@ -477,7 +459,6 @@ def _open_posix_identity_descriptors(
 @contextlib.contextmanager
 def hold_storage_identity(path: Path) -> Iterator[StorageIdentityGuard]:
     """Yield a stable Docker bind source and retain its OS identity boundary."""
-
     canonical = path.resolve(strict=True)
     identity = storage_tree_identity(canonical)
     if os.name == "nt":
@@ -515,7 +496,6 @@ def hold_storage_identity(path: Path) -> Iterator[StorageIdentityGuard]:
 
 def _validate_sentinel(path: Path, *, required: bool) -> bool:
     """Check that the marker is a regular file bound to this exact path."""
-
     sentinel = path / STORAGE_SENTINEL_NAME
     try:
         if _is_link(sentinel):
@@ -544,7 +524,6 @@ def _validate_sentinel(path: Path, *, required: bool) -> bool:
 
 def _require_operator_group_access(path: Path) -> None:
     """Ensure the host operator can retain access after provisioning."""
-
     try:
         readable = os.access(path, os.R_OK | os.W_OK | os.X_OK)
     except OSError as exc:
@@ -574,7 +553,6 @@ def _require_operator_group_access(path: Path) -> None:
 
 def _require_posix_ancestor_boundary(path: Path, *, operator_uid: int) -> None:
     """Reject an ancestor that another host principal can replace through."""
-
     ancestor = path.parent
     while True:
         try:
@@ -605,7 +583,6 @@ def _require_posix_boundary_owners(
     operator_groups: set[int],
 ) -> None:
     """Require exact owners for the replaceable root and direct child names."""
-
     allowed_gids = {*operator_groups, APP_GID}
     expected_owners: list[tuple[str, Path, set[int], set[int]]] = [
         ("root", path, {operator_uid}, operator_groups)
@@ -647,7 +624,6 @@ def _require_posix_boundary_owners(
 # ============================================================================
 def _require_posix_storage_policy(path: Path) -> None:
     """Enforce recursive POSIX ownership and least-permission boundaries."""
-
     if os.name == "nt":
         return
     try:
@@ -790,7 +766,6 @@ _WINDOWS_INHERITANCE_FLAGS = {"containerinherit", "objectinherit"}
 
 def _windows_acl_process_spec() -> tuple[list[str], dict[str, str]]:
     """Return a PowerShell command pinned to its own trusted module root."""
-
     environment = os.environ.copy()
     executable = (
         shutil.which("pwsh.exe")
@@ -819,7 +794,6 @@ def _windows_acl_process_spec() -> tuple[list[str], dict[str, str]]:
 
 def _windows_acl_remediation(path: Path) -> str:
     """Return the operator command that provisions a restricted host DACL."""
-
     return (
         f'icacls "{path}" /inheritance:r /grant:r '
         '"<YOUR-WINDOWS-ACCOUNT>:(OI)(CI)M" '
@@ -829,7 +803,6 @@ def _windows_acl_remediation(path: Path) -> str:
 
 def _windows_rights_satisfy_modify(row: dict[str, object]) -> bool:
     """Return whether numeric FileSystemRights prove Modify or FullControl."""
-
     try:
         mask = int(row.get("RightsMask", ""))
     except (TypeError, ValueError):
@@ -842,7 +815,6 @@ def _windows_rights_satisfy_modify(row: dict[str, object]) -> bool:
 
 def _windows_row_is_inheritable(row: dict[str, object]) -> bool:
     """Return whether a root ACE propagates to both child directories and files."""
-
     flags = {
         item.strip().casefold()
         for item in str(row.get("InheritanceFlags", "")).split(",")
@@ -856,12 +828,11 @@ def _windows_row_is_inheritable(row: dict[str, object]) -> bool:
     # FIX: CI/OI plus NoPropagateInherit reaches only one generation, so it
     # cannot prove operator recovery access throughout the bounded tree.
     disallowed_propagation = {"inheritonly", "nopropagateinherit"}
-    return _WINDOWS_INHERITANCE_FLAGS <= flags and not (disallowed_propagation & propagation)
+    return _WINDOWS_INHERITANCE_FLAGS <= flags and not disallowed_propagation & propagation
 
 
 def _windows_path_key(value: object) -> str:
     """Return a case-insensitive normalized key for one reported Windows path."""
-
     if not isinstance(value, str) or not value:
         raise ValueError("ACL path must be a non-empty string")
     return os.path.normcase(os.path.abspath(value))
@@ -880,7 +851,6 @@ def _windows_path_key(value: object) -> str:
 # ============================================================================
 def _require_windows_host_acl(path: Path) -> None:
     """Fail closed unless Windows host ACLs contain only approved principals.
-
     Docker Desktop's Linux VM ``stat`` output is intentionally not used as a
     confidentiality proof. The NTFS DACL is the source of truth on Windows;
     this query checks every non-reparse descendant and rejects any broad allow
@@ -1074,7 +1044,6 @@ def validate_storage_path(
     require_attestation: bool = True,
 ) -> Path:
     """Return a safe canonical storage path, optionally before attestation."""
-
     if raw_value is None:
         raw_text = os.environ.get(STORAGE_ENV_VAR, "") or DEFAULT_STORAGE_SOURCE
     else:
@@ -1121,7 +1090,8 @@ def validate_storage_path(
         Path("/mnt").resolve(strict=False),
         Path("/run").resolve(strict=False),
         Path("/srv").resolve(strict=False),
-        Path("/tmp").resolve(strict=False),
+        # Rejected-root blocklist: the literal is the control itself.
+        Path("/tmp").resolve(strict=False),  # skipcq: BAN-B108
         Path("/var").resolve(strict=False),
         Path("/var/lib").resolve(strict=False),
     }:
@@ -1148,7 +1118,6 @@ def validate_storage_path(
 
 def _create_sentinel(path: Path) -> None:
     """Create the path-bound marker without replacing an existing marker."""
-
     sentinel = path / STORAGE_SENTINEL_NAME
     try:
         with sentinel.open("x", encoding="utf-8", newline="\n") as handle:
@@ -1163,7 +1132,6 @@ def _create_sentinel(path: Path) -> None:
 
 def _real_directory_identity(path: Path) -> tuple[int, int]:
     """Return a non-link directory identity used around bounded host writes."""
-
     try:
         if _is_link(path):
             raise StoragePathError(f"storage directory became a link: {path!s}")
@@ -1194,7 +1162,6 @@ def prepare_storage_path(
     adopt_existing: bool = False,
 ) -> Path:
     """Validate an existing source or create/adopt a dedicated source safely."""
-
     root = (project_root or Path(__file__).resolve().parents[1]).resolve(strict=True)
     canonical = validate_storage_path(
         raw_value,
@@ -1276,6 +1243,7 @@ def prepare_storage_path(
 
 
 def _build_parser() -> argparse.ArgumentParser:
+    """Return the validator CLI parser for the reviewed invocation options."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "path",
@@ -1303,7 +1271,6 @@ def _build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     """Run the host preflight CLI and return a process exit status."""
-
     args = _build_parser().parse_args(argv)
     try:
         path = (

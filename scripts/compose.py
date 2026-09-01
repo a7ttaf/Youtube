@@ -139,7 +139,6 @@ def _option_value(
     option: str,
 ) -> tuple[str, int]:
     """Read one ``--option value`` or ``--option=value`` global option."""
-
     argument = arguments[index]
     if argument == option:
         if index + 1 >= len(arguments) or not arguments[index + 1]:
@@ -158,7 +157,6 @@ def _service_tail(
     allow_empty: bool,
 ) -> tuple[str, ...]:
     """Validate a tail containing service names and no command options."""
-
     if not tail and not allow_empty:
         raise StoragePathError(f"Compose {action} requires at least one service")
     if any(argument.startswith("-") for argument in tail):
@@ -186,7 +184,6 @@ def _service_tail(
 # ============================================================================
 def _parse_request(arguments: list[str]) -> LaunchRequest:
     """Return a normalized allowlisted launcher request."""
-
     if not arguments:
         raise StoragePathError(
             "usage: python scripts/compose.py [--env-file PATH] [--profile dev] <supported action>"
@@ -316,7 +313,6 @@ def _parse_request(arguments: list[str]) -> LaunchRequest:
 
 def _compose_environment(source: dict[str, str]) -> dict[str, str]:
     """Reject ambient Compose controls and pin every launcher-owned boundary."""
-
     compose_controls = sorted(key for key in source if key.upper().startswith("COMPOSE_"))
     if compose_controls:
         raise StoragePathError(
@@ -343,7 +339,6 @@ def _compose_environment(source: dict[str, str]) -> dict[str, str]:
 
 def _request_env_file(request: LaunchRequest, *, cwd: Path) -> Path | None:
     """Resolve the explicit env file, or the conventional project .env, once."""
-
     global_args = list(request.global_args)
     for index in range(0, len(global_args), 2):
         if global_args[index] == "--env-file":
@@ -357,7 +352,6 @@ def _request_env_file(request: LaunchRequest, *, cwd: Path) -> Path | None:
 
 def _replace_request_env_file(request: LaunchRequest, env_file: Path) -> LaunchRequest:
     """Return the same parsed action with one launcher-owned env-file copy."""
-
     original_globals = list(request.global_args)
     profile_args: list[str] = []
     for index in range(0, len(original_globals), 2):
@@ -374,7 +368,6 @@ def _replace_request_env_file(request: LaunchRequest, env_file: Path) -> LaunchR
 
 def _validated_env_bytes(path: Path) -> bytes:
     """Read one env file and reject every launcher/Compose behavioral assignment."""
-
     try:
         payload = path.read_bytes()
     except OSError as exc:
@@ -415,7 +408,6 @@ def _isolated_env_request(
     cwd: Path,
 ) -> Iterator[LaunchRequest]:
     """Yield a request referencing only an immutable launcher-owned env snapshot."""
-
     source = _request_env_file(request, cwd=cwd)
     if source is None:
         yield request
@@ -446,7 +438,6 @@ def _run_checked(
     capture: bool = False,
 ) -> subprocess.CompletedProcess[str]:
     """Run Docker without shell interpolation and optionally retain output."""
-
     try:
         return subprocess.run(
             command,
@@ -464,7 +455,6 @@ def _run_checked(
 
 def _local_endpoint(endpoint: object) -> bool:
     """Return whether an endpoint is one exact local Docker transport."""
-
     if not isinstance(endpoint, str):
         return False
     return endpoint.casefold() in {
@@ -476,7 +466,6 @@ def _local_endpoint(endpoint: object) -> bool:
 
 def _require_local_docker_context(*, cwd: Path, env: dict[str, str]) -> dict[str, str]:
     """Prove one local endpoint and return an environment pinned to that endpoint."""
-
     explicit_host = env.get("DOCKER_HOST")
     if explicit_host and not _local_endpoint(explicit_host):
         raise StoragePathError("DOCKER_HOST selects a remote or unapproved daemon")
@@ -523,7 +512,6 @@ def _run_daemon_checked(
     capture: bool = False,
 ) -> subprocess.CompletedProcess[str]:
     """Run a daemon action only with the exact endpoint returned by local proof."""
-
     if not _local_endpoint(env.get("DOCKER_HOST")):
         raise StoragePathError("Docker daemon action lacks a pinned local endpoint")
     return _run_checked(command, cwd=cwd, env=env, capture=capture)
@@ -536,7 +524,6 @@ def _render_model(
     env: dict[str, str],
 ) -> dict[str, object]:
     """Render all profiles from the pinned Compose file without host mutation."""
-
     render_globals: list[str] = []
     global_args = list(request.global_args)
     index = 0
@@ -575,7 +562,6 @@ def _render_model(
 
 def _canonical_model_source(raw_source: object) -> Path:
     """Return one absolute canonical bind source from rendered JSON."""
-
     if not isinstance(raw_source, str) or not raw_source:
         raise StoragePathError("rendered storage bind has no source")
     if any(character in raw_source for character in ("\x00", "\r", "\n")):
@@ -591,7 +577,6 @@ def _canonical_model_source(raw_source: object) -> Path:
 
 def _path_overlap(first: Path, second: Path) -> bool:
     """Return whether two canonical paths contain one another."""
-
     try:
         first.relative_to(second)
         return True
@@ -606,7 +591,6 @@ def _path_overlap(first: Path, second: Path) -> bool:
 
 def _normalized_target(raw_target: object) -> str:
     """Normalize a rendered Linux container target and reject ambiguity."""
-
     if not isinstance(raw_target, str) or not raw_target.startswith("/"):
         raise StoragePathError("rendered volume target is not an absolute POSIX path")
     if "\\" in raw_target or any(character in raw_target for character in ("\x00", "\r", "\n")):
@@ -634,7 +618,6 @@ def _validate_rendered_model(
     expected_storage_sources: dict[str, Path] | None = None,
 ) -> Path:
     """Validate the exact storage projection and return its canonical source."""
-
     if model.get("name") != PROJECT_NAME:
         raise StoragePathError("rendered Compose project name differs from the pinned name")
     services = model.get("services")
@@ -859,7 +842,6 @@ def _validate_rendered_model(
 # ============================================================================
 def _build_reviewed_image(*, cwd: Path, env: dict[str, str]) -> str:
     """Build the exact reviewed context and return its immutable local image ID."""
-
     project_root = cwd.resolve(strict=True)
     dockerfile = (project_root / "Dockerfile").resolve(strict=True)
     built = _run_daemon_checked(
@@ -917,7 +899,6 @@ def _probe_storage_writable(
     env: dict[str, str],
 ) -> None:
     """Run a bounded non-root write probe through the app service."""
-
     result = _run_daemon_checked(
         [
             "docker",
@@ -944,7 +925,6 @@ def _probe_storage_writable(
 
 def _detached_storage_up_args(request: LaunchRequest) -> tuple[str, ...]:
     """Return the reviewed up command with a deterministic create phase."""
-
     action_index = len(request.global_args)
     arguments = list(request.compose_args)
     if request.action != "up" or arguments[action_index] != "up":
@@ -956,7 +936,6 @@ def _detached_storage_up_args(request: LaunchRequest) -> tuple[str, ...]:
 
 def _inspected_host_source(raw_source: object) -> Path:
     """Normalize one Docker-reported source spelling back to a host path."""
-
     if not isinstance(raw_source, str):
         raise StoragePathError("Docker reported a non-string bind source")
     normalized = raw_source
@@ -996,7 +975,6 @@ def _capture_storage_container_ids(
     env: dict[str, str],
 ) -> _StorageContainerCapture:
     """Capture only valid scoped IDs and separately report enumeration trust."""
-
     if len(request.storage_services) != 1:
         raise StoragePathError("storage startup does not identify exactly one app service")
     result = _run_daemon_checked(
@@ -1038,7 +1016,6 @@ def _remove_container_ids(
     env: dict[str, str],
 ) -> None:
     """Remove only application containers whose IDs were proven by Compose ps."""
-
     if not identifiers:
         return
     removed = _run_daemon_checked(
@@ -1070,7 +1047,6 @@ def _inspect_container_storage_mounts(
     expected_sources: dict[str, Path],
 ) -> None:
     """Prove one captured container has both exact durable child binds."""
-
     inspected = _run_daemon_checked(
         [
             "docker",
@@ -1147,7 +1123,6 @@ def _audit_current_storage_containers(
     require_exactly_one: bool,
 ) -> StoragePathError | None:
     """Inspect captured app IDs and remove only IDs that violate the contract."""
-
     capture = _capture_storage_container_ids(request, cwd=cwd, env=env)
     identifiers = capture.identifiers
     issue: StoragePathError | None = None
@@ -1193,7 +1168,6 @@ def _verify_created_storage_mounts(
     expected_sources: dict[str, Path],
 ) -> None:
     """Require exactly one app container with durable canonical child binds."""
-
     issue = _audit_current_storage_containers(
         request,
         cwd=cwd,
@@ -1212,7 +1186,6 @@ def _remove_request_storage_containers(
     env: dict[str, str],
 ) -> None:
     """Remove captured scoped app containers after an identity failure."""
-
     capture = _capture_storage_container_ids(request, cwd=cwd, env=env)
     _remove_container_ids(capture.identifiers, cwd=cwd, env=env)
     if not capture.complete:
@@ -1241,7 +1214,6 @@ def _assert_storage_identity_or_remove(
     cleanup_message: str,
 ) -> None:
     """Remove scoped app containers if the held storage identity changed."""
-
     try:
         identity_guard.assert_current()
     except StoragePathError:
@@ -1276,7 +1248,6 @@ def _run_guarded_storage_up(
     expected_sources: dict[str, Path],
 ) -> subprocess.CompletedProcess[str]:
     """Create, inspect, and optionally attach to one durable app container."""
-
     create_args = _detached_storage_up_args(request)
     identity_guard.assert_current()
     created = _run_daemon_checked(
@@ -1366,7 +1337,6 @@ def _run_guarded_storage_up(
 # ============================================================================
 def main(argv: list[str] | None = None) -> int:
     """Execute one supported launcher action and return its process status."""
-
     raw_arguments = list(sys.argv[1:] if argv is None else argv)
     try:
         request = _parse_request(raw_arguments)
