@@ -1926,7 +1926,7 @@ def test_main_keeps_identity_and_immutable_image_pinned_through_final_up(
         def child_source(self, name: str) -> Path:
             return source / name
 
-        def __enter__(self) -> Guard:
+        def __enter__(self) -> "Guard":
             state["guard_active"] = True
             return self
 
@@ -2035,7 +2035,7 @@ def test_main_late_identity_race_removes_scoped_app_and_returns_failure(
         def child_source(self, name: str) -> Path:
             return source / name
 
-        def __enter__(self) -> Guard:
+        def __enter__(self) -> "Guard":
             state["guard_active"] = True
             return self
 
