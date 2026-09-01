@@ -97,6 +97,7 @@ const outcomeChip = (outcome: GroupSyncGroupResult["outcome"]): ReactNode => {
   return <Badge tone={tone}>{outcome}</Badge>;
 };
 
+/** Human label for a group's active flag. */
 const activeLabel = (active: boolean): string => (active ? "active" : "archived");
 
 /**
@@ -385,6 +386,7 @@ export const GroupsSyncFlow = ({
     }
   };
 
+  /** Return from Preview to the reason step, clearing any error copy. */
   const backToReason = () => {
     setError(null);
     setStep("reason");

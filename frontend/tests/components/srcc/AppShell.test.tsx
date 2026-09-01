@@ -877,6 +877,18 @@ describe("AppShell month ownership", () => {
   });
 });
 
+/** The SIDEBAR button carrying this label (the button also holds an icon +
+ * count, and labels like "Channel Registry" also appear in the view itself,
+ * so the lookup is scoped to the sidebar landmark). Defined above the
+ * "fixture-free chrome" describe, its first consumer, so every use follows
+ * the definition. */
+const navButton = (label: string): HTMLElement => {
+  const sidebar = screen.getByRole("complementary", { name: "Primary navigation" });
+  const button = within(sidebar).getByText(label).closest("button");
+  if (button === null) throw new Error(`no nav button for ${label}`);
+  return button;
+};
+
 describe("AppShell fixture-free chrome", () => {
   it("hydrates session-backed chrome and the current command route from API data", async () => {
     (globalThis.fetch as ReturnType<typeof vi.fn>).mockImplementation(
@@ -1105,16 +1117,6 @@ const deferredImportResponse = () => {
   // flow's own catch is the observer, so keep the promise quiet until then.
   pending.catch(() => undefined);
   return { pending, release, reject: fail };
-};
-
-/** The SIDEBAR button carrying this label (the button also holds an icon +
- * count, and labels like "Channel Registry" also appear in the view itself,
- * so the lookup is scoped to the sidebar landmark). */
-const navButton = (label: string): HTMLElement => {
-  const sidebar = screen.getByRole("complementary", { name: "Primary navigation" });
-  const button = within(sidebar).getByText(label).closest("button");
-  if (button === null) throw new Error(`no nav button for ${label}`);
-  return button;
 };
 
 // The reads this flow needs, keyed by pathname like routeFetchWithSessionRoutes.

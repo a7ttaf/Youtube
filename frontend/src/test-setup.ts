@@ -15,9 +15,12 @@ import { afterEach } from "vitest";
 // ============================================================================
 const NativeRequest = globalThis.Request;
 if (NativeRequest) {
+  /** Probe whether the native Request constructor accepts this signal's brand. */
   const nativeRequestAcceptsSignal = (signal: AbortSignal): boolean => {
     try {
-      void new NativeRequest("http://ums.local/__request-signal-probe__", {
+      // Constructed for the throw alone: the probe only asks whether this
+      // signal brand survives native Request's brand checks.
+      new NativeRequest("http://ums.local/__request-signal-probe__", {
         signal,
       });
       return true;
@@ -29,8 +32,10 @@ if (NativeRequest) {
     }
   };
 
+  /** Follow the source signal with a native Node AbortSignal of the same reason. */
   const followWithNativeSignal = (source: AbortSignal): AbortSignal => {
     const nativeController = transferableAbortController();
+    /** Abort the native controller with the source signal's abort reason. */
     const abortNativeSignal = () => nativeController.abort(source.reason);
 
     if (source.aborted) {

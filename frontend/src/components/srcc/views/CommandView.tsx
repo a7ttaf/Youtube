@@ -175,6 +175,7 @@ const statusTone = (status: string): Severity => {
   return "blue";
 };
 
+/** Copy for a known bank-reconciliation status, or a toned fallback for an unknown one. */
 const bankReconciliationStatusCopy = (status: string) =>
   BANK_RECONCILIATION_STATUS_COPY[status] ?? {
     label: status,
@@ -183,6 +184,7 @@ const bankReconciliationStatusCopy = (status: string) =>
     metricTone: "is-payment",
   };
 
+/** "N thing(s)" with the count pluralized correctly. */
 const countLabel = (count: number, singular: string, plural = `${singular}s`): string =>
   `${count} ${count === 1 ? singular : plural}`;
 
@@ -277,6 +279,7 @@ const alertErrorBadge = (error: ApiError | Error): { tone: Severity; children: s
   return { tone: isForbidden ? "blue" : "red", children: isForbidden ? "No permission" : "Error" };
 };
 
+/** Badge props for a loaded smart-alerts summary: Clear, or its highest severity. */
 const alertDataBadge = (data: SmartAlertsSummary): { tone: Severity; children: string } => {
   if (data.status === "CLEAR") return { tone: "green", children: "Clear" };
   const severity = data.highest_severity;
@@ -286,6 +289,7 @@ const alertDataBadge = (data: SmartAlertsSummary): { tone: Severity; children: s
   };
 };
 
+/** Panel header badge that degrades through error, loading, and empty states. */
 const SmartAlertsHeaderBadge = ({
   data,
   loading,
@@ -307,10 +311,41 @@ const SmartAlertsHeaderBadge = ({
 const safeAlerts = (data: SmartAlertsSummary | null): SmartAlert[] =>
   data && Array.isArray(data.alerts) ? data.alerts : [];
 
+/** Sub-copy under the alerts panel's no-alerts state. */
 const emptyAlertSubText = (data: SmartAlertsSummary | null): string =>
   data
     ? `Status ${data.status} — nothing needs attention for ${data.month}.`
     : "No smart-alert data returned.";
+
+// ============================================================================
+// Purpose: Translate Smart Alerts failures without reusing net-revenue copy or
+//   exposing an arbitrary backend error body in this cross-domain panel.
+// Database/ORM: None (frontend error presentation only).
+// Standards: 403 names Smart Alerts and the selected-month permission domain;
+//   all other failures use fixed retry-safe copy.
+// Blast Radius: Error copy only; no fetch or authorization behavior.
+// Connections:
+//   - File: backend/ums_smart_revenue/api/revenue.py -> smart-alerts gates.
+// ============================================================================
+const smartAlertsErrorCopy = (
+  error: ApiError | Error,
+): { title: string; detail: string } => {
+  if (error instanceof ApiError) {
+    if (error.status === 403) {
+      // FIX: Keep this cross-domain panel from inheriting net-revenue denial
+      // copy while retaining its fixed, non-reflective failure messages.
+      return describeError(error, "Your role cannot view smart alerts for this month.");
+    }
+    return {
+      title: `Request failed (${error.status})`,
+      detail: "Could not load Smart Alerts for this finance month.",
+    };
+  }
+  return {
+    title: "Network error",
+    detail: "Could not reach the Smart Alerts service.",
+  };
+};
 
 /** Body of the smart-alerts panel: error, loading, empty, and alert-row states. */
 const SmartAlertsBody = ({
@@ -383,36 +418,6 @@ const SmartAlertsBody = ({
       ))}
     </div>
   );
-};
-
-// ============================================================================
-// Purpose: Translate Smart Alerts failures without reusing net-revenue copy or
-//   exposing an arbitrary backend error body in this cross-domain panel.
-// Database/ORM: None (frontend error presentation only).
-// Standards: 403 names Smart Alerts and the selected-month permission domain;
-//   all other failures use fixed retry-safe copy.
-// Blast Radius: Error copy only; no fetch or authorization behavior.
-// Connections:
-//   - File: backend/ums_smart_revenue/api/revenue.py -> smart-alerts gates.
-// ============================================================================
-const smartAlertsErrorCopy = (
-  error: ApiError | Error,
-): { title: string; detail: string } => {
-  if (error instanceof ApiError) {
-    if (error.status === 403) {
-      // FIX: Keep this cross-domain panel from inheriting net-revenue denial
-      // copy while retaining its fixed, non-reflective failure messages.
-      return describeError(error, "Your role cannot view smart alerts for this month.");
-    }
-    return {
-      title: `Request failed (${error.status})`,
-      detail: "Could not load Smart Alerts for this finance month.",
-    };
-  }
-  return {
-    title: "Network error",
-    detail: "Could not reach the Smart Alerts service.",
-  };
 };
 
 // ============================================================================
@@ -498,6 +503,7 @@ type RevenueMetric = {
   locked?: boolean;
 };
 
+/** Build the Command Center's top revenue metric cards from a net-revenue response. */
 const buildRevenueMetrics = (
   data: NetRevenueResponse,
   canViewFinance: boolean,
@@ -674,6 +680,7 @@ const BANK_RECONCILIATION_CARD_LABELS = [
 
 const BANK_RECONCILIATION_USD_CURRENCY = "USD";
 
+/** Badge for the AdSense payment card: Paid once any USD payment is filed. */
 const adsensePaymentBadge = (
   data: MonthBankReconciliationSummary,
 ): BankReconciliationMetric["badge"] => {
@@ -683,9 +690,11 @@ const adsensePaymentBadge = (
   return { text: "Missing", tone: "amber" };
 };
 
+/** Primary note for the AdSense payment card: the paid-USD payment count. */
 const adsensePaymentPrimaryNote = (data: MonthBankReconciliationSummary): string =>
   countLabel(data.paid_payment_count, "paid USD payment");
 
+/** Secondary note: unsupported-currency or unpaid counts, else the source name. */
 const adsensePaymentSecondaryNote = (data: MonthBankReconciliationSummary): string => {
   if (data.unsupported_payment_currency_count > 0) {
     return countLabel(data.unsupported_payment_currency_count, "unsupported currency payment");
@@ -696,6 +705,7 @@ const adsensePaymentSecondaryNote = (data: MonthBankReconciliationSummary): stri
   return "AdSense source";
 };
 
+/** Metric tone class for the AdSense payment card. */
 const adsensePaymentTone = (data: MonthBankReconciliationSummary): string => {
   if (data.paid_payment_count > 0) {
     return "is-payment";
@@ -703,6 +713,7 @@ const adsensePaymentTone = (data: MonthBankReconciliationSummary): string => {
   return "is-review";
 };
 
+/** Badge for the bank receipts card: green once any receipt has loaded. */
 const bankReceiptBadge = (
   data: MonthBankReconciliationSummary,
 ): BankReconciliationMetric["badge"] => {
@@ -712,6 +723,7 @@ const bankReceiptBadge = (
   return { text: countLabel(data.entry_count, "receipt"), tone: "amber" };
 };
 
+/** Note for the bank receipts card: whether the bank source has loaded yet. */
 const bankReceiptSourceNote = (data: MonthBankReconciliationSummary): string => {
   if (data.entry_count > 0) {
     return "Bank source loaded";
@@ -719,6 +731,7 @@ const bankReceiptSourceNote = (data: MonthBankReconciliationSummary): string => 
   return "Waiting for bank";
 };
 
+/** Metric tone class for the bank receipts card. */
 const bankReceiptTone = (data: MonthBankReconciliationSummary): string => {
   if (data.entry_count > 0) {
     return "is-revenue";
@@ -726,6 +739,7 @@ const bankReceiptTone = (data: MonthBankReconciliationSummary): string => {
   return "is-review";
 };
 
+/** Note for the reconciliation cards: the finance-displayed bank transfer fee. */
 const bankTransferFeeNote = (
   data: MonthBankReconciliationSummary,
   canViewFinance: boolean,
@@ -735,6 +749,7 @@ const bankTransferFeeNote = (
     placeholder: "No fee",
   });
 
+/** Secondary note for the unresolved-gap card: the tolerance, or what is still missing. */
 const bankGapSecondaryNote = (
   data: MonthBankReconciliationSummary,
   canViewFinance: boolean,
@@ -828,6 +843,7 @@ const bankReconciliationErrorCopy = (
   };
 };
 
+/** Badge tone for the reconciliation error strip: blue only for permission denials. */
 const bankReconciliationErrorTone = (title: string): Severity => {
   if (title === "No permission") {
     return "blue";
@@ -835,11 +851,13 @@ const bankReconciliationErrorTone = (title: string): Severity => {
   return "red";
 };
 
+/** True only during the FIRST load, before any summary has landed for this read. */
 const isInitialBankReconciliationLoad = (
   loading: boolean,
   data: MonthBankReconciliationSummary | null,
 ): boolean => loading && !data;
 
+/** Shared labelled section wrapper for every reconciliation strip state. */
 const BankReconciliationShell = ({
   children,
   role,
@@ -859,6 +877,7 @@ const BankReconciliationShell = ({
   </section>
 );
 
+/** The strip shown without payment+bank read grants: restricted placeholders only. */
 const RestrictedBankReconciliationStrip = () => (
   <BankReconciliationShell>
     {BANK_RECONCILIATION_CARD_LABELS.map((label) => (
@@ -876,6 +895,7 @@ const RestrictedBankReconciliationStrip = () => (
   </BankReconciliationShell>
 );
 
+/** The strip shown when the reconciliation read failed. */
 const BankReconciliationErrorStrip = ({ error }: { error: ApiError | Error }) => {
   const { title, detail } = bankReconciliationErrorCopy(error);
   return (
@@ -894,6 +914,7 @@ const BankReconciliationErrorStrip = ({ error }: { error: ApiError | Error }) =>
   );
 };
 
+/** The strip shown while the first reconciliation summary is still in flight. */
 const LoadingBankReconciliationStrip = ({ month }: { month: string }) => (
   <BankReconciliationShell busy>
     {BANK_RECONCILIATION_CARD_LABELS.map((label) => (
@@ -912,6 +933,7 @@ const LoadingBankReconciliationStrip = ({ month }: { month: string }) => (
   </BankReconciliationShell>
 );
 
+/** The strip shown when the read settled without a summary body. */
 const EmptyBankReconciliationStrip = () => (
   <BankReconciliationShell>
     <article className="metric is-review">
@@ -927,6 +949,7 @@ const EmptyBankReconciliationStrip = () => (
   </BankReconciliationShell>
 );
 
+/** The strip rendering the built reconciliation metric cards. */
 const PopulatedBankReconciliationStrip = ({
   metrics,
 }: {
@@ -990,6 +1013,7 @@ const BankReconciliationDataStrip = ({ month }: { month: string }) => {
   return <PopulatedBankReconciliationStrip metrics={metrics} />;
 };
 
+/** Permission gate in front of the reconciliation data strip. */
 const BankReconciliationStatusStrip = ({
   month,
   canViewBankReconciliationSummary,
@@ -1137,6 +1161,7 @@ const buildGapLegDescriptors = (
   canViewFinance: boolean,
   currency: string,
 ): GapLegDescriptor[] => {
+  /** Render a leg money value (or the null dash) in the selected currency. */
   const money = (value: string | null) => financeDisplay(value, canViewFinance, { currency });
   const payment = data.payment_leg;
   const bank = data.bank_leg;
@@ -1826,6 +1851,7 @@ const OutsideCmsSummaryTiles = ({
   const outsideCount = outsideCms?.summary?.outside_cms_channel_count ?? null;
   const missingCount = outsideCms?.summary?.missing_official_revenue_count ?? null;
   const openCount = issues?.summary?.total_issue_count ?? null;
+  /** Locale-formatted count, or the dash placeholder for a null summary. */
   const fmt = (value: number | null): string =>
     value === null ? "—" : value.toLocaleString();
   return (
@@ -2461,6 +2487,7 @@ const ScopeAccessNotice = ({
   );
 };
 
+/** The Command Center view: revenue, alerts, and monitor panels gated by session grants. */
 const CommandView = ({
   canViewFinance,
   canViewAnalytics = false,

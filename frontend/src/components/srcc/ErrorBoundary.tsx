@@ -219,10 +219,12 @@ class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundaryState> {
     this.state = { errorCategory: null, correlationId: null };
   }
 
+  /** Derive the render-failure state from the thrown error's category only. */
   static getDerivedStateFromError(error: unknown): ErrorBoundaryState {
     return { errorCategory: errorCategoryOf(error), correlationId: null };
   }
 
+  /** Sanitize the failure, deliver the report, and focus the committed fallback. */
   componentDidCatch(error: unknown, _info: ErrorInfo): void {
     const report = safeErrorReportOf(error);
     this.setState({
@@ -262,6 +264,7 @@ class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundaryState> {
     (this.props.onReload ?? reloadDocumentForRecovery)();
   };
 
+  /** Render the children, or the sanitized recovery fallback once a failure landed. */
   render(): ReactNode {
     const { errorCategory, correlationId } = this.state;
     if (errorCategory === null) return this.props.children;

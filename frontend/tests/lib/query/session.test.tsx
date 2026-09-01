@@ -147,7 +147,7 @@ beforeEach(() => {
 
 afterEach(() => {
   globalThis.fetch = ORIGINAL_FETCH;
-  focusManager.setFocused(undefined);
+  focusManager.setFocused();
 });
 
 describe("useSessionMeQuery", () => {

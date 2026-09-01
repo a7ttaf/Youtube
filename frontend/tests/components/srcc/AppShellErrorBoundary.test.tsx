@@ -21,7 +21,8 @@ const { SENSITIVE_ERROR, WRITE_CRASH, WRITE_GATE } = vi.hoisted(() => {
     WRITE_CRASH: writeCrash,
     WRITE_GATE: {
       pending: Promise.resolve(),
-      release: (() => undefined) as (value?: void) => void,
+      // Same shape as the real WriteInFlightControl.release: () => void.
+      release: (() => undefined) as () => void,
     },
   };
 });
@@ -32,8 +33,11 @@ vi.mock("@/components/srcc/views/GroupsView", () => ({
   },
 }));
 
-vi.mock("@/components/srcc/views/RegistryView", () => ({
-  default: (): ReactNode => {
+vi.mock("@/components/srcc/views/RegistryView", () => {
+  // Capitalized (and a component-shaped function) so the hooks below read as
+  // a React component to the analyzer, matching the hook rules the real view
+  // follows — identical render behavior to the previous inline arrow.
+  const MockRegistryView = (): ReactNode => {
     const write = useWriteInFlightControl();
     const [crashed, setCrashed] = useState(false);
     if (crashed) throw WRITE_CRASH;
@@ -43,8 +47,9 @@ vi.mock("@/components/srcc/views/RegistryView", () => ({
       setCrashed(true);
     };
     return <button onClick={startWrite}>Start pending apply and crash</button>;
-  },
-}));
+  };
+  return { default: MockRegistryView };
+});
 
 const ORIGINAL_FETCH = globalThis.fetch;
 const SAFE_DIAGNOSTIC = "[ErrorBoundary] view render failed";
@@ -154,7 +159,8 @@ const routeShellFetch = (input: RequestInfo | URL): Promise<Response> => {
 
 beforeEach(() => {
   WRITE_GATE.pending = new Promise<void>((resolve) => {
-    WRITE_GATE.release = resolve;
+    // Wrapped in a zero-arg closure to match release's () => void shape.
+    WRITE_GATE.release = () => resolve();
   });
   vi.stubGlobal("fetch", vi.fn(routeShellFetch));
   globalThis.localStorage.clear();

@@ -88,6 +88,7 @@ const DOWNLOAD_ROUTES: Partial<Record<ExportType, DownloadRoute>> = {
   },
 };
 
+/** Type guard: does this export type have a dedicated GET download route? */
 const hasDownloadRoute = (
   exportType: string,
 ): exportType is ExportType =>
@@ -138,6 +139,7 @@ const SCOPE_TYPE_OPTIONS: Array<{ value: ExportScopeType; label: string }> = [
   { value: "group", label: "Group" },
 ];
 
+/** True when the session holds the export capability this report type belongs to. */
 const hasReportCapability = (
   option: ReportTypeOption,
   permissions: ReportTypePermissions,
@@ -147,6 +149,7 @@ const hasReportCapability = (
     : permissions.canExportFinance;
 };
 
+/** True when a revenue-carrying type may be offered under the session's revenue visibility. */
 const hasCreateRevenueVisibility = (
   option: ReportTypeOption,
   permissions: ReportTypePermissions,
@@ -154,6 +157,7 @@ const hasCreateRevenueVisibility = (
   return !option.requiresRevenueVisibility || permissions.canViewRevenue;
 };
 
+/** True when the create form may OFFER this report type (creatable + permitted). */
 const canOfferReportType = (
   option: ReportTypeOption,
   permissions: ReportTypePermissions,

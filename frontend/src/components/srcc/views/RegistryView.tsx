@@ -192,6 +192,7 @@ type RegistrySummaryTile = {
   note: string;
 };
 
+/** Build the registry header's summary tiles from the loaded channel list. */
 const buildSummaryTiles = (
   channels: ChannelRegistryEntry[] | null,
   loading: boolean,
