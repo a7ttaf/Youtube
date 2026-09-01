@@ -80,8 +80,8 @@ jobs:
 
       - name: Provision pinned Bats
         env:
-          BATS_VERSION: "v1.11.1"
-          BATS_COMMIT: "b640ec3cf2c7c9cfc9e6351479261186f76eeec8"
+          BATS_VERSION: "v1.13.0"
+          BATS_COMMIT: "3bca150ec86275d6d9d5a4fd7d48ab8b6c6f3d87"
         run: |
           FORCE=1 bash ci/scripts/install-bats.sh
           echo "$GITHUB_WORKSPACE/.ci-gate/bats/bin" >> "$GITHUB_PATH"
