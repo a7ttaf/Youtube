@@ -856,7 +856,6 @@ def _require_windows_host_acl(path: Path) -> None:
     this query checks every non-reparse descendant and rejects any broad allow
     ACE. The error includes the explicit operator-run ``icacls`` action.
     """
-
     if os.name != "nt":
         return
     try:

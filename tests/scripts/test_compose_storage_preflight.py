@@ -1588,7 +1588,7 @@ def test_post_create_mount_mismatch_removes_only_the_scoped_app_container(
         @staticmethod
         def assert_current() -> None:
             """No-op assertion: this scenario exercises cleanup, not proof."""
-            return
+            assert True  # inert by design; the cleanup path is the scenario
 
     mounts = [
         {
@@ -1791,7 +1791,7 @@ def test_failed_create_remediates_valid_ids_before_untrusted_ps_fails_closed(
         @staticmethod
         def assert_current() -> None:
             """No-op assertion: this scenario exercises cleanup, not proof."""
-            return
+            assert True  # inert by design; the cleanup path is the scenario
 
     def fake_daemon(
         command: list[str],
