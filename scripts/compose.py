@@ -872,7 +872,6 @@ def _require_reviewed_image_service(
 
 def _require_storage_bind_options(
     service_name: str,
-    service: dict[str, object],
     storage_mounts: dict[str, dict[str, dict[str, object]]],
 ) -> None:
     """Require every durable child bind to stay an explicit non-readonly bind."""
@@ -987,7 +986,7 @@ def _validate_rendered_model(
                 raise StoragePathError("rendered migrate service adds an unexpected volume")
             continue
 
-        _require_storage_bind_options(service_name, service, storage_mounts)
+        _require_storage_bind_options(service_name, storage_mounts)
         _require_volume_layout(service_name, service, project_root=project_root)
 
     if not project_root.is_absolute():
