@@ -275,6 +275,11 @@ def test_database_capability_fails_closed_and_allows_active_database_item(monkey
     monkeypatch.setenv("UMS_CI_DATABASE_TEST_MODULES", f'["{module_path}"]')
     helper = getattr(import_module("tests.db._postgres_helpers"), "require_" + "postgres_url")
 
+    # The lane/manifest semantics under test must not depend on the ambient
+    # runner environment: the database lane exports UMS_TEST_DATABASE_URL for
+    # its own suite, which would otherwise satisfy these fail-closed checks.
+    monkeypatch.delenv(postgres_env, raising=False)
+
     monkeypatch.setenv("UMS_CI_PYTEST_LANE", "fast")
     token = enter_test_module(module_path)
     try:
