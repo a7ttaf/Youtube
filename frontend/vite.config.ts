@@ -38,6 +38,7 @@ export {
 const FRONTEND_ROOT = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(FRONTEND_ROOT, "..");
 
+/** True only for the development serve command; builds and preview stay inert. */
 export const shouldEnableDevGateway = (
   command: string,
   mode: string,
@@ -71,6 +72,7 @@ export const isLoopbackDevServerHost = (host: string | boolean | undefined): boo
 //   - File: frontend/tests/devProxySecurity.test.ts -> real override probes.
 // ============================================================================
 const resolvedDevGatewayHostGuard = (): Plugin => {
+  /** Fail closed unless the resolved server is loopback-bound and not middleware. */
   const assertSafeServerBoundary = (server: {
     host?: string | boolean;
     middlewareMode?: boolean | { server: unknown };

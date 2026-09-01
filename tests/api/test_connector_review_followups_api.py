@@ -30,6 +30,7 @@ def auth_headers(
     user_id: str | UUID = USER_ID,
     email: str = "connector-review-user@example.com",
 ) -> dict[str, str]:
+    """Build the trusted-gateway header set a browser client would send."""
     headers = {
         "x-user-id": str(user_id),
         "x-user-email": email,
@@ -43,10 +44,12 @@ def auth_headers(
 
 
 def build_database_url(tmp_path) -> str:
+    """Return the per-test SQLite URL so runs never share state."""
     return f"sqlite+pysqlite:///{(tmp_path / 'connector-review.db').as_posix()}"
 
 
 def seed_database(database_url: str) -> None:
+    """Create the schema plus the one actor credential requests authenticate as."""
     engine = create_engine(database_url)
     try:
         OrgBase.metadata.create_all(engine)
@@ -211,6 +214,7 @@ def test_audited_operator_setup_precedes_numeric_version_credential_registration
 
 
 def test_connector_credentials_reject_unknown_actor_id(tmp_path):
+    """Reject registration whose actor_user_id names no seeded user."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -234,6 +238,7 @@ def test_connector_credentials_reject_unknown_actor_id(tmp_path):
 
 
 def test_connector_scoped_admin_lists_only_their_connector_credentials(tmp_path):
+    """Scope listing to the connector in the caller's access scope."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -266,6 +271,7 @@ def test_connector_scoped_admin_lists_only_their_connector_credentials(tmp_path)
 
 
 def test_disabled_connector_admin_cannot_list_connector_credentials(tmp_path):
+    """Deny a disabled principal even with the connector scope granted."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     app = create_app(database_url=database_url)

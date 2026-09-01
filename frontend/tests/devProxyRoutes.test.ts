@@ -512,54 +512,6 @@ const targetContainsSymbol = (
   return found;
 };
 
-/** Reject argument substitution when a builder can overwrite that parameter. */
-const functionWritesSymbol = (
-  functionNode: InspectableFunction,
-  symbol: ts.Symbol,
-  checker: ts.TypeChecker,
-): boolean => {
-  if (!functionNode.body) {
-    return true;
-  }
-  let found = false;
-  const visit = (node: ts.Node): void => {
-    if (
-      ts.isBinaryExpression(node) &&
-      ASSIGNMENT_OPERATORS.has(node.operatorToken.kind) &&
-      targetContainsSymbol(node.left, symbol, checker)
-    ) {
-      found = true;
-      return;
-    }
-    if (
-      (ts.isPrefixUnaryExpression(node) || ts.isPostfixUnaryExpression(node)) &&
-      (node.operator === ts.SyntaxKind.PlusPlusToken ||
-        node.operator === ts.SyntaxKind.MinusMinusToken) &&
-      targetContainsSymbol(node.operand, symbol, checker)
-    ) {
-      found = true;
-      return;
-    }
-    if (
-      (ts.isForOfStatement(node) || ts.isForInStatement(node)) &&
-      !ts.isVariableDeclarationList(node.initializer) &&
-      targetContainsSymbol(node.initializer, symbol, checker)
-    ) {
-      found = true;
-      return;
-    }
-    ts.forEachChild(node, visit);
-  };
-  for (const parameter of functionNode.parameters) {
-    if (parameter.initializer) {
-      visit(parameter.initializer);
-    }
-  }
-  if (!found) {
-    visit(functionNode.body);
-  }
-  return found;
-};
 
 /** Resolve one expression to immutable function implementations. */
 const inspectableFunctionsForExpression = (
@@ -1149,7 +1101,7 @@ const assertSpecifierResolvesIntoAuditedProgram = (
     }
     if (!scannedFiles.has(canonicalFileIdentity(candidate))) {
       throw new Error(
-        `extensionless specifier resolves to Vite-served bytes outside the audited program: ` +
+        'extensionless specifier resolves to Vite-served bytes outside the audited program: ' +
           `${specifier} -> ${candidate}; require an explicit extension into the audited sources`,
       );
     }
@@ -1875,75 +1827,6 @@ const parameterUsesApiClientMethod = (
   return found;
 };
 
-/** Mark parameters that receive a proven API client at any inspectable call site. */
-const discoverApiClientParameters = (
-  sourceFiles: readonly ts.SourceFile[],
-  checker: ts.TypeChecker,
-): ReadonlySet<ts.Symbol> => {
-  const found = new Set<ts.Symbol>();
-  let changed = true;
-  while (changed) {
-    changed = false;
-    const visit = (node: ts.Node): void => {
-      if (
-        ts.isCallExpression(node) &&
-        !isApiClientCall(node, checker, found)
-      ) {
-        const implementations = calledFunctions(node, checker);
-        const clientArguments = node.arguments.map((argument) => {
-          const expression = unwrapExpression(argument);
-          const hasStaticPropertyPath = ts.isPropertyAccessExpression(expression) ||
-            (ts.isElementAccessExpression(expression) &&
-              expression.argumentExpression !== undefined &&
-              (ts.isNumericLiteral(
-                unwrapExpression(expression.argumentExpression),
-              ) ||
-                knownString(expression.argumentExpression, {
-                  checker,
-                  substitutions: new Map(),
-                  visiting: new Set(),
-                }) !== undefined));
-          return (
-            ts.isIdentifier(expression) ||
-            hasStaticPropertyPath ||
-            hasApiClientMethodType(checker.getTypeAtLocation(expression), checker)
-          ) && isApiClientReceiver(expression, checker, new Set(), found);
-        });
-        if (implementations.length === 0 && clientArguments.some(Boolean)) {
-          throw new Error(
-            "API-client argument escapes an unsupported call; use an inspectable immutable wrapper",
-          );
-        }
-        for (const implementation of implementations) {
-          implementation.parameters.forEach((parameter, index) => {
-            if (!ts.isIdentifier(parameter.name)) {
-              return;
-            }
-            const parameterSymbol = resolvedSymbolAt(parameter.name, checker);
-            const argument = node.arguments[index];
-            if (
-              parameterSymbol &&
-              argument &&
-              parameterUsesApiClientMethod(
-                implementation,
-                parameterSymbol,
-                checker,
-              ) &&
-              !found.has(parameterSymbol) &&
-              clientArguments[index]
-            ) {
-              found.add(parameterSymbol);
-              changed = true;
-            }
-          });
-        }
-      }
-      ts.forEachChild(node, visit);
-    };
-    sourceFiles.forEach(visit);
-  }
-  return found;
-};
 
 /** Return whether an access selects a method from the typed API-client surface. */
 const isApiClientMethodAccess = (
@@ -2215,54 +2098,6 @@ const isApiClientCall = (
       ));
 };
 
-/** Reject method escapes outside direct calls and const aliases we can trace. */
-const assertSupportedApiClientMethodUse = (access: ts.Expression): void => {
-  let current: ts.Node = access;
-  let parent = current.parent;
-  while (
-    parent &&
-    (ts.isParenthesizedExpression(parent) ||
-      ts.isAsExpression(parent) ||
-      ts.isSatisfiesExpression(parent) ||
-      ts.isNonNullExpression(parent) ||
-      ts.isTypeAssertionExpression(parent)) &&
-    parent.expression === current
-  ) {
-    current = parent;
-    parent = current.parent;
-  }
-  if (parent && ts.isCallExpression(parent) && parent.expression === current) {
-    return;
-  }
-  if (
-    parent &&
-    ts.isVariableDeclaration(parent) &&
-    parent.initializer === current &&
-    ts.isVariableDeclarationList(parent.parent) &&
-    (parent.parent.flags & ts.NodeFlags.Const) !== 0
-  ) {
-    return;
-  }
-  throw new Error(
-    "API-client method escapes the supported direct-call or const-alias forms",
-  );
-};
-
-/** Return whether an identifier labels syntax rather than evaluating a value. */
-const isNonValueIdentifier = (identifier: ts.Identifier): boolean => {
-  const parent = identifier.parent;
-  return (
-    ((ts.isVariableDeclaration(parent) ||
-      ts.isBindingElement(parent) ||
-      ts.isParameter(parent) ||
-      ts.isFunctionDeclaration(parent) ||
-      ts.isFunctionExpression(parent)) &&
-      parent.name === identifier) ||
-    (ts.isPropertyAccessExpression(parent) && parent.name === identifier) ||
-    (ts.isPropertyAssignment(parent) && parent.name === identifier) ||
-    (ts.isMethodDeclaration(parent) && parent.name === identifier)
-  );
-};
 
 /** Derive all request roots in one compiler-bound source file. */
 // FIX: The former literal-only scan silently dropped composed or type-erased
@@ -3308,7 +3143,7 @@ describe("dev proxy route coverage (derived from frontend/src)", () => {
     ],
     [
       "Function constructor chain",
-      '((() => {}).constructor as FunctionConstructor)("return fetch(\\\"/reports/raw-files\\\")")();',
+      '((() => {}).constructor as FunctionConstructor)("return fetch(\\"/reports/raw-files\\")")();',
     ],
     [
       "XMLHttpRequest",
@@ -3333,11 +3168,11 @@ describe("dev proxy route coverage (derived from frontend/src)", () => {
   });
 
   it.each([
-    'setTimeout("fetch(\\\"/hidden\\\")", 0);',
+    'setTimeout("fetch(\\"/hidden\\")", 0);',
     'setTimeout(atob("ZmV0Y2goJy9oaWRkZW4nKQ=="), 0);',
     'setTimeout(window.name, 0);',
-    'const timer = setTimeout; timer("fetch(\\\"/hidden\\\")", 0);',
-    '(0, setTimeout)("fetch(\\\"/hidden\\\")", 0);',
+    'const timer = setTimeout; timer("fetch(\\"/hidden\\")", 0);',
+    '(0, setTimeout)("fetch(\\"/hidden\\")", 0);',
   ])("fails closed when a string timer escapes direct-call syntax: %s", (source) => {
     expect(() => discoverRequestedPrefixesInSource(source)).toThrow(
       /timer references must be direct calls with a callable handler|unaudited network or dynamic-code access is forbidden/iu,
@@ -3345,8 +3180,8 @@ describe("dev proxy route coverage (derived from frontend/src)", () => {
   });
 
   it.each([
-    ["direct eval", 'eval("client.get(\\\"/hidden\\\")");'],
-    ["Function constructor", 'new Function("return fetch(\\\"/hidden\\\")");'],
+    ["direct eval", 'eval("client.get(\\"/hidden\\")");'],
+    ["Function constructor", 'new Function("return fetch(\\"/hidden\\")");'],
     ["computed global eval", 'globalThis["eval"]("void 0");'],
     [
       "computed global Function constructor",

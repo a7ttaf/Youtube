@@ -45,6 +45,7 @@ const apiRequestTarget = (rawPath: string): string => {
 const pathPart = (requestUrl: string): string =>
   requestUrl.split(/[?#]/u, 1)[0] ?? "";
 
+/** Return whether a request target carries traversal, control, or split segments. */
 const hasUnsafeSegments = (value: string): boolean => {
   if (
     !value.startsWith("/") ||

@@ -5,17 +5,17 @@ import { useTenant } from "@/contexts/TenantContext";
 
 import { assertTrustedApiRoute } from "./trustedRoutes";
 
+// The JSON media type this client both requests and detects. Named once so the
+// Accept header, the Content-Type it sets on JSON bodies, and the response
+// content-type sniff in parseBody can never drift apart.
+const JSON_MEDIA_TYPE = "application/json";
+
 /**
  * Typed error thrown by the API client for any non-2xx response (and for a 2xx
  * response whose declared-JSON body fails to parse). Carries the HTTP status,
  * the parsed (or raw-text) response body, and the resolved request URL so
  * callers can branch on `instanceof ApiError` + status (e.g. 403 scope guards).
  */
-// The JSON media type this client both requests and detects. Named once so the
-// Accept header, the Content-Type it sets on JSON bodies, and the response
-// content-type sniff in parseBody can never drift apart.
-const JSON_MEDIA_TYPE = "application/json";
-
 export class ApiError extends Error {
   readonly name = "ApiError";
   constructor(

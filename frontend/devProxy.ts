@@ -2,10 +2,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 
 import type { ProxyOptions } from "vite";
 
-import {
-  TENANT_SCOPED_ROUTES,
-  isSafeRouteUrl,
-} from "./src/lib/api/trustedRoutes";
+import { isSafeRouteUrl } from "./src/lib/api/trustedRoutes";
 
 export {
   TENANT_SCOPED_ROUTES,
@@ -63,6 +60,7 @@ const isTrustedGatewayHeader = (header: string): boolean =>
 
 export type GatewayHeader = readonly [header: string, value: string];
 
+/** Read one gateway env value or fail closed when the resolved value is blank. */
 const requiredEnvValue = (
   env: Record<string, string>,
   envVar: string,
@@ -182,6 +180,7 @@ const normalizeTrustedBackendOrigin = (rawValue: string): string => {
   return origin.origin;
 };
 
+/** Canonicalize every comma-separated trusted backend origin or fail closed. */
 export const parseTrustedBackendOrigins = (rawValue: string): string[] =>
   rawValue
     .split(",")
@@ -223,12 +222,15 @@ export const resolveDevBackendTarget = (
   return target.origin;
 };
 
+/** Escape one literal route path for exact matching inside a route regex. */
 const escapeRegex = (value: string): string =>
   value.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
 
+/** Build the exact-segment proxy context regex for one trusted route root. */
 export const proxyContextForRoute = (route: string): string =>
   `^${escapeRegex(route)}(?:/|\\?|$)`;
 
+/** Collapse a Node header value to one string, rejecting duplicated headers. */
 const singleHeader = (value: string | string[] | undefined): string | undefined =>
   Array.isArray(value) ? (value.length === 1 ? value[0] : undefined) : value;
 
@@ -275,6 +277,7 @@ const requestUsesTrustedOrigin = (request: IncomingMessage): boolean => {
   );
 };
 
+/** Answer one untrusted request and report the path Vite should serve instead. */
 const rejectRequest = (
   response: ServerResponse,
   statusCode: number,
