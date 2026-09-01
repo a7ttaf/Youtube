@@ -1,8 +1,11 @@
 # Delivery Backlog
 
-## Status (2026-08-07)
+## Status (ledger through 2026-08-30; program plans recertified 2026-08-31)
 
-Reconciled through PR #170 (owner-stamp recovery, merged 2026-08-06). Marker
+The detailed marker ledger below was last fully reconciled through PR #170
+(owner-stamp recovery, merged 2026-08-06). Current-main status is separately
+verified for PR #171 (merged 2026-08-07) and PR #211 (merged 2026-08-30);
+intervening entries are not implicitly reclassified by this note. Marker
 conventions match `01_IMPLEMENTATION_PLAN.md`:
 
 - `✅ PR #N` — shipped end-to-end at the layer being marked.
@@ -13,12 +16,34 @@ conventions match `01_IMPLEMENTATION_PLAN.md`:
 Honesty rule: scaffolding-only items (ORM + repo + tests but no real
 ingestion / UI / user-facing path) are marked `⏳`, not `✅`.
 
-**Unmerged-branch note (2026-08-06):** the "Reconciled through PR #N" line
-above counts MERGED PRs only, per the PR-numbered marker conventions. The
-scheduled group sync is reconciled inline under its branch name
-(`feat/scheduled-group-sync`, open as PR #171 at reconciliation time) and is
-deliberately OUTSIDE that high-water mark; on merge its entries convert to
-`✅ PR #171`.
+**Post-reconciliation status note (2026-08-30):** PR #171
+(`feat/scheduled-group-sync`) merged to `main` on 2026-08-07 as `cc8892d`; its
+inline entry below is now `✅ PR #171`. PR #211 (rolling month window) merged to
+current `main` on 2026-08-30 as `41b4953`; its inline entry below is now
+`✅ PR #211`. This note does not claim a full review of intervening PRs.
+
+**Program plans note (2026-08-31, branch `docs/program-plans-consolidated`):** consolidates
+the five plan documents from former draft plan PRs (#209 Docs/20–21, #218 Docs/23,
+#219 Docs/24, plus Docs/25) into the #220 docs PR after the gap-fix review. See:
+[`20_DEPLOYMENT_READINESS_AUDIT.md`](20_DEPLOYMENT_READINESS_AUDIT.md),
+[`21_BETA_IMPLEMENTATION_PLAN.md`](21_BETA_IMPLEMENTATION_PLAN.md),
+[`23_ADMIN_ACCESS_AND_CONFIG_PLAN.md`](23_ADMIN_ACCESS_AND_CONFIG_PLAN.md),
+[`24_US_WITHHOLDING_AND_US_REVENUE_PLAN.md`](24_US_WITHHOLDING_AND_US_REVENUE_PLAN.md),
+[`25_PROGRAM_DEPENDENCY_GRAPH.md`](25_PROGRAM_DEPENDENCY_GRAPH.md).
+Living P0 execution is tracked by current successor PRs **#221–#225 (P0-a…P0-e)**.
+PR #210 is historical: it merged into the non-main `docs/deployment-readiness-audit`
+branch and is not the source of truth on `main`. See
+[`25_PROGRAM_DEPENDENCY_GRAPH.md`](25_PROGRAM_DEPENDENCY_GRAPH.md) for the live-status snapshot.
+
+**US-withholding plan note (2026-08-31):** Docs/24 — Egypt–US treaty copyright-royalty
+withholding is **15%** when confirmed on AdSense tax info (not 16%); no-form defaults:
+**30% on US-source earnings (business)** / **24% on worldwide (individual)**. Program
+U1–U4: probe → additive country-sliced ingest (normalization fence plus non-alerting
+intentional-evidence telemetry) → backend-emitted estimate from a PostgreSQL
+account/category effective interval (**no env/default fallback**) → optional durable,
+idempotent, payment-linked actual revision. **Fence:** recon
+`DEFAULT_US_WITHHOLDING_RATE = 0.30` stays dormant (Docs/21 P3). D-U1 (AdSense tax-info
+confirmation + persisted effective-dated row) blocks U3.
 
 **Test-harness note (2026-06-11, branch `fix/pg-migration-test-lock-timeout`):** the PG
 migration round-trip tests' `fresh_engine` schema reset now sets `SET LOCAL lock_timeout`
@@ -619,7 +644,7 @@ closed unmerged and superseded by the consolidated batch in #156.
   The summary tiles are now wired to the live `GET /audit/summary` aggregate-count
   route (see the audit summary endpoint entry below); the Retention tile stays a
   static policy constant.
-- ⏳ Rolling month window (item P1.2, branch `feat/p1-rolling-months`) — the
+- ✅ Rolling month window (item P1.2, PR #211, merged 2026-08-30) — the
   frozen `DEFAULT_MONTH = "2026-03"` / `MONTH_OPTIONS` literals and the AppShell
   topbar month `<select>` now all derive from `frontend/src/lib/months.ts`:
   current calendar month + the 3 before it, from LOCAL date components with an
@@ -636,10 +661,22 @@ closed unmerged and superseded by the consolidated batch in #156.
   (c) `scripts/seed_demo_month.py` and `scripts/smoke_mvp.py` compute their
   default `--month` at run time (local civil date) instead of the frozen
   `"2026-03"`, and `frontend/README.md` documents seeding the current month with
-  both a bash and a PowerShell form. Converts to `✅ PR #N` on merge.
+  both a bash and a PowerShell form.
 
 ## P2 — Advanced features
 
+- ⏳ Admin, access & configuration UI — Docs/23 (this consolidated program-plans PR;
+  supersedes draft #218): backend already ships the account/access surface
+  (list/create/patch users — no DELETE; scoped role assignment + scoped permission
+  grants + catalog reads, audited with required reasons) and NO view exposes it.
+  Program: **prerequisite P0-c**; A1 Admin MVP (+ `users.read_scoped`; Admin nav on
+  `can_manage_users || can_assign_roles`, assignment-only surface independently gated);
+  A2-owned matrix + `/security` proxy residual; A6 delegated admin with
+  `home_org_unit_id` + no-amplification/read-isolation and account-global lifecycle
+  reserved to global admins behind `can_manage_user_lifecycle`; A7 Google-only sign-in
+  + explicit audited, one-time enrollment into active-only-unique
+  `external_identities` revision history; A3–A5. Tripwires: no role editor, no secrets,
+  no delegation before A6. Remaining: whole program (plan only).
 - ⏳ Display-only currency conversion foundation — remaining: display-only
   conversion is not started. Note the distinction: bank-side FX + transfer-fee
   effects ARE derived as evidence-only `deduction_components` by Track F
@@ -1914,7 +1951,7 @@ single P-tier above.
   of the CMS owner id #169 had reintroduced + the hash-based tracked-file
   hygiene guard (`tests/test_repo_hygiene.py`, also standalone PR #173).
   No migration.
-- ✅ Scheduled CMS group sync (2026-08-06, open PR #171, branch
+- ✅ Scheduled CMS group sync (2026-08-06, merged PR #171 as `cc8892d`, branch
   `feat/scheduled-group-sync`)
   — grouping now converges automatically instead of only on an operator's
   `POST /channels/groups/sync` curl. **Executor job kind:** a reserved
@@ -2165,7 +2202,8 @@ single P-tier above.
   reason-required -> 422, 404 unknown/cross-tenant, 409 re-purge) marks PURGED
   keeping metadata; additive `purged_at`/`purged_by` columns + CHECK swap.
   ⏳ Refine-later: real US-view-share feed, withholding-rate calibration, and
-  multi-API-key ingestion scaling.
+  multi-API-key ingestion scaling. **Rate ruling + display-estimate program:**
+  Docs/24 (15% treaty estimate; recon `0.30` path stays fenced / Docs/21 P3).
 - ✅ Phase 5 analytics & monitoring surface (PR #98, 2026-06-13, branch
   `feat/phase5-analytics-monitoring`) — one combined PR closing the
   highest-value Phase 1 / 5 / 7 acceptance-gate gaps plus this doc
@@ -2244,7 +2282,12 @@ single P-tier above.
   `CONNECTOR_JOB_RUN` `ROWS_SKIPPED` summary audit edge (counts by reason,
   finance-month scoped) + WARNING log, and the same finance-month audit edges
   feed the `SOURCE_ROWS_SKIPPED` dashboard smart alert. Ingest/finance numbers
-  unchanged; only the silent drop is now observable.
+  unchanged; only the silent drop is now observable. **Planned U2 exception:**
+  `NON_PROJECTING_EVIDENCE` remains in raw audit telemetry but is removed from
+  actionable alert counts before sensitive-reason redaction, so healthy country
+  evidence does not manufacture a dropped-row WARNING or HIGH alert for either
+  dashboard/export audience; every genuinely actionable or unclassified positive skip
+  keeps the existing behavior.
 - ✅ Gate `/security/*` catalog endpoints behind VIEW_AUDIT_LOG (PR #112) —
   `GET /security/roles` and `GET /security/permissions` previously returned
   the full role→permission catalog (including `sensitive`/`auditOnUse` flags)
