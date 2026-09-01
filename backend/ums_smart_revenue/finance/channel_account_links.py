@@ -18,6 +18,7 @@ that first uses it so every commit stays ruff-clean:
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from uuid import UUID
@@ -26,6 +27,10 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from ums_smart_revenue.connectors.google_source_rows.dataclasses import (
+    YOUTUBE_ANALYTICS_PROJECTING_REPORT_TYPE,
+    SourceRowProjectionDisposition,
+)
 from ums_smart_revenue.db.finance_models import (
     AdsenseContentOwnerLinkORM,
     ContentOwnerChannelLinkORM,
@@ -40,6 +45,44 @@ _DEFAULT_TENANT_UUID = UUID(UMS_TENANT_ID)
 _MONTH_LENGTH = 7
 _OPEN_END = "9999-12"  # sentinel for open-ended ranges in overlap comparison
 _VALID_LINK_STATUSES = frozenset({"UNVERIFIED", "VERIFIED", "REJECTED", "CONFLICT"})
+
+
+# ============================================================================
+# Purpose: Independently exclude Analytics evidence from owner-channel graph
+#          derivation before it can affect allocation or reconciliation scope.
+# Database/ORM: Reads persisted GoogleRevenueSourceRowORM provenance values.
+# Standards: Exact report/disposition/dimension contract; malformed or unknown
+#            Analytics provenance fails closed outside the allocation graph.
+# Blast Radius: Owner-channel links, payment allocation, and reconciliation.
+# Connections:
+#   - File: backend/ums_smart_revenue/connectors/google_source_parsers/
+#     youtube_analytics.py -> Emits the projecting provenance contract.
+#   - Method: upsert_owner_channel_links_from_source -> Applies this fence
+#     before grouping source co-occurrences into durable graph links.
+# ============================================================================
+def _is_projecting_owner_channel_provenance(
+    *,
+    source_system: str,
+    report_type: str,
+    raw_payload: object,
+) -> bool:
+    """Return whether one source row may contribute an allocation graph edge."""
+    if source_system != "youtube_analytics":
+        return True
+    if not isinstance(raw_payload, Mapping):
+        return False
+    dimensions = raw_payload.get("dimensions")
+    disposition = raw_payload.get("projection_disposition")
+    return (
+        report_type == YOUTUBE_ANALYTICS_PROJECTING_REPORT_TYPE
+        and isinstance(dimensions, Mapping)
+        and "country" not in dimensions
+        and disposition
+        in {
+            None,
+            SourceRowProjectionDisposition.PROJECTING.value,
+        }
+    )
 
 
 def _is_unique_violation(exc: IntegrityError) -> bool:
@@ -585,19 +628,16 @@ class SqlAlchemyChannelAccountLinkRepository:
                 GoogleRevenueSourceRowORM.content_owner_id,
                 GoogleRevenueSourceRowORM.youtube_channel_id,
                 GoogleRevenueSourceRowORM.report_month,
-                func.min(GoogleRevenueSourceRowORM.source_row_key),
-            )
-            .where(
+                GoogleRevenueSourceRowORM.source_row_key,
+                GoogleRevenueSourceRowORM.source_system,
+                GoogleRevenueSourceRowORM.report_type,
+                GoogleRevenueSourceRowORM.raw_payload,
+            ).where(
                 GoogleRevenueSourceRowORM.tenant_id == self._tenant_id,
                 GoogleRevenueSourceRowORM.content_owner_id.is_not(None),
                 GoogleRevenueSourceRowORM.youtube_channel_id.is_not(None),
             )
-            .group_by(
-                GoogleRevenueSourceRowORM.content_owner_id,
-                GoogleRevenueSourceRowORM.youtube_channel_id,
-                GoogleRevenueSourceRowORM.report_month,
-            )
-        ).all()
+        )
         # FIX (skip blank source identities, was PR #57 -V8b): the source identity
         # columns are nullable Text with NO non-empty CHECK, so a row can carry ''
         # or a whitespace-only owner/channel. The .is_not(None) filter above lets
@@ -608,11 +648,21 @@ class SqlAlchemyChannelAccountLinkRepository:
         # bogus active link. Drop blank/whitespace-only identities here (str.strip()
         # also covers tabs/newlines) before grouping. Stored values are otherwise
         # left as-is — interior normalization would change the derived link key.
-        observed: list[tuple[str, str, str, str]] = [
-            (owner, channel, month, key)
-            for owner, channel, month, key in observed_rows
-            if owner and owner.strip() and channel and channel.strip()
-        ]
+        grouped_observed: dict[tuple[str, str, str], str] = {}
+        for owner, channel, month, key, source_system, report_type, raw_payload in observed_rows:
+            if not owner or not owner.strip() or not channel or not channel.strip():
+                continue
+            if not _is_projecting_owner_channel_provenance(
+                source_system=source_system,
+                report_type=report_type,
+                raw_payload=raw_payload,
+            ):
+                continue
+            identity = (owner, channel, month)
+            previous_key = grouped_observed.get(identity)
+            if previous_key is None or key < previous_key:
+                grouped_observed[identity] = key
+        observed = [(*identity, key) for identity, key in grouped_observed.items()]
         locked_months: set[str] = set()
         for month in sorted({m for _owner, _channel, m, _key in observed}):
             close = get_or_create_month_close_row(

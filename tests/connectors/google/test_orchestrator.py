@@ -48,6 +48,7 @@ from google.oauth2.credentials import Credentials
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
+from ums_smart_revenue.config.settings import AppSettings
 from ums_smart_revenue.connectors.google import (
     local_secret_resolver,
     secret_resolver,
@@ -66,6 +67,10 @@ from ums_smart_revenue.connectors.google.youtube_analytics_client import (
     _METRICS as _ANALYTICS_METRICS,
 )
 from ums_smart_revenue.connectors.google_source_parsers.base import ParserError
+from ums_smart_revenue.connectors.google_source_rows.dataclasses import (
+    YOUTUBE_ANALYTICS_COUNTRY_EVIDENCE_REPORT_TYPE,
+    YOUTUBE_ANALYTICS_PROJECTING_REPORT_TYPE,
+)
 from ums_smart_revenue.connectors.runs import orchestrator as orchestrator_module
 from ums_smart_revenue.connectors.runs.blob_storage import compute_checksum
 from ums_smart_revenue.connectors.runs.orchestrator import (
@@ -110,23 +115,27 @@ _SERVICE_ACTOR_ID = "ddddeeee-ffff-0000-1111-222222222222"
 def _next_produced_report(
     produced_iter: Iterator[ProducedReport],
 ) -> ProducedReport:
+    """Return the single expected produced report or fail the assertion."""
     for produced in produced_iter:
         return produced
     raise AssertionError("expected one aggregated YouTube report")
 
 
 def _assert_produced_reports_exhausted(produced_iter: Iterator[ProducedReport]) -> None:
+    """Fail if any produced report was left unconsumed."""
     for extra_report in produced_iter:
         raise AssertionError(f"expected produced reports to be exhausted, got {extra_report!r}")
 
 
 def _close_produced_reports(produced_iter: Iterator[ProducedReport]) -> None:
+    """Close the produced-report iterator when the runtime supports it."""
     close = getattr(produced_iter, "close", None)
     if callable(close):
         close()
 
 
 def _runner_credentials() -> Credentials:
+    """Build throwaway credentials for the orchestrator runner."""
     return Credentials(token="test-token")
 
 
@@ -800,7 +809,8 @@ def test_run_one_reuses_raw_file_inserted_by_racing_worker(
 
     def racing_find(db_session, *, tenant_id, source, report_type, report_month, checksum):
         """Race the duplicate-row lookup with a sibling insert
-        to exercise the IntegrityError fallback."""
+        to exercise the IntegrityError fallback.
+        """
         calls["n"] += 1
         if calls["n"] == 1:
             db_session.add(
@@ -1939,7 +1949,8 @@ def test_bucket_b_parser_error_on_second_report_marks_raw_file_failed_and_status
 
     class FlakyParser:
         """Parser that fails the first call and succeeds on retry;
-        exercises parser retry semantics."""
+        exercises parser retry semantics.
+        """
 
         @staticmethod
         def parse(payload, *, tenant_id):
@@ -3049,6 +3060,101 @@ def test_run_one_with_youtube_analytics_succeeds_for_cms_channels_only(
     assert all(r.source_system == "youtube_analytics" for r in source_rows)
     assert {r.metric_key for r in source_rows} == set(_ANALYTICS_METRICS.split(","))
     assert {r.youtube_channel_id for r in source_rows} == {"UC_orch_cms"}
+    stored_payload = json.loads(next(iter(store.values())))
+    assert stored_payload["query_request"]["dimensions"] == "channel,month"
+
+
+def test_run_one_rejects_analytics_dimension_mismatch_before_source_or_fact_write(
+    session: Session, _stub_secret_resolver
+) -> None:
+    """Contain a missing returned month dimension as a typed report failure."""
+    session.add(
+        YouTubeChannelORM(
+            id=uuid4(),
+            tenant_id=TENANT_ID,
+            youtube_channel_id="UC_dimension_mismatch",
+            channel_name="Dimension Mismatch",
+            content_owner_id=_ANALYTICS_ACCOUNT_ID,
+            active=True,
+            revenue_required=True,
+            cms_status="INSIDE_CMS",
+        )
+    )
+    session.flush()
+    _make_credential_row(
+        session,
+        tenant_id=TENANT_ID,
+        connector_key=_ANALYTICS_CONNECTOR_KEY,
+        account_id=_ANALYTICS_ACCOUNT_ID,
+    )
+    payload = _make_analytics_parser_payload(
+        channel_id="UC_dimension_mismatch",
+        report_month="2026-05",
+    )
+    # The wire request declares month, but this simulated Google response
+    # drops both the month header and its cell. The runner still synthesises
+    # channel; the parser must detect that month remains missing.
+    payload["columnHeaders"] = payload["columnHeaders"][1:]
+    payload["rows"] = [payload["rows"][0][1:]]
+
+    with (
+        patch(
+            "ums_smart_revenue.connectors.runs.orchestrator.YouTubeAnalyticsClient"
+        ) as yt_analytics_cls,
+        patch("ums_smart_revenue.connectors.runs.orchestrator.LocalFileStoreBackend") as local_cls,
+        patch("ums_smart_revenue.connectors.runs.orchestrator.refresh_credentials") as refresh,
+        patch("ums_smart_revenue.connectors.runs.orchestrator.GoogleHttpClient") as http_cls,
+    ):
+        http_cls.return_value.close.return_value = None
+        refresh.return_value = None
+        yt_analytics_cls.return_value.fetch_channel_report.return_value = payload
+
+        backend = local_cls.return_value
+        store: dict[str, bytes] = {}
+        backend.upload.side_effect = lambda *, storage_uri, content: store.__setitem__(
+            storage_uri, content
+        )
+        backend.get_bytes.side_effect = lambda *, storage_uri: store[storage_uri]
+
+        outcome = run_one(
+            session,
+            tenant_id=TENANT_ID,
+            connector_key=_ANALYTICS_CONNECTOR_KEY,
+            account_id=_ANALYTICS_ACCOUNT_ID,
+            report_month="2026-05",
+        )
+
+    assert outcome.run is not None
+    assert outcome.run.status == "FAILED"
+    assert outcome.counts["reports_succeeded"] == 0
+    assert outcome.counts["reports_failed"] == 1
+    assert outcome.counts["rows_upserted_total"] == 0
+    assert outcome.per_report_failures == [("youtube_analytics", "ParserError")]
+    assert (
+        session.scalars(
+            select(GoogleRevenueSourceRowORM).where(
+                GoogleRevenueSourceRowORM.tenant_id == TENANT_ID
+            )
+        ).all()
+        == []
+    )
+
+    from ums_smart_revenue.db.finance_models import (
+        MonthlyChannelRevenueFactORM,
+    )  # noqa: PLC0415
+
+    assert (
+        session.scalars(
+            select(MonthlyChannelRevenueFactORM).where(
+                MonthlyChannelRevenueFactORM.tenant_id == TENANT_ID
+            )
+        ).all()
+        == []
+    )
+    raw_file = session.scalars(
+        select(RawReportFileORM).where(RawReportFileORM.tenant_id == TENANT_ID)
+    ).one()
+    assert raw_file.parse_status == "FAILED"
 
 
 def test_run_one_with_youtube_analytics_contains_channel_fetch_failures(
@@ -3261,6 +3367,126 @@ def test_run_one_with_youtube_analytics_empty_success_replaces_existing_rows(
         )
     ).all()
     assert final_rows == []
+
+
+def test_country_evidence_survives_a_flag_off_worldwide_rerun(
+    session: Session,
+    _stub_secret_resolver,
+) -> None:
+    """Enabled-to-disabled U2 transition cannot delete retained evidence rows."""
+    channel_id = "UC_country_toggle"
+    report_month = "2026-05"
+    session.add(
+        YouTubeChannelORM(
+            id=uuid4(),
+            tenant_id=TENANT_ID,
+            youtube_channel_id=channel_id,
+            channel_name="Country Toggle",
+            content_owner_id=_ANALYTICS_ACCOUNT_ID,
+            active=True,
+            revenue_required=True,
+            cms_status="INSIDE_CMS",
+        )
+    )
+    session.flush()
+    _make_credential_row(
+        session,
+        tenant_id=TENANT_ID,
+        connector_key=_ANALYTICS_CONNECTOR_KEY,
+        account_id=_ANALYTICS_ACCOUNT_ID,
+    )
+    worldwide_response = _make_analytics_parser_payload(
+        channel_id=channel_id,
+        report_month=report_month,
+    )
+    country_response = {
+        "columnHeaders": [
+            {"columnType": "DIMENSION", "name": "country"},
+            {"columnType": "METRIC", "name": "estimatedRevenue"},
+        ],
+        "rows": [["US", 4.0]],
+    }
+
+    def _run(*, evidence_enabled: bool) -> tuple[ConnectorRunOutcome, object]:
+        """Execute one real orchestration pass with only HTTP/storage faked."""
+        with (
+            patch(
+                "ums_smart_revenue.connectors.runs.orchestrator.load_app_settings",
+                return_value=AppSettings(
+                    youtube_analytics_country_evidence_enabled=evidence_enabled,
+                ),
+            ),
+            patch(
+                "ums_smart_revenue.connectors.runs.orchestrator.YouTubeAnalyticsClient"
+            ) as analytics_cls,
+            patch(
+                "ums_smart_revenue.connectors.runs.orchestrator.LocalFileStoreBackend"
+            ) as local_cls,
+            patch("ums_smart_revenue.connectors.runs.orchestrator.refresh_credentials") as refresh,
+            patch("ums_smart_revenue.connectors.runs.orchestrator.GoogleHttpClient") as http_cls,
+        ):
+            http_cls.return_value.close.return_value = None
+            refresh.return_value = None
+            analytics_client = analytics_cls.return_value
+            analytics_client.fetch_channel_report.return_value = worldwide_response
+            analytics_client.fetch_channel_country_evidence.return_value = country_response
+            backend = local_cls.return_value
+            store: dict[str, bytes] = {}
+            backend.upload.side_effect = lambda *, storage_uri, content: store.__setitem__(
+                storage_uri,
+                content,
+            )
+            backend.get_bytes.side_effect = lambda *, storage_uri: store[storage_uri]
+
+            outcome = run_one(
+                session,
+                tenant_id=TENANT_ID,
+                connector_key=_ANALYTICS_CONNECTOR_KEY,
+                account_id=_ANALYTICS_ACCOUNT_ID,
+                report_month=report_month,
+            )
+        return outcome, analytics_client
+
+    enabled_outcome, enabled_client = _run(evidence_enabled=True)
+    assert enabled_outcome.run is not None
+    assert enabled_outcome.run.status == "SUCCEEDED"
+    enabled_client.fetch_channel_country_evidence.assert_called_once()
+    first_rows = session.scalars(
+        select(GoogleRevenueSourceRowORM).where(
+            GoogleRevenueSourceRowORM.tenant_id == TENANT_ID,
+            GoogleRevenueSourceRowORM.source_system == "youtube_analytics",
+            GoogleRevenueSourceRowORM.report_month == report_month,
+        )
+    ).all()
+    evidence_rows = [
+        row
+        for row in first_rows
+        if row.report_type == YOUTUBE_ANALYTICS_COUNTRY_EVIDENCE_REPORT_TYPE
+    ]
+    assert len(evidence_rows) == 1
+    evidence_key = evidence_rows[0].source_row_key
+    assert {
+        row.report_type
+        for row in first_rows
+        if row.report_type == YOUTUBE_ANALYTICS_PROJECTING_REPORT_TYPE
+    } == {YOUTUBE_ANALYTICS_PROJECTING_REPORT_TYPE}
+
+    disabled_outcome, disabled_client = _run(evidence_enabled=False)
+    assert disabled_outcome.run is not None
+    assert disabled_outcome.run.status == "SUCCEEDED"
+    disabled_client.fetch_channel_country_evidence.assert_not_called()
+    final_rows = session.scalars(
+        select(GoogleRevenueSourceRowORM).where(
+            GoogleRevenueSourceRowORM.tenant_id == TENANT_ID,
+            GoogleRevenueSourceRowORM.source_system == "youtube_analytics",
+            GoogleRevenueSourceRowORM.report_month == report_month,
+        )
+    ).all()
+    assert evidence_key in {
+        row.source_row_key
+        for row in final_rows
+        if row.report_type == YOUTUBE_ANALYTICS_COUNTRY_EVIDENCE_REPORT_TYPE
+    }
 
 
 def test_run_one_with_youtube_analytics_keeps_sibling_cms_rows_on_full_success(
@@ -3581,14 +3807,15 @@ def test_run_one_with_youtube_analytics_real_local_file_store_backend_round_trip
     # the exact bytes on disk. The runner spreads the stub response,
     # synthesises the `channel` DIMENSION header / row prefix (since the wire
     # request uses `dimensions=month` only), then OVERWRITES query_request
-    # with a freshly constructed dict using the canonical
-    # _ANALYTICS_METRICS/_ANALYTICS_DIMENSIONS constants. Mirror that logic
-    # here so the expected bytes match what lands on disk.
+    # with parser-owned metadata using the canonical metric set and the
+    # post-synthesis `channel,month` dimension set. Mirror that logic here so
+    # the expected bytes match what lands on disk.
     _year, _month = report_month.split("-")
     _first_day = f"{_year}-{_month}-01"
 
-    # The parser-payload's endDate is the calendar month end, not the wire
-    # first-of-month, so persisted period_end records the actual coverage.
+    # The parser payload deliberately differs from the wire request in two
+    # fields: endDate records calendar-month coverage, and dimensions declares
+    # the synthesized channel header alongside month.
     from calendar import (
         monthrange as _monthrange,
     )  # local import to avoid test churn  # noqa: PLC0415
@@ -3596,14 +3823,14 @@ def test_run_one_with_youtube_analytics_real_local_file_store_backend_round_trip
     _last_day = f"{int(_year):04d}-{int(_month):02d}-{_monthrange(int(_year), int(_month))[1]:02d}"
 
     def _runner_query_request(channel_id: str) -> dict:
-        """Build the runner-side query_request dict (mirrors the wire request layout)."""
+        """Build parser-owned metadata for the post-synthesis response shape."""
         return {
             "ids": f"contentOwner=={_ANALYTICS_ACCOUNT_ID}",
             "filters": f"channel=={channel_id}",
             "startDate": _first_day,
             "endDate": _last_day,
             "metrics": _ANALYTICS_METRICS,
-            "dimensions": _ANALYTICS_DIMENSIONS,
+            "dimensions": f"channel,{_ANALYTICS_DIMENSIONS}",
         }
 
     def _synthesise_channel(payload: dict, channel_id: str) -> dict:

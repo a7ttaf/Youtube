@@ -5,6 +5,7 @@ from decimal import Decimal
 from importlib import import_module
 
 from ums_smart_revenue.connectors.google_source_rows.dataclasses import (
+    YOUTUBE_ANALYTICS_COUNTRY_EVIDENCE_REPORT_TYPE,
     GoogleRevenueSourceRowEntry,
 )
 from ums_smart_revenue.finance.adsense_payments import AdSensePaymentEntry
@@ -27,6 +28,8 @@ def source_row(
     channel=None,
     system="adsense_management",
     key=None,
+    report_type="report",
+    raw_payload=None,
 ):
     """Build a GoogleRevenueSourceRowEntry for tests."""
     return GoogleRevenueSourceRowEntry(
@@ -37,7 +40,7 @@ def source_row(
         source_account_id=account,
         content_owner_id=None,
         youtube_channel_id=channel,
-        report_type="report",
+        report_type=report_type,
         report_month=MONTH,
         period_start=date(2026, 4, 1),
         period_end=date(2026, 4, 30),
@@ -47,7 +50,7 @@ def source_row(
         currency_code=currency,
         source_report_id="r1",
         raw_file_id=None,
-        raw_payload={"k": "v"},
+        raw_payload=raw_payload or {"k": "v"},
         imported_by=None,
         ingested_at=datetime(2026, 5, 1, 12, 0, 0),
     )
@@ -136,6 +139,43 @@ def test_source_rows_skips_non_usd_and_counts_it():
     )
     assert components == []
     assert skipped == 1
+
+
+def test_country_evidence_tax_token_cannot_become_a_deduction_component():
+    """A malformed U2 value kind cannot reduce official net revenue."""
+    evidence = source_row(
+        value_kind="tax",
+        amount="40.00",
+        channel="chan-1",
+        system="youtube_analytics",
+        report_type=YOUTUBE_ANALYTICS_COUNTRY_EVIDENCE_REPORT_TYPE,
+        raw_payload={
+            "dimensions": {"channel": "chan-1", "country": "US"},
+            "projection_disposition": "NON_PROJECTING_EVIDENCE",
+        },
+    )
+
+    components, skipped = _mod().map_source_rows_to_components([evidence])
+
+    assert components == []
+    assert skipped == 0
+
+
+def test_legacy_country_row_cannot_become_a_deduction_component():
+    """Country presence independently fences a missing legacy disposition."""
+    evidence = source_row(
+        value_kind="deduction",
+        amount="15.00",
+        channel="chan-1",
+        system="youtube_analytics",
+        report_type="reports.query",
+        raw_payload={"dimensions": {"channel": "chan-1", "country": "EG"}},
+    )
+
+    components, skipped = _mod().map_source_rows_to_components([evidence])
+
+    assert components == []
+    assert skipped == 0
 
 
 # ---- bank fee / FX ----

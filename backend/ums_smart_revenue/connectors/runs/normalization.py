@@ -6,6 +6,7 @@ import logging
 from collections import Counter
 from uuid import UUID
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ums_smart_revenue.auth.audit_service import AuditSink
@@ -18,10 +19,15 @@ from ums_smart_revenue.connectors.runs.repository import (
     ConnectorRunEntry,
     record_projection_failure,
 )
+from ums_smart_revenue.db.connector_models import ConnectorRunRawFileORM
 from ums_smart_revenue.db.lane import platform_lane
+from ums_smart_revenue.db.report_models import RawReportFileORM
 from ums_smart_revenue.finance.google_source_normalizer import (
+    EvidenceDisposition,
     GoogleSourceNormalizer,
+    NonProjectingEvidenceOutcome,
     SkippedSourceRow,
+    SkipReason,
 )
 from ums_smart_revenue.finance.month_close import get_month_close_status
 from ums_smart_revenue.finance.revenue_facts import RevenueFactLockedMonthError
@@ -68,6 +74,7 @@ class SqlAlchemyIngestedSourceRowNormalizationAdapter:
         actor_user_id: str,
         audit_actor: UserPrincipal,
     ) -> None:
+        """Project this run's source rows or fail closed after orchestration gates."""
         audit_sink: AuditSink = SqlAlchemyAuditSink(self._session, tenant_id=self._tenant_id)
         try:
             if (
@@ -111,13 +118,32 @@ class SqlAlchemyIngestedSourceRowNormalizationAdapter:
                         fact=fact,
                         lifecycle="UPDATED",
                     )
-                if result.skipped:
+                run_evidence = _evidence_outcomes_for_analytics_run(
+                    session=self._session,
+                    run=run,
+                    outcomes=result.non_projecting_evidence,
+                )
+                if run_evidence:
+                    _emit_non_projecting_evidence_audit(
+                        audit_sink=audit_sink,
+                        audit_actor=audit_actor,
+                        run=run,
+                        report_month=report_month,
+                        outcomes=run_evidence,
+                    )
+                audit_skipped, retained_evidence_skipped = _partition_skipped_rows_for_evidence_run(
+                    skipped=result.skipped,
+                    run_evidence=run_evidence,
+                )
+                all_alertable_skips = [*audit_skipped, *retained_evidence_skipped]
+                if all_alertable_skips:
                     _emit_skipped_rows_audit(
                         audit_sink=audit_sink,
                         audit_actor=audit_actor,
                         run=run,
                         report_month=report_month,
-                        skipped=result.skipped,
+                        skipped=all_alertable_skips,
+                        retained_evidence_count=len(retained_evidence_skipped),
                     )
                 self._session.commit()
         except RevenueFactLockedMonthError:
@@ -151,6 +177,165 @@ class SqlAlchemyIngestedSourceRowNormalizationAdapter:
                 report_month,
             )
             raise
+
+
+# ============================================================================
+# Purpose: Scope month-wide normalization outcomes to the exact Analytics
+#          connector/account/raw evidence imported by this run.
+# Database/ORM: Reads connector_run_raw_files joined to raw_report_files.
+# Standards: Exact connector alias, content-owner account, and raw-file lineage;
+#            unrelated or unlinked outcomes fail closed.
+# Blast Radius: Evidence audit attribution only; finance projection unchanged.
+# Connections:
+#   - File: backend/ums_smart_revenue/finance/google_source_normalizer.py ->
+#     Returns month-wide outcomes carrying preserved source_account_id values.
+#   - Function: _emit_non_projecting_evidence_audit -> Receives only the
+#     triggering account's evidence snapshot.
+# ============================================================================
+def _evidence_outcomes_for_analytics_run(
+    *,
+    session: Session,
+    run: ConnectorRunEntry,
+    outcomes: list[NonProjectingEvidenceOutcome],
+) -> list[NonProjectingEvidenceOutcome]:
+    """Return only evidence attributable to this Analytics account run."""
+    if run.connector_key not in {"youtube-analytics", "youtube_analytics"}:
+        return []
+    account_id = run.account_id.strip()
+    if not account_id:
+        return []
+    try:
+        run_id = UUID(run.id)
+        tenant_id = UUID(run.tenant_id)
+    except (TypeError, ValueError, AttributeError):
+        return []
+    raw_file_ids = {
+        str(raw_file_id)
+        for raw_file_id in session.scalars(
+            select(ConnectorRunRawFileORM.raw_report_file_id)
+            .join(
+                RawReportFileORM,
+                (RawReportFileORM.tenant_id == ConnectorRunRawFileORM.tenant_id)
+                & (RawReportFileORM.id == ConnectorRunRawFileORM.raw_report_file_id),
+            )
+            .where(
+                ConnectorRunRawFileORM.tenant_id == tenant_id,
+                ConnectorRunRawFileORM.connector_run_id == run_id,
+                RawReportFileORM.source == "youtube_analytics",
+                RawReportFileORM.report_type == "youtube_analytics_country_evidence",
+                RawReportFileORM.parse_status == "PARSED",
+            )
+        ).all()
+    }
+    if not raw_file_ids:
+        return []
+    expected_source_account_id = f"contentOwner=={account_id}"
+    return [
+        outcome
+        for outcome in outcomes
+        if outcome.source_system == "youtube_analytics"
+        and outcome.source_account_id == expected_source_account_id
+        and outcome.raw_file_id in raw_file_ids
+    ]
+
+
+# ============================================================================
+# Purpose: Separate current-run skips from retained evidence defects without
+#          suppressing either class from operator alerts.
+# Database/ORM: None.
+# Standards: Stable typed skip reasons and source-row identity matching only;
+#            retained defects remain visible but are never run-attributed.
+# Blast Radius: Connector audit attribution and HIGH skipped-row alerts.
+# Connections:
+#   - Function: _evidence_outcomes_for_analytics_run -> Supplies the exact
+#     account/run-scoped evidence identities.
+#   - Function: _emit_skipped_rows_audit -> Receives the filtered defect set.
+# ============================================================================
+def _partition_skipped_rows_for_evidence_run(
+    *,
+    skipped: list[SkippedSourceRow],
+    run_evidence: list[NonProjectingEvidenceOutcome],
+) -> tuple[list[SkippedSourceRow], list[SkippedSourceRow]]:
+    """Return current/general skips separately from retained evidence defects."""
+    run_evidence_ids = {outcome.source_row_id for outcome in run_evidence}
+    evidence_skip_reasons = {
+        SkipReason.INVALID_NON_PROJECTING_EVIDENCE,
+        SkipReason.DUPLICATE_NON_PROJECTING_EVIDENCE,
+    }
+    current_or_general: list[SkippedSourceRow] = []
+    retained_evidence: list[SkippedSourceRow] = []
+    for row in skipped:
+        if row.reason in evidence_skip_reasons and row.source_row_id not in run_evidence_ids:
+            retained_evidence.append(row)
+        else:
+            current_or_general.append(row)
+    return current_or_general, retained_evidence
+
+
+# ============================================================================
+# Purpose: Record accepted/rejected U2 evidence counts as an informational
+#          connector lifecycle edge distinct from projection-defect alerts.
+# Database/ORM: Writes one audit_logs row through record_audit_event.
+# Standards: Aggregate counts only; no source-row ids, accounts, amounts, or
+#            raw payloads cross the audit boundary.
+# Blast Radius: Audit telemetry only. Finance facts/totals/exports unchanged.
+# Connections:
+#   - File: backend/ums_smart_revenue/finance/google_source_normalizer.py ->
+#     Produces typed NonProjectingEvidenceOutcome classifications.
+#   - File: backend/ums_smart_revenue/finance/smart_alert_signals.py -> Reads
+#     ROWS_SKIPPED only, so healthy accepted evidence cannot raise HIGH alerts.
+# ============================================================================
+def _emit_non_projecting_evidence_audit(
+    *,
+    audit_sink: AuditSink,
+    audit_actor: UserPrincipal,
+    run: ConnectorRunEntry,
+    report_month: str,
+    outcomes: list[NonProjectingEvidenceOutcome],
+) -> None:
+    """Emit one privacy-safe NON_PROJECTING_EVIDENCE summary edge."""
+    from ums_smart_revenue.auth.audit import AuditEventType
+    from ums_smart_revenue.auth.audit_service import record_audit_event
+    from ums_smart_revenue.auth.scopes import AccessScope
+
+    disposition_counts = Counter(outcome.disposition.value for outcome in outcomes)
+    rejected_by_reason = Counter(
+        outcome.reason.value
+        for outcome in outcomes
+        if outcome.disposition is EvidenceDisposition.REJECTED
+    )
+    accepted_by_country = Counter(
+        outcome.country_code
+        for outcome in outcomes
+        if outcome.disposition is EvidenceDisposition.ACCEPTED and outcome.country_code is not None
+    )
+    logger.info(
+        "ingestion normalize classified non-projecting evidence "
+        "tenant_id=%s month=%s accepted=%d rejected=%d",
+        run.tenant_id,
+        report_month,
+        disposition_counts[EvidenceDisposition.ACCEPTED.value],
+        disposition_counts[EvidenceDisposition.REJECTED.value],
+    )
+    record_audit_event(
+        sink=audit_sink,
+        actor=audit_actor,
+        event_type=AuditEventType.CONNECTOR_JOB_RUN,
+        entity_type="connector_run",
+        entity_id=run.id,
+        scope=AccessScope.finance_month(report_month),
+        reason="connector normalize: non-projecting evidence classified",
+        details={
+            "lifecycle": "NON_PROJECTING_EVIDENCE",
+            "accepted_count": disposition_counts[EvidenceDisposition.ACCEPTED.value],
+            "rejected_count": disposition_counts[EvidenceDisposition.REJECTED.value],
+            "rejected_by_reason": dict(sorted(rejected_by_reason.items())),
+            "accepted_by_country": dict(sorted(accepted_by_country.items())),
+            "month": report_month,
+            "triggered_by_run_id": run.id,
+            "triggered_by_connector_key": run.connector_key,
+        },
+    )
 
 
 def _record_projection_failure_on_run(
@@ -232,6 +417,7 @@ def _emit_skipped_rows_audit(
     run: ConnectorRunEntry,
     report_month: str,
     skipped: list[SkippedSourceRow],
+    retained_evidence_count: int = 0,
 ) -> None:
     """Emit one CONNECTOR_JOB_RUN summary edge for projection-skipped source rows."""
     from ums_smart_revenue.auth.audit import AuditEventType
@@ -257,22 +443,45 @@ def _emit_skipped_rows_audit(
         report_month,
         reason_counts,
     )
+    attribution_details: dict[str, object]
+    if retained_evidence_count:
+        current_or_general_count = len(skipped) - retained_evidence_count
+        attribution_details = {
+            "attribution_scope": (
+                "MIXED_MONTH_SNAPSHOT"
+                if current_or_general_count
+                else "RETAINED_MONTH_SNAPSHOT"
+            ),
+            "current_or_general_skipped_count": current_or_general_count,
+            "retained_evidence_skipped_count": retained_evidence_count,
+            "observed_during_run_id": run.id,
+            "observed_during_connector_key": run.connector_key,
+        }
+    else:
+        attribution_details = {
+            "attribution_scope": "CURRENT_RUN",
+            "triggered_by_run_id": run.id,
+            "triggered_by_connector_key": run.connector_key,
+            "triggered_by_account_id": run.account_id,
+        }
     record_audit_event(
         sink=audit_sink,
         actor=audit_actor,
         event_type=AuditEventType.CONNECTOR_JOB_RUN,
-        entity_type="connector_run",
-        entity_id=run.id,
+        entity_type="finance_month" if retained_evidence_count else "connector_run",
+        entity_id=report_month if retained_evidence_count else run.id,
         scope=AccessScope.finance_month(report_month),
-        reason="connector normalize: source rows skipped during projection",
+        reason=(
+            "connector normalize: month snapshot contains retained source-row defects"
+            if retained_evidence_count
+            else "connector normalize: source rows skipped during projection"
+        ),
         details={
             "lifecycle": "ROWS_SKIPPED",
             "skipped_count": len(skipped),
             "skipped_by_reason": reason_counts,
             "month": report_month,
-            "triggered_by_run_id": run.id,
-            "triggered_by_connector_key": run.connector_key,
-            "triggered_by_account_id": run.account_id,
+            **attribution_details,
         },
     )
 

@@ -8,12 +8,14 @@
 #   strict truthy/falsy token parsing; no implicit defaults for identity or
 #   URL values. Callers consume load_app_settings(), never os.environ
 #   directly.
-# Blast Radius: App boot wiring only -- the feature flags gate thread-
-#   spawning workers at startup. No authorization, finance, audit, or export
-#   behavior.
+# Blast Radius: App boot wiring plus opt-in YouTube Analytics country-evidence
+#   API volume. The country flag does not authorize finance projection, math,
+#   exports, or UI consumption.
 # Connections:
 #   - File: backend/ums_smart_revenue/app.py -> create_app consumes
 #     AppSettings and enforces the cross-flag fail-fast contract.
+#   - File: backend/ums_smart_revenue/connectors/runs/orchestrator.py -> gates
+#     the second, non-projecting country-evidence request.
 # ============================================================================
 """Runtime configuration loaded from UMS_* environment variables."""
 
@@ -31,6 +33,7 @@ CONNECTOR_JOB_MAX_WORKERS_ENV = "UMS_CONNECTOR_JOB_MAX_WORKERS"
 CONNECTOR_JOB_STALE_RUNNING_HOURS_ENV = "UMS_CONNECTOR_JOB_STALE_RUNNING_HOURS"
 GROUP_SYNC_SCHEDULE_ENABLED_ENV = "UMS_GROUP_SYNC_SCHEDULE_ENABLED"
 GROUP_SYNC_INTERVAL_HOURS_ENV = "UMS_GROUP_SYNC_INTERVAL_HOURS"
+YOUTUBE_ANALYTICS_COUNTRY_EVIDENCE_ENABLED_ENV = "UMS_YOUTUBE_ANALYTICS_COUNTRY_EVIDENCE_ENABLED"
 
 _TRUTHY_TOKENS = frozenset({"1", "true", "yes", "on"})
 _FALSY_TOKENS = frozenset({"0", "false", "no", "off", ""})
@@ -75,6 +78,10 @@ class AppSettings:
     # same contract as max_workers.
     group_sync_schedule_enabled: bool = False
     group_sync_interval_hours: int = 24
+    # U2 country rows are evidence-only and deliberately opt-in. Keeping the
+    # collection gate OFF by default prevents an uncoordinated API-volume and
+    # source-row-key change while the EGP currency cutover is still pending.
+    youtube_analytics_country_evidence_enabled: bool = False
 
 
 @lru_cache(maxsize=1)
@@ -103,6 +110,10 @@ def load_app_settings() -> AppSettings:
         ),
         group_sync_schedule_enabled=_load_bool(GROUP_SYNC_SCHEDULE_ENABLED_ENV, default=False),
         group_sync_interval_hours=_load_int(GROUP_SYNC_INTERVAL_HOURS_ENV, default=24),
+        youtube_analytics_country_evidence_enabled=_load_bool(
+            YOUTUBE_ANALYTICS_COUNTRY_EVIDENCE_ENABLED_ENV,
+            default=False,
+        ),
     )
 
 

@@ -1,9 +1,9 @@
 # ============================================================================
-# Purpose: Build deterministic analytics summary CSV artifacts from normalized
-# YouTube Analytics source rows without exposing raw payload/account metadata.
+# Purpose: Build deterministic analytics summary CSV artifacts from projecting
+# YouTube Analytics rows while excluding country evidence and private metadata.
 # Database/ORM: google_revenue_source_rows and youtube_channels read-only queries.
-# Standards: Service-layer CSV generation, USD-only export contract, injection
-# guarded text cells, and typed validation errors.
+# Standards: Service-layer CSV generation, fail-closed provenance fence,
+# USD-only export contract, injection-guarded cells, and typed errors.
 # Blast Radius: Analytics exports, revenue amount disclosure, artifact checksums.
 # Connections:
 #   - File: backend/ums_smart_revenue/api/exports.py -> Download route/auth/audit.
@@ -23,6 +23,10 @@ import sqlalchemy as sa
 from sqlalchemy.orm import Session
 from sqlalchemy.sql.elements import ColumnElement
 
+from ums_smart_revenue.connectors.google_source_rows.dataclasses import (
+    YOUTUBE_ANALYTICS_PROJECTING_REPORT_TYPE,
+    SourceRowProjectionDisposition,
+)
 from ums_smart_revenue.db.org_models import YouTubeChannelORM
 from ums_smart_revenue.db.source_models import GoogleRevenueSourceRowORM
 from ums_smart_revenue.finance.decimal_formatting import decimal_to_api
@@ -35,6 +39,8 @@ class AnalyticsSummaryCsvValidationError(ValueError):
 
 @dataclass(frozen=True)
 class AnalyticsSummaryCsvRow:
+    """One aggregated Analytics summary line, keyed by channel and metric."""
+
     report_month: str
     youtube_channel_id: str
     channel_name: str
@@ -70,9 +76,110 @@ _BLANK_CHANNEL_ID_CHARACTERS = (" ", "\t", "\r", "\n", "\f", "\v")
 
 
 # ============================================================================
+# Purpose: Admit only worldwide/projecting Analytics source rows to the direct
+#          source-row CSV aggregate, including legacy rows without a token.
+# Database/ORM: Reads google_revenue_source_rows.report_type/raw_payload JSON.
+# Standards: PostgreSQL/SQLite key-existence checks distinguish missing legacy
+#            tokens from explicit null/unknown provenance and fail closed on
+#            unsupported database dialects.
+# Blast Radius: Analytics export amounts, counts, formulas, and audit artifacts.
+# Connections:
+#   - File: backend/ums_smart_revenue/connectors/google_source_parsers/
+#     youtube_analytics.py -> Emits the report type and disposition token.
+#   - File: backend/ums_smart_revenue/finance/google_source_normalizer.py ->
+#     Applies the independent canonical-fact projection fence.
+# ============================================================================
+def _projecting_analytics_source_row_predicate(
+    *,
+    session: Session,
+    source_row: type[GoogleRevenueSourceRowORM],
+) -> ColumnElement[bool]:
+    """Return the fail-closed SQL predicate for export-eligible Analytics rows."""
+    dialect_name = session.get_bind().dialect.name
+    dimensions_are_projecting: ColumnElement[bool]
+    country_exists: ColumnElement[bool]
+    provenance_is_projecting: ColumnElement[bool]
+    if dialect_name == "postgresql":
+        dimensions_exist = sa.func.jsonb_exists(source_row.raw_payload, "dimensions")
+        dimensions_are_projecting = cast(
+            ColumnElement[bool],
+            sa.or_(
+                sa.not_(dimensions_exist),
+                sa.func.jsonb_typeof(source_row.raw_payload["dimensions"]) == "object",
+            ),
+        )
+        country_exists = cast(
+            ColumnElement[bool],
+            sa.func.coalesce(
+                sa.func.jsonb_exists(source_row.raw_payload["dimensions"], "country"),
+                sa.false(),
+            ),
+        )
+        disposition_exists = sa.func.jsonb_exists(
+            source_row.raw_payload,
+            "projection_disposition",
+        )
+        disposition_value = source_row.raw_payload["projection_disposition"].as_string()
+        provenance_is_projecting = cast(
+            ColumnElement[bool],
+            sa.or_(
+                sa.not_(disposition_exists),
+                disposition_value == SourceRowProjectionDisposition.PROJECTING.value,
+            ),
+        )
+    elif dialect_name == "sqlite":
+        dimensions_type = sa.func.json_type(
+            source_row.raw_payload,
+            "$.dimensions",
+        )
+        dimensions_are_projecting = cast(
+            ColumnElement[bool],
+            sa.or_(dimensions_type.is_(None), dimensions_type == "object"),
+        )
+        country_exists = cast(
+            ColumnElement[bool],
+            sa.func.json_type(
+                source_row.raw_payload,
+                "$.dimensions.country",
+            ).is_not(None),
+        )
+        disposition_type = sa.func.json_type(
+            source_row.raw_payload,
+            "$.projection_disposition",
+        )
+        disposition_value = sa.func.json_extract(
+            source_row.raw_payload,
+            "$.projection_disposition",
+        )
+        provenance_is_projecting = cast(
+            ColumnElement[bool],
+            sa.or_(
+                disposition_type.is_(None),
+                sa.and_(
+                    disposition_type == "text",
+                    disposition_value == SourceRowProjectionDisposition.PROJECTING.value,
+                ),
+            ),
+        )
+    else:
+        raise AnalyticsSummaryCsvValidationError(
+            f"analytics summary CSV does not support database dialect {dialect_name!r}"
+        )
+    return cast(
+        ColumnElement[bool],
+        sa.and_(
+            source_row.report_type == YOUTUBE_ANALYTICS_PROJECTING_REPORT_TYPE,
+            dimensions_are_projecting,
+            sa.not_(country_exists),
+            provenance_is_projecting,
+        ),
+    )
+
+
+# ============================================================================
 # Purpose: Build a scoped analytics CSV artifact from normalized Google source
 # rows, preserving the aggregate source/formula/confidence contract while
-# excluding raw payloads and account identifiers from the export surface.
+# excluding evidence, raw payloads, and account identifiers from the surface.
 # Database/ORM: google_revenue_source_rows and youtube_channels.
 # Standards: Repository-like read logic stays out of the route; CSV output is
 # injection-guarded and deterministic by channel/metric/value/currency.
@@ -155,6 +262,10 @@ def list_analytics_summary_csv_rows(
             source_row.source_system == _SOURCE_SYSTEM,
             source_row.report_month == month,
             source_row.currency_code == currency_code,
+            _projecting_analytics_source_row_predicate(
+                session=session,
+                source_row=source_row,
+            ),
             source_row.youtube_channel_id.is_not(None),
             # FIX: SQL trim() only strips spaces by default on PostgreSQL/SQLite;
             # remove ASCII whitespace so tab/newline-only IDs never enter CSV rows.
