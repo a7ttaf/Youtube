@@ -1,3 +1,11 @@
+# ============================================================================
+# Purpose: Tenant-bound user account repository behaviour tests.
+# Database/ORM: In-memory SQLAlchemy Session with SecurityBase schema.
+# Standards: Typed domain errors; tenant isolation assertions.
+# Blast Radius: Test-only.
+# Connections:
+#   - File: backend/ums_smart_revenue/auth/users.py -> subject.
+# ============================================================================
 """Tenant-bound user account repository behaviour tests."""
 
 from datetime import UTC, datetime
@@ -141,6 +149,43 @@ def test_user_repository_email_conflict_is_tenant_scoped() -> None:
     row = session.scalars(select(UserORM).where(UserORM.id == UUID(created.id))).one()
     assert row.tenant_id == SECOND_TENANT_ID
     assert row.email == "shared@example.com"
+
+
+def test_get_user_by_email_returns_the_tenant_account() -> None:
+    """Verify the email lookup resolves the current tenant's account."""
+    session = build_session()
+    seed_users(session)
+
+    found = SqlAlchemyUserAccountRepository(session, tenant_id=DEFAULT_TENANT_ID).get_user_by_email(
+        email="SHARED@Example.com"
+    )
+
+    assert found is not None
+    assert found.id == str(DEFAULT_USER_ID)
+    assert found.email == "shared@example.com"
+
+
+def test_get_user_by_email_is_tenant_scoped() -> None:
+    """Verify the email lookup never resolves another tenant's account."""
+    session = build_session()
+    seed_users(session)
+
+    repository = SqlAlchemyUserAccountRepository(session, tenant_id=SECOND_TENANT_ID)
+
+    # "shared@example.com" exists, but only in the DEFAULT tenant.
+    assert repository.get_user_by_email(email="shared@example.com") is None
+    assert repository.get_user_by_email(email="absent@example.com") is None
+
+
+def test_get_user_by_email_rejects_a_malformed_address() -> None:
+    """Verify a malformed email is a typed validation error, not a silent miss."""
+    session = build_session()
+    seed_users(session)
+
+    with pytest.raises(UserAccountValidationError):
+        SqlAlchemyUserAccountRepository(session, tenant_id=DEFAULT_TENANT_ID).get_user_by_email(
+            email="not-an-email"
+        )
 
 
 def test_user_repository_explicit_tenant_overrides_request_context() -> None:
@@ -354,3 +399,13 @@ def _tenant(tenant_id: UUID, *, slug: str) -> Tenant:
         created_at=CREATED_AT,
         updated_at=CREATED_AT,
     )
+
+
+def test_connection_invalidated_is_not_retryable() -> None:
+    """A dead connection must never be retried at savepoint granularity."""
+    from sqlalchemy.exc import DBAPIError
+
+    from ums_smart_revenue.auth.users import _is_retryable_user_storage_error
+
+    exc = DBAPIError("SELECT 1", {}, Exception("connection lost"), connection_invalidated=True)
+    assert _is_retryable_user_storage_error(exc) is False

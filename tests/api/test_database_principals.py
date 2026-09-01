@@ -8,11 +8,12 @@ from uuid import UUID, uuid4
 import pytest
 from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, select, text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.exc import TimeoutError as SQLAlchemyTimeoutError
 from sqlalchemy.orm import Session
 
+import ums_smart_revenue.api.users as users_api
 from ums_smart_revenue.api.dependencies import (
     TrustedGatewayIdentity,
     current_principal_from_database,
@@ -386,6 +387,45 @@ def test_database_principal_uses_stored_role_instead_of_claimed_header_role(tmp_
     assert response.status_code == 201
     assert response.json()["role_key"] == "assistant_analyst"
     assert response.json()["assigned_by"] == str(ACTOR_ID)
+
+
+def test_database_principal_account_write_rolls_back_when_audit_fails(
+    tmp_path,
+    monkeypatch,
+):
+    """Keep the post-principal account write and audit inside one request unit."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    add_role_assignment(database_url, user_id=ACTOR_ID, role_key="corporate_admin")
+
+    def fail_audit_recording(**_kwargs: object) -> None:
+        """Simulate an audit subsystem outage at write time."""
+        raise RuntimeError("audit unavailable")
+
+    monkeypatch.setattr(users_api, "record_audit_event", fail_audit_recording)
+    client = TestClient(create_app(database_url=database_url, authz_source="database"))
+
+    response = client.post(
+        "/users",
+        headers=auth_headers(include_bootstrap_claims=False),
+        json={
+            "email": "database-auth-audit-failure@example.com",
+            "display_name": "Database Auth Audit Failure",
+            "reason": "Exercise post-principal request rollback",
+        },
+    )
+
+    engine = create_engine(database_url)
+    with Session(engine) as session:
+        persisted_user = session.scalars(
+            select(UserORM).where(UserORM.email == "database-auth-audit-failure@example.com")
+        ).one_or_none()
+        audit_logs = session.scalars(select(AuditLogORM)).all()
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == "Audit logging unavailable"
+    assert persisted_user is None
+    assert audit_logs == []
 
 
 def test_database_principal_loads_direct_permission_grants(tmp_path):

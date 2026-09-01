@@ -204,6 +204,7 @@ _REVENUE_SOURCE_KINDS_BY_CONNECTOR_KEY = {
     "manual_upload": {RevenueFactSourceKind.MANUAL_UPLOAD.value},
     "allocation": {RevenueFactSourceKind.ALLOCATION.value},
 }
+_MANUAL_REVENUE_CONNECTOR_KEYS = frozenset({"manual-upload", "manual_upload"})
 
 
 @dataclass(frozen=True)
@@ -1013,6 +1014,57 @@ def request_revenue_recalculation(
     return response_body
 
 
+# ============================================================================
+# Purpose: Authorize the bounded Google-free manual revenue-fact upload without
+#   granting connector execution. Scheduled/service callers retain the legacy
+#   RUN_CONNECTOR_JOBS gate at the requested connector scope.
+# Database/ORM: None; pure policy evaluation over the loaded principal.
+# Standards: The dedicated grant is global-only and valid only for the
+#   MANUAL_UPLOAD source under the two supported manual connector aliases.
+#   Every other source fails closed onto the legacy connector permission.
+# Blast Radius: Authorization for POST /revenue/facts only; no connector jobs,
+#   raw-file registration, AdSense sync, exchange-rate sync, or registry writes.
+# Connections:
+#   - File: backend/ums_smart_revenue/auth/permissions.py -> typed permission.
+#   - File: backend/ums_smart_revenue/auth/user_permissions.py -> global scope.
+# ============================================================================
+def _revenue_fact_import_permission(
+    user: UserPrincipal,
+    payload: RevenueFactImportRequest,
+    connector_scope: AccessScope,
+) -> Permission:
+    """Return the permission that authorizes this exact fact import."""
+    is_manual_revenue = (
+        payload.connector_key in _MANUAL_REVENUE_CONNECTOR_KEYS
+        and payload.source_kind == RevenueFactSourceKind.MANUAL_UPLOAD.value
+    )
+    if is_manual_revenue and has_permission(
+        user,
+        Permission.IMPORT_MANUAL_REVENUE,
+        AccessScope.global_scope(),
+    ):
+        return Permission.IMPORT_MANUAL_REVENUE
+    # FIX: RUN_CONNECTOR_JOBS is also granted to human Revenue Operations and
+    # Connector Admin roles; only a persisted service principal may use the
+    # connector-execution path. Humans fail closed onto the manual grant.
+    if user.is_service_account:
+        require_permission(user, Permission.RUN_CONNECTOR_JOBS, connector_scope)
+        return Permission.RUN_CONNECTOR_JOBS
+    raise_missing_permission(Permission.IMPORT_MANUAL_REVENUE)
+
+
+# ============================================================================
+# Purpose: Validate and persist one connector-sourced monthly revenue fact,
+#   then append its REPORT_IMPORTED audit record through the atomic sink.
+# Database/ORM: MonthlyChannelRevenueFactORM and AuditLogORM via repositories.
+# Standards: Thin route, typed validation/domain errors, fail-closed dual-path
+#   authorization, and audit permission matching the path actually used.
+# Blast Radius: Finance fact and audit writes. Locked-month protections and all
+#   source/formula/confidence validation remain unchanged.
+# Connections:
+#   - File: backend/ums_smart_revenue/finance/revenue_facts.py -> repository.
+#   - File: backend/ums_smart_revenue/auth/audit.py -> REPORT_IMPORTED contract.
+# ============================================================================
 @router.post("/facts", status_code=status.HTTP_201_CREATED)
 def import_revenue_fact(
     payload: RevenueFactImportRequest,
@@ -1025,7 +1077,7 @@ def import_revenue_fact(
 ) -> dict[str, object]:
     """Validate and persist a connector-sourced monthly fact, then audit it."""
     connector_scope = AccessScope.connector(payload.connector_key)
-    require_permission(user, Permission.RUN_CONNECTOR_JOBS, connector_scope)
+    authorization_permission = _revenue_fact_import_permission(user, payload, connector_scope)
     try:
         source_kind = _validate_connector_source_kind(payload.connector_key, payload.source_kind)
         fact = repository.record_fact(
@@ -1059,6 +1111,7 @@ def import_revenue_fact(
         entity_id=fact.audit_entity_id,
         scope=connector_scope,
         reason=payload.reason,
+        permission_override=authorization_permission,
         details={
             "connector_key": payload.connector_key,
             "source_report_id": payload.source_report_id,
@@ -4053,9 +4106,7 @@ def _snapshot_selection_channel_ids(
         group = registry.get_group(target_scope.id or "")
         if group is None or not group.active:
             return set()
-        snapshot_members = set(
-            registry.get_active_member_channels(target_scope.id or "") or ()
-        )
+        snapshot_members = set(registry.get_active_member_channels(target_scope.id or "") or ())
         if authorized_channel_ids is not None:
             snapshot_members &= authorized_channel_ids
         if not snapshot_members:

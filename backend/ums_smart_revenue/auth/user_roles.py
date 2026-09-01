@@ -1,3 +1,20 @@
+# ============================================================================
+# Purpose: Tenant-scoped role-assignment repository: create assignments with
+#   actor validation, savepoint-isolated duplicate handling, and a typed
+#   conflict contract; plus read and lifecycle operations over them.
+# Database/ORM: UserRoleAssignmentORM + AccessScopeORM (SecurityBase) through
+#   the caller's SQLAlchemy session; ambient TENANT_CTX supplies tenancy.
+# Standards: Typed UserRoleAssignment*Error exceptions; every write inside a
+#   begin_nested() savepoint so concurrent duplicates surface as the typed
+#   conflict instead of poisoning the outer transaction.
+# Blast Radius: Authorization state -- global/company role grants feed policy
+#   decisions everywhere; failures here are fail-closed.
+# Connections:
+#   - File: scripts/bootstrap_operator.py -> idempotent first-run caller whose
+#     EXISTING outcome depends on the conflict mapping below.
+#   - File: backend/ums_smart_revenue/auth/users.py -> sibling account
+#     repository sharing the storage-retry/savepoint pattern.
+# ============================================================================
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
@@ -120,13 +137,19 @@ class SqlAlchemyUserRoleAssignmentRepository:
         scope = self._get_or_create_scope(scope_type=scope_type, scope_id=scope_id)
 
         existing = self._session.scalars(
-            select(UserRoleAssignmentORM).where(
+            select(UserRoleAssignmentORM)
+            .where(
                 UserRoleAssignmentORM.tenant_id == self._tenant_id,
                 UserRoleAssignmentORM.user_id == target_user_id,
                 UserRoleAssignmentORM.role_key == role.value,
                 UserRoleAssignmentORM.scope_id == scope.id,
                 UserRoleAssignmentORM.active.is_(True),
             )
+            # FIX: Lock an existing active assignment before returning the
+            # idempotent conflict.  Without this lock a concurrent revoker
+            # could commit after this read and leave the CONFLICT result with
+            # no active role by the time the caller commits.
+            .with_for_update()
         ).one_or_none()
         if existing is not None:
             raise UserRoleAssignmentConflictError("Active role assignment already exists")
@@ -141,19 +164,31 @@ class SqlAlchemyUserRoleAssignmentRepository:
             reason=normalized_reason,
             active=True,
         )
-        self._session.add(row)
         try:
             with self._session.begin_nested():
+                # FIX: the add must sit INSIDE the savepoint -- opening
+                # begin_nested() flushes pending session state, so an add left
+                # outside let a concurrent duplicate INSERT abort the OUTER
+                # transaction; this handler then saw PendingRollbackError
+                # instead of being able to raise the typed conflict, and the
+                # idempotent bootstrap exited with a database failure rather
+                # than its EXISTING outcome.
+                self._session.add(row)
                 self._session.flush()
         except IntegrityError as exc:
             duplicate = self._session.scalars(
-                select(UserRoleAssignmentORM).where(
+                select(UserRoleAssignmentORM)
+                .where(
                     UserRoleAssignmentORM.tenant_id == self._tenant_id,
                     UserRoleAssignmentORM.user_id == target_user_id,
                     UserRoleAssignmentORM.role_key == role.value,
                     UserRoleAssignmentORM.scope_id == scope.id,
                     UserRoleAssignmentORM.active.is_(True),
                 )
+                # FIX: lock the surviving row so the conflict decision reads
+                # the post-race state, not a snapshot from before the insert
+                # race resolved.
+                .with_for_update()
             ).one_or_none()
             if duplicate is not None:
                 raise UserRoleAssignmentConflictError(
