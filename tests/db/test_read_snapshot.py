@@ -34,7 +34,8 @@ def test_non_postgres_session_is_a_no_op() -> None:
 
 def test_non_postgres_active_transaction_is_tolerated() -> None:
     """The dialect gate precedes the transaction guard: SQLite lanes share
-    one session, so an already-begun transaction must not be rejected there."""
+    one session, so an already-begun transaction must not be rejected there.
+    """
     engine = create_engine("sqlite+pysqlite:///:memory:")
     with Session(engine) as session:
         session.execute(text("SELECT 1"))

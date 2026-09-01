@@ -140,7 +140,6 @@ def _defer_logging_restore_until_workers_finish(
     executor: ConnectorJobExecutor | None,
 ) -> None:
     """Release output now and redaction only after all survivors exit."""
-
     # FIX: Output ownership and redaction safety are different lifetimes.
     # Restore levels/detach the UMS output handler now, but keep the exact
     # safety filters on every configured handler until both wait contracts
@@ -148,6 +147,7 @@ def _defer_logging_restore_until_workers_finish(
     release_logging_output(configuration)
 
     def _wait_and_restore() -> None:
+        """Restore redaction safety only after both wait contracts confirm quiescence."""
         try:
             if scheduler is not None:
                 scheduler.wait_for_shutdown_completion()

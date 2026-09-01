@@ -477,6 +477,7 @@ def _redact_log_text(value: object) -> str:
     text = _redact_private_sql(text)
 
     def _escape_control(match: re.Match[str]) -> str:
+        """Render one control character as a safe visible escape."""
         character = match.group(0)
         replacements = {"\r": r"\r", "\n": r"\n", "\t": r"\t"}
         if character in replacements:
@@ -532,7 +533,7 @@ def _redact_exception_chain(value: BaseException) -> str:
         chain.append((current, cause is not None))
         current = cause if cause is not None else current.__context__
     rendered: list[str] = []
-    for index, (exception, has_direct_cause) in enumerate(reversed(chain)):
+    for index, (exception, _) in enumerate(reversed(chain)):
         if index:
             relation = (
                 "The above exception was the direct cause"

@@ -220,9 +220,11 @@ def test_scheduler_close_exception_still_closes_executor_and_restores_once(
         setattr(executor, "close", _executor_close)
         monkeypatch.setattr(app_module, "restore_logging", _restore_once)
 
-        with pytest.raises(ExceptionGroup, match="background worker shutdown failed"):
-            with TestClient(app):
-                pass
+        with (
+            pytest.raises(ExceptionGroup, match="background worker shutdown failed"),
+            TestClient(app),
+        ):
+            pass
 
         assert close_order == ["scheduler", "executor"]
         assert restored.wait(timeout=2)
@@ -309,14 +311,17 @@ def test_scheduler_start_failure_closes_both_workers_and_restores_once(
             raise RuntimeError("thread start failed")
 
         def _scheduler_close() -> bool:
+            """Record that the scheduler closed, then run the real close."""
             close_order.append("scheduler")
             return real_scheduler_close()
 
         def _executor_close() -> bool:
+            """Record that the executor closed, then run the real close."""
             close_order.append("executor")
             return real_executor_close()
 
         def _restore_once(configuration: LoggingConfiguration) -> None:
+            """Count the logging-safety restore and run the real one."""
             restore_calls["count"] += 1
             real_restore(configuration)
 
@@ -325,9 +330,8 @@ def test_scheduler_start_failure_closes_both_workers_and_restores_once(
         setattr(executor, "close", _executor_close)
         monkeypatch.setattr(app_module, "restore_logging", _restore_once)
 
-        with pytest.raises(RuntimeError, match="thread start failed"):
-            with TestClient(app):
-                pass
+        with pytest.raises(RuntimeError, match="thread start failed"), TestClient(app):
+            pass
 
         assert close_order == ["scheduler", "executor"]
         assert restore_calls["count"] == 1

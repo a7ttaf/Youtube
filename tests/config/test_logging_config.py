@@ -896,6 +896,7 @@ def test_handlers_added_after_configuration_and_output_release_are_redacted() ->
 
 def test_formatter_replaces_a_precached_raw_exception_and_is_idempotent():
     """A formatter that ran first cannot leave raw credentials in exc_text."""
+    record = None
     try:
         raise RuntimeError("client_secret=cached-secret safe_cache=kept")
     except RuntimeError:
@@ -908,6 +909,8 @@ def test_formatter_replaces_a_precached_raw_exception_and_is_idempotent():
             args=(),
             exc_info=sys.exc_info(),
         )
+    # The try body raises unconditionally, so the except block always ran.
+    assert record is not None
 
     logging.Formatter("%(message)s").format(record)
     assert record.exc_text is not None
@@ -1395,9 +1398,12 @@ def test_foreign_filter_marker_collision_is_removed_only_by_identity() -> None:
     """A lookalike operator filter survives UMS safety-filter teardown."""
 
     class _ForeignFilter(logging.Filter):
+        """Foreign filter that only mimics the operator marker attribute."""
+
         _ums_smart_revenue_filter_id = "redaction-v2"
 
         def filter(self, _record: logging.LogRecord) -> bool:
+            """Accept every record; the filter under test only asserts identity."""
             return True
 
     root = logging.getLogger()

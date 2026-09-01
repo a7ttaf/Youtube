@@ -141,6 +141,7 @@ def test_corporate_admin_cannot_grant_finance_permission(tmp_path):
 
 
 def test_manual_revenue_permission_is_global_and_finance_admin_controlled(tmp_path):
+    """Manual revenue grants must stay global and finance-admin controlled."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -169,6 +170,7 @@ def test_manual_revenue_permission_is_global_and_finance_admin_controlled(tmp_pa
 
 
 def test_manual_revenue_permission_rejects_non_global_scope(tmp_path):
+    """Manual revenue grants reject any tenant-scoped assignment."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))

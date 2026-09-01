@@ -44,6 +44,7 @@ P0_C_PERMISSION_VALUES = frozenset({"finance.import_manual_revenue"})
 
 
 def test_permission_catalog_is_b1_baseline_plus_p0c_manual_revenue() -> None:
+    """The shipped catalog stays B1 baseline plus the P0c manual-revenue key."""
     expected = EXPECTED_PERMISSION_VALUES | P0_C_PERMISSION_VALUES
     actual = {p.value for p in Permission}
     added = actual - expected

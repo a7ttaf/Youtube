@@ -1144,6 +1144,8 @@ def test_request_connector_job_activation_can_open_fresh_sqlite_session(
     factory = build_session_factory(database_url)
 
     class _CheckoutProbeExecutor(_FakeExecutor):
+        """Executor that records the audit rows visible at activation time."""
+
         seen_actions: list[str]
 
         def __init__(self) -> None:
@@ -1153,6 +1155,7 @@ def test_request_connector_job_activation_can_open_fresh_sqlite_session(
         def activate(self, reservation):  # type: ignore[override]
             self.activate_calls.append({"reservation": reservation})
             with factory() as probe_session:
+                """Inspect the committed audit rows during reservation activation."""
                 rows = probe_session.scalars(
                     select(AuditLogORM).where(AuditLogORM.request_id == str(reservation.job_id))
                 ).all()
@@ -2101,7 +2104,8 @@ def test_derive_credential_health_state_missing_without_secret_ref():
 
 def test_derive_credential_health_state_auth_failed_precedence_over_missing():
     """auth_failed is evaluated before missing: a failed refresh with no secret
-    still derives 'auth_failed' (locks the documented rule precedence)."""
+    still derives 'auth_failed' (locks the documented rule precedence).
+    """
     as_of = datetime(2026, 6, 14, 12, 0, tzinfo=UTC)
     entry = ConnectorCredentialEntry(
         id="x",

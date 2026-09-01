@@ -254,6 +254,7 @@ def test_run_job_unexpected_exception_redacts_guarded_owner_traceback(tmp_path) 
     owner_id = "GuardedOwnerUnexpectedWorker123"
 
     def _boom(_session, **_kwargs):
+        """Raise an error whose message carries credential-shaped query text."""
         raise RuntimeError(
             "https://youtube.test/reports?"
             f"onBehalfOfContentOwner={owner_id}&"
@@ -773,8 +774,6 @@ def test_close_retains_hung_worker_until_it_really_settles(tmp_path, monkeypatch
     import threading
     import time
 
-    import ums_smart_revenue.connectors.runs.executor as executor_module
-
     monkeypatch.setattr(executor_module, "CLOSE_DRAIN_TIMEOUT_SECONDS", 0.2)
 
     factory = _factory(tmp_path)
@@ -821,8 +820,6 @@ def test_wait_for_shutdown_completion_retains_timed_out_audit_thread(tmp_path, m
     """The unbounded waiter keeps a timed-out shutdown audit reachable."""
     import threading
     import time
-
-    import ums_smart_revenue.connectors.runs.executor as executor_module
 
     monkeypatch.setattr(executor_module, "SHUTDOWN_AUDIT_BUDGET_SECONDS", 0.05)
 
@@ -1004,6 +1001,7 @@ def test_abandoned_intent_recovery_is_batched_server_side(
         _context,
         _executemany,
     ) -> None:
+        """Record every SQL statement executed against the test engine."""
         if "audit_logs" in statement.lower():
             statements.append(" ".join(statement.lower().split()))
 

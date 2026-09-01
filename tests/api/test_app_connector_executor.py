@@ -147,6 +147,8 @@ def test_completion_wait_failure_retains_redaction_safety(
     )
 
     class _BrokenWaitExecutor:
+        """Executor stub whose completion observer always fails."""
+
         def wait_for_shutdown_completion(self) -> None:
             """Model a broken completion observer after bounded close."""
             raise RuntimeError("completion observer failed")
