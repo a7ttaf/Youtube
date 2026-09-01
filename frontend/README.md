@@ -297,6 +297,10 @@ permanent access-denied screen — **no preview role is needed**.
   `disabled` principal renders `AccessDenied` — the dashboard is never shown
   before the principal is known, and a transient error never leaves a stale
   principal's capabilities live.
+- **Tenant/auth boundaries rehydrate fail closed**: when the resolved tenant
+  changes inside the mounted application, the prior principal is hidden
+  immediately while a tenant-keyed `/session/me` request resolves. A failed or
+  disabled replacement cannot inherit the prior principal's capabilities.
 - **Connector controls require `canRunConnectorJobs`**: the job-sync and
   AdSense-sync write actions stay disabled unless the principal's capability is
   true.

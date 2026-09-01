@@ -23,7 +23,7 @@ import {
 } from "@/lib/api/useConnectors";
 import { useConnectorRuns } from "@/lib/api/useConnectorRuns";
 import { useConnectorTest } from "@/lib/api/useConnectorTest";
-import type { Severity } from "@/lib/mock/data";
+import type { Severity } from "@/types/domain";
 import { monthKeyLabel, monthKeyOfDateInput } from "@/lib/months";
 import {
   Badge,

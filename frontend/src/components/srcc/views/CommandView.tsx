@@ -29,17 +29,13 @@ import { useOutsideCmsChannels } from "@/lib/api/useOutsideCmsChannels";
 import { useRankings } from "@/lib/api/useRankings";
 import { useRevenueScopes } from "@/lib/api/useRevenueScopes";
 import { useSmartAlerts } from "@/lib/api/useSmartAlerts";
-import {
-  CLOSE_STEPS,
-  EXPORT_READINESS,
-  ISSUES,
-} from "@/lib/mock/data";
-import type { Severity } from "@/lib/mock/data";
+import type { Severity } from "@/types/domain";
 import { confidenceDisplay } from "@/lib/confidence";
 import { LockIcon } from "../icons";
 import {
   Badge,
   DEFAULT_MONTH,
+  Dot,
   financeDisplay,
   ItemRow,
   MONTH_OPTIONS,
@@ -51,9 +47,11 @@ import {
 // Purpose: The first REAL-data screen. Renders the monthly net-revenue summary
 //   (gross / net / deductions / status / allocation source) for a selected
 //   month + scope via the useNetRevenue hook, with explicit loading and error
-//   states. Establishes the data-wiring pattern the other six views follow;
-//   side panels (Issue Queue, Month Close, Export Readiness) stay on mock data
-//   for now and are clearly labelled as such.
+//   states. Establishes the data-wiring pattern the other seven views follow.
+//   Every panel on this screen is API-backed. The fabricated Issue Queue, Month
+//   Close Controls, and Export Readiness panels were removed; their real
+//   domains already live in Channel Issues/Smart Alerts, CloseView, and
+//   ExportsView.
 // Database/ORM: None (frontend) — consumes GET /revenue/months/{month}/net-revenue.
 // Standards: Money values are backend strings, formatted for display only (no
 //   float math); finance cells are permission-gated via financeDisplay; 403 ->
@@ -84,12 +82,8 @@ const scopeOptionKey = (scopeType: string, scopeId: string | null): string => {
   return scopeId ? `${scopeType}:${scopeId}` : scopeType;
 };
 
-// The guaranteed fallback when the authorized-scope fetch is loading, errors, or
-// returns nothing: a single GLOBAL option. A scoped viewer with no global grant
-// never sees this injected on top of a successful response — it is ONLY the
-// fail-open default so the screen renders while the real, fail-closed option set
-// (which the backend returns with global present ONLY when authorized) loads. The
-// panels themselves fail-closed on the actual scoped reads.
+// Inert query-shape placeholder used only while requests are disabled. It is
+// never rendered as an authorized option and never enables a global request.
 const GLOBAL_SCOPE_FALLBACK: ScopeOption = {
   label: "Global",
   scopeType: "global",
@@ -102,9 +96,10 @@ const GLOBAL_SCOPE_FALLBACK: ScopeOption = {
 //   authorized scopes verbatim (the backend already includes global only when
 //   authorized, so a scoped viewer correctly gets no global option — the
 //   anti-scope-leak guarantee). While loading, on a 403/error, or on an empty
-//   list, fall back to global-only so the screen never blocks.
+//   list, return no options so every scope-bound finance read remains withheld.
 // Standards: Pure mapping; no client-side authorization invented — the fetched
-//   set is the fail-closed source of truth. No money handling here.
+//   set is the fail-closed source of truth. A failed or empty read returns NO
+//   options; it must never invent global authority.
 // Blast Radius: Authorization (the selector's option source). No mutation.
 // Connections:
 //   - File: frontend/src/lib/api/useRevenueScopes.ts -> the option source.
@@ -112,7 +107,7 @@ const GLOBAL_SCOPE_FALLBACK: ScopeOption = {
 // ============================================================================
 const resolveScopeOptions = (scopes: RevenueScopeOption[] | null): ScopeOption[] => {
   if (!scopes || scopes.length === 0) {
-    return [GLOBAL_SCOPE_FALLBACK];
+    return [];
   }
   return scopes.map((scope) => ({
     label: scope.label,
@@ -180,6 +175,7 @@ const statusTone = (status: string): Severity => {
   return "blue";
 };
 
+/** Copy for a known bank-reconciliation status, or a toned fallback for an unknown one. */
 const bankReconciliationStatusCopy = (status: string) =>
   BANK_RECONCILIATION_STATUS_COPY[status] ?? {
     label: status,
@@ -188,6 +184,7 @@ const bankReconciliationStatusCopy = (status: string) =>
     metricTone: "is-payment",
   };
 
+/** "N thing(s)" with the count pluralized correctly. */
 const countLabel = (count: number, singular: string, plural = `${singular}s`): string =>
   `${count} ${count === 1 ? singular : plural}`;
 
@@ -233,101 +230,18 @@ const channelAvatar = (channel: ChannelNetRevenue): string => {
   return (id.slice(-2) || "--").toUpperCase();
 };
 
-/** Mock Issue Queue panel (not yet wired to the API). */
-const IssueQueuePanel = () => {
-  return (
-    <section className="panel" aria-labelledby="issuesTitle">
-      <div className="panel-header">
-        <div className="panel-title">
-          <strong id="issuesTitle">Issue Queue</strong>
-          <span>Sample data — not yet wired to the API</span>
-        </div>
-        <Badge tone="amber">Mock</Badge>
-      </div>
-      <div className="issue-list" role="list">
-        {ISSUES.map((i) => (
-          <ItemRow
-            key={i.title}
-            tone={i.tone}
-            title={i.title}
-            sub={i.sub}
-            trailing={<Badge tone={i.badge.tone}>{i.badge.text}</Badge>}
-          />
-        ))}
-      </div>
-    </section>
-  );
-};
-
-/** Trailing control for a close step: a status badge or an action button. */
-const CloseStepAction = ({ step }: { step: (typeof CLOSE_STEPS)[number] }) => {
-  if (step.badge) {
-    return <Badge tone={step.badge.tone}>{step.badge.text}</Badge>;
-  }
-  return (
-    <button className="mini-button" type="button">
-      {step.action}
-    </button>
-  );
-};
-
-/** Mock Month Close Controls panel (not yet wired to the API). */
-const MonthCloseControlsPanel = () => {
-  return (
-    <section className="panel" aria-labelledby="closeTitle">
-      <div className="panel-header">
-        <div className="panel-title">
-          <strong id="closeTitle">Month Close Controls</strong>
-          <span>Sample data — not yet wired to the API</span>
-        </div>
-        <Badge tone="amber">Mock</Badge>
-      </div>
-      <div className="close-list" role="list">
-        {CLOSE_STEPS.map((s) => (
-          <ItemRow
-            key={s.title}
-            tone={s.tone}
-            title={s.title}
-            sub={s.sub}
-            className="close-item"
-            trailing={<CloseStepAction step={s} />}
-          />
-        ))}
-      </div>
-    </section>
-  );
-};
-
-/** Mock Export Readiness panel (not yet wired to the API). */
-const ExportReadinessPanel = () => {
-  return (
-    <section className="panel">
-      <div className="panel-header">
-        <div className="panel-title">
-          <strong>Export Readiness</strong>
-          <span>Sample data — not yet wired to the API</span>
-        </div>
-        <Badge tone="amber">Mock</Badge>
-      </div>
-      <div className="issue-list" role="list">
-        {EXPORT_READINESS.map((r) => (
-          <ItemRow
-            key={r.title}
-            tone={r.tone}
-            title={r.title}
-            sub={r.sub}
-            trailing={<Badge tone={r.badge.tone}>{r.badge.text}</Badge>}
-          />
-        ))}
-      </div>
-    </section>
-  );
-};
-
 // ============================================================================
-// Purpose: Map an ApiError/Error to friendly UI copy. 403 -> no-permission
-//   message (matches the finance fail-closed model); other ApiError -> the
-//   typed status + message; non-ApiError -> generic network failure.
+// Purpose: Map an ApiError/Error to friendly UI copy. A caller may provide
+//   domain-specific 403 detail instead of inheriting the net-revenue default.
+// Database/ORM: None (frontend error presentation only).
+// Standards: The 403 branch uses fixed caller-owned copy and never reflects a
+//   backend authorization detail; other typed/network failures preserve the
+//   existing shared error contract.
+// Blast Radius: Operator-facing failure copy only; no request or authorization
+//   behavior changes.
+// Connections:
+//   - File: frontend/src/components/srcc/views/CloseView.tsx -> close copy.
+//   - File: frontend/src/components/srcc/views/ExportsView.tsx -> export copy.
 // ============================================================================
 const extractApiErrorDetail = (error: ApiError): string => {
   const body = error.body as { detail?: unknown } | null;
@@ -335,12 +249,20 @@ const extractApiErrorDetail = (error: ApiError): string => {
   return error.message;
 };
 
-const describeError = (error: ApiError | Error): { title: string; detail: string } => {
+/**
+ * Map an API or network failure to safe screen copy.
+ * @param error The typed API or ordinary network error to describe.
+ * @param forbiddenDetail Domain-specific copy for a 403 response.
+ */
+const describeError = (
+  error: ApiError | Error,
+  forbiddenDetail = "Your role cannot view net revenue for this month or scope.",
+): { title: string; detail: string } => {
   if (error instanceof ApiError) {
     if (error.status === 403)
       return {
         title: "No permission",
-        detail: "Your role cannot view net revenue for this month or scope.",
+        detail: forbiddenDetail,
       };
     return { title: `Request failed (${error.status})`, detail: extractApiErrorDetail(error) };
   }
@@ -357,6 +279,7 @@ const alertErrorBadge = (error: ApiError | Error): { tone: Severity; children: s
   return { tone: isForbidden ? "blue" : "red", children: isForbidden ? "No permission" : "Error" };
 };
 
+/** Badge props for a loaded smart-alerts summary: Clear, or its highest severity. */
 const alertDataBadge = (data: SmartAlertsSummary): { tone: Severity; children: string } => {
   if (data.status === "CLEAR") return { tone: "green", children: "Clear" };
   const severity = data.highest_severity;
@@ -366,6 +289,7 @@ const alertDataBadge = (data: SmartAlertsSummary): { tone: Severity; children: s
   };
 };
 
+/** Panel header badge that degrades through error, loading, and empty states. */
 const SmartAlertsHeaderBadge = ({
   data,
   loading,
@@ -387,10 +311,41 @@ const SmartAlertsHeaderBadge = ({
 const safeAlerts = (data: SmartAlertsSummary | null): SmartAlert[] =>
   data && Array.isArray(data.alerts) ? data.alerts : [];
 
+/** Sub-copy under the alerts panel's no-alerts state. */
 const emptyAlertSubText = (data: SmartAlertsSummary | null): string =>
   data
     ? `Status ${data.status} — nothing needs attention for ${data.month}.`
     : "No smart-alert data returned.";
+
+// ============================================================================
+// Purpose: Translate Smart Alerts failures without reusing net-revenue copy or
+//   exposing an arbitrary backend error body in this cross-domain panel.
+// Database/ORM: None (frontend error presentation only).
+// Standards: 403 names Smart Alerts and the selected-month permission domain;
+//   all other failures use fixed retry-safe copy.
+// Blast Radius: Error copy only; no fetch or authorization behavior.
+// Connections:
+//   - File: backend/ums_smart_revenue/api/revenue.py -> smart-alerts gates.
+// ============================================================================
+const smartAlertsErrorCopy = (
+  error: ApiError | Error,
+): { title: string; detail: string } => {
+  if (error instanceof ApiError) {
+    if (error.status === 403) {
+      // FIX: Keep this cross-domain panel from inheriting net-revenue denial
+      // copy while retaining its fixed, non-reflective failure messages.
+      return describeError(error, "Your role cannot view smart alerts for this month.");
+    }
+    return {
+      title: `Request failed (${error.status})`,
+      detail: "Could not load Smart Alerts for this finance month.",
+    };
+  }
+  return {
+    title: "Network error",
+    detail: "Could not reach the Smart Alerts service.",
+  };
+};
 
 /** Body of the smart-alerts panel: error, loading, empty, and alert-row states. */
 const SmartAlertsBody = ({
@@ -403,7 +358,7 @@ const SmartAlertsBody = ({
   error: ApiError | Error | null;
 }) => {
   if (error) {
-    const { title, detail } = describeError(error);
+    const { title, detail } = smartAlertsErrorCopy(error);
     return (
       <div className="issue-list" role="alert">
         <ItemRow
@@ -473,7 +428,8 @@ const SmartAlertsBody = ({
 //   four finance-month permissions the net-revenue read does not all require) or
 //   any other error renders inside this card only — the channel table, status
 //   strip, and explain panel keep rendering. Loading / error / 403 / empty
-//   states mirror the rest of CommandView and reuse describeError.
+//   states are domain-specific. The hook is disabled unless all four
+//   backend-derived grants cover the selected month.
 // Database/ORM: None (frontend) — consumes GET /revenue/months/{month}/smart-alerts.
 // Standards: No money is rendered here (alerts carry messages, not gated finance
 //   cells), so no canViewFinance gating is needed; severity drives the badge
@@ -485,8 +441,29 @@ const SmartAlertsBody = ({
 //   - File: frontend/src/lib/api/types.ts -> SmartAlertsSummary contract.
 //   - File: backend/ums_smart_revenue/api/revenue.py -> get_month_smart_alerts.
 // ============================================================================
-const SmartAlertsPanel = ({ month }: { month: string }) => {
-  const { data, loading, error, reload } = useSmartAlerts({ month });
+const SmartAlertsPanel = ({ month, enabled }: { month: string; enabled: boolean }) => {
+  const { data, loading, error, reload } = useSmartAlerts({ month, enabled });
+
+  if (!enabled) {
+    return (
+      <section className="panel" aria-labelledby="smartAlertsTitle" style={{ marginBottom: 16 }}>
+        <div className="panel-header">
+          <div className="panel-title">
+            <strong id="smartAlertsTitle">Smart Alerts / Problem Panel</strong>
+            <span>Cross-domain finance health signals for {month}</span>
+          </div>
+          <Badge tone="red">Restricted</Badge>
+        </div>
+        <div className="permission-band">
+          <Dot tone="red" />
+          <span>
+            <strong>Smart Alerts withheld</strong>
+            <span>Requires global revenue and confidence plus payment and bank access for this month.</span>
+          </span>
+        </div>
+      </section>
+    );
+  }
 
   return (
     <section className="panel" aria-labelledby="smartAlertsTitle" style={{ marginBottom: 16 }}>
@@ -526,6 +503,7 @@ type RevenueMetric = {
   locked?: boolean;
 };
 
+/** Build the Command Center's top revenue metric cards from a net-revenue response. */
 const buildRevenueMetrics = (
   data: NetRevenueResponse,
   canViewFinance: boolean,
@@ -702,6 +680,7 @@ const BANK_RECONCILIATION_CARD_LABELS = [
 
 const BANK_RECONCILIATION_USD_CURRENCY = "USD";
 
+/** Badge for the AdSense payment card: Paid once any USD payment is filed. */
 const adsensePaymentBadge = (
   data: MonthBankReconciliationSummary,
 ): BankReconciliationMetric["badge"] => {
@@ -711,9 +690,11 @@ const adsensePaymentBadge = (
   return { text: "Missing", tone: "amber" };
 };
 
+/** Primary note for the AdSense payment card: the paid-USD payment count. */
 const adsensePaymentPrimaryNote = (data: MonthBankReconciliationSummary): string =>
   countLabel(data.paid_payment_count, "paid USD payment");
 
+/** Secondary note: unsupported-currency or unpaid counts, else the source name. */
 const adsensePaymentSecondaryNote = (data: MonthBankReconciliationSummary): string => {
   if (data.unsupported_payment_currency_count > 0) {
     return countLabel(data.unsupported_payment_currency_count, "unsupported currency payment");
@@ -724,6 +705,7 @@ const adsensePaymentSecondaryNote = (data: MonthBankReconciliationSummary): stri
   return "AdSense source";
 };
 
+/** Metric tone class for the AdSense payment card. */
 const adsensePaymentTone = (data: MonthBankReconciliationSummary): string => {
   if (data.paid_payment_count > 0) {
     return "is-payment";
@@ -731,6 +713,7 @@ const adsensePaymentTone = (data: MonthBankReconciliationSummary): string => {
   return "is-review";
 };
 
+/** Badge for the bank receipts card: green once any receipt has loaded. */
 const bankReceiptBadge = (
   data: MonthBankReconciliationSummary,
 ): BankReconciliationMetric["badge"] => {
@@ -740,6 +723,7 @@ const bankReceiptBadge = (
   return { text: countLabel(data.entry_count, "receipt"), tone: "amber" };
 };
 
+/** Note for the bank receipts card: whether the bank source has loaded yet. */
 const bankReceiptSourceNote = (data: MonthBankReconciliationSummary): string => {
   if (data.entry_count > 0) {
     return "Bank source loaded";
@@ -747,6 +731,7 @@ const bankReceiptSourceNote = (data: MonthBankReconciliationSummary): string => 
   return "Waiting for bank";
 };
 
+/** Metric tone class for the bank receipts card. */
 const bankReceiptTone = (data: MonthBankReconciliationSummary): string => {
   if (data.entry_count > 0) {
     return "is-revenue";
@@ -754,6 +739,7 @@ const bankReceiptTone = (data: MonthBankReconciliationSummary): string => {
   return "is-review";
 };
 
+/** Note for the reconciliation cards: the finance-displayed bank transfer fee. */
 const bankTransferFeeNote = (
   data: MonthBankReconciliationSummary,
   canViewFinance: boolean,
@@ -763,6 +749,7 @@ const bankTransferFeeNote = (
     placeholder: "No fee",
   });
 
+/** Secondary note for the unresolved-gap card: the tolerance, or what is still missing. */
 const bankGapSecondaryNote = (
   data: MonthBankReconciliationSummary,
   canViewFinance: boolean,
@@ -856,6 +843,7 @@ const bankReconciliationErrorCopy = (
   };
 };
 
+/** Badge tone for the reconciliation error strip: blue only for permission denials. */
 const bankReconciliationErrorTone = (title: string): Severity => {
   if (title === "No permission") {
     return "blue";
@@ -863,11 +851,13 @@ const bankReconciliationErrorTone = (title: string): Severity => {
   return "red";
 };
 
+/** True only during the FIRST load, before any summary has landed for this read. */
 const isInitialBankReconciliationLoad = (
   loading: boolean,
   data: MonthBankReconciliationSummary | null,
 ): boolean => loading && !data;
 
+/** Shared labelled section wrapper for every reconciliation strip state. */
 const BankReconciliationShell = ({
   children,
   role,
@@ -887,6 +877,7 @@ const BankReconciliationShell = ({
   </section>
 );
 
+/** The strip shown without payment+bank read grants: restricted placeholders only. */
 const RestrictedBankReconciliationStrip = () => (
   <BankReconciliationShell>
     {BANK_RECONCILIATION_CARD_LABELS.map((label) => (
@@ -904,6 +895,7 @@ const RestrictedBankReconciliationStrip = () => (
   </BankReconciliationShell>
 );
 
+/** The strip shown when the reconciliation read failed. */
 const BankReconciliationErrorStrip = ({ error }: { error: ApiError | Error }) => {
   const { title, detail } = bankReconciliationErrorCopy(error);
   return (
@@ -922,6 +914,7 @@ const BankReconciliationErrorStrip = ({ error }: { error: ApiError | Error }) =>
   );
 };
 
+/** The strip shown while the first reconciliation summary is still in flight. */
 const LoadingBankReconciliationStrip = ({ month }: { month: string }) => (
   <BankReconciliationShell busy>
     {BANK_RECONCILIATION_CARD_LABELS.map((label) => (
@@ -940,6 +933,7 @@ const LoadingBankReconciliationStrip = ({ month }: { month: string }) => (
   </BankReconciliationShell>
 );
 
+/** The strip shown when the read settled without a summary body. */
 const EmptyBankReconciliationStrip = () => (
   <BankReconciliationShell>
     <article className="metric is-review">
@@ -955,6 +949,7 @@ const EmptyBankReconciliationStrip = () => (
   </BankReconciliationShell>
 );
 
+/** The strip rendering the built reconciliation metric cards. */
 const PopulatedBankReconciliationStrip = ({
   metrics,
 }: {
@@ -1018,6 +1013,7 @@ const BankReconciliationDataStrip = ({ month }: { month: string }) => {
   return <PopulatedBankReconciliationStrip metrics={metrics} />;
 };
 
+/** Permission gate in front of the reconciliation data strip. */
 const BankReconciliationStatusStrip = ({
   month,
   canViewBankReconciliationSummary,
@@ -1165,6 +1161,7 @@ const buildGapLegDescriptors = (
   canViewFinance: boolean,
   currency: string,
 ): GapLegDescriptor[] => {
+  /** Render a leg money value (or the null dash) in the selected currency. */
   const money = (value: string | null) => financeDisplay(value, canViewFinance, { currency });
   const payment = data.payment_leg;
   const bank = data.bank_leg;
@@ -1771,9 +1768,8 @@ const ExplainCard = ({
 };
 
 /**
- * Two-column Command Center workspace: the real channel table plus mock issue,
- * close, explanation, and export-readiness panels. Splits into named panels so
- * each JSX subtree stays shallow.
+ * Two-column Command Center workspace: the real channel table beside the real
+ * explanation card. Both read the same net-revenue response the parent fetched.
  */
 const CommandWorkspace = ({
   data,
@@ -1812,15 +1808,10 @@ const CommandWorkspace = ({
           onSelect={onSelect}
         />
 
-        {/* issue + close split — still mock data (not part of net-revenue API) */}
-        <div className="layout-split">
-          <IssueQueuePanel />
-          <MonthCloseControlsPanel />
-        </div>
       </div>
 
-      {/* explain + readiness */}
-      <aside className="side-stack" aria-label="Explanation and readiness">
+      {/* The explanation card is API-backed; no fabricated readiness panel. */}
+      <aside className="side-stack" aria-label="Explanation">
         <ExplainCard
           selectedChannel={selectedChannel}
           canViewFinance={canViewFinance}
@@ -1828,7 +1819,6 @@ const CommandWorkspace = ({
           loading={loading}
           month={month}
         />
-        <ExportReadinessPanel />
       </aside>
     </section>
   );
@@ -1861,6 +1851,7 @@ const OutsideCmsSummaryTiles = ({
   const outsideCount = outsideCms?.summary?.outside_cms_channel_count ?? null;
   const missingCount = outsideCms?.summary?.missing_official_revenue_count ?? null;
   const openCount = issues?.summary?.total_issue_count ?? null;
+  /** Locale-formatted count, or the dash placeholder for a null summary. */
   const fmt = (value: number | null): string =>
     value === null ? "—" : value.toLocaleString();
   return (
@@ -1932,6 +1923,7 @@ const MonitorList = ({
   empty,
   emptyTitle,
   emptySub,
+  forbiddenDetail,
   children,
 }: {
   error: ApiError | Error | null;
@@ -1939,10 +1931,11 @@ const MonitorList = ({
   empty: boolean;
   emptyTitle: string;
   emptySub: string;
+  forbiddenDetail: string;
   children: ReactNode;
 }) => {
   if (error) {
-    const { title, detail } = describeError(error);
+    const { title, detail } = describeError(error, forbiddenDetail);
     return (
       <div className="issue-list" role="alert">
         <ItemRow tone="blue" title={title} sub={detail} trailing={<Badge tone="blue">—</Badge>} />
@@ -2006,6 +1999,7 @@ const OutsideCmsHalf = ({
         empty={items.length === 0}
         emptyTitle="No outside-CMS channels"
         emptySub="Every channel in scope is inside a managed CMS."
+        forbiddenDetail="Your role cannot view outside-CMS coverage for this scope."
       >
         {items.map((item) => (
           <OutsideCmsRow key={item.youtube_channel_id} item={item} />
@@ -2041,6 +2035,7 @@ const ChannelIssuesHalf = ({
         empty={items.length === 0}
         emptyTitle="No channel issues"
         emptySub="No registry-health issues in this scope."
+        forbiddenDetail="Your role cannot view channel issues for this scope."
       >
         {items.map((issue) => (
           <ChannelIssueRow
@@ -2330,7 +2325,10 @@ const RankingsBody = ({
     enabled: scopesReady,
   });
   if (error) {
-    const { title, detail } = describeError(error);
+    const { title, detail } = describeError(
+      error,
+      "Your role cannot view rankings for this month or scope.",
+    );
     return (
       <div className="issue-list" role="alert">
         <ItemRow tone="blue" title={title} sub={detail} trailing={<Badge tone="blue">—</Badge>} />
@@ -2443,6 +2441,53 @@ const financeMonthHintSatisfies = (
   month: string,
 ): boolean => hint.globalScope || hint.financeMonths.includes(month);
 
+// ============================================================================
+// Purpose: Explain why scope-bound finance queries are currently withheld.
+// Database/ORM: None (frontend read-state presentation).
+// Standards: Fixed copy; an error or empty authorized-scope response never
+//   degrades into an invented global request.
+// Blast Radius: Authorization UX only; the query gate is computed separately.
+// Connections:
+//   - File: frontend/src/lib/api/useRevenueScopes.ts -> supplies this state.
+// ============================================================================
+const ScopeAccessNotice = ({
+  canViewFinance,
+  loading,
+  error,
+  empty,
+}: {
+  canViewFinance: boolean;
+  loading: boolean;
+  error: ApiError | Error | null;
+  empty: boolean;
+}) => {
+  let title = "Revenue access unavailable";
+  let detail = "This session has no revenue-read capability.";
+  let tone: Severity = "red";
+  if (canViewFinance && loading) {
+    title = "Loading authorized scopes";
+    detail = "Finance queries stay withheld until the scope list is trustworthy.";
+    tone = "blue";
+  } else if (canViewFinance && error) {
+    title = "Authorized scopes unavailable";
+    detail = "The scope read failed, so no global or scoped finance query was sent.";
+  } else if (canViewFinance && empty) {
+    title = "No authorized scopes returned";
+    detail = "The empty scope response cannot authorize a global finance query.";
+  }
+  return (
+    <div className="permission-band" role={error ? "alert" : undefined}>
+      <Dot tone={tone} />
+      <span>
+        <strong>{title}</strong>
+        <span>{detail}</span>
+      </span>
+      <Badge tone={tone}>{loading && canViewFinance ? "Loading" : "Withheld"}</Badge>
+    </div>
+  );
+};
+
+/** The Command Center view: revenue, alerts, and monitor panels gated by session grants. */
 const CommandView = ({
   canViewFinance,
   canViewAnalytics = false,
@@ -2481,50 +2526,49 @@ const CommandView = ({
   const [month, setMonth] = useState<string>(DEFAULT_MONTH);
   // Stable {scopeType, scopeId} identity instead of a positional index: the
   // option list arrives asynchronously, so an index would point at the wrong
-  // (or a vanished) scope once the fetched set replaces the global-only fallback.
+  // (or a vanished) scope once the fetched set resolves.
   const [selectedScopeKey, setSelectedScopeKey] = useState<string>(
     scopeOptionKey(GLOBAL_SCOPE_FALLBACK.scopeType, GLOBAL_SCOPE_FALLBACK.scopeId),
   );
   const [selectedChannelId, setSelectedChannelId] = useState<string | null>(null);
 
-  // Fetch the viewer's VIEW_REVENUE-authorized scopes ONCE at the view root. The
-  // selector is populated ONLY from these (fail-closed against an org-structure
-  // leak); while loading or on a 403/error it degrades to global-only so the
-  // screen never blocks (the panels fail-closed on the actual scoped reads).
-  const { data: scopesData, error: scopesError } = useRevenueScopes();
-  // FIX (review #102 Qodo #3): Hold the net-revenue + rankings reads until the
-  // authorized-scope fetch has a verdict (data OR error). While it is still
-  // loading, scopesData is null and `scope` resolves to the global fallback —
-  // firing it immediately would trigger an unauthorized global read (likely a
-  // noisy 403) for a scoped viewer before their real options arrive. Once the
-  // scopes fetch resolves (success -> real options, or error -> global fallback),
-  // the gated reads fire with the correct scope.
-  const scopesReady = useMemo(
-    () => scopesData !== null || scopesError !== null,
-    [scopesData, scopesError],
+  // FIX: No VIEW_REVENUE capability means no scope discovery request. More
+  // importantly, a failed or empty discovery response is not authority for a
+  // global fallback: every scope-bound finance request stays disabled.
+  const {
+    data: scopesData,
+    loading: scopesLoading,
+    error: scopesError,
+  } = useRevenueScopes(canViewFinance);
+  const scopesTrusted = useMemo(
+    () =>
+      canViewFinance &&
+      scopesError === null &&
+      Array.isArray(scopesData) &&
+      scopesData.length > 0,
+    [canViewFinance, scopesData, scopesError],
   );
   const scopeOptions = useMemo(
     () => resolveScopeOptions(scopesData),
     [scopesData],
   );
-  // Resolve the active scope from the stable key, falling back to the first
-  // option (always present — resolveScopeOptions guarantees >=1) when the key is
-  // not in the current list (e.g. before the fetch resolves). The fallback is
-  // global while loading, never an out-of-scope unit.
+  // Resolve only against the server-authorized set. The inert placeholder below
+  // shapes disabled hooks but is never rendered or allowed to dispatch.
   const scope = useMemo(
     () =>
       scopeOptions.find(
         (option) => scopeOptionKey(option.scopeType, option.scopeId) === selectedScopeKey,
       ) ??
       scopeOptions[0] ??
-      GLOBAL_SCOPE_FALLBACK,
+      null,
     [scopeOptions, selectedScopeKey],
   );
+  const queryScope = scope ?? GLOBAL_SCOPE_FALLBACK;
   const { data, loading, error, reload } = useNetRevenue({
     month,
-    scopeType: scope.scopeType,
-    scopeId: scope.scopeId,
-    enabled: scopesReady,
+    scopeType: queryScope.scopeType,
+    scopeId: queryScope.scopeId,
+    enabled: scopesTrusted,
   });
 
   const currency = useMemo(() => data?.currency ?? "USD", [data]);
@@ -2540,7 +2584,13 @@ const CommandView = ({
     () => selectedChannel?.youtube_channel_id ?? null,
     [selectedChannel],
   );
-  const canViewBankReconciliationSummary = canViewPayments && canViewBankReconciliation;
+  const paymentsCoverMonth = financeMonthHintSatisfies(paymentsViewScopes, month);
+  const bankCoversMonth = financeMonthHintSatisfies(bankReconciliationViewScopes, month);
+  const canViewBankReconciliationSummary =
+    canViewPayments &&
+    canViewBankReconciliation &&
+    paymentsCoverMonth &&
+    bankCoversMonth;
   // The composed gap-explanation endpoint enforces the smart-alerts gate set
   // (VIEW_REVENUE + VIEW_CONFIDENCE @ global, payments + bank @ the
   // requested finance month) — mirror it client-side so a session that
@@ -2551,10 +2601,12 @@ const CommandView = ({
   // grant scoped only to another month restricts here instead of fetching.
   // The backend still re-checks every gate — these hints never broaden.
   const canViewGapNarrative =
+    scopesTrusted &&
     canViewRevenueGlobal &&
     canViewConfidence &&
-    financeMonthHintSatisfies(paymentsViewScopes, month) &&
-    financeMonthHintSatisfies(bankReconciliationViewScopes, month);
+    paymentsCoverMonth &&
+    bankCoversMonth;
+  const canViewSmartAlerts = canViewGapNarrative;
 
   return (
     <>
@@ -2584,7 +2636,8 @@ const CommandView = ({
           // `scope` already falls back to the first option (global while
           // loading), so the displayed option always matches the scope being read
           // — no desynced selection that reads one scope but shows another.
-          value={scopeOptionKey(scope.scopeType, scope.scopeId)}
+          value={scope ? scopeOptionKey(scope.scopeType, scope.scopeId) : ""}
+          disabled={!scopesTrusted}
           onChange={(e) => {
             // Store the stable scope key; the active {scopeType, scopeId} is
             // resolved from it against the current option list. Reset the
@@ -2594,6 +2647,7 @@ const CommandView = ({
             setSelectedChannelId(null);
           }}
         >
+          {!scope ? <option value="">Authorized scopes unavailable</option> : null}
           {scopeOptions.map((s) => (
             <option
               key={scopeOptionKey(s.scopeType, s.scopeId)}
@@ -2608,20 +2662,32 @@ const CommandView = ({
           className="icon-button"
           aria-label="Refresh net revenue"
           title="Refresh net revenue"
+          disabled={!scopesTrusted}
           onClick={reload}
         >
           ↻
         </button>
       </section>
 
+      {!scopesTrusted ? (
+        <ScopeAccessNotice
+          canViewFinance={canViewFinance}
+          loading={canViewFinance && scopesLoading && scopesError === null}
+          error={scopesError}
+          empty={Array.isArray(scopesData) && scopesData.length === 0}
+        />
+      ) : null}
+
       {/* status strip — REAL net-revenue summary */}
-      <NetRevenueStatusStrip
-        data={data}
-        loading={loading}
-        error={error}
-        canViewFinance={canViewFinance}
-        currency={currency}
-      />
+      {scopesTrusted ? (
+        <NetRevenueStatusStrip
+          data={data}
+          loading={loading}
+          error={error}
+          canViewFinance={canViewFinance}
+          currency={currency}
+        />
+      ) : null}
 
       {/* payment/bank reconciliation — REAL data, sourced from the backend summary */}
       <BankReconciliationStatusStrip
@@ -2635,7 +2701,7 @@ const CommandView = ({
       <GapNarrativePanel month={month} canViewGapNarrative={canViewGapNarrative} />
 
       {/* smart-alerts / problem panel — REAL data, fails independently */}
-      <SmartAlertsPanel month={month} />
+      <SmartAlertsPanel month={month} enabled={canViewSmartAlerts} />
 
       {/* outside-CMS + channel-issues monitor — REAL data, fails independently,
           no-fetch-when-restricted (mounts only when canViewAnalytics) */}
@@ -2643,26 +2709,30 @@ const CommandView = ({
 
       {/* company/sector/channel rankings — REAL data, fails independently,
            finance-gated (shows money; mounts only when canViewFinance) */}
-      <RankingsPanel
-        month={month}
-        canViewFinance={canViewFinance}
-        scopeType={scope.scopeType}
-        scopeId={scope.scopeId}
-        scopesReady={scopesReady}
-      />
+      {scopesTrusted ? (
+        <>
+          <RankingsPanel
+            month={month}
+            canViewFinance={canViewFinance}
+            scopeType={queryScope.scopeType}
+            scopeId={queryScope.scopeId}
+            scopesReady={scopesTrusted}
+          />
 
-      <CommandWorkspace
-        data={data}
-        loading={loading}
-        error={error}
-        canViewFinance={canViewFinance}
-        currency={currency}
-        channelCount={channels.length}
-        selectedChannel={selectedChannel}
-        selectedChannelId={activeChannelId}
-        month={month}
-        onSelect={setSelectedChannelId}
-      />
+          <CommandWorkspace
+            data={data}
+            loading={loading}
+            error={error}
+            canViewFinance={canViewFinance}
+            currency={currency}
+            channelCount={channels.length}
+            selectedChannel={selectedChannel}
+            selectedChannelId={activeChannelId}
+            month={month}
+            onSelect={setSelectedChannelId}
+          />
+        </>
+      ) : null}
     </>
   );
 };

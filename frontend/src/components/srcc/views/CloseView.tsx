@@ -12,8 +12,7 @@ import {
   useMonthCloseActions,
   useMonthCloseReadiness,
 } from "@/lib/api/useMonthClose";
-import type { Severity } from "@/lib/mock/data";
-import { RECON_NOTES } from "@/lib/mock/data";
+import type { Severity } from "@/types/domain";
 import {
   Badge,
   DEFAULT_MONTH,
@@ -48,8 +47,9 @@ const formatCloseTimestamp = (value: string | null | undefined): string =>
 //   actions (POST {reason}) behind an inline audited-reason input and a two-step
 //   arm/confirm latch (first click arms, second click executes), mapping a
 //   409 (blockers / wrong state) to a clear inline message and refetching
-//   status on success. The Reconciliation Equation side panel stays on mock
-//   data (not part of the close API) and is labelled as such.
+//   status on success. The fabricated Reconciliation Equation panel was
+//   removed; its equation and status notes had no close-API source, while the
+//   real readiness blockers already render in this view.
 // Database/ORM: None (frontend) — consumes the finance-close read endpoints and
 //   the guarded, audited lock/unlock write endpoints.
 // Standards: No client-side finance authorization is invented — the backend
@@ -170,10 +170,10 @@ const describeApiActionError = (error: ApiError): string => {
   if (error.status === 409) {
     return describeConflictBody(error.body);
   }
-  if (error.status === 403) {
-    return "Your role cannot lock or unlock this finance month.";
-  }
-  const { detail } = describeError(error);
+  const { detail } = describeError(
+    error,
+    "Your role cannot lock or unlock this finance month.",
+  );
   return detail;
 };
 
@@ -186,6 +186,38 @@ const describeActionError = (error: unknown): string => {
   if (error instanceof ApiError) return describeApiActionError(error);
   if (error instanceof Error) return error.message;
   return "Could not reach the finance-close service.";
+};
+
+// ============================================================================
+// Purpose: Translate finance-close status/readiness failures with copy for the
+//   actual domain instead of reusing CommandView's net-revenue 403 message.
+// Database/ORM: None (frontend error presentation only).
+// Standards: 403 and non-permission API errors use fixed safe copy; arbitrary
+//   backend detail is not reflected into the close controls.
+// Blast Radius: Close read UX only; no request or state transition.
+// Connections:
+//   - File: frontend/src/lib/api/useMonthClose.ts -> supplies these errors.
+// ============================================================================
+const describeCloseReadError = (
+  error: ApiError | Error,
+  surface: "status" | "readiness",
+): { title: string; detail: string } => {
+  const label = surface === "status" ? "month-close status" : "month-close readiness";
+  if (error instanceof ApiError) {
+    if (error.status === 403) {
+      // FIX: Reuse the shared fixed 403 contract with copy that names the
+      // actual close read instead of net revenue.
+      return describeError(error, `Your role cannot view ${label} for this month.`);
+    }
+    return {
+      title: `Request failed (${error.status})`,
+      detail: `Could not load ${label} for this finance month.`,
+    };
+  }
+  return {
+    title: "Network error",
+    detail: `Could not reach the ${label} service.`,
+  };
 };
 
 /**
@@ -497,38 +529,6 @@ const LockControlsPanel = ({
   );
 };
 
-/**
- * Static Reconciliation Equation reference panel. Still on mock data and labelled
- * as such — not part of the close API.
- */
-const ReconciliationPanel = () => {
-  return (
-    <section className="panel">
-      <div className="panel-header">
-        <div className="panel-title">
-          <strong>Reconciliation Equation</strong>
-          <span>Sample data — not yet wired to the API</span>
-        </div>
-        <Badge tone="amber">Mock</Badge>
-      </div>
-      <div className="formula" style={{ margin: 13 }}>
-        gross_reported - official_tax - payment_fees - allocation_gap + approved_overrides = locked_net
-      </div>
-      <div className="issue-list" role="list">
-        {RECON_NOTES.map((n) => (
-          <ItemRow
-            key={n.title}
-            tone={n.tone}
-            title={n.title}
-            sub={n.sub}
-            trailing={<Badge tone={n.badge.tone}>{n.badge.text}</Badge>}
-          />
-        ))}
-      </div>
-    </section>
-  );
-};
-
 // A month with no finance_month_close row is honestly OPEN: nothing has locked
 // it, and the backend only creates the row once a finance write touches the
 // month. This is not a UI invention — the backend itself already resolves a
@@ -682,7 +682,10 @@ const CloseStatusSummary = ({
   if (mode === "error") {
     // closeSummaryMode's contract: "error" is only reachable when error is
     // non-null, but a string mode cannot narrow the type — assert it here.
-    const { title, detail } = describeError(error as ApiError | Error);
+    const { title, detail } = describeCloseReadError(
+      error as ApiError | Error,
+      "status",
+    );
     return (
       <div className="view-summary" aria-label="Month close summary" role="alert">
         <article className="summary-tile">
@@ -729,7 +732,7 @@ const ReadinessChecklist = ({
   error: ApiError | Error | null;
 }) => {
   if (error) {
-    const { title, detail } = describeError(error);
+    const { title, detail } = describeCloseReadError(error, "readiness");
     return (
       <div className="table-wrap" role="alert">
         <div style={{ padding: 16 }}>
@@ -931,7 +934,9 @@ const CloseView = ({
   } = useMonthCloseReadiness({ month });
   const actions = useMonthCloseActions({ month });
 
-  const isLocked = status?.status?.toUpperCase() === "LOCKED";
+  const normalizedStatus = status?.status?.toUpperCase();
+  const isLocked = normalizedStatus === "LOCKED";
+  const isOpen = status === null || normalizedStatus === "OPEN";
 
   // FIX (PR #211 review): a null status only means "no close record" once a
   // read for the SELECTED month settled on it, and an ERROR only renders once
@@ -941,7 +946,29 @@ const CloseView = ({
   // month switch.
   const settledStatusMonth = useSettledStatusMonth(month, statusLoading);
   const statusKnown =
-    !statusLoading && statusError === null && settledStatusMonth === month;
+    !statusLoading &&
+    statusError === null &&
+    settledStatusMonth === month &&
+    (status === null || status.month === month) &&
+    (status === null || normalizedStatus === "OPEN" || normalizedStatus === "LOCKED");
+  // FIX: Readiness has the same one-render stale-month window as status. Track
+  // its verdict month independently and require a non-null, matching response
+  // before the lock affordance can become active.
+  const settledReadinessMonth = useSettledStatusMonth(month, readinessLoading);
+  const readinessKnown =
+    !readinessLoading &&
+    readinessError === null &&
+    settledReadinessMonth === month &&
+    readiness !== null &&
+    readiness.month === month;
+  // FIX: Lock requires the privileged readiness verdict, but unlock does not.
+  // Finance Approver owns UNLOCK_FINANCE_MONTH without LOCK_FINANCE_MONTH, so
+  // requiring readiness for both made that shipped role permanently unable to
+  // unlock. Status still must be a trusted, exact LOCKED verdict for unlock;
+  // lock requires trusted OPEN/not-started status plus trusted readiness.
+  const canLockSelectedMonth =
+    canCloseMonth && statusKnown && isOpen && readinessKnown && readiness?.ready === true;
+  const canUnlockSelectedMonth = canUnlockMonth && statusKnown && isLocked;
 
   // ==========================================================================
   // Purpose: POST a lock/unlock action using the trimmed, audited reason already
@@ -959,6 +986,15 @@ const CloseView = ({
   // ==========================================================================
   const runAction = useCallback(
     async (kind: LockAction) => {
+      const actionAllowed =
+        kind === "lock" ? canLockSelectedMonth : canUnlockSelectedMonth;
+      if (!actionAllowed) {
+        setLockState({
+          busy: false,
+          error: "Lock controls are unavailable until the selected month state is trustworthy.",
+        });
+        return;
+      }
       const trimmed = reason.trim();
       if (!trimmed) {
         setLockState({ busy: false, error: "A reason is required." });
@@ -983,7 +1019,14 @@ const CloseView = ({
         runInFlightRef.current = false;
       }
     },
-    [actions, reason, reloadReadiness, reloadStatus],
+    [
+      actions,
+      canLockSelectedMonth,
+      canUnlockSelectedMonth,
+      reason,
+      reloadReadiness,
+      reloadStatus,
+    ],
   );
 
   // ==========================================================================
@@ -1051,8 +1094,8 @@ const CloseView = ({
             status={status}
             statusKnown={statusKnown}
             month={month}
-            canCloseMonth={canCloseMonth}
-            canUnlockMonth={canUnlockMonth}
+            canCloseMonth={canLockSelectedMonth}
+            canUnlockMonth={canUnlockSelectedMonth}
             isLocked={isLocked}
             lockState={lockState}
             reason={reason}
@@ -1061,7 +1104,6 @@ const CloseView = ({
             onActionClick={handleActionClick}
             onCancel={resetWorkflow}
           />
-          <ReconciliationPanel />
         </aside>
       </div>
     </section>

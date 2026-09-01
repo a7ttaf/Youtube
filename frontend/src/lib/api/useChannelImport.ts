@@ -127,6 +127,7 @@ const PLAN_OUTCOMES = [OUTCOME_CREATE, OUTCOME_UPDATE, OUTCOME_UNCHANGED, OUTCOM
 const IMPORT_CMS_STATUS = "INSIDE_CMS";
 const CMS_STATUSES = [IMPORT_CMS_STATUS, "OUTSIDE_CMS", "UNKNOWN"] as const;
 
+/** True only for the three CMS statuses the parser can emit on a row. */
 const isCmsStatus = (value: unknown): boolean => {
   return CMS_STATUSES.some((status) => status === value);
 };
@@ -161,6 +162,7 @@ const isNonBlankString = (value: unknown): boolean => {
  */
 const CHANNEL_ID_PATTERN = /^UC[A-Za-z0-9_-]{22}$/u;
 
+/** True only when the value matches the parser's CHANNEL_ID_PATTERN shape. */
 const isChannelId = (value: unknown): boolean => {
   return typeof value === "string" && CHANNEL_ID_PATTERN.test(value);
 };
@@ -176,8 +178,8 @@ const isChannelId = (value: unknown): boolean => {
  * and leaves the SPA unable to reach Preview (review #184, codex P2).
  * Measured, not assumed:
  *
- *   python: "﻿Alpha".strip() -> unchanged
- *   node:   "﻿Alpha".trim()  -> "Alpha"
+ *   python: "\ufeffAlpha".strip() -> unchanged
+ *   node:   "\ufeffAlpha".trim()  -> "Alpha"
  *
  * The other direction is harmless: U+001C-U+001F are Python-space and not
  * JS-space, but the parser has already stripped them from the ends, so no
@@ -225,6 +227,7 @@ const PYTHON_UNSTRIPPED = new RegExp(`^[${PYTHON_SPACE}]|[${PYTHON_SPACE}]$`, "u
 // ============================================================================
 const PYTHON_STRIPPABLE = new RegExp(`^[${PYTHON_SPACE}]+|[${PYTHON_SPACE}]+$`, "gu");
 
+/** Strip Python's str.strip() whitespace set from both ends of the value. */
 const pythonStrip = (value: string): string => value.replace(PYTHON_STRIPPABLE, "");
 
 // ============================================================================
@@ -255,6 +258,7 @@ const pythonStrip = (value: string): string => value.replace(PYTHON_STRIPPABLE, 
 // ============================================================================
 const WIRE_NEWLINE = /\r\n|\r|\n/gu;
 
+/** Rewrite every newline shape to the CRLF the multipart encoder puts on the wire. */
 const toWireText = (value: string): string => value.replace(WIRE_NEWLINE, "\r\n");
 
 /**
@@ -277,10 +281,12 @@ const isParserText = (value: unknown): boolean => {
   );
 };
 
+/** True only for an outcome label the plan protocol defines. */
 const isOutcome = (value: unknown): boolean => {
   return typeof value === "string" && PLAN_OUTCOMES.some((outcome) => outcome === value);
 };
 
+/** True for a group action the backend plans, or null when a row creates no group effect. */
 const isGroupAction = (value: unknown): boolean => {
   return value === null || GROUP_ACTIONS.some((action) => action === value);
 };
@@ -329,6 +335,7 @@ const isChangeSide = (value: unknown): boolean => {
   return value === null || typeof value === "string" || typeof value === "boolean";
 };
 
+/** True for a well-formed {from, to} change pair with renderable sides. */
 const isFieldChange = (value: unknown): boolean => {
   if (!isPlainObject(value)) {
     return false;
@@ -373,6 +380,7 @@ const isChangeMap = (value: unknown): boolean => {
 const MAX_IMPORT_ROWS = 5000;
 const MAX_PLAN_ROW_NUMBER = MAX_IMPORT_ROWS * 2;
 
+/** True for a 1-based, in-range, unique-per-plan CSV record number (see MAX_PLAN_ROW_NUMBER). */
 const isRowNumber = (value: unknown): boolean => {
   return (
     typeof value === "number" &&
@@ -382,6 +390,7 @@ const isRowNumber = (value: unknown): boolean => {
   );
 };
 
+/** True for the nullable-string shape the plan emits for optional text fields. */
 const isNullableString = (value: unknown): boolean => {
   return value === null || typeof value === "string";
 };
@@ -753,6 +762,7 @@ const ROW_CHECKS: ReadonlyArray<(row: Record<string, unknown>) => boolean> = [
   explainsErrorRows,
 ];
 
+/** True for a row passing every row-local structural check in ROW_CHECKS. */
 const isPlanRow = (row: unknown): boolean => {
   if (!isPlainObject(row)) {
     return false;
@@ -986,6 +996,7 @@ const PLAN_CHECKS: ReadonlyArray<(rows: ReadonlyArray<Record<string, unknown>>) 
   channelRowsAgree,
 ];
 
+/** True for a non-empty array of plan rows that also satisfies every whole-plan check. */
 const isPlanRows = (value: unknown): boolean => {
   if (!Array.isArray(value) || value.length === 0 || !value.every(isPlanRow)) {
     return false;
@@ -1104,6 +1115,7 @@ const diffsMatchTheirFields = (plan: Record<string, unknown>): boolean => {
   });
 };
 
+/** True when the plan's counts tally matches a recount of its own rows per outcome. */
 const countsMatchRows = (candidate: Record<string, unknown>): boolean => {
   const counts = candidate.counts as Record<string, number>;
   const rows = candidate.rows as ChannelImportRowResult[];

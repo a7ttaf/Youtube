@@ -9,14 +9,12 @@ import type {
 } from "@/lib/api/types";
 import { useExportActions } from "@/lib/api/useExportActions";
 import { useExports } from "@/lib/api/useExports";
-import { EXPORTS_GUARDRAILS } from "@/lib/mock/data";
-import type { Severity } from "@/lib/mock/data";
+import type { Severity } from "@/types/domain";
 import {
   Badge,
   DEFAULT_MONTH,
   Dot,
   formatTimestamp,
-  ItemRow,
   MONTH_OPTIONS,
 } from "../shared";
 import { describeError } from "./CommandView";
@@ -31,8 +29,9 @@ import { describeError } from "./CommandView";
 //   configured so the Vite dev proxy injects the trusted-gateway + X-UMS-Tenant
 //   headers, or the configured VITE_API_BASE_URL origin otherwise — because the
 //   JSON-strict useApiClient cannot fetch binary. Loading / error / 403 states
-//   mirror CommandView and TraceView. The Export Guardrails side panel stays as
-//   static role context (it is descriptive, not API data).
+//   mirror CommandView and TraceView. The fabricated Export Guardrails panel
+//   was removed because no endpoint reports its On/Open/Blocked statuses; the
+//   per-job status column remains the authoritative UI signal.
 // Database/ORM: None (frontend) — consumes GET /exports (list), POST /exports
 //   (create, server-side insert + audit), and links to the binary download
 //   routes; downloads are served by the backend, never fetched client-side.
@@ -89,6 +88,7 @@ const DOWNLOAD_ROUTES: Partial<Record<ExportType, DownloadRoute>> = {
   },
 };
 
+/** Type guard: does this export type have a dedicated GET download route? */
 const hasDownloadRoute = (
   exportType: string,
 ): exportType is ExportType =>
@@ -139,6 +139,7 @@ const SCOPE_TYPE_OPTIONS: Array<{ value: ExportScopeType; label: string }> = [
   { value: "group", label: "Group" },
 ];
 
+/** True when the session holds the export capability this report type belongs to. */
 const hasReportCapability = (
   option: ReportTypeOption,
   permissions: ReportTypePermissions,
@@ -148,6 +149,7 @@ const hasReportCapability = (
     : permissions.canExportFinance;
 };
 
+/** True when a revenue-carrying type may be offered under the session's revenue visibility. */
 const hasCreateRevenueVisibility = (
   option: ReportTypeOption,
   permissions: ReportTypePermissions,
@@ -155,6 +157,7 @@ const hasCreateRevenueVisibility = (
   return !option.requiresRevenueVisibility || permissions.canViewRevenue;
 };
 
+/** True when the create form may OFFER this report type (creatable + permitted). */
 const canOfferReportType = (
   option: ReportTypeOption,
   permissions: ReportTypePermissions,
@@ -343,41 +346,6 @@ const ExportCenterHeader = () => {
   );
 };
 
-/** Header for the export guardrails side panel (title, description, policy badge). */
-const GuardrailsHeader = () => {
-  return (
-    <div className="panel-header">
-      <div className="panel-title">
-        <strong>Export Guardrails</strong>
-        <span>Every package records scope, filters, checksum, and actor</span>
-      </div>
-      <Badge tone="amber">Policy</Badge>
-    </div>
-  );
-};
-
-/** Static side panel listing the export guardrails (descriptive role context). */
-const ExportGuardrailsPanel = () => {
-  return (
-    <aside className="view-stack">
-      <section className="panel">
-        <GuardrailsHeader />
-        <div className="issue-list" role="list">
-          {EXPORTS_GUARDRAILS.map((g) => (
-            <ItemRow
-              key={g.title}
-              tone={g.tone}
-              title={g.title}
-              sub={g.sub}
-              trailing={<Badge tone={g.badge.tone}>{g.badge.text}</Badge>}
-            />
-          ))}
-        </div>
-      </section>
-    </aside>
-  );
-};
-
 /**
  * The Report type field. Renders the creatable-type <select> when at least one
  * type is offered; otherwise it shows an honest disabled state (a single
@@ -557,7 +525,7 @@ const RequestExportForm = ({
 
 /** Inline alert banner shown when an export request POST fails. */
 const RequestError = ({ error }: { error: ApiError | Error }) => {
-  const { title, detail } = describeError(error);
+  const { title, detail } = describeError(error, "Your role cannot create this export.");
   return (
     <div className="permission-band" role="alert" style={{ margin: 13 }}>
       <Dot tone="red" />
@@ -674,7 +642,7 @@ const ExportJobsTableBody = ({
   canViewRevenue: boolean;
 }) => {
   if (error) {
-    const { title, detail } = describeError(error);
+    const { title, detail } = describeError(error, "Your role cannot view export jobs.");
     return (
       <div className="table-wrap" role="alert">
         <div style={{ padding: 16 }}>
@@ -863,46 +831,42 @@ const ExportsView = ({
 
   return (
     <section className="view-page" aria-labelledby="exportsTitle">
-      <div className="view-grid wide-side">
-        <section className="panel">
-          <ExportCenterHeader />
+      <section className="panel">
+        <ExportCenterHeader />
 
-          <RequestExportForm
-            exportType={effectiveExportType}
-            onExportType={setExportType}
-            reportTypeOptions={reportTypeOptions}
-            hasCreatableType={hasCreatableType}
-            scopeType={scopeType}
-            onScopeType={setScopeType}
-            scopeId={scopeId}
-            onScopeId={setScopeId}
-            requiresScopeId={requiresScopeId}
-            month={month}
-            onMonth={setMonth}
-            currency={currency}
-            onCurrency={setCurrency}
-            reason={reason}
-            onReason={setReason}
-            canCreateExport={canCreateExport}
-            canSubmit={canSubmit}
-            submitting={actions.loading}
-            onGenerate={onGenerate}
-          />
+        <RequestExportForm
+          exportType={effectiveExportType}
+          onExportType={setExportType}
+          reportTypeOptions={reportTypeOptions}
+          hasCreatableType={hasCreatableType}
+          scopeType={scopeType}
+          onScopeType={setScopeType}
+          scopeId={scopeId}
+          onScopeId={setScopeId}
+          requiresScopeId={requiresScopeId}
+          month={month}
+          onMonth={setMonth}
+          currency={currency}
+          onCurrency={setCurrency}
+          reason={reason}
+          onReason={setReason}
+          canCreateExport={canCreateExport}
+          canSubmit={canSubmit}
+          submitting={actions.loading}
+          onGenerate={onGenerate}
+        />
 
-          {actions.error ? <RequestError error={actions.error} /> : null}
-          {actions.data ? <RequestSuccess job={actions.data} /> : null}
+        {actions.error ? <RequestError error={actions.error} /> : null}
+        {actions.data ? <RequestSuccess job={actions.data} /> : null}
 
-          <ExportJobsTable
-            jobs={jobs}
-            loading={loading}
-            error={error}
-            onRefresh={reload}
-            canViewRevenue={canViewRevenue}
-          />
-        </section>
-
-        <ExportGuardrailsPanel />
-      </div>
+        <ExportJobsTable
+          jobs={jobs}
+          loading={loading}
+          error={error}
+          onRefresh={reload}
+          canViewRevenue={canViewRevenue}
+        />
+      </section>
     </section>
   );
 };

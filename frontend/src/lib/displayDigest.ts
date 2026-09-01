@@ -5,9 +5,17 @@ import {
   type DisplayDigestPlanFields,
 } from "@/lib/displayDigestCore";
 
+type SchedulerWithYield = {
+  yield: () => Promise<void>;
+};
+
+/** Yield control back to the browser main thread (scheduler.yield, else setTimeout 0). */
 const yieldToMainThread = async (): Promise<void> => {
-  if (typeof scheduler !== "undefined" && "yield" in scheduler) {
-    await (scheduler as Scheduler & { yield: () => Promise<void> }).yield();
+  const schedulerApi = (
+    globalThis as typeof globalThis & { scheduler?: SchedulerWithYield }
+  ).scheduler;
+  if (schedulerApi && typeof schedulerApi.yield === "function") {
+    await schedulerApi.yield();
     return;
   }
   await new Promise<void>((resolve) => {
@@ -26,6 +34,7 @@ const workerWaiters = new Map<
   { resolve: (digest: string) => void; reject: (error: Error) => void }
 >();
 
+/** Reject every pending digest waiter with `error` and drop them from the map. */
 const rejectAllWorkerWaiters = (error: Error): void => {
   for (const waiter of workerWaiters.values()) {
     waiter.reject(error);
@@ -33,6 +42,7 @@ const rejectAllWorkerWaiters = (error: Error): void => {
   workerWaiters.clear();
 };
 
+/** Terminate the digest worker (if any) and memoize it as permanently absent (null). */
 const disableDigestWorker = (): void => {
   if (digestWorker) {
     digestWorker.onmessage = null;
@@ -43,6 +53,7 @@ const disableDigestWorker = (): void => {
   digestWorker = null;
 };
 
+/** Fail every pending waiter and kill the worker so later calls fall back to sync compute. */
 const handleDigestWorkerFailure = (message: string): void => {
   rejectAllWorkerWaiters(new Error(message));
   disableDigestWorker();
@@ -87,6 +98,7 @@ const ensureDigestWorkerListener = (worker: Worker): void => {
   };
 };
 
+/** The memoized digest worker: create once, null when unavailable or already failed. */
 const getDigestWorker = (): Worker | null => {
   if (digestWorker !== undefined) {
     return digestWorker;

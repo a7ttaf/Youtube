@@ -9,7 +9,7 @@ import type {
 } from "@/lib/api/types";
 import { useExplanation } from "@/lib/api/useExplanation";
 import { useNetRevenue } from "@/lib/api/useNetRevenue";
-import type { Role, Severity } from "@/lib/mock/data";
+import type { Role, Severity } from "@/types/domain";
 import { confidenceDisplay } from "@/lib/confidence";
 import {
   Badge,

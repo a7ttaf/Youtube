@@ -14,6 +14,7 @@ const ORIGINAL_FETCH = globalThis.fetch;
 // The armed confirm button names the month the view is on, which is the rolling
 // DEFAULT_MONTH — derive the matcher from it instead of a literal that ages out.
 const CONFIRM_LOCK_LABEL = new RegExp(`^confirm lock ${DEFAULT_MONTH}$`, "i");
+const CONFIRM_UNLOCK_LABEL = new RegExp(`^confirm unlock ${DEFAULT_MONTH}$`, "i");
 
 beforeEach(() => {
   vi.stubGlobal("fetch", vi.fn());
@@ -25,7 +26,7 @@ afterEach(() => {
 });
 
 const OPEN_STATUS: FinanceMonthCloseStatus = {
-  month: "2026-03",
+  month: DEFAULT_MONTH,
   status: "OPEN",
   allocation_method: null,
   allocation_rule_payload: {},
@@ -36,7 +37,7 @@ const OPEN_STATUS: FinanceMonthCloseStatus = {
 };
 
 const LOCKED_STATUS: FinanceMonthCloseStatus = {
-  month: "2026-03",
+  month: DEFAULT_MONTH,
   status: "LOCKED",
   allocation_method: "gross_revenue_proportional",
   allocation_rule_payload: {},
@@ -47,26 +48,26 @@ const LOCKED_STATUS: FinanceMonthCloseStatus = {
 };
 
 const READINESS_READY: FinanceCloseReadinessResponse = {
-  month: "2026-03",
+  month: DEFAULT_MONTH,
   ready: true,
   blockers: [],
 };
 
 const READINESS_BLOCKED: FinanceCloseReadinessResponse = {
-  month: "2026-03",
+  month: DEFAULT_MONTH,
   ready: false,
   blockers: [
     {
       blocker_type: "PENDING_MANUAL_OVERRIDES",
       severity: "HIGH",
       count: 2,
-      message: "2 pending manual overrides require approval before locking 2026-03.",
+      message: `2 pending manual overrides require approval before locking ${DEFAULT_MONTH}.`,
     },
     {
       blocker_type: "MISSING_REVENUE_FACTS",
       severity: "HIGH",
       count: 1,
-      message: "1 revenue-required channel has no revenue facts for 2026-03.",
+      message: `1 revenue-required channel has no revenue facts for ${DEFAULT_MONTH}.`,
     },
   ],
 };
@@ -163,13 +164,38 @@ describe("CloseView wired to finance-close", () => {
     // Each blocker message + type renders in the checklist.
     expect(
       screen.getByText(
-        "2 pending manual overrides require approval before locking 2026-03.",
+        `2 pending manual overrides require approval before locking ${DEFAULT_MONTH}.`,
       ),
     ).toBeInTheDocument();
     expect(
       screen.getByText(
-        "1 revenue-required channel has no revenue facts for 2026-03.",
+        `1 revenue-required channel has no revenue facts for ${DEFAULT_MONTH}.`,
       ),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("Reconciliation Equation")).not.toBeInTheDocument();
+    expect(screen.queryByText("Gap allocation needs final note"))
+      .not.toBeInTheDocument();
+  });
+
+  it("renders settled close summary and ready checklist from backend responses", async () => {
+    fetchMock().mockImplementation(
+      routeFetch({
+        status: () => jsonResponse(OPEN_STATUS),
+        readiness: () => jsonResponse(READINESS_READY),
+      }),
+    );
+    renderCloseView();
+
+    await screen.findByText("Month is ready to lock");
+    await waitFor(() =>
+      expect(within(screen.getByLabelText("Month close summary")).getByText("OPEN")).toBeInTheDocument(),
+    );
+    const summary = screen.getByLabelText("Month close summary");
+    expect(within(summary).getByText(OPEN_STATUS.month)).toBeInTheDocument();
+    expect(within(summary).getByText("Ready")).toBeInTheDocument();
+    expect(within(summary).getByText("No blockers")).toBeInTheDocument();
+    expect(
+      screen.getByText(`No unresolved close blockers for ${DEFAULT_MONTH}.`),
     ).toBeInTheDocument();
   });
 
@@ -203,9 +229,44 @@ describe("CloseView wired to finance-close", () => {
     );
     renderCloseView();
 
-    await waitFor(() =>
-      expect(screen.getAllByText("No permission").length).toBeGreaterThan(0),
+    expect(
+      await screen.findByText(
+        "Your role cannot view month-close status for this month.",
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "Your role cannot view month-close readiness for this month.",
+      ),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/cannot view net revenue/iu)).not.toBeInTheDocument();
+    expect(screen.getByLabelText(/reason \(required, audited\)/i)).toBeDisabled();
+    expect(screen.getByRole("button", { name: /^lock month$/i })).toBeDisabled();
+    expect(screen.getByRole("button", { name: /^unlock month$/i })).toBeDisabled();
+    expect(fetchMock().mock.calls.every((call) => call[1]?.method !== "POST"))
+      .toBe(true);
+  });
+
+  it("withholds close mutations when readiness fails after status succeeds", async () => {
+    fetchMock().mockImplementation(
+      routeFetch({
+        status: () => jsonResponse(OPEN_STATUS),
+        readiness: () =>
+          jsonResponse({ detail: "storage-secret-readiness-diagnostic" }, 500),
+      }),
     );
+    renderCloseView();
+
+    await screen.findByText(
+      "Could not load month-close readiness for this finance month.",
+    );
+    expect(screen.queryByText("storage-secret-readiness-diagnostic"))
+      .not.toBeInTheDocument();
+    expect(screen.getByLabelText(/reason \(required, audited\)/i)).toBeDisabled();
+    expect(screen.getByRole("button", { name: /^lock month$/i })).toBeDisabled();
+    expect(screen.getByRole("button", { name: /^unlock month$/i })).toBeDisabled();
+    expect(fetchMock().mock.calls.every((call) => call[1]?.method !== "POST"))
+      .toBe(true);
   });
 
   it("renders the honest not-started state when the month has no close row (404)", async () => {    // The rolling default opens on the CURRENT calendar month, which has no
@@ -241,7 +302,7 @@ describe("CloseView wired to finance-close", () => {
     expect(within(summary).getByText("2 blockers")).toBeInTheDocument();
     expect(
       screen.getByText(
-        "2 pending manual overrides require approval before locking 2026-03.",
+        `2 pending manual overrides require approval before locking ${DEFAULT_MONTH}.`,
       ),
     ).toBeInTheDocument();
   });
@@ -345,7 +406,10 @@ describe("CloseView wired to finance-close", () => {
     await waitFor(() =>
       expect(screen.getByText("Request failed (500)")).toBeInTheDocument(),
     );
-    expect(screen.getByText("new month exploded")).toBeInTheDocument();
+    expect(
+      screen.getByText("Could not load month-close status for this finance month."),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("new month exploded")).toBeNull();
   });
 
   it("still replaces the summary with the error tile on a 500 status read", async () => {
@@ -363,7 +427,12 @@ describe("CloseView wired to finance-close", () => {
     );
     const summary = screen.getByLabelText("Month close summary");
     expect(summary).toHaveAttribute("role", "alert");
-    expect(within(summary).getByText("close lookup exploded")).toBeInTheDocument();
+    expect(
+      within(summary).getByText(
+        "Could not load month-close status for this finance month.",
+      ),
+    ).toBeInTheDocument();
+    expect(within(summary).queryByText("close lookup exploded")).toBeNull();
     expect(screen.queryByText("No close record yet")).toBeNull();
     // A failed status read is UNKNOWN, not open: the Lock Controls badge shows
     // an em dash instead of asserting OPEN for a month whose state it does not
@@ -389,6 +458,66 @@ describe("CloseView wired to finance-close", () => {
 
     const lockButton = await screen.findByRole("button", { name: /^lock month$/i });
     expect(lockButton).toBeDisabled();
+  });
+
+  it("allows an unlock-only approver when readiness is forbidden but locked status is trusted", async () => {
+    let statusCall = 0;
+    fetchMock().mockImplementation(
+      routeFetch({
+        status: () => {
+          statusCall += 1;
+          return jsonResponse(statusCall === 1 ? LOCKED_STATUS : OPEN_STATUS);
+        },
+        readiness: () =>
+          jsonResponse({ detail: "Missing permission: lock:finance-month" }, 403),
+        unlock: () => jsonResponse({ ...OPEN_STATUS, audit_event: {} }),
+      }),
+    );
+    renderCloseView(false, true);
+
+    await screen.findByText(
+      "Your role cannot view month-close readiness for this month.",
+    );
+    const unlockButton = screen.getByRole("button", { name: /^unlock month$/i });
+    const lockButton = screen.getByRole("button", { name: /^lock month$/i });
+    expect(lockButton).toBeDisabled();
+
+    fireEvent.change(screen.getByLabelText(/reason \(required, audited\)/i), {
+      target: { value: "Correction approved" },
+    });
+    expect(unlockButton).toBeEnabled();
+    fireEvent.click(unlockButton);
+    fireEvent.click(
+      await screen.findByRole("button", { name: CONFIRM_UNLOCK_LABEL }),
+    );
+
+    await waitFor(() =>
+      expect(screen.getAllByText("OPEN").length).toBeGreaterThan(0),
+    );
+    expect(
+      fetchMock().mock.calls.filter(([input]) => urlOf(input).endsWith("/unlock")),
+    ).toHaveLength(1);
+  });
+
+  it("treats an unknown close status as untrusted and sends no mutation", async () => {
+    fetchMock().mockImplementation(
+      routeFetch({
+        status: () => jsonResponse({ ...OPEN_STATUS, status: "CORRUPT" }),
+        readiness: () => jsonResponse(READINESS_READY),
+        lock: () => jsonResponse({ detail: "must not be called" }, 500),
+        unlock: () => jsonResponse({ detail: "must not be called" }, 500),
+      }),
+    );
+    renderCloseView();
+
+    await screen.findByText("Month is ready to lock");
+    fireEvent.change(screen.getByLabelText(/reason \(required, audited\)/i), {
+      target: { value: "unsafe status" },
+    });
+    expect(screen.getByRole("button", { name: /^lock month$/i })).toBeDisabled();
+    expect(screen.getByRole("button", { name: /^unlock month$/i })).toBeDisabled();
+    expect(fetchMock().mock.calls.every((call) => call[1]?.method !== "POST"))
+      .toBe(true);
   });
 
   it("locks the month via the reason + arm/confirm flow and refetches status", async () => {
@@ -440,6 +569,39 @@ describe("CloseView wired to finance-close", () => {
     expect(JSON.parse(String(lockInit?.body))).toMatchObject({
       reason: "March close complete",
     });
+  });
+
+  it("maps a lock POST 403 to close-action copy without a false state transition", async () => {
+    fetchMock().mockImplementation(
+      routeFetch({
+        status: () => jsonResponse(OPEN_STATUS),
+        readiness: () => jsonResponse(READINESS_READY),
+        lock: () =>
+          jsonResponse({ detail: "internal-permission-name-must-not-render" }, 403),
+      }),
+    );
+
+    renderCloseView();
+    const lockButton = await screen.findByRole("button", { name: /^lock month$/i });
+    fireEvent.change(screen.getByLabelText(/reason \(required, audited\)/i), {
+      target: { value: "Denied close" },
+    });
+    fireEvent.click(lockButton);
+    fireEvent.click(
+      await screen.findByRole("button", { name: CONFIRM_LOCK_LABEL }),
+    );
+
+    expect(
+      await screen.findByText("Your role cannot lock or unlock this finance month."),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("internal-permission-name-must-not-render"))
+      .not.toBeInTheDocument();
+    expect(screen.queryByText(/cannot view net revenue/i)).not.toBeInTheDocument();
+    expect(
+      fetchMock().mock.calls.filter(([input]) => urlOf(input).endsWith("/lock")),
+    ).toHaveLength(1);
+    expect(screen.getAllByText("OPEN").length).toBeGreaterThan(0);
+    expect(screen.queryByText("LOCKED")).not.toBeInTheDocument();
   });
 
   it("drops a same-tick double-click on the armed confirm: exactly one /lock POST, no error banner", async () => {
@@ -509,21 +671,12 @@ describe("CloseView wired to finance-close", () => {
     expect(screen.queryByText("Action failed")).not.toBeInTheDocument();
   });
 
-  it("maps a 409 lock conflict to a clear inline message", async () => {
+  it("keeps Lock disabled and sends no mutation when readiness reports blockers", async () => {
     fetchMock().mockImplementation(
       routeFetch({
         status: () => jsonResponse(OPEN_STATUS),
         readiness: () => jsonResponse(READINESS_BLOCKED),
-        lock: () =>
-          jsonResponse(
-            {
-              detail: {
-                message: "Finance month has unresolved close blockers",
-                blockers: READINESS_BLOCKED.blockers,
-              },
-            },
-            409,
-          ),
+        lock: () => jsonResponse({ detail: "must not be called" }, 500),
       }),
     );
     renderCloseView();
@@ -532,17 +685,9 @@ describe("CloseView wired to finance-close", () => {
     fireEvent.change(screen.getByLabelText(/reason \(required, audited\)/i), {
       target: { value: "force lock" },
     });
-    // Arm, then confirm the lock so the conflicting POST fires.
-    fireEvent.click(lockButton);
-    fireEvent.click(
-      await screen.findByRole("button", { name: CONFIRM_LOCK_LABEL }),
-    );
-
-    await waitFor(() =>
-      expect(screen.getByText("Action failed")).toBeInTheDocument(),
-    );
+    expect(lockButton).toBeDisabled();
     expect(
-      screen.getByText(/unresolved close blockers \(2 blockers\)/i),
-    ).toBeInTheDocument();
+      fetchMock().mock.calls.some(([input]) => urlOf(input).endsWith("/lock")),
+    ).toBe(false);
   });
 });

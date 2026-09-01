@@ -4125,10 +4125,10 @@ YML
 @test "preflight: in ship mode the check toggles come from HEAD, not the worktree" {
   # These toggles decide which lanes run at all, and reading them from the
   # worktree let an *unstaged* edit switch lanes off for a push that does not
-  # carry the edit. Setting tests-shell, tests-js and typecheck-js to false is
-  # enough on its own: lint-js and format-js are already disabled, so
-  # _all_related_checks_disabled then drops the whole `node` lane as well, and
-  # tests-shell is the lane that would have reported the config file as drift.
+  # carry the edit. Setting every related check to false is enough on its own,
+  # so _all_related_checks_disabled then drops the whole `node` lane as well,
+  # and tests-shell is the lane that would have reported the config file as
+  # drift.
   # A pushed frontend commit with failing tests passes on toggles that exist in
   # nobody's tree but the pusher's.
   local sb drv

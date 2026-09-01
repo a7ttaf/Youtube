@@ -2,7 +2,7 @@ import { useEffect, useState, type Dispatch, type SetStateAction } from "react";
 
 import { ApiError } from "@/lib/api/client";
 import { type AuditEventPagination, type AuditLogEntry } from "@/lib/api/types";
-import type { Severity } from "@/lib/mock/data";
+import type { Severity } from "@/types/domain";
 
 import { Badge, Dot, TimelinePlaceholderRow, formatTimestamp } from "../shared";
 

@@ -3,6 +3,7 @@
 
 import type { JSX } from "react";
 
+/** Wrap SVG paths in the shared presentation-only icon container. */
 const wrap = (path: JSX.Element) => (
   <span className="icon" aria-hidden="true">
     <svg viewBox="0 0 24 24">{path}</svg>
@@ -72,6 +73,7 @@ export const NAV_ICONS: Record<string, JSX.Element> = {
   ),
 };
 
+/** Render the command-center brand glyph. */
 export const BrandIcon = () =>
   wrap(
     <>
@@ -80,14 +82,17 @@ export const BrandIcon = () =>
     </>,
   );
 
-export const RefreshIcon = () =>
-  wrap(
-    <>
-      <path d="M20 12a8 8 0 1 1-2.3-5.6" />
-      <path d="M20 4v6h-6" />
-    </>,
-  );
-
+// ============================================================================
+// Purpose: Render the lock glyph used for protected finance status and actions.
+// Database/ORM: None (frontend presentation only).
+// Standards: Pure SVG presentation; no state, data fetching, or authorization
+//   decision is made here. Owning views retain the permission checks.
+// Blast Radius: Presentation only; changing the paths affects lock affordances.
+// Connections:
+//   - File: frontend/src/components/srcc/views/CommandView.tsx -> renders this
+//     icon for protected finance status surfaces.
+// ============================================================================
+/** Render the lock glyph for a protected finance surface. */
 export const LockIcon = () =>
   wrap(
     <>

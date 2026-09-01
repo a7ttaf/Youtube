@@ -15,7 +15,7 @@ import {
 } from "@/lib/api/useChannelImport";
 import { displayDigestMatchesDisclosedAsync } from "@/lib/displayDigest";
 import { useContentOwners } from "@/lib/api/useContentOwners";
-import type { Severity } from "@/lib/mock/data";
+import type { Severity } from "@/types/domain";
 import { ActionStepper } from "../ActionStepper";
 import { OutcomeTable, type OutcomeTableRow } from "../OutcomeTable";
 import { Badge } from "../shared";
@@ -140,6 +140,7 @@ const describeImportError = (err: unknown): string => {
  */
 const PLAN_BEARING_STATUSES = new Set([409, 422]);
 
+/** The `detail` body of a plan-bearing apply rejection, or null when there is none. */
 const planBearingDetail = (err: unknown): unknown | null => {
   if (!(err instanceof ApiError) || !PLAN_BEARING_STATUSES.has(err.status)) {
     return null;
@@ -1790,6 +1791,7 @@ export const RegistryImportFlow = ({
     }
   };
 
+  /** Return from a later step to the upload step, clearing any error copy. */
   const backToUpload = () => {
     setError(null);
     setStep("upload");

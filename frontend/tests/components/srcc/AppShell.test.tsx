@@ -1,6 +1,9 @@
 // frontend/src/components/srcc/__tests__/AppShell.test.tsx
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import type { ReactNode } from "react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { StrictMode } from "react";
+import { createMemoryRouter, RouterProvider } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import AppShell, { isImportScopeSettled } from "@/components/srcc/AppShell";
@@ -8,7 +11,6 @@ import { DEFAULT_MONTH, MONTH_OPTIONS } from "@/components/srcc/shared";
 import { SessionProvider } from "@/contexts/SessionContext";
 import { TenantProvider } from "@/contexts/TenantContext";
 import type { SessionMe } from "@/lib/api/types";
-import { monthKeyLabel } from "@/lib/months";
 import { withDisplayDigest } from "../../helpers/displayDigestFixtures";
 
 const ORIGINAL_FETCH = globalThis.fetch;
@@ -89,6 +91,72 @@ const NET_REVENUE_BODY = {
   audit_events: [],
 };
 
+const traceChannel = (youtube_channel_id: string) => ({
+  month: "2026-03",
+  youtube_channel_id,
+  status: "CALCULATED",
+  primary_source_kind: "youtube_cms",
+  baseline_gross_revenue_usd: "0",
+  baseline_net_revenue_usd: "0",
+  approved_manual_override_total_usd: "0",
+  adjusted_gross_revenue_usd: "0",
+  net_revenue_usd: "0",
+  deduction_amount_usd: "0",
+  channel_direct_deduction_amount_usd: "0",
+  account_allocated_deduction_amount_usd: "0",
+  deduction_percentage: "0",
+  confidence: "A",
+  approved_manual_override_count: 0,
+  pending_manual_override_count: 0,
+  issues: [],
+});
+
+const TRACE_REVENUE_BODY = {
+  ...NET_REVENUE_BODY,
+  channel_count: 2,
+  calculated_channel_count: 2,
+  channels: [
+    traceChannel("UC-FIRST-LIVE"),
+    traceChannel("UC-SECOND-LIVE"),
+  ],
+};
+
+const TRACE_REGISTRY_CHANNELS = [
+  {
+    youtube_channel_id: "UC-FIRST-LIVE",
+    channel_name: "First Live Channel",
+    primary_company_id: "company-1",
+    cms_status: "INSIDE_CMS",
+    content_owner_id: "OWNERaaa",
+    revenue_required: false,
+    revenue_source_status: "PERFORMANCE_ONLY",
+    active: true,
+  },
+  {
+    youtube_channel_id: "UC-SECOND-LIVE",
+    channel_name: "Second Live Channel",
+    primary_company_id: "company-1",
+    cms_status: "INSIDE_CMS",
+    content_owner_id: "OWNERaaa",
+    revenue_required: false,
+    revenue_source_status: "PERFORMANCE_ONLY",
+    active: true,
+  },
+];
+
+const EMPTY_RANKINGS_BODY = {
+  month: "2026-03",
+  scope_type: "global",
+  scope_id: null,
+  metric: "gross",
+  limit: 10,
+  allocation_source: "live_compute",
+  committed_run: null,
+  companies: [],
+  sectors: [],
+  channels: [],
+};
+
 const urlOf = (input: unknown): string => {
   if (typeof input === "string") return input;
   if (input instanceof URL) return input.toString();
@@ -129,6 +197,38 @@ const tenantFetchCalls = () => {
   return mock.mock.calls.filter(([input]) => isTenantCall(input));
 };
 
+/** Render a shell tree inside a data router so blocker behavior matches production. */
+const renderDataRouter = (
+  tree: ReactNode,
+  initialEntries: string[] = ["/command"],
+) => {
+  const queryClient = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  });
+  const router = createMemoryRouter(
+    [{ path: "*", element: tree }],
+    { initialEntries },
+  );
+  const rendered = render(
+    <QueryClientProvider client={queryClient}>
+      <RouterProvider router={router} />
+    </QueryClientProvider>,
+  );
+  return {
+    ...rendered,
+    router,
+    unmount: () => {
+      rendered.unmount();
+      router.dispose();
+    },
+  };
+};
+
+const renderShellTree = (
+  tree: ReactNode,
+  initialEntries: string[] = ["/command"],
+) => renderDataRouter(tree, initialEntries);
+
 describe("import scope settling", () => {
   // The rule that decides whether an import may be ADMITTED at all. Its effect
   // on the button is covered in RegistryImportFlow.test.tsx.
@@ -168,10 +268,10 @@ describe("AppShell tenant proof tag", () => {
         }),
       ),
     );
-    render(
+    renderShellTree(
       <SessionProvider>
         <TenantProvider initialSlug="ums">
-          <AppShell />
+          <AppShell initialView="command" />
         </TenantProvider>
       </SessionProvider>,
     );
@@ -187,10 +287,10 @@ describe("AppShell tenant proof tag", () => {
     (globalThis.fetch as ReturnType<typeof vi.fn>).mockImplementation(
       routeFetch(() => jsonResponse({ detail: "Tenant registry unavailable" }, 503)),
     );
-    render(
+    renderShellTree(
       <SessionProvider>
         <TenantProvider initialSlug="ums">
-          <AppShell />
+          <AppShell initialView="command" />
         </TenantProvider>
       </SessionProvider>,
     );
@@ -204,10 +304,10 @@ describe("AppShell tenant proof tag", () => {
     (globalThis.fetch as ReturnType<typeof vi.fn>).mockImplementation(
       routeFetch(() => jsonResponse({ detail: "Tenant registry unavailable" }, 503)),
     );
-    render(
+    renderShellTree(
       <SessionProvider>
         <TenantProvider initialSlug="ums">
-          <AppShell />
+          <AppShell initialView="command" />
         </TenantProvider>
       </SessionProvider>,
     );
@@ -231,11 +331,11 @@ describe("AppShell tenant proof tag", () => {
         }),
       ),
     );
-    render(
+    renderShellTree(
       <StrictMode>
         <SessionProvider>
           <TenantProvider>
-            <AppShell />
+            <AppShell initialView="command" />
           </TenantProvider>
         </SessionProvider>
       </StrictMode>,
@@ -263,10 +363,10 @@ describe("AppShell tenant proof tag", () => {
             });
       }),
     );
-    render(
+    renderShellTree(
       <SessionProvider>
         <TenantProvider initialSlug="ums">
-          <AppShell />
+          <AppShell initialView="command" />
         </TenantProvider>
       </SessionProvider>,
     );
@@ -295,10 +395,10 @@ describe("AppShell tenant proof tag", () => {
         }),
       ),
     );
-    render(
+    renderShellTree(
       <SessionProvider>
         <TenantProvider initialSlug="ums">
-          <AppShell />
+          <AppShell initialView="command" />
         </TenantProvider>
       </SessionProvider>,
     );
@@ -324,18 +424,21 @@ describe("AppShell tenant proof tag", () => {
         }),
       ),
     );
-    render(
+    renderShellTree(
       <SessionProvider>
         <TenantProvider>
-          <AppShell />
+          <AppShell initialView="command" />
         </TenantProvider>
       </SessionProvider>,
     );
-    const tag = await screen.findByTestId("tenant-proof");
-    // findByTestId only waits for the element; wait for the resolved tenant text
-    // so the assertion never reads the initial "(resolving…) (loading…)" placeholder.
+    await screen.findByTestId("tenant-proof");
+    // FIX: Tenant-boundary session rehydration intentionally removes the shell
+    // while the replacement principal is unknown, so re-query the proof tag
+    // instead of retaining the detached pre-boundary DOM node.
     await waitFor(() =>
-      expect(tag.textContent).toContain("Acme Holdings (acme)"),
+      expect(screen.getByTestId("tenant-proof").textContent).toContain(
+        "Acme Holdings (acme)",
+      ),
     );
     const tenantCalls = tenantFetchCalls();
     expect(tenantCalls).toHaveLength(1);
@@ -422,6 +525,12 @@ const routeFetchWithSessionRoutes = (sessionResponder: () => Response): FetchRou
   ["/adsense/payments", () => jsonResponse(EMPTY_ADSENSE_PAYMENTS)],
   ["/exports", () => jsonResponse(EMPTY_EXPORTS)],
   ["/groups", () => jsonResponse(EMPTY_GROUPS)],
+  // Real-shaped authorized-scopes body: the hardened useRevenueScopes hook
+  // withholds every finance query on a malformed/failed scopes read, so the
+  // neutral net-revenue default body must never answer this route.
+  ["/revenue/scopes", () => jsonResponse({
+    scopes: [{ scope_type: "global", scope_id: null, label: "Global" }],
+  })],
 ]);
 
 const requestPathOf = (input: unknown) =>
@@ -440,15 +549,15 @@ const routeFetchWithSession = (sessionResponder: () => Response) => {
   };
 };
 
-const renderShell = () => {
-  return render(
+const renderShell = (initialEntries: string[] = ["/command"]) =>
+  renderDataRouter(
     <SessionProvider>
       <TenantProvider initialSlug="ums">
-        <AppShell />
+        <AppShell initialView="command" />
       </TenantProvider>
     </SessionProvider>,
+    initialEntries,
   );
-};
 
 describe("AppShell production session hydration", () => {
   afterEach(() => {
@@ -475,6 +584,47 @@ describe("AppShell production session hydration", () => {
     const roleControl = screen.getByLabelText(/current role/i);
     expect(roleControl.tagName).toBe("OUTPUT");
     expect(screen.queryByTestId("role-preview-hint")).not.toBeInTheDocument();
+  });
+
+  it("reads /session/me once per tenant boundary when StrictMode replays the shell mount", async () => {
+    vi.stubEnv("DEV", false);
+    vi.stubEnv("VITE_ENABLE_ROLE_PREVIEW", "");
+    const fetchMock = globalThis.fetch as ReturnType<typeof vi.fn>;
+    fetchMock.mockImplementation(
+      routeFetchWithSession(() => jsonResponse(sessionBody({ canViewRevenue: true }))),
+    );
+
+    renderDataRouter(
+      <StrictMode>
+        <SessionProvider>
+          <TenantProvider>
+            <AppShell initialView="command" />
+          </TenantProvider>
+        </SessionProvider>
+      </StrictMode>,
+    );
+
+    await waitFor(
+      () => {
+        const calls = fetchMock.mock.calls.filter(([input]) => isSessionCall(input));
+        expect(calls).toHaveLength(2);
+      },
+      { timeout: 1_000 },
+    );
+    await waitFor(
+      () => expect(screen.getByText(/money visible/i)).toBeInTheDocument(),
+      { timeout: 1_000 },
+    );
+    const sessionCalls = fetchMock.mock.calls.filter(([input]) => isSessionCall(input));
+    expect(sessionCalls).toHaveLength(2);
+    const firstHeaders = new Headers(
+      (sessionCalls[0]?.[1] as RequestInit | undefined)?.headers,
+    );
+    const tenantHeaders = new Headers(
+      (sessionCalls[1]?.[1] as RequestInit | undefined)?.headers,
+    );
+    expect(firstHeaders.has("X-UMS-Tenant")).toBe(false);
+    expect(tenantHeaders.get("X-UMS-Tenant")).toBe(SHELL_TENANT.slug);
   });
 
   it("PRODUCTION: withheld canViewRevenue gates finance cells to the Restricted sentinel", async () => {
@@ -695,25 +845,162 @@ describe("AppShell production session hydration", () => {
   });
 });
 
-// ------------------------------------------------------------- month chrome
+// ------------------------------------------------------------- month ownership
 
-describe("AppShell topbar month filter", () => {
-  it("MONTH CHROME: options and the default derive from the rolling window", async () => {
+describe("AppShell month ownership", () => {
+  it("keeps month selection in the owning view and binds each change to its request", async () => {
+    const requestedMonths: string[] = [];
+    const routed = routeFetchWithSession(() => jsonResponse(sessionBody({ canViewRevenue: true })));
+    (globalThis.fetch as ReturnType<typeof vi.fn>).mockImplementation((input: unknown) => {
+      const path = requestPathOf(input);
+      const match = path.match(/^\/revenue\/months\/([^/]+)\/net-revenue$/);
+      if (match) {
+        const month = decodeURIComponent(match[1]);
+        requestedMonths.push(month);
+        return Promise.resolve(jsonResponse({ ...NET_REVENUE_BODY, month }));
+      }
+      return routed(input);
+    });
+    renderShell();
+
+    const filters = await screen.findByLabelText("Net revenue filters");
+    expect(screen.queryByRole("group", { name: "Report filters" })).not.toBeInTheDocument();
+    const monthSelect = within(filters).getByLabelText("Month") as HTMLSelectElement;
+    expect(monthSelect.value).toBe(DEFAULT_MONTH);
+    await waitFor(() => expect(requestedMonths).toContain(DEFAULT_MONTH));
+
+    const nextMonth = MONTH_OPTIONS[1];
+    fireEvent.change(monthSelect, { target: { value: nextMonth } });
+    await waitFor(() => expect(requestedMonths).toContain(nextMonth));
+    expect(monthSelect.value).toBe(nextMonth);
+    expect(requestedMonths.filter((month) => month === nextMonth)).toHaveLength(1);
+  });
+});
+
+/** The SIDEBAR button carrying this label (the button also holds an icon +
+ * count, and labels like "Channel Registry" also appear in the view itself,
+ * so the lookup is scoped to the sidebar landmark). Defined above the
+ * "fixture-free chrome" describe, its first consumer, so every use follows
+ * the definition. */
+const navButton = (label: string): HTMLElement => {
+  const sidebar = screen.getByRole("complementary", { name: "Primary navigation" });
+  const button = within(sidebar).getByText(label).closest("button");
+  if (button === null) throw new Error(`no nav button for ${label}`);
+  return button;
+};
+
+describe("AppShell fixture-free chrome", () => {
+  it("hydrates session-backed chrome and the current command route from API data", async () => {
     (globalThis.fetch as ReturnType<typeof vi.fn>).mockImplementation(
       routeFetchWithSession(() => jsonResponse(sessionBody({ canViewRevenue: true }))),
     );
     renderShell();
 
-    // The wired CommandView carries its own aria-label="Month" selector, so
-    // scope to the topbar's "Report filters" control row before querying.
-    const reportFilters = await screen.findByLabelText("Report filters");
-    const monthSelect = within(reportFilters).getByLabelText("Month") as HTMLSelectElement;
+    const sidebar = await screen.findByRole("complementary", { name: "Primary navigation" });
+    expect(within(sidebar).getByRole("button", { name: "Command Center" })).toHaveAttribute(
+      "aria-current",
+      "page",
+    );
+    expect(within(sidebar).getByRole("button", { name: "Channel Registry" })).toBeEnabled();
+    await screen.findByText(/money visible/i);
+
+    const filters = await screen.findByLabelText("Net revenue filters");
+    expect(within(filters).getByLabelText("Month")).toHaveValue(DEFAULT_MONTH);
+    const revenueSummary = screen.getByRole("region", { name: "Revenue summary" });
+    expect(within(revenueSummary).getByText("Net revenue")).toBeInTheDocument();
+  });
+
+  it("clears a Registry Review trace seed across route transitions", async () => {
+    const routed = routeFetchWithSession(() =>
+      jsonResponse(sessionBody({ canViewRevenue: true, canManageRegistry: true })),
+    );
+    (globalThis.fetch as ReturnType<typeof vi.fn>).mockImplementation((input: unknown) => {
+      const path = requestPathOf(input);
+      if (path === "/channels") return Promise.resolve(jsonResponse(TRACE_REGISTRY_CHANNELS));
+      if (path.endsWith("/net-revenue")) {
+        return Promise.resolve(jsonResponse(TRACE_REVENUE_BODY));
+      }
+      if (path.endsWith("/rankings")) return Promise.resolve(jsonResponse(EMPTY_RANKINGS_BODY));
+      if (path === "/org-units") return Promise.resolve(jsonResponse([]));
+      return routed(input);
+    });
+    const rendered = renderShell();
+
+    await screen.findByRole("complementary", { name: "Primary navigation" });
+    fireEvent.click(navButton("Channel Registry"));
+    const secondRow = await waitFor(() => {
+      const row = screen.getByText("Second Live Channel").closest("tr");
+      if (!row) throw new Error("registry row not rendered");
+      return row;
+    });
+    fireEvent.click(within(secondRow).getByRole("button", { name: "Review" }));
+
+    const channel = (await screen.findByLabelText("Channel")) as HTMLSelectElement;
+    await waitFor(() => expect(channel.value).toBe("UC-SECOND-LIVE"));
+
+    await act(async () => {
+      await rendered.router.navigate("/command");
+    });
+    await waitFor(() => expect(screen.queryByLabelText("Channel")).not.toBeInTheDocument());
+    await act(async () => {
+      await rendered.router.navigate("/trace");
+    });
+    const reenteredChannel = (await screen.findByLabelText("Channel")) as HTMLSelectElement;
+    await waitFor(() => expect(reenteredChannel.value).toBe("UC-FIRST-LIVE"));
+  });
+});
+
+// ---------------------------------------------------------- month controls
+
+describe("AppShell month controls", () => {
+  it("MONTH CHROME: removes the inert global filter and preserves the wired rolling selector", async () => {
+    const routed = routeFetchWithSession(() =>
+      jsonResponse(sessionBody({ canViewRevenue: true })),
+    );
+    (globalThis.fetch as ReturnType<typeof vi.fn>).mockImplementation(
+      (input: unknown) => {
+        if (requestPathOf(input) === "/revenue/scopes") {
+          return Promise.resolve(
+            jsonResponse({
+              scopes: [{ scope_type: "global", scope_id: null, label: "Global" }],
+            }),
+          );
+        }
+        return routed(input);
+      },
+    );
+    renderShell();
+
+    expect(screen.queryByLabelText("Report filters")).not.toBeInTheDocument();
+    // The deleted shell subtitle asserted a frozen close month and reporting
+    // currency that the shell did not read from any trusted source.
+    expect(screen.queryByText(/March 2026 close/iu)).not.toBeInTheDocument();
+    expect(screen.queryByText(/USD reporting currency/iu)).not.toBeInTheDocument();
+    const viewFilters = await screen.findByLabelText("Net revenue filters");
+    const monthSelect = within(viewFilters).getByLabelText("Month") as HTMLSelectElement;
     const renderedLabels = within(monthSelect)
       .getAllByRole("option")
       .map((option) => option.textContent);
-    // Same source as every wired view's selector — no second hardcoded list.
-    expect(renderedLabels).toEqual(MONTH_OPTIONS.map(monthKeyLabel));
-    expect(monthSelect.value).toBe(monthKeyLabel(DEFAULT_MONTH));
+    // The real controlled view retains PR #211's rolling source/default.
+    expect(renderedLabels).toEqual(MONTH_OPTIONS);
+    expect(monthSelect.value).toBe(DEFAULT_MONTH);
+
+    const selectedMonth = MONTH_OPTIONS[1];
+    if (!selectedMonth) {
+      throw new Error("rolling month window must expose a second month");
+    }
+    fireEvent.change(monthSelect, { target: { value: selectedMonth } });
+    await waitFor(() => expect(monthSelect.value).toBe(selectedMonth));
+    const fetchMock = globalThis.fetch as ReturnType<typeof vi.fn>;
+    await waitFor(() =>
+      expect(
+        fetchMock.mock.calls.some(([input]) =>
+          urlOf(input).includes(
+            `/revenue/months/${encodeURIComponent(selectedMonth)}/net-revenue`,
+          ),
+        ),
+      ).toBe(true),
+    );
   });
 });
 
@@ -832,16 +1119,6 @@ const deferredImportResponse = () => {
   return { pending, release, reject: fail };
 };
 
-/** The SIDEBAR button carrying this label (the button also holds an icon +
- * count, and labels like "Channel Registry" also appear in the view itself,
- * so the lookup is scoped to the sidebar landmark). */
-const navButton = (label: string): HTMLElement => {
-  const sidebar = screen.getByRole("complementary", { name: "Primary navigation" });
-  const button = within(sidebar).getByText(label).closest("button");
-  if (button === null) throw new Error(`no nav button for ${label}`);
-  return button;
-};
-
 // The reads this flow needs, keyed by pathname like routeFetchWithSessionRoutes.
 // Only /channels/import is answered per test, so it is the sole branch in the
 // router below rather than another entry here.
@@ -851,6 +1128,19 @@ const IMPORT_SHELL_ROUTES: FetchRouteMap = new Map([
   ["/channels", () => jsonResponse(IMPORT_CHANNELS)],
   ["/org-units", () => jsonResponse([])],
   ["/connectors/content-owners", () => jsonResponse({ items: [{ account_id: "OWNERaaa" }] })],
+  [
+    "/audit/events",
+    () =>
+      jsonResponse({
+        items: [],
+        pagination: { limit: 50, has_more: false, next_cursor: null },
+        audit_event: {},
+      }),
+  ],
+  [
+    "/audit/summary",
+    () => jsonResponse({ total_events: 0, sensitive_events: 0, recent_count: 0, window_hours: 24 }),
+  ],
 ]);
 
 describe("AppShell navigation latch during an un-abortable write", () => {
@@ -942,6 +1232,50 @@ describe("AppShell navigation latch during an un-abortable write", () => {
       expect(screen.getByRole("group", { name: "Import applied" })).toBeInTheDocument(),
     );
     expect(navButton("CMS Groups")).toBeEnabled();
+  });
+
+  it("NAV LATCH: blocks browser Back and Forward while an import apply is in flight", async () => {
+    const applyGate = deferredImportResponse();
+    let firstCall = true;
+    const rendered = await openImportPreview(() => {
+      if (firstCall) {
+        firstCall = false;
+        return jsonResponse(IMPORT_PLAN);
+      }
+      return applyGate.pending;
+    });
+
+    // Add and then leave a same-view history entry so both directions have a
+    // concrete target without unmounting the import preview.
+    await act(async () => {
+      await rendered.router.navigate("/registry?history-probe=1");
+      await rendered.router.navigate(-1);
+    });
+    expect(rendered.router.state.location.pathname).toBe("/registry");
+
+    fireEvent.click(screen.getByRole("button", { name: /^apply$/iu }));
+    await waitFor(() => expect(navButton("CMS Groups")).toBeDisabled());
+
+    // A blocked Back leaves the route and the preview mounted at the current
+    // entry; the reset is intentional, not an accepted transition.
+    await act(async () => {
+      await rendered.router.navigate(-1);
+    });
+    expect(rendered.router.state.location.pathname).toBe("/registry");
+    expect(screen.getByRole("group", { name: "Import preview" })).toBeInTheDocument();
+
+    // Forward is independently blocked as well; this catches guards that only
+    // cover sidebar/programmatic PUSH navigation.
+    await act(async () => {
+      await rendered.router.navigate(1);
+    });
+    expect(rendered.router.state.location.pathname).toBe("/registry");
+    expect(screen.getByRole("group", { name: "Import preview" })).toBeInTheDocument();
+
+    applyGate.release(jsonResponse({ ...IMPORT_PLAN, dry_run: false }));
+    await waitFor(() =>
+      expect(screen.getByRole("group", { name: "Import applied" })).toBeInTheDocument(),
+    );
   });
 
   it("NAV LATCH: leaves navigation free during the read-only dry run", async () => {
