@@ -549,6 +549,7 @@ def test_org_skeleton_audit_failure_rolls_back_users_and_org_units(tmp_path, mon
     real_record_audit_event = deps["record_audit_event"]
 
     def _fail_org_audit(**kwargs):
+        """Fail the organisation audit write to exercise rollback."""
         if kwargs["event_type"] is deps["AuditEventType"].ORG_UNIT_CHANGED:
             raise ValueError("org audit unavailable")
         return real_record_audit_event(**kwargs)
@@ -792,6 +793,7 @@ def test_commit_dbapi_error_reports_unknown_and_exact_retry_recovers_idempotentl
             return getattr(self._session, name)
 
         def commit(self):
+            """Record the commit call without touching a real connection."""
             self._session.commit()
             raise DBAPIError(
                 statement=None,

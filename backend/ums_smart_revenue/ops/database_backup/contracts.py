@@ -63,6 +63,7 @@ def sha256_stream(stream: BinaryIO) -> str:
 
 
 def _require_exact_keys(body: dict[str, Any], expected: set[str], label: str) -> None:
+    """Require a payload to carry exactly the expected fields."""
     actual = set(body)
     if actual != expected:
         missing = sorted(expected - actual)
@@ -74,12 +75,14 @@ def _require_exact_keys(body: dict[str, Any], expected: set[str], label: str) ->
 
 
 def _require_string(value: object, label: str) -> str:
+    """Require a non-empty string field."""
     if not isinstance(value, str) or not value:
         raise BackupToolError(f"{label} must be a non-empty string", exit_code=8)
     return value
 
 
 def _require_integer(value: object, label: str, *, minimum: int = 0) -> int:
+    """Require a strict integer field with an optional lower bound."""
     if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
         raise BackupToolError(
             f"{label} must be an integer >= {minimum}",
@@ -154,6 +157,7 @@ class ArtifactRecord:
 
     @classmethod
     def from_json(cls, body: object, *, label: str) -> ArtifactRecord:
+        """Parse and validate an artifact record from a manifest payload."""
         if not isinstance(body, dict):
             raise BackupToolError(f"{label} must be an object", exit_code=8)
         _require_exact_keys(body, {"name", "bytes", "sha256"}, label)
@@ -165,6 +169,7 @@ class ArtifactRecord:
         return cls(name=name, bytes=size, sha256=digest)
 
     def to_json(self) -> dict[str, object]:
+        """Return the lossless JSON representation of this artifact."""
         return {"name": self.name, "bytes": self.bytes, "sha256": self.sha256}
 
 
@@ -177,6 +182,7 @@ class DatabaseIdentity:
 
     @classmethod
     def from_json(cls, body: object) -> DatabaseIdentity:
+        """Parse and validate the database identity from a manifest payload."""
         if not isinstance(body, dict):
             raise BackupToolError("source.identity must be an object", exit_code=8)
         _require_exact_keys(body, {"system_identifier", "database"}, "source.identity")
@@ -194,6 +200,7 @@ class DatabaseIdentity:
         )
 
     def to_json(self) -> dict[str, str]:
+        """Return the lossless JSON representation of this cluster identity."""
         return {
             "system_identifier": self.system_identifier,
             "database": self.database,
@@ -214,6 +221,7 @@ class DatabaseLocale:
 
     @classmethod
     def from_json(cls, body: object) -> DatabaseLocale:
+        """Parse and validate the cluster locale from a manifest payload."""
         if not isinstance(body, dict):
             raise BackupToolError("source.locale must be an object", exit_code=8)
         expected = {
@@ -235,6 +243,7 @@ class DatabaseLocale:
         return cls(**values)  # type: ignore[arg-type]
 
     def to_json(self) -> dict[str, str]:
+        """Return the lossless JSON representation of this locale."""
         return {
             "encoding": self.encoding,
             "collate": self.collate,
@@ -260,6 +269,7 @@ class SourceRecord:
 
     @classmethod
     def from_json(cls, body: object) -> SourceRecord:
+        """Parse and validate the full source description from a payload."""
         if not isinstance(body, dict):
             raise BackupToolError("source must be an object", exit_code=8)
         expected = {
@@ -301,6 +311,7 @@ class SourceRecord:
         )
 
     def to_json(self) -> dict[str, object]:
+        """Return the lossless JSON representation of this source."""
         return {
             "identity": self.identity.to_json(),
             "server_version_num": self.server_version_num,
@@ -326,6 +337,7 @@ class TableRecord:
 
     @classmethod
     def from_json(cls, body: object, *, index: int) -> TableRecord:
+        """Parse and validate one table record from the manifest payload."""
         label = f"tables[{index}]"
         if not isinstance(body, dict):
             raise BackupToolError(f"{label} must be an object", exit_code=8)
@@ -337,6 +349,7 @@ class TableRecord:
         )
 
     def to_json(self) -> dict[str, object]:
+        """Return the lossless JSON representation of this table record."""
         return {"schema": self.schema, "name": self.name, "rows": self.rows}
 
 
@@ -362,6 +375,7 @@ class SequenceRecord:
 
     @classmethod
     def from_json(cls, body: object, *, index: int) -> SequenceRecord:
+        """Parse and validate one sequence record from the manifest payload."""
         label = f"sequences[{index}]"
         if not isinstance(body, dict):
             raise BackupToolError(f"{label} must be an object", exit_code=8)
@@ -383,6 +397,7 @@ class SequenceRecord:
             raise BackupToolError(f"{label} boolean fields must be booleans", exit_code=8)
 
         def integer(field: str, *, minimum: int | None = None) -> int:
+            """Read a strict integer field from the payload being validated."""
             value = body[field]
             if isinstance(value, bool) or not isinstance(value, int):
                 raise BackupToolError(f"{label}.{field} must be an integer", exit_code=8)
@@ -407,6 +422,7 @@ class SequenceRecord:
         )
 
     def to_json(self) -> dict[str, object]:
+        """Return the lossless JSON representation of this manifest."""
         return {
             "schema": self.schema,
             "name": self.name,
@@ -446,6 +462,7 @@ class BackupManifest:
     # ============================================================================
     @classmethod
     def from_json(cls, body: object) -> BackupManifest:
+        """Parse and strictly validate a complete backup manifest payload."""
         if not isinstance(body, dict):
             raise BackupToolError("database manifest must be an object", exit_code=8)
         expected = {
@@ -547,6 +564,7 @@ class BackupManifest:
 
     @classmethod
     def load(cls, path: Path) -> BackupManifest:
+        """Load a manifest from disk, refusing duplicate JSON keys."""
         try:
             if path.stat().st_size > MAX_MANIFEST_BYTES:
                 raise BackupToolError(f"{path.name} exceeds the manifest size limit", exit_code=8)
@@ -561,6 +579,7 @@ class BackupManifest:
         return cls.from_json(raw)
 
     def to_json(self) -> dict[str, object]:
+        """Return the lossless JSON representation of this manifest."""
         return {
             "schema": BACKUP_SCHEMA,
             "status": "complete",
@@ -590,6 +609,7 @@ def verify_artifacts(directory: Path, manifest: BackupManifest) -> None:
 
 
 def _is_redirect_status(status: os.stat_result) -> bool:
+    """Report whether a stat result denotes a symlink or reparse point."""
     attributes = getattr(status, "st_file_attributes", 0)
     reparse = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
     return stat.S_ISLNK(status.st_mode) or bool(attributes & reparse)

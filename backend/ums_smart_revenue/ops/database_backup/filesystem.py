@@ -41,6 +41,7 @@ class DirectoryIdentity:
 
 
 def _is_redirect(path: Path) -> bool:
+    """Report whether the path is a symlink or Windows reparse point."""
     try:
         return path.is_symlink() or bool(
             path.lstat().st_file_attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT
@@ -63,6 +64,7 @@ def require_no_redirect_components(path: Path, *, label: str) -> None:
 
 
 def _restrict_windows_owner_acl(path: Path) -> None:
+    """Reduce the Windows DACL to the current owner with explicit protection."""
     if os.name != "nt":
         return
     script = r"""
@@ -157,6 +159,7 @@ if (($rules[0].FileSystemRights -band $requiredRights) -ne $requiredRights -or
 
 
 def _verify_windows_owner_acl(path: Path) -> None:
+    """Verify the directory DACL still grants only the current owner."""
     script = r"""
 $ErrorActionPreference = 'Stop'
 $target = [IO.Path]::GetFullPath($env:UMS_DATABASE_BACKUP_ACL_TARGET)
@@ -231,6 +234,7 @@ def require_owner_only_directory(path: Path) -> None:
 
 
 def _real_directory_identity(path: Path) -> DirectoryIdentity:
+    """Return the device and inode of the resolved directory."""
     try:
         status = path.lstat()
     except OSError as exc:
@@ -371,6 +375,7 @@ def resolve_output_directory(
 
 
 def _sync_file(path: Path) -> None:
+    """Flush a file's contents and metadata to stable storage."""
     flags = os.O_RDWR if os.name == "nt" else os.O_RDONLY
     descriptor = os.open(path, flags)
     try:
@@ -380,6 +385,7 @@ def _sync_file(path: Path) -> None:
 
 
 def _sync_directory(path: Path) -> None:
+    """Flush a directory entry to stable storage."""
     if os.name == "nt":
         return
     descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
@@ -390,6 +396,7 @@ def _sync_directory(path: Path) -> None:
 
 
 def _durable_move(source: Path, destination: Path) -> None:
+    """Move a directory onto its destination and sync both parents."""
     if destination.exists():
         raise BackupToolError(f"backup destination already exists: {destination.name}", exit_code=2)
     if os.name == "nt":
@@ -546,6 +553,7 @@ def publish(staging: Path, destination: Path, *, manifest: BackupManifest) -> No
 #   - File: backend/ums_smart_revenue/ops/database_backup/contracts.py -> identity.
 # ============================================================================
 def require_matching_backup_history(output: Path, identity: DatabaseIdentity) -> None:
+    """Refuse an output directory holding history for another database."""
     observed: set[DatabaseIdentity] = set()
     for child in sorted(output.iterdir(), key=lambda path: path.name):
         if not RUN_NAME_RE.fullmatch(child.name):

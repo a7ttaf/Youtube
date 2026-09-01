@@ -109,6 +109,7 @@ class CommandRunner:
         environment: Mapping[str, str] | None = None,
         exit_code: int = 5,
     ) -> str:
+        """Run a command and return its decoded standard output."""
         command_environment = None
         if environment is not None:
             command_environment = os.environ.copy()
@@ -143,6 +144,7 @@ class CommandRunner:
         environment: Mapping[str, str] | None = None,
         exit_code: int = 5,
     ) -> None:
+        """Run a command writing binary output straight to a file."""
         command_environment = None
         if environment is not None:
             command_environment = os.environ.copy()
@@ -181,6 +183,7 @@ class CommandRunner:
         environment: Mapping[str, str] | None = None,
         exit_code: int = 6,
     ) -> str:
+        """Run a command reading binary input from a file."""
         try:
             with source.open("rb") as stream:
                 return self.stream_to_text(
@@ -238,6 +241,7 @@ class CommandRunner:
         environment: Mapping[str, str] | None = None,
         exit_code: int = 6,
     ) -> str:
+        """Run a command feeding a file as binary standard input."""
         return self.file_to_text(
             argv,
             source,
@@ -247,6 +251,7 @@ class CommandRunner:
 
 
 def _container_inspect(runner: CommandRunner, container: str) -> dict[str, object]:
+    """Inspect a container and return its decoded metadata object."""
     if not _SAFE_CONTAINER_RE.fullmatch(container):
         raise BackupToolError("container name/id contains unsupported characters", exit_code=2)
     raw = runner.text(["docker", "container", "inspect", container], exit_code=3)
@@ -393,6 +398,7 @@ def remove_rehearsal_container(runner: CommandRunner, name: str, *, ownership_to
 
 
 def _container_environment(inspect: dict[str, object]) -> dict[str, str]:
+    """Extract the environment map recorded in a container inspect."""
     config = inspect.get("Config")
     if not isinstance(config, dict) or not isinstance(config.get("Env"), list):
         raise BackupToolError("container has no readable environment contract", exit_code=3)
@@ -405,6 +411,7 @@ def _container_environment(inspect: dict[str, object]) -> dict[str, str]:
 
 
 def _published_postgres_endpoint(inspect: dict[str, object]) -> tuple[str, int]:
+    """Read the published host and port for the Postgres container."""
     network = inspect.get("NetworkSettings")
     ports = network.get("Ports") if isinstance(network, dict) else None
     bindings = ports.get("5432/tcp") if isinstance(ports, dict) else None
@@ -479,6 +486,7 @@ _PG18_PREDEFINED_MEMBERSHIPS = (
 #   - File: backend/ums_smart_revenue/ops/database_backup/backup.py -> snapshot.
 # ============================================================================
 def resolve_container_connection(runner: CommandRunner, container: str) -> ContainerConnection:
+    """Resolve a container reference into a loopback connection contract."""
     inspect = _container_inspect(runner, container)
     if inspect.get("Path") != "docker-entrypoint.sh" or inspect.get("Args") != ["postgres"]:
         raise BackupToolError(
@@ -528,6 +536,7 @@ def resolve_container_connection(runner: CommandRunner, container: str) -> Conta
 
 
 def _connect(source: ContainerConnection) -> Connection[tuple[object, ...]]:
+    """Open a psycopg connection to the target container."""
     try:
         return psycopg.connect(
             host=source.host,
@@ -588,6 +597,7 @@ def require_password_authentication(source: ContainerConnection) -> None:
 
 
 def _database_locale(connection: Connection[tuple[object, ...]]) -> DatabaseLocale:
+    """Read the cluster locale and encoding from the connected server."""
     row = connection.execute(
         """
         SELECT
@@ -619,6 +629,7 @@ def _database_locale(connection: Connection[tuple[object, ...]]) -> DatabaseLoca
 
 
 def _table_names(connection: Connection[tuple[object, ...]]) -> list[tuple[str, str]]:
+    """List the user table schemas and names in the connected database."""
     rows = connection.execute(
         """
         SELECT n.nspname, c.relname
@@ -742,6 +753,7 @@ def _lock_export_relations(connection: Connection[tuple[object, ...]]) -> None:
 def snapshot_sequences(
     connection: Connection[tuple[object, ...]],
 ) -> tuple[SequenceRecord, ...]:
+    """Capture the ordered sequence state of the connected database."""
     rows = connection.execute(
         """
         SELECT n.nspname, c.relname, format_type(s.seqtypid, NULL),

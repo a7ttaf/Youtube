@@ -50,14 +50,17 @@ class StorageContractError(RuntimeError):
 
 
 def _repository_root() -> Path:
+    """Locate the repository root from this script's own location."""
     return Path(__file__).resolve().parents[1]
 
 
 def _normalized_path(path: Path) -> str:
+    """Return the portable POSIX spelling of a path."""
     return os.path.normcase(str(path.resolve(strict=False)))
 
 
 def _is_redirect(path: Path) -> bool:
+    """Report whether the path is a symlink or Windows reparse point."""
     try:
         if path.is_symlink():
             return True
@@ -71,6 +74,7 @@ def _is_redirect(path: Path) -> bool:
 
 
 def _reject_existing_redirects(path: Path, *, stop_at: Path | None = None) -> None:
+    """Fail if any path on the way to the target is a redirect."""
     candidate = path
     while True:
         if candidate.exists() and _is_redirect(candidate):
@@ -81,6 +85,7 @@ def _reject_existing_redirects(path: Path, *, stop_at: Path | None = None) -> No
 
 
 def _raw_path(raw_path: str, *, base: Path) -> Path:
+    """Resolve a configured storage path under its declared base."""
     if not raw_path or not raw_path.strip():
         raise StorageContractError("storage path must be explicitly set and non-empty")
     if raw_path.strip() in {".", "./", ".\\"}:
@@ -90,6 +95,7 @@ def _raw_path(raw_path: str, *, base: Path) -> Path:
 
 
 def _configured_path_key(raw_path: str) -> str:
+    """Normalize and validate a configured storage path into its key."""
     if not raw_path or not raw_path.strip():
         raise StorageContractError("storage path must be explicitly set and non-empty")
     portable = raw_path.strip().replace("\\", "/")
@@ -118,6 +124,7 @@ def _validate_host_candidate(
     safe_root: Path,
     repository_root: Path,
 ) -> Path:
+    """Resolve a host-side storage path and refuse traversal or redirects."""
     unresolved = _raw_path(raw_path, base=repository_root)
     unresolved_safe_root = safe_root.expanduser()
     if not unresolved_safe_root.is_absolute():
@@ -153,6 +160,7 @@ def _validate_host_candidate(
 
 
 def _read_json(path: Path) -> dict[str, Any]:
+    """Read a JSON object from disk, refusing duplicate keys."""
     if _is_redirect(path):
         raise StorageContractError(f"contract file may not be a link: {path}")
     try:
@@ -169,6 +177,7 @@ def _read_json(path: Path) -> dict[str, Any]:
 
 
 def _sync_file(path: Path) -> None:
+    """Flush a file's contents and metadata to stable storage."""
     flags = os.O_RDWR if os.name == "nt" else os.O_RDONLY
     descriptor = os.open(path, flags)
     try:
@@ -178,6 +187,7 @@ def _sync_file(path: Path) -> None:
 
 
 def _sync_directory(path: Path) -> None:
+    """Flush a directory entry to stable storage."""
     if os.name == "nt":
         # Windows directory handles do not support FlushFileBuffers. File
         # creation is flushed through the final file; renames use WRITE_THROUGH.
@@ -191,6 +201,7 @@ def _sync_directory(path: Path) -> None:
 
 
 def _durable_replace(source: Path, destination: Path) -> None:
+    """Atomically replace the destination with the source and sync parents."""
     if os.name == "nt":
         import ctypes
 
@@ -213,6 +224,7 @@ def _durable_replace(source: Path, destination: Path) -> None:
 
 
 def _write_json_exclusive(path: Path, payload: dict[str, Any]) -> None:
+    """Create a JSON file that must not already exist."""
     encoded = (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode()
     temporary = path.with_name(f".{path.name}.partial-{os.getpid()}-{secrets.token_hex(4)}")
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
@@ -233,6 +245,7 @@ def _write_json_exclusive(path: Path, payload: dict[str, Any]) -> None:
 
 
 def _write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
+    """Write JSON through a same-directory temporary and durable rename."""
     encoded = (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode()
     temporary = path.with_name(f".{path.name}.partial-{os.getpid()}-{secrets.token_hex(4)}")
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
@@ -249,6 +262,7 @@ def _write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
 
 
 def _validate_marker_payload(payload: dict[str, Any], marker_path: Path) -> None:
+    """Check that a storage marker matches the configured mount."""
     if payload.get("contract") != CONTRACT_NAME:
         raise StorageContractError(f"unknown storage contract in {marker_path}")
     if set(payload) != {"canonical_path", "configured_path_key", "contract", "safe_root"}:
@@ -378,6 +392,7 @@ def _validate_mounted_marker(
     *,
     configured_host_path: str | None = None,
 ) -> dict[str, Any]:
+    """Validate the initialized-storage marker inside a mounted volume."""
     if not mount_root.is_dir() or _is_redirect(mount_root):
         raise StorageContractError(f"mounted storage root is not a real directory: {mount_root}")
     marker_path = mount_root / MARKER_FILENAME
@@ -401,6 +416,7 @@ def _validate_mounted_marker(
 
 
 def _ready_payload(marker: dict[str, Any]) -> dict[str, str]:
+    """Build the marker payload published once storage is ready."""
     return {
         "canonical_path": marker["canonical_path"],
         "configured_path_key": marker["configured_path_key"],
@@ -410,6 +426,7 @@ def _ready_payload(marker: dict[str, Any]) -> dict[str, str]:
 
 
 def _validate_ready_storage(mount_root: Path) -> None:
+    """Verify an already-initialized storage mount end to end."""
     if not mount_root.is_dir() or _is_redirect(mount_root):
         raise StorageContractError(f"mounted storage root is not a real directory: {mount_root}")
     ready_path = mount_root / READY_FILENAME
@@ -447,6 +464,7 @@ def exec_with_ready_storage(mount_root: Path, command: list[str]) -> None:
 
 
 def _walk_without_redirects(root: Path) -> list[Path]:
+    """Walk a tree while refusing symlinks and reparse points."""
     paths = [root]
     for directory, directory_names, file_names in os.walk(root, followlinks=False):
         current = Path(directory)
@@ -461,6 +479,7 @@ def _walk_without_redirects(root: Path) -> list[Path]:
 
 
 def _probe_as_identity(roots: tuple[Path, ...], *, uid: int, gid: int) -> None:
+    """Run a storage probe under an explicit uid and gid."""
     original_euid = os.geteuid()
     original_egid = os.getegid()
     original_groups = os.getgroups()
@@ -489,6 +508,7 @@ def _probe_as_identity(roots: tuple[Path, ...], *, uid: int, gid: int) -> None:
 #   - File: Docs/20_COMPOSE_STORAGE_RUNBOOK.md -> pending-restore contract.
 # ============================================================================
 def _verify_tree_readable_as_identity(roots: tuple[Path, ...], *, uid: int, gid: int) -> None:
+    """Verify every tree entry is readable by the runtime identity."""
     paths: list[Path] = []
     for root in roots:
         paths.extend(_walk_without_redirects(root))
@@ -519,11 +539,13 @@ def _verify_tree_readable_as_identity(roots: tuple[Path, ...], *, uid: int, gid:
 
 
 def _require_search_access(path: Path) -> None:
+    """Require search permission on a directory path."""
     if not os.access(path, os.X_OK, effective_ids=True):
         raise PermissionError(f"runtime identity cannot search directory: {path}")
 
 
 def _runtime_identity(app_user: str) -> tuple[int, int]:
+    """Resolve the container app account to a uid and gid pair."""
     try:
         import pwd
     except ModuleNotFoundError as exc:  # pragma: no cover - container is Linux.
@@ -624,6 +646,7 @@ def initialize_container_storage(
 
 
 def _assert_sensitive_output(path: Path, *, repository_root: Path) -> Path:
+    """Resolve backup output outside the repository without overwriting."""
     output = path.expanduser().resolve(strict=False)
     repository = repository_root.resolve(strict=False)
     if output.is_relative_to(repository):
@@ -635,6 +658,7 @@ def _assert_sensitive_output(path: Path, *, repository_root: Path) -> Path:
 
 
 def _archive_storage_tree(storage: Path, archive: Path) -> Path:
+    """Write the storage tree into a deterministic tar archive."""
     roots = tuple(storage / name for name in STORAGE_DIRECTORIES)
     if any(not root.is_dir() for root in roots):
         raise StorageContractError("artifact and blob directories must exist before backup")
@@ -721,6 +745,7 @@ def create_mounted_artifact_archive(
 
 
 def _validated_archive_members(handle: tarfile.TarFile) -> list[tarfile.TarInfo]:
+    """Read archive members while refusing unsafe or redirected paths."""
     members = handle.getmembers()
     seen: set[str] = set()
     top_levels: set[str] = set()
@@ -771,6 +796,7 @@ def verify_artifact_archive(archive: Path) -> None:
 
 
 def _sha256(path: Path) -> str:
+    """Return the SHA-256 hex digest of a file."""
     digest = hashlib.sha256()
     with path.open("rb") as handle:
         while chunk := handle.read(CHUNK_SIZE):
@@ -779,6 +805,7 @@ def _sha256(path: Path) -> str:
 
 
 def _sha256_stream(handle: BinaryIO) -> str:
+    """Return the SHA-256 hex digest of an open binary stream."""
     position = handle.tell()
     digest = hashlib.sha256()
     try:
@@ -791,6 +818,7 @@ def _sha256_stream(handle: BinaryIO) -> str:
 
 
 def _configured_gcs_bucket(value: str | None) -> str:
+    """Require a GCS bucket name when the blob backend is GCS."""
     bucket = value if value is not None else os.environ.get("UMS_GCS_BUCKET", DEFAULT_GCS_BUCKET)
     if not isinstance(bucket, str) or not bucket or bucket != bucket.strip():
         raise StorageContractError("configured GCS bucket must be explicit and non-empty")
@@ -798,6 +826,7 @@ def _configured_gcs_bucket(value: str | None) -> str:
 
 
 def _decode_gcs_snapshot(data: bytes, *, source: Path) -> dict[str, Any]:
+    """Decode a GCS snapshot file into a JSON object."""
     try:
         payload = json.loads(data.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -812,6 +841,7 @@ def _validate_gcs_snapshot_payload(
     *,
     expected_bucket: str,
 ) -> None:
+    """Validate a GCS snapshot payload against the expected bucket."""
     if (
         set(payload) != {"bucket", "objects", "schema"}
         or payload.get("schema") != "ums-gcs-snapshot-v1"
@@ -1125,6 +1155,7 @@ def verify_bundle_manifest(
 
 
 def _ensure_empty_restore_target(storage: Path) -> None:
+    """Refuse to initialize restore storage over existing content."""
     pending = storage / RESTORE_PENDING_FILENAME
     if pending.exists():
         raise StorageContractError("an earlier restore is still pending container initialization")
@@ -1157,6 +1188,7 @@ def _restore_journal_payload(
     gcs_bucket: str | None,
     stage_name: str,
 ) -> dict[str, Any]:
+    """Build the journal payload describing a staged restore."""
     return {
         "archive_sha256": archive_digest,
         "blob_backend": blob_backend,
@@ -1179,6 +1211,7 @@ def _validate_restore_journal(
     *,
     allow_missing_stage: bool = False,
 ) -> Path:
+    """Validate a staged restore journal against the declared digests."""
     if set(payload) != {
         "archive_sha256",
         "blob_backend",
@@ -1263,6 +1296,7 @@ def _pending_restore_payload(
     blob_backend: str,
     gcs_bucket: str | None,
 ) -> dict[str, str | None]:
+    """Build the pending-restore record for a staged publication."""
     return {
         "archive_sha256": archive_digest,
         "blob_backend": blob_backend,
@@ -1274,6 +1308,7 @@ def _pending_restore_payload(
 
 
 def _validate_pending_restore_payload(payload: dict[str, Any]) -> None:
+    """Validate the shape of a pending-restore record."""
     archive_digest = payload.get("archive_sha256")
     manifest_digest = payload.get("manifest_sha256")
     blob_backend = payload.get("blob_backend")
@@ -1313,6 +1348,7 @@ def _rollback_restore_publication(
     gcs_bucket: str | None,
     journal: dict[str, Any],
 ) -> None:
+    """Undo a partially published restore and restore the pending marker."""
     journal_path = storage / RESTORE_JOURNAL_FILENAME
     journal["state"] = "rolling-back"
     _write_json_atomic(journal_path, journal)
@@ -1342,6 +1378,7 @@ def _rollback_restore_publication(
 
 
 def _finish_pending_restore_initialization(storage: Path) -> None:
+    """Complete a previously interrupted storage initialization."""
     for name in STORAGE_DIRECTORIES:
         root = storage / name
         if not root.is_dir() or _is_redirect(root):
@@ -1389,16 +1426,19 @@ def _finish_pending_restore_initialization(storage: Path) -> None:
 
 
 def _remove_empty_stage(stage: Path, storage: Path) -> None:
+    """Remove a stage directory only when it holds nothing."""
     stage.rmdir()
     _sync_directory(storage)
 
 
 def _unlink_and_sync(path: Path) -> None:
+    """Unlink a file and flush its parent directory entry."""
     path.unlink()
     _sync_directory(path.parent)
 
 
 def _verify_restore_bytes(storage: Path, stage: Path, archive: BinaryIO) -> None:
+    """Stream-compare restored bytes against the source archive."""
     locations: dict[str, Path] = {}
     actual_names: set[str] = set()
     for name in STORAGE_DIRECTORIES:
@@ -1715,6 +1755,7 @@ def _restore_artifact_archive_from_stream(
 
 
 def _build_parser() -> argparse.ArgumentParser:
+    """Build the compose storage CLI argument parser."""
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
 

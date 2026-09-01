@@ -20,6 +20,7 @@ from ums_smart_revenue.ops.database_backup.restore import (  # noqa: E402
 
 
 def _parse_args(argv: list[str] | None) -> argparse.Namespace:
+    """Parse restore CLI arguments without non-empty-target overrides."""
     parser = argparse.ArgumentParser(
         description=(
             "Verify and restore one database backup. Non-empty targets are always refused."

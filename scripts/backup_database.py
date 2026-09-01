@@ -31,6 +31,7 @@ SEED_TABLES = _SEED_TABLES
 
 
 def _parse_args(argv: list[str] | None) -> argparse.Namespace:
+    """Parse backup CLI arguments without retention or prune options."""
     parser = argparse.ArgumentParser(
         description=(
             "Create a custom-format PostgreSQL dump, canonical role SQL copy, and strict "

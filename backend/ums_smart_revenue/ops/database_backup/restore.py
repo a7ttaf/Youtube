@@ -136,10 +136,12 @@ def open_backup(directory: Path, *, repository_root: Path) -> Iterator[OpenBacku
 
 
 def _major_version(server_version_num: int) -> int:
+    """Reduce a server version number to its major release."""
     return server_version_num // 10000
 
 
 def _require_compatible_target(target: ContainerConnection, manifest: BackupManifest) -> None:
+    """Refuse a target whose major version or locale differs from the manifest."""
     if target.image_id != manifest.source.image_id:
         raise BackupToolError("target image id does not match the backup source", exit_code=2)
     if target.user != manifest.source.user:
@@ -177,6 +179,7 @@ def _require_compatible_target(target: ContainerConnection, manifest: BackupMani
 def _verify_restore(
     target: ContainerConnection, manifest: BackupManifest
 ) -> tuple[TableRecord, ...]:
+    """Compare a restored target against the manifest's expectations."""
     actual = target_table_counts(target)
     expected_by_name = {record.qualified_name: record.rows for record in manifest.tables}
     actual_by_name = {record.qualified_name: record.rows for record in actual}

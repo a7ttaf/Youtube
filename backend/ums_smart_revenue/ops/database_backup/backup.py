@@ -47,6 +47,7 @@ class BackupResult:
 
 
 def _canonical_roles_bytes(repository_root: Path) -> bytes:
+    """Read the tracked canonical role SQL, refusing a missing or redirected file."""
     path = repository_root / "scripts" / "compose_restore_roles.sql"
     if not path.is_file() or path.is_symlink():
         raise BackupToolError(
@@ -69,6 +70,7 @@ def _canonical_roles_bytes(repository_root: Path) -> bytes:
 
 
 def _write_roles(staging: Path, body: bytes) -> Path:
+    """Write the canonical role SQL into the staging directory as a new file."""
     path = staging / ROLES_NAME
     with path.open("xb") as stream:
         stream.write(body)
@@ -87,6 +89,7 @@ def _write_roles(staging: Path, body: bytes) -> Path:
 
 
 def _content_floor(table_counts: dict[str, int]) -> dict[str, int]:
+    """Reject any seed table that is missing or empty in the snapshot."""
     missing = sorted(SEED_TABLES - set(table_counts))
     empty = sorted(name for name in SEED_TABLES if table_counts.get(name, 0) < 1)
     if missing or empty:

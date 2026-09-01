@@ -30,6 +30,7 @@ storage = _load_script()
 
 
 def _layout(tmp_path: Path) -> tuple[Path, Path]:
+    """Create a repository and storage root pair for a test."""
     repository = tmp_path / "repo"
     repository.mkdir()
     safe_root = repository / "data"
@@ -242,9 +243,12 @@ def test_compose_wrapper_validates_host_before_spawning(tmp_path):
     invocations: list[tuple[list[str], dict[str, object]]] = []
 
     class Result:
+        """Command outcome captured by the fake command runner."""
+
         returncode = 17
 
     def runner(command, **kwargs):
+        """Return a command runner that records the argv it is given."""
         invocations.append((command, kwargs))
         return Result()
 
@@ -372,6 +376,7 @@ def test_completed_restore_cleanup_retries_after_each_removal_boundary(tmp_path,
     """Ready-first cleanup tolerates interruption after stage or journal removal."""
 
     def completed_state(root: Path) -> tuple[Path, Path, Path]:
+        """Create a storage tree that already reached the ready state."""
         root.mkdir()
         for name in storage.STORAGE_DIRECTORIES:
             (root / name).mkdir()
@@ -409,6 +414,7 @@ def test_completed_restore_cleanup_retries_after_each_removal_boundary(tmp_path,
     interrupted = False
 
     def interrupt_journal(path):
+        """Abort initialization right after the journal lands."""
         nonlocal interrupted
         if Path(path) == journal_path and not interrupted:
             interrupted = True
@@ -431,6 +437,7 @@ def test_completed_restore_cleanup_retries_after_each_removal_boundary(tmp_path,
     interrupted = False
 
     def interrupt_pending(path):
+        """Abort initialization right after the pending marker lands."""
         nonlocal interrupted
         if Path(path) == pending and not interrupted:
             interrupted = True
@@ -469,6 +476,7 @@ def test_prepare_rejects_symlink_or_junction_target(tmp_path):
 
 
 def _seed_storage(repository: Path, safe_root: Path, name: str = "ums") -> Path:
+    """Create an already-initialized storage tree."""
     target = storage.prepare_storage(
         str(safe_root / name),
         safe_root=safe_root,
@@ -482,6 +490,7 @@ def _seed_storage(repository: Path, safe_root: Path, name: str = "ums") -> Path:
 
 
 def _recovery_members(bundle: Path, archive: Path) -> list[Path]:
+    """List the bundle members needed to drive a recovery run."""
     database_run = bundle / "ums-database-backup-20260831T000000Z-1234abcd"
     database_run.mkdir(exist_ok=True)
     database_dump = database_run / "database.dump"
@@ -788,6 +797,7 @@ def test_compose_recovery_manifest_rejects_incomplete_bundle(tmp_path, monkeypat
     real_validate = storage._validate_gcs_snapshot_payload
 
     def swap_snapshot_before_semantic_validation(payload, *, expected_bucket):
+        """Swap the GCS snapshot before semantic validation runs."""
         snapshot.write_text(json.dumps(replacement_payload), encoding="utf-8")
         return real_validate(payload, expected_bucket=expected_bucket)
 
@@ -960,6 +970,7 @@ def test_restore_journal_precedes_stage_creation_and_missing_stage_retries(tmp_p
     real_stage = storage._stage_verified_restore
 
     def interrupt_before_stage(*_args, **_kwargs):
+        """Abort the restore before the stage directory is created."""
         raise KeyboardInterrupt
 
     monkeypatch.setattr(storage, "_stage_verified_restore", interrupt_before_stage)
@@ -1008,6 +1019,7 @@ def test_restore_retry_discards_partial_journaled_extraction(tmp_path, monkeypat
     real_copy = storage.shutil.copyfileobj
 
     def interrupt_copy(source_handle, output, *, length):
+        """Abort the restore partway through copying the archive."""
         output.write(source_handle.read(1))
         raise KeyboardInterrupt
 
@@ -1059,6 +1071,7 @@ def test_restore_retry_restarts_verified_stage_before_publishing_transition(tmp_
     real_atomic = storage._write_json_atomic
 
     def interrupt_transition(path, payload):
+        """Abort the restore after the stage is written but before publication."""
         if (
             Path(path) == target / storage.RESTORE_JOURNAL_FILENAME
             and payload["state"] == "publishing"
@@ -1182,6 +1195,7 @@ def test_restore_uses_pinned_manifest_bytes_after_atomic_path_swap(tmp_path, mon
     real_verify = storage.verify_bundle_manifest
 
     def swap_paths_after_verification(*args, **kwargs):
+        """Swap stage and target paths once verification has passed."""
         verified = real_verify(*args, **kwargs)
         os.replace(replacement_manifest, manifest)
         return verified
@@ -1232,6 +1246,7 @@ def test_restore_archive_path_swap_is_blocked_or_uses_pinned_handle(tmp_path, mo
     real_verify = storage.verify_bundle_manifest
 
     def swap_archive_after_verification(*args, **kwargs):
+        """Replace the archive after verification has passed."""
         verified = real_verify(*args, **kwargs)
         os.replace(replacement_archive, archive)
         return verified
@@ -1289,6 +1304,7 @@ def test_restore_rejects_in_place_archive_change_after_verification(tmp_path, mo
     real_verify = storage.verify_bundle_manifest
 
     def overwrite_archive_after_verification(*args, **kwargs):
+        """Overwrite the published archive after verification has passed."""
         verified = real_verify(*args, **kwargs)
         archive.write_bytes(replacement_archive.read_bytes())
         return verified
@@ -1330,6 +1346,7 @@ def test_restore_publication_rolls_back_and_retries_after_replace_error(tmp_path
     failed = False
 
     def fail_second_publication(source_path, destination_path):
+        """Fail the publication of the second artifact."""
         nonlocal failed
         if (
             not failed
@@ -1391,6 +1408,7 @@ def test_restore_publication_resumes_after_abrupt_second_replace(tmp_path, monke
     interrupted = False
 
     def interrupt_second_publication(source_path, destination_path):
+        """Abort the publication of the second artifact."""
         nonlocal interrupted
         if (
             not interrupted
@@ -1451,6 +1469,7 @@ def test_restore_retry_rejects_truncated_journaled_stage(tmp_path, monkeypatch):
     real_replace = storage._durable_replace
 
     def interrupt_first_publication(source_path, destination_path):
+        """Abort the publication of the first artifact."""
         if Path(destination_path) == target / "artifacts":
             raise KeyboardInterrupt
         return real_replace(Path(source_path), Path(destination_path))
@@ -1503,6 +1522,7 @@ def test_restore_retry_rejects_directory_replaced_by_regular_file(tmp_path, monk
     real_replace = storage._durable_replace
 
     def interrupt_first_publication(source_path, destination_path):
+        """Abort the first publication attempt for this scenario."""
         if Path(destination_path) == target / "artifacts":
             raise KeyboardInterrupt
         return real_replace(Path(source_path), Path(destination_path))
@@ -1645,6 +1665,7 @@ def test_root_operator_can_publish_root_owned_backup(tmp_path, monkeypatch):
     )
 
     def fake_archive(_mount, archive):
+        """Substitute a small archive for the real bundle payload."""
         archive.parent.mkdir()
         archive.write_bytes(b"archive")
         return archive

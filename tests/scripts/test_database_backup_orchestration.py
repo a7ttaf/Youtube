@@ -54,6 +54,7 @@ def _unit_restore_packages_are_private(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def _source() -> SourceRecord:
+    """Build a valid source description."""
     return SourceRecord(
         identity=DatabaseIdentity(system_identifier="7677783453675450413", database="ums"),
         server_version_num=180000,
@@ -74,6 +75,7 @@ def _source() -> SourceRecord:
 
 
 def _tables(*, application_rows: int = 3) -> tuple[TableRecord, ...]:
+    """Build a sorted table tuple with the requested row counts."""
     # Deliberately synthetic values: migration totals are measured at runtime
     # and must never become expectations in this orchestration fixture.
     counts = {
@@ -92,6 +94,7 @@ def _tables(*, application_rows: int = 3) -> tuple[TableRecord, ...]:
 
 
 def _sequences() -> tuple[SequenceRecord, ...]:
+    """Build a valid sequence tuple."""
     return (
         SequenceRecord(
             schema="public",
@@ -110,6 +113,7 @@ def _sequences() -> tuple[SequenceRecord, ...]:
 
 
 def _connection(container: str = "source-postgres") -> ContainerConnection:
+    """Build a container connection contract."""
     return ContainerConnection(
         container=container,
         host="127.0.0.1",
@@ -123,6 +127,7 @@ def _connection(container: str = "source-postgres") -> ContainerConnection:
 
 
 def _repository(tmp_path: Path) -> Path:
+    """Create a temporary repository root."""
     repository = tmp_path / "repo"
     scripts = repository / "scripts"
     scripts.mkdir(parents=True)
@@ -132,6 +137,7 @@ def _repository(tmp_path: Path) -> Path:
 
 
 def _backup_directory(tmp_path: Path, repository: Path) -> tuple[Path, BackupManifest]:
+    """Publish a verified backup directory and return its manifest."""
     run = tmp_path / "ums-database-backup-20260831T000000Z-1234abcd"
     run.mkdir()
     dump = run / DUMP_NAME
@@ -161,6 +167,7 @@ def _backup_directory(tmp_path: Path, repository: Path) -> tuple[Path, BackupMan
 
 @contextmanager
 def _fake_snapshot(_source: ContainerConnection) -> Iterator[tuple[object, str]]:
+    """Patch the snapshot step and report the roles digest."""
     yield object(), "00000003-0000001B-1"
 
 
@@ -169,6 +176,7 @@ def _patch_backup_happy_path(
     *,
     tables: tuple[TableRecord, ...] | None = None,
 ) -> None:
+    """Patch every backup proof to its happy-path answer."""
     monkeypatch.setattr(backup, "require_migration_security_floor", lambda *_: None)
     monkeypatch.setattr(backup, "resolve_container_connection", lambda *_: _connection())
     monkeypatch.setattr(backup, "exported_snapshot", _fake_snapshot)
@@ -189,6 +197,7 @@ def _patch_backup_happy_path(
 def test_backup_publishes_strict_manifest_after_all_proofs(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Backup publishes a strict manifest only after every proof passes."""
     repository = _repository(tmp_path)
     output = tmp_path / "backups"
     output.mkdir()
@@ -224,6 +233,7 @@ def test_backup_publishes_strict_manifest_after_all_proofs(
 def test_backup_requires_explicit_writer_quiescence_before_output_mutation(
     tmp_path: Path,
 ) -> None:
+    """Backup needs explicit writer quiescence before touching the output."""
     with pytest.raises(BackupToolError, match="writers are stopped"):
         backup.run_backup(
             repository_root=tmp_path,
@@ -238,6 +248,7 @@ def test_backup_requires_explicit_writer_quiescence_before_output_mutation(
 def test_backup_refuses_sequence_state_change_during_dump(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Backup refuses a sequence state change during the dump."""
     repository = _repository(tmp_path)
     output = tmp_path / "backups"
     output.mkdir()
@@ -260,6 +271,7 @@ def test_backup_refuses_sequence_state_change_during_dump(
 def test_backup_counts_and_locks_tables_before_pg_dump(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Backup counts and locks tables before running pg_dump."""
     repository = _repository(tmp_path)
     output = tmp_path / "backups"
     output.mkdir()
@@ -290,6 +302,7 @@ def test_backup_counts_and_locks_tables_before_pg_dump(
 def test_backup_never_prunes_an_older_valid_run(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Backup never prunes an older valid run."""
     repository = _repository(tmp_path)
     output = tmp_path / "backups"
     output.mkdir()
@@ -311,6 +324,7 @@ def test_backup_never_prunes_an_older_valid_run(
 def test_backup_refuses_seed_only_install_without_an_override(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Backup refuses a seed-only install without an explicit override."""
     repository = _repository(tmp_path)
     output = tmp_path / "backups"
     output.mkdir()
@@ -331,6 +345,7 @@ def test_backup_refuses_seed_only_install_without_an_override(
 def test_backup_refuses_missing_seed_table_without_an_override(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Backup refuses a missing seed table without an explicit override."""
     repository = _repository(tmp_path)
     output = tmp_path / "backups"
     output.mkdir()
@@ -349,6 +364,7 @@ def test_backup_refuses_missing_seed_table_without_an_override(
 def test_backup_uses_only_the_tracked_role_sql(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Backup uses only the tracked role SQL."""
     repository = _repository(tmp_path)
     canonical = repository / "scripts/compose_restore_roles.sql"
     canonical.write_text("CREATE ROLE app_tenant PASSWORD 'leak'; app_platform", encoding="utf-8")
@@ -370,6 +386,7 @@ def _patch_restore_happy_path(
     manifest: BackupManifest,
     events: list[str],
 ) -> None:
+    """Patch every restore proof to its happy-path answer."""
     target = _connection("target-postgres")
     monkeypatch.setattr(restore, "require_migration_security_floor", lambda *_: None)
     monkeypatch.setattr(
@@ -425,6 +442,7 @@ def _patch_restore_happy_path(
 def test_direct_restore_checks_everything_before_roles_and_data(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Direct restore checks everything before it touches roles or data."""
     repository = _repository(tmp_path)
     run, manifest = _backup_directory(tmp_path, repository)
     events: list[str] = []
@@ -458,6 +476,7 @@ def test_direct_restore_checks_everything_before_roles_and_data(
 
 
 def test_direct_restore_requires_explicit_clean_target_acknowledgement(tmp_path: Path) -> None:
+    """Direct restore requires an explicit clean-target acknowledgement."""
     repository = _repository(tmp_path)
     run, _manifest = _backup_directory(tmp_path, repository)
     with pytest.raises(BackupToolError, match="confirm-clean-target"):
@@ -474,12 +493,14 @@ def test_direct_restore_requires_explicit_clean_target_acknowledgement(tmp_path:
 def test_confirmed_direct_restore_still_refuses_a_nonempty_target_before_writes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """A confirmed direct restore still refuses a non-empty target."""
     repository = _repository(tmp_path)
     run, manifest = _backup_directory(tmp_path, repository)
     events: list[str] = []
     _patch_restore_happy_path(monkeypatch, manifest, events)
 
     def _not_clean(*_: object) -> None:
+        """Report the target as not clean."""
         events.append("clean")
         raise BackupToolError("restore target is not clean", exit_code=2)
 
@@ -500,6 +521,7 @@ def test_confirmed_direct_restore_still_refuses_a_nonempty_target_before_writes(
 def test_restore_refuses_noncanonical_role_sql_before_target_resolution(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Restore refuses non-canonical role SQL before resolving the target."""
     repository = _repository(tmp_path)
     run, manifest = _backup_directory(tmp_path, repository)
     roles = run / ROLES_NAME
@@ -513,6 +535,7 @@ def test_restore_refuses_noncanonical_role_sql_before_target_resolution(
     called = False
 
     def _unexpected(*_: object) -> ContainerConnection:
+        """Fail the test if a target is resolved."""
         nonlocal called
         called = True
         return _connection()
@@ -533,12 +556,14 @@ def test_restore_refuses_noncanonical_role_sql_before_target_resolution(
 def test_restore_refuses_tampered_dump_before_target_resolution(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Restore refuses a tampered dump before resolving the target."""
     repository = _repository(tmp_path)
     run, _manifest = _backup_directory(tmp_path, repository)
     (run / DUMP_NAME).write_bytes(b"tampered")
     called = False
 
     def _unexpected(*_: object) -> ContainerConnection:
+        """Fail the test if a target is resolved."""
         nonlocal called
         called = True
         return _connection()
@@ -559,6 +584,7 @@ def test_restore_refuses_tampered_dump_before_target_resolution(
 def test_restore_consumes_pinned_roles_after_path_replacement(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Restore consumes the pinned roles even after a path replacement."""
     repository = _repository(tmp_path)
     run, manifest = _backup_directory(tmp_path, repository)
     events: list[str] = []
@@ -566,6 +592,7 @@ def test_restore_consumes_pinned_roles_after_path_replacement(
     original = (run / ROLES_NAME).read_bytes()
 
     def _replace_then_resolve(*_: object) -> ContainerConnection:
+        """Replace the roles path, then resolve the target."""
         replacement = tmp_path / "replacement-roles.sql"
         replacement.write_text("SELECT 'unverified';", encoding="utf-8")
         try:
@@ -580,6 +607,7 @@ def test_restore_consumes_pinned_roles_after_path_replacement(
     consumed: list[bytes] = []
 
     def _consume_roles(*_: object, **kwargs: object) -> None:
+        """Consume the roles bytes handed to the restore."""
         source = kwargs["source"]
         source.seek(0)  # type: ignore[attr-defined]
         consumed.append(source.read())  # type: ignore[attr-defined]
@@ -601,6 +629,7 @@ def test_restore_consumes_pinned_roles_after_path_replacement(
 def test_restore_verification_rejects_any_row_count_difference(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Restore verification rejects any row count difference."""
     repository = _repository(tmp_path)
     run, manifest = _backup_directory(tmp_path, repository)
     events: list[str] = []
@@ -625,6 +654,7 @@ def test_restore_verification_rejects_any_row_count_difference(
 def test_restore_requires_the_exact_table_set_and_per_table_counts(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, variant: str
 ) -> None:
+    """Restore requires the exact table set and per-table counts."""
     repository = _repository(tmp_path)
     run, manifest = _backup_directory(tmp_path, repository)
     events: list[str] = []
@@ -654,6 +684,7 @@ def test_restore_requires_the_exact_table_set_and_per_table_counts(
 def test_restore_requires_the_exact_alembic_head(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Restore requires the exact Alembic head."""
     repository = _repository(tmp_path)
     run, manifest = _backup_directory(tmp_path, repository)
     events: list[str] = []
@@ -673,6 +704,7 @@ def test_restore_requires_the_exact_alembic_head(
 def test_restore_requires_exact_sequence_state(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Restore requires exact sequence state."""
     repository = _repository(tmp_path)
     run, manifest = _backup_directory(tmp_path, repository)
     events: list[str] = []
@@ -692,6 +724,7 @@ def test_restore_requires_exact_sequence_state(
 def test_restore_requires_exact_authorization_catalog(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Restore requires the exact authorization catalog."""
     repository = _repository(tmp_path)
     run, manifest = _backup_directory(tmp_path, repository)
     events: list[str] = []
@@ -711,6 +744,7 @@ def test_restore_requires_exact_authorization_catalog(
 def test_restore_refuses_historical_authorization_manifest_before_target_access(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Restore refuses a historical authorization manifest before target access."""
     repository = _repository(tmp_path)
     run, manifest = _backup_directory(tmp_path, repository)
     historical = replace(manifest, authorization_catalog_sha256="d" * 64)
@@ -733,12 +767,14 @@ def test_restore_refuses_historical_authorization_manifest_before_target_access(
 
 
 def replace_record(record: TableRecord, *, rows: int) -> TableRecord:
+    """Return the table record with a different row count."""
     return TableRecord(schema=record.schema, name=record.name, rows=rows)
 
 
 def test_restore_refuses_locale_or_major_version_mismatch(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Restore refuses a locale or major-version mismatch."""
     repository = _repository(tmp_path)
     run, manifest = _backup_directory(tmp_path, repository)
     events: list[str] = []
@@ -764,6 +800,7 @@ def test_restore_refuses_locale_or_major_version_mismatch(
 def test_rehearsal_removes_its_exact_container_after_success(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Rehearsal removes its exact container after success."""
     repository = _repository(tmp_path)
     run, manifest = _backup_directory(tmp_path, repository)
     events: list[str] = []
@@ -771,6 +808,7 @@ def test_rehearsal_removes_its_exact_container_after_success(
     image_arguments: list[tuple[str, str]] = []
 
     def _resolve_image(_runner: object, *, operator_reference: str, expected_image_id: str) -> str:
+        """Resolve the operator reference to the expected image id."""
         image_arguments.append((operator_reference, expected_image_id))
         events.append("image")
         return manifest.source.image_id
@@ -778,6 +816,7 @@ def test_rehearsal_removes_its_exact_container_after_success(
     created_images: list[str] = []
 
     def _create(*_: object, **kwargs: object) -> None:
+        """Record the container creation call."""
         created_images.append(str(kwargs["image_id"]))
         events.append("create")
 
@@ -806,6 +845,7 @@ def test_rehearsal_removes_its_exact_container_after_success(
 def test_rehearsal_cleanup_runs_when_restore_fails(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Rehearsal cleanup still runs when the restore fails."""
     repository = _repository(tmp_path)
     run, manifest = _backup_directory(tmp_path, repository)
     events: list[str] = []
@@ -869,6 +909,7 @@ def test_rehearsal_cleanup_runs_when_restore_fails(
 def test_clis_do_not_offer_nonempty_retention_or_prune_options(
     parser: object, base: list[str], extra: list[str]
 ) -> None:
+    """Neither CLI offers non-empty retention or prune options."""
     with pytest.raises(SystemExit) as captured:
         parser(base + extra)  # type: ignore[operator]
     assert captured.value.code == 2
@@ -879,6 +920,7 @@ def test_backup_cli_maps_untyped_filesystem_errors_to_safe_code(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
+    """The backup CLI maps untyped filesystem errors to a safe exit code."""
     monkeypatch.setattr(
         backup_cli,
         "resolve_output_directory",
@@ -904,9 +946,11 @@ def test_backup_cli_maps_untyped_filesystem_errors_to_safe_code(
 def test_backup_cli_requires_quiescence_ack_before_output_resolution(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
+    """The backup CLI needs the quiescence acknowledgement before resolving output."""
     resolved = False
 
     def _unexpected(*_args: object, **_kwargs: object) -> Path:
+        """Fail the test if the output path is resolved."""
         nonlocal resolved
         resolved = True
         raise AssertionError("output must not be resolved")
@@ -920,6 +964,7 @@ def test_backup_cli_requires_quiescence_ack_before_output_resolution(
 def test_restore_cli_maps_a_missing_selection_to_operator_refusal(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
+    """The restore CLI maps a missing selection to an operator refusal."""
     monkeypatch.setattr(
         restore_cli,
         "rehearse_restore",

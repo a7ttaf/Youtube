@@ -20,6 +20,8 @@ from ums_smart_revenue.ops.database_backup.semantic import (
 
 
 class _TextRunner:
+    """Command runner stub returning canned text output."""
+
     def __init__(self, replies: list[str] | None = None) -> None:
         self.replies = list(replies or [])
         self.calls: list[tuple[list[str], str | None, int]] = []
@@ -33,12 +35,14 @@ class _TextRunner:
         environment: Mapping[str, str] | None = None,
         exit_code: int = 5,
     ) -> str:
+        """Record argv and return canned standard output."""
         self.calls.append((argv, stdin, exit_code))
         self.environments.append(environment)
         return self.replies.pop(0) if self.replies else ""
 
 
 def _container_inspect(*, host_ip: str | tuple[str, ...] = "127.0.0.1") -> str:
+    """Build a docker inspect payload for a source container."""
     host_ips = (host_ip,) if isinstance(host_ip, str) else host_ip
     return json.dumps(
         [
@@ -68,6 +72,7 @@ def _container_inspect(*, host_ip: str | tuple[str, ...] = "127.0.0.1") -> str:
 
 
 def _image_inspect(*, image_id: str | None = None, postgres_image: bool = True) -> str:
+    """Build a docker image inspect payload."""
     environment = ["PG_MAJOR=18"] if postgres_image else ["APP=other"]
     entrypoint = ["docker-entrypoint.sh"] if postgres_image else ["other"]
     command = ["postgres"] if postgres_image else ["other"]
@@ -86,6 +91,7 @@ def _image_inspect(*, image_id: str | None = None, postgres_image: bool = True) 
 
 
 def test_container_resolution_keeps_password_internal_and_requires_loopback() -> None:
+    """Container resolution keeps the password internal and needs loopback."""
     runner = _TextRunner([_container_inspect()])
     source = postgres.resolve_container_connection(runner, "ums-postgres")  # type: ignore[arg-type]
     assert source.host == "127.0.0.1"
@@ -117,11 +123,13 @@ def test_container_resolution_keeps_password_internal_and_requires_loopback() ->
 
 @pytest.mark.parametrize("container", ["", "unsafe/name", "name\nother", " name"])
 def test_container_resolution_rejects_unsafe_names(container: str) -> None:
+    """Container resolution rejects unsafe container names."""
     with pytest.raises(BackupToolError, match="unsupported characters"):
         postgres.resolve_container_connection(_TextRunner(), container)  # type: ignore[arg-type]
 
 
 def test_container_resolution_rejects_postgres_command_overrides() -> None:
+    """Container resolution rejects Postgres command overrides."""
     body = json.loads(_container_inspect())
     body[0]["Args"] = ["postgres", "-c", "session_replication_role=replica"]
     with pytest.raises(BackupToolError, match="official image default"):
@@ -133,7 +141,10 @@ def test_container_resolution_rejects_postgres_command_overrides() -> None:
 def test_native_command_failure_never_echoes_argv_secret(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """A native command failure never echoes the secret-bearing argv."""
+
     def _failed(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        """Return a completed process with a failing exit code."""
         return subprocess.CompletedProcess([], 1, "", "safe failure")
 
     monkeypatch.setattr(subprocess, "run", _failed)
@@ -144,6 +155,7 @@ def test_native_command_failure_never_echoes_argv_secret(
 
 
 def test_rehearsal_image_requires_operator_reference_to_match_immutable_id() -> None:
+    """Rehearsal image resolution binds the reference to the immutable id."""
     expected = "sha256:" + "a" * 64
     accepted = postgres.resolve_rehearsal_image(
         _TextRunner([_image_inspect()]),  # type: ignore[arg-type]
@@ -161,6 +173,7 @@ def test_rehearsal_image_requires_operator_reference_to_match_immutable_id() -> 
 
 
 def test_rehearsal_image_rejects_non_postgres_config() -> None:
+    """Rehearsal image resolution rejects a non-Postgres image config."""
     with pytest.raises(BackupToolError, match="not a PostgreSQL image"):
         postgres.resolve_rehearsal_image(
             _TextRunner([_image_inspect(postgres_image=False)]),  # type: ignore[arg-type]
@@ -170,6 +183,7 @@ def test_rehearsal_image_rejects_non_postgres_config() -> None:
 
 
 def test_rehearsal_container_creation_uses_direct_argv_and_loopback() -> None:
+    """Rehearsal container creation uses direct argv against loopback."""
     runner = _TextRunner()
     postgres.create_rehearsal_container(
         runner,  # type: ignore[arg-type]
@@ -195,6 +209,7 @@ def test_rehearsal_container_creation_uses_direct_argv_and_loopback() -> None:
 def test_restore_target_must_reject_a_deliberately_wrong_password(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """The restore target must reject a deliberately wrong password."""
     source = postgres.ContainerConnection(
         container="target",
         host="127.0.0.1",
@@ -207,7 +222,10 @@ def test_restore_target_must_reject_a_deliberately_wrong_password(
     )
 
     class _UnexpectedConnection:
+        """Connection stub that fails the test if it is ever used."""
+
         def close(self) -> None:
+            """Mark the unexpected connection as closed."""
             return None
 
     monkeypatch.setattr(psycopg, "connect", lambda **_kwargs: _UnexpectedConnection())
@@ -215,6 +233,7 @@ def test_restore_target_must_reject_a_deliberately_wrong_password(
         postgres.require_password_authentication(source)
 
     def _reject(**_kwargs: object) -> object:
+        """Fail the test if a psycopg connection is attempted."""
         raise psycopg.errors.InvalidPassword("password authentication failed")
 
     monkeypatch.setattr(psycopg, "connect", _reject)
@@ -222,14 +241,19 @@ def test_restore_target_must_reject_a_deliberately_wrong_password(
 
 
 class _Rows:
+    """Cursor result stub returning canned rows."""
+
     def __init__(self, rows: list[tuple[object, ...]]) -> None:
         self._rows = rows
 
     def fetchall(self) -> list[tuple[object, ...]]:
+        """Return the canned rows."""
         return self._rows
 
 
 class _AuthorizationConnection:
+    """Connection stub answering the authorization catalog probe."""
+
     def __init__(self, *, unsafe_edge: bool = False) -> None:
         payload = canonical_authorization_payload()
         self.roles = [tuple(row.values()) for row in payload["roles"]]
@@ -240,6 +264,7 @@ class _AuthorizationConnection:
             self.assignments.sort()
 
     def execute(self, query: str) -> _Rows:
+        """Answer the catalog query with canned rows."""
         if "FROM public.roles" in query:
             return _Rows(self.roles)
         if "FROM public.permissions" in query:
@@ -250,6 +275,7 @@ class _AuthorizationConnection:
 
 
 def test_authorization_catalog_gate_requires_exact_runtime_semantics() -> None:
+    """The authorization gate requires exact runtime catalog semantics."""
     expected = authorization_catalog_digest(canonical_authorization_payload())
     assert (
         postgres.snapshot_authorization_catalog_digest(  # type: ignore[arg-type]
@@ -264,6 +290,7 @@ def test_authorization_catalog_gate_requires_exact_runtime_semantics() -> None:
 
 
 def test_rehearsal_cleanup_refuses_foreign_container_names() -> None:
+    """Rehearsal cleanup refuses container names it did not create."""
     runner = _TextRunner()
     with pytest.raises(BackupToolError, match="unrecognized"):
         postgres.remove_rehearsal_container(  # type: ignore[arg-type]
@@ -273,6 +300,7 @@ def test_rehearsal_cleanup_refuses_foreign_container_names() -> None:
 
 
 def test_rehearsal_cleanup_requires_its_ownership_label() -> None:
+    """Rehearsal cleanup requires its own ownership label."""
     runner = _TextRunner(
         [
             "abc123\n",
@@ -299,6 +327,7 @@ def test_rehearsal_cleanup_requires_its_ownership_label() -> None:
 
 
 def test_clean_target_query_covers_non_table_user_objects() -> None:
+    """The clean-target query covers non-table user objects."""
     query = postgres._USER_OBJECT_COUNT_SQL
     for catalog in (
         "pg_collation",
@@ -369,6 +398,7 @@ def test_clean_target_query_covers_non_table_user_objects() -> None:
 
 
 def test_snapshot_fences_catalog_and_relations_before_export() -> None:
+    """The snapshot fences catalog and relations before the export runs."""
     snapshot_source = inspect.getsource(postgres.exported_snapshot)
     lock_source = inspect.getsource(postgres._lock_export_relations)
 
@@ -388,6 +418,7 @@ def test_snapshot_fences_catalog_and_relations_before_export() -> None:
 def test_dedicated_cluster_accepts_only_stock_pg18_memberships(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """A dedicated cluster accepts only stock Postgres 18 memberships."""
     source = postgres.ContainerConnection(
         container="c" * 64,
         host="127.0.0.1",
@@ -451,13 +482,18 @@ def test_dedicated_cluster_accepts_only_stock_pg18_memberships(
     ]
 
     class _Rows:
+        """Cursor result stub returning canned rows."""
+
         def __init__(self, rows: list[tuple[object, ...]]) -> None:
             self._rows = rows
 
         def fetchall(self) -> list[tuple[object, ...]]:
+            """Return the canned rows."""
             return self._rows
 
     class _Connection:
+        """Connection stub serving canned catalog rows."""
+
         def __init__(self) -> None:
             self.replies = iter(
                 [
@@ -470,9 +506,11 @@ def test_dedicated_cluster_accepts_only_stock_pg18_memberships(
             )
 
         def execute(self, _query: str) -> _Rows:
+            """Return the canned rows for any query."""
             return _Rows(next(self.replies))
 
         def close(self) -> None:
+            """Mark the connection closed."""
             return None
 
     monkeypatch.setattr(postgres, "_connect", lambda _source: _Connection())
@@ -489,11 +527,13 @@ def test_dedicated_cluster_accepts_only_stock_pg18_memberships(
 def test_file_runner_opens_restore_source_as_binary(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """The file runner opens a restore source as binary."""
     source = tmp_path / "database.dump"
     source.write_bytes(b"PGDMP")
     observed: list[bytes] = []
 
     def _consume(*_args: object, **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        """Consume the handed stream without touching the filesystem."""
         stream = kwargs["stdin"]
         observed.append(stream.read())
         return subprocess.CompletedProcess([], 0, b"", b"")

@@ -44,6 +44,7 @@ def _scope_nodes(function: ast.FunctionDef) -> Iterator[ast.AST]:
 
 
 def _assignment(node: ast.AST) -> tuple[str, ast.AST] | None:
+    """Return the name and value of a simple assignment node."""
     if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name) and node.value:
         return node.target.id, node.value
     if (
@@ -90,6 +91,7 @@ def _qualified_table_name(
     table_bindings: dict[str, set[str]],
     string_bindings: dict[str, set[str]],
 ) -> set[str]:
+    """Resolve an identifier node to the table names it may denote."""
     if isinstance(node, ast.Name):
         return table_bindings.get(node.id, set())
     if not (
@@ -118,6 +120,7 @@ def _scope_bindings(
     module_tables: dict[str, set[str]],
     module_strings: dict[str, set[str]],
 ) -> tuple[dict[str, set[str]], dict[str, set[str]]]:
+    """Collect the table and string bindings visible from a statement scope."""
     assignments = [item for node in nodes if (item := _assignment(node))]
     local_names = parameter_names | {name for name, _value in assignments}
     tables = {
@@ -143,6 +146,7 @@ def _scope_bindings(
 
 
 def _module_bindings(tree: ast.Module) -> tuple[dict[str, set[str]], dict[str, set[str]]]:
+    """Collect module-level table and string bindings."""
     assignment_nodes = [node for node in tree.body if _assignment(node)]
     if not assignment_nodes:
         return {}, {}
@@ -182,6 +186,7 @@ def _module_callable_bindings(
     tree: ast.Module,
     functions: dict[str, ast.FunctionDef],
 ) -> dict[str, set[str]]:
+    """Map module callables to the tables their bodies may touch."""
     direct = {name: {name} for name in functions}
     assignment_nodes = [node for node in tree.body if _assignment(node)]
     return _callable_bindings(
@@ -192,6 +197,7 @@ def _module_callable_bindings(
 
 
 def _function_parameter_names(function: ast.FunctionDef) -> set[str]:
+    """List the parameter names declared by a function node."""
     result = {
         argument.arg
         for argument in function.args.posonlyargs + function.args.args + function.args.kwonlyargs
@@ -204,6 +210,7 @@ def _function_parameter_names(function: ast.FunctionDef) -> set[str]:
 
 
 def _primary_call_argument(call: ast.Call, *, keywords: set[str]) -> ast.AST | None:
+    """Pick the positional or keyword argument that names the SQL text."""
     candidates = list(call.args[:1])
     candidates.extend(keyword.value for keyword in call.keywords if keyword.arg in keywords)
     return candidates[0] if len(candidates) == 1 else None
@@ -245,6 +252,7 @@ def _sql_strings(node: ast.AST, strings: dict[str, set[str]]) -> set[str]:
 
 
 def _tables_from_sql(sql: str) -> set[str]:
+    """Return the tables a SQL string writes to."""
     result: set[str] = set()
     for match in _INSERT_TABLE_RE.finditer(sql):
         schema = (match.group("schema") or "public").strip('"')
@@ -254,11 +262,13 @@ def _tables_from_sql(sql: str) -> set[str]:
 
 
 def _statement_after_leading_trivia(sql: str) -> str:
+    """Strip leading comments and whitespace from a SQL string."""
     match = _SQL_LEADING_TRIVIA_RE.match(sql)
     return sql[match.end() :] if match else sql
 
 
 def _is_single_non_executing_stored_body(sql: str) -> bool:
+    """Report SQL that is only an inert stored-routine body."""
     statement = _statement_after_leading_trivia(sql)
     if not _NON_EXECUTING_STORED_BODY_RE.match(statement):
         return False
@@ -294,6 +304,7 @@ def _sql_expression_skeleton(node: ast.AST) -> str:
 
 
 def _has_unresolved_insert_literal(node: ast.AST) -> bool:
+    """Report an INSERT target the scanner could not resolve to a table."""
     return any(
         isinstance(child, ast.Constant)
         and isinstance(child.value, str)
@@ -315,6 +326,7 @@ def _has_unresolved_insert_literal(node: ast.AST) -> bool:
 #   - File: backend/ums_smart_revenue/ops/database_backup/contracts.py -> gate.
 # ============================================================================
 def _migration_seed_tables(source: str, *, source_name: str) -> set[str]:
+    """Extract the tables an Alembic upgrade seeds."""
     tree = ast.parse(source, filename=source_name)
     functions = {node.name: node for node in tree.body if isinstance(node, ast.FunctionDef)}
     if "upgrade" not in functions:
@@ -446,6 +458,7 @@ def _migration_seed_tables(source: str, *, source_name: str) -> set[str]:
 
 
 def test_migration_seed_scanner_detects_supported_upgrade_insert_idioms() -> None:
+    """The scanner recognises every INSERT idiom the migrations use."""
     source = """
 MODULE_TABLE = sa.table("bulk_seed")
 SQL = "INSERT INTO literal_seed (id) VALUES (1)"
@@ -478,6 +491,7 @@ def downgrade():
 
 
 def test_migration_seed_scanner_follows_module_and_local_helper_aliases() -> None:
+    """The scanner follows module-level and local helper aliases."""
     source = """
 def seed_rows():
     table = sa.table("aliased_helper_seed")
@@ -506,6 +520,7 @@ def downgrade_rows():
 
 
 def test_migration_seed_scanner_isolates_upgrade_scope_and_reachability() -> None:
+    """Only reachable upgrade-scope statements count as seeds."""
     source = """
 table = sa.table("module_only")
 
@@ -525,6 +540,7 @@ def downgrade():
 
 
 def test_migration_seed_scanner_rejects_unresolved_insert_target() -> None:
+    """The scanner rejects an INSERT whose target cannot be resolved."""
     source = """
 def upgrade():
     bind.execute(sa.insert(resolve_table()), rows)
@@ -537,6 +553,7 @@ def downgrade():
 
 
 def test_migration_seed_scanner_rejects_dynamic_literal_insert_target() -> None:
+    """The scanner rejects INSERT targets built from dynamic literals."""
     source = """
 def upgrade():
     bind.execute(sa.text("INSERT INTO " + resolve_table()))
@@ -556,6 +573,7 @@ def downgrade():
     ],
 )
 def test_migration_seed_scanner_rejects_compound_insert_statements(sql: str) -> None:
+    """The scanner rejects compound statements instead of guessing."""
     source = f"""\
 def upgrade():
     op.execute(sa.text({sql!r}))
@@ -568,6 +586,7 @@ def downgrade():
 
 
 def test_migration_seed_scanner_rejects_unresolved_helper_statement() -> None:
+    """The scanner rejects unresolved helpers rather than skipping them."""
     source = """
 def upgrade():
     run_statement("INSERT INTO hidden_seed (id) VALUES (1)")
@@ -594,6 +613,7 @@ def downgrade():
 #   - File: backend/ums_smart_revenue/db/alembic/versions -> every seed source.
 # ============================================================================
 def test_seed_tables_match_what_the_migrations_actually_seed() -> None:
+    """The scanned seed set equals what the migrations really insert."""
     versions = REPOSITORY_ROOT / "backend/ums_smart_revenue/db/alembic/versions"
     migration_seed_tables: set[str] = set()
     for migration in sorted(versions.glob("*.py")):

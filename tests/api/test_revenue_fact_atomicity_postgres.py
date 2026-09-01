@@ -265,13 +265,12 @@ def test_manual_revenue_fact_and_audit_share_lost_commit_fate_on_postgres(
             )
         )
 
-    with patch.object(SqlAlchemyAuditSink, "append", append_and_observe):
-        with TestClient(app) as client:
-            response = client.post(
-                "/revenue/facts",
-                headers=_auth_headers(),
-                json=_request_payload(),
-            )
+    with patch.object(SqlAlchemyAuditSink, "append", append_and_observe), TestClient(app) as client:
+        response = client.post(
+            "/revenue/facts",
+            headers=_auth_headers(),
+            json=_request_payload(),
+        )
 
     assert response.status_code == 201, response.text
     assert response.json()["source_kind"] == "MANUAL_UPLOAD"
