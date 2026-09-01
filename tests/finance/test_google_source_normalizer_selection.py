@@ -389,6 +389,7 @@ def _country_payload(
     country: object = "US",
     disposition: object = "NON_PROJECTING_EVIDENCE",
 ) -> dict[str, object]:
+    """Build a country-evidence payload for selection tests."""
     return {
         "dimensions": {"channel": channel, "country": country},
         "metric": "estimatedRevenue",

@@ -115,23 +115,27 @@ _SERVICE_ACTOR_ID = "ddddeeee-ffff-0000-1111-222222222222"
 def _next_produced_report(
     produced_iter: Iterator[ProducedReport],
 ) -> ProducedReport:
+    """Return the single expected produced report or fail the assertion."""
     for produced in produced_iter:
         return produced
     raise AssertionError("expected one aggregated YouTube report")
 
 
 def _assert_produced_reports_exhausted(produced_iter: Iterator[ProducedReport]) -> None:
+    """Fail if any produced report was left unconsumed."""
     for extra_report in produced_iter:
         raise AssertionError(f"expected produced reports to be exhausted, got {extra_report!r}")
 
 
 def _close_produced_reports(produced_iter: Iterator[ProducedReport]) -> None:
+    """Close the produced-report iterator when the runtime supports it."""
     close = getattr(produced_iter, "close", None)
     if callable(close):
         close()
 
 
 def _runner_credentials() -> Credentials:
+    """Build throwaway credentials for the orchestrator runner."""
     return Credentials(token="test-token")
 
 
@@ -805,7 +809,8 @@ def test_run_one_reuses_raw_file_inserted_by_racing_worker(
 
     def racing_find(db_session, *, tenant_id, source, report_type, report_month, checksum):
         """Race the duplicate-row lookup with a sibling insert
-        to exercise the IntegrityError fallback."""
+        to exercise the IntegrityError fallback.
+        """
         calls["n"] += 1
         if calls["n"] == 1:
             db_session.add(
@@ -1944,7 +1949,8 @@ def test_bucket_b_parser_error_on_second_report_marks_raw_file_failed_and_status
 
     class FlakyParser:
         """Parser that fails the first call and succeeds on retry;
-        exercises parser retry semantics."""
+        exercises parser retry semantics.
+        """
 
         @staticmethod
         def parse(payload, *, tenant_id):

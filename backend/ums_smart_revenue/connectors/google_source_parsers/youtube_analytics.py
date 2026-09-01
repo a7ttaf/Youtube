@@ -75,6 +75,8 @@ def _canonical_filters(filters: str | None) -> str | None:
 
 @dataclass(frozen=True)
 class _AnalyticsParseContext:
+    """Validated request-level context backing one Analytics query signature."""
+
     period_start: date
     period_end: date
     currency: str
@@ -447,6 +449,8 @@ def _iter_analytics_source_rows(
 #   - File: tests/connectors/_fixtures/youtube_analytics/ -> Fixtures.
 # ============================================================================
 class YouTubeAnalyticsParser:
+    """Parse YouTube Analytics ``reports.query`` payloads into source rows."""
+
     source_system = "youtube_analytics"
 
     def parse(
@@ -455,6 +459,7 @@ class YouTubeAnalyticsParser:
         *,
         tenant_id: UUID,
     ) -> Iterable[ParsedSourceRow]:
+        """Emit one row per metric cell after header and projection validation."""
         request = require_dict(payload, "query_request")
         context = _analytics_parse_context(request)
         header_specs = _analytics_header_specs(payload.get("columnHeaders"))

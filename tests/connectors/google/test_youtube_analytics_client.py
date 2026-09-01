@@ -274,6 +274,7 @@ def test_fetch_channel_country_evidence_uses_full_month_and_country_only(
     """U2 requests the smallest country-sliced revenue shape, with no rate math."""
 
     def handler(request: httpx.Request) -> httpx.Response:
+        """Assert the country-evidence query shape and answer with one row."""
         params = dict(request.url.params)
         assert params == {
             "ids": "contentOwner==owner-a",

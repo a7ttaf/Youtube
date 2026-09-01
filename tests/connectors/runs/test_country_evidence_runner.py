@@ -21,6 +21,7 @@ from ums_smart_revenue.connectors.runs.orchestrator import (
 
 
 def _worldwide_response() -> dict[str, object]:
+    """Build the month-dimensioned worldwide Analytics response."""
     return {
         "columnHeaders": [
             {"name": "month", "columnType": "DIMENSION", "dataType": "STRING"},
@@ -31,6 +32,7 @@ def _worldwide_response() -> dict[str, object]:
 
 
 def _country_response() -> dict[str, object]:
+    """Build the country-dimensioned Analytics response."""
     return {
         "columnHeaders": [
             {"name": "country", "columnType": "DIMENSION", "dataType": "STRING"},
@@ -41,6 +43,7 @@ def _country_response() -> dict[str, object]:
 
 
 def _collect_reports(*, enabled: bool, country_error: Exception | None = None):
+    """Assemble the runner collaborators for one normalization pass."""
     session = MagicMock(name="session")
     session.in_transaction.return_value = False
     http = MagicMock(name="http")

@@ -74,6 +74,7 @@ class SqlAlchemyIngestedSourceRowNormalizationAdapter:
         actor_user_id: str,
         audit_actor: UserPrincipal,
     ) -> None:
+        """Project this run's source rows or fail closed after orchestration gates."""
         audit_sink: AuditSink = SqlAlchemyAuditSink(self._session, tenant_id=self._tenant_id)
         try:
             if (

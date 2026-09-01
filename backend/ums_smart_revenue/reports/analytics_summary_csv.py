@@ -39,6 +39,8 @@ class AnalyticsSummaryCsvValidationError(ValueError):
 
 @dataclass(frozen=True)
 class AnalyticsSummaryCsvRow:
+    """One aggregated Analytics summary line, keyed by channel and metric."""
+
     report_month: str
     youtube_channel_id: str
     channel_name: str

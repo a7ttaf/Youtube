@@ -19,12 +19,14 @@ TENANT_ID = uuid4()
 
 
 def _load_fixture(name: str) -> dict[str, object]:
+    """Load one captured Analytics response fixture by name."""
     ref = resources.files("tests.connectors._fixtures.youtube_analytics").joinpath(name)
     with ref.open("r", encoding="utf-8") as fh:
         return json.load(fh)
 
 
 def test_parse_emits_one_row_per_metric_per_data_row() -> None:
+    """Emit one ParsedSourceRow per metric cell of every data row."""
     # Three rows, two monetary metrics each => 6 ParsedSourceRow.
     payload = _load_fixture("sample_query_response_2026_04.json")
     rows = list(YouTubeAnalyticsParser().parse(payload, tenant_id=TENANT_ID))
@@ -32,6 +34,7 @@ def test_parse_emits_one_row_per_metric_per_data_row() -> None:
 
 
 def test_parse_preserves_amounts_and_uses_query_currency() -> None:
+    """Keep source amounts exact and reuse the query-declared currency."""
     payload = _load_fixture("sample_query_response_2026_04.json")
     rows = list(YouTubeAnalyticsParser().parse(payload, tenant_id=TENANT_ID))
     # All rows carry USD because the query currency was USD.
@@ -42,6 +45,7 @@ def test_parse_preserves_amounts_and_uses_query_currency() -> None:
 
 
 def test_parse_sets_value_kind_estimated_for_estimated_metric() -> None:
+    """Mark Analytics revenue as estimated, never settled."""
     payload = _load_fixture("sample_query_response_2026_04.json")
     rows = list(YouTubeAnalyticsParser().parse(payload, tenant_id=TENANT_ID))
     for row in rows:
@@ -52,6 +56,7 @@ def test_parse_sets_value_kind_estimated_for_estimated_metric() -> None:
 
 
 def test_period_uses_query_start_end() -> None:
+    """Derive period and report_month from the query start/end dates."""
     payload = _load_fixture("sample_query_response_2026_04.json")
     rows = list(YouTubeAnalyticsParser().parse(payload, tenant_id=TENANT_ID))
     for row in rows:
@@ -61,6 +66,7 @@ def test_period_uses_query_start_end() -> None:
 
 
 def test_source_row_key_stable_across_reruns() -> None:
+    """Produce identical source_row_keys for identical data on rerun."""
     a = list(
         YouTubeAnalyticsParser().parse(
             _load_fixture("sample_query_response_2026_04.json"),
@@ -77,6 +83,7 @@ def test_source_row_key_stable_across_reruns() -> None:
 
 
 def test_parser_uses_youtube_analytics_source_system() -> None:
+    """Stamp every parsed row with the youtube_analytics source system."""
     payload = _load_fixture("sample_query_response_2026_04.json")
     rows = list(YouTubeAnalyticsParser().parse(payload, tenant_id=TENANT_ID))
     assert all(r.source_system == "youtube_analytics" for r in rows)
@@ -140,7 +147,8 @@ def test_missing_currency_defaults_to_usd() -> None:
 
 def test_surrounding_whitespace_currency_is_trimmed() -> None:
     """A present `currency` with surrounding whitespace is trimmed and stored as
-    the bare ISO code, so "  USD  " and "USD" are the same currency (and key)."""
+    the bare ISO code, so "  USD  " and "USD" are the same currency (and key).
+    """
     base = _load_fixture("sample_query_response_2026_04.json")
     payload = {**base, "query_request": {**base["query_request"], "currency": "  USD  "}}
     rows = list(YouTubeAnalyticsParser().parse(payload, tenant_id=TENANT_ID))
@@ -317,7 +325,8 @@ def test_content_owner_id_is_bare_id_not_selector() -> None:
 
 def test_empty_and_omitted_filters_produce_same_key() -> None:
     """A present-but-empty filter and an omitted filter both mean unfiltered,
-    so they must produce the same source_row_key (idempotency)."""
+    so they must produce the same source_row_key (idempotency).
+    """
     base = _load_fixture("sample_query_response_2026_04.json")  # no filters key
     empty = {**base, "query_request": {**base["query_request"], "filters": ""}}
     a = sorted(r.source_row_key for r in YouTubeAnalyticsParser().parse(base, tenant_id=TENANT_ID))
@@ -327,7 +336,8 @@ def test_empty_and_omitted_filters_produce_same_key() -> None:
 
 def test_reordered_multi_value_filter_produces_same_key() -> None:
     """Reordering comma-separated values inside a filter clause is semantically
-    equivalent and must produce the same source_row_key."""
+    equivalent and must produce the same source_row_key.
+    """
     base = _load_fixture("sample_query_response_2026_04.json")
     p1 = {**base, "query_request": {**base["query_request"], "filters": "video==id1,id2"}}
     p2 = {**base, "query_request": {**base["query_request"], "filters": "video==id2,id1"}}
@@ -357,7 +367,8 @@ def test_parse_accepts_numeric_metric_values() -> None:
 
 def test_rejects_bool_metric_value() -> None:
     """bool is an int subclass but is never a real money value; it must fail
-    closed at the parser rather than coerce to Decimal(0)/Decimal(1)."""
+    closed at the parser rather than coerce to Decimal(0)/Decimal(1).
+    """
     base = _load_fixture("sample_query_response_2026_04.json")
     bad = {**base, "rows": [["UC_test_alpha", "US", True, "1500.000000"]]}
     with pytest.raises(ParserError):
@@ -366,7 +377,8 @@ def test_rejects_bool_metric_value() -> None:
 
 def test_rejects_non_numeric_non_string_metric_value() -> None:
     """A metric cell that is neither a number nor a Decimal string (e.g. null)
-    must fail closed at the parser, not silently coerce or crash downstream."""
+    must fail closed at the parser, not silently coerce or crash downstream.
+    """
     base = _load_fixture("sample_query_response_2026_04.json")
     bad = {**base, "rows": [["UC_test_alpha", "US", None, "1500.000000"]]}
     with pytest.raises(ParserError):
@@ -375,7 +387,8 @@ def test_rejects_non_numeric_non_string_metric_value() -> None:
 
 def test_rejects_non_finite_float_amount() -> None:
     """A non-finite float metric cell (inf/nan, which Python's json accepts)
-    must be rejected at the parser, mirroring the Decimal-string Infinity case."""
+    must be rejected at the parser, mirroring the Decimal-string Infinity case.
+    """
     base = _load_fixture("sample_query_response_2026_04.json")
     bad = {**base, "rows": [["UC_test_alpha", "US", float("inf"), "1500.000000"]]}
     with pytest.raises(ParserError):

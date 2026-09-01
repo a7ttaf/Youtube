@@ -1945,6 +1945,8 @@ def _delete_stale_source_rows(
 
 @dataclass(frozen=True)
 class _RawReportDescriptor:
+    """Identity axes of one logical raw report within the run."""
+
     connector_key: str
     source_system: str
     report_type: str
@@ -1953,6 +1955,8 @@ class _RawReportDescriptor:
 
 @dataclass(frozen=True)
 class _RawReportStorageContext:
+    """Blob backend and request provenance for raw report uploads."""
+
     backend: BlobStorageBackend
     scheme: str
     bucket: str
@@ -1961,12 +1965,16 @@ class _RawReportStorageContext:
 
 @dataclass(frozen=True)
 class _RawReportAuditContext:
+    """Audit sink plus acting principal for raw report audit records."""
+
     sink: AuditSink
     actor: UserPrincipal
 
 
 @dataclass(frozen=True)
 class _RawReportLinkContext:
+    """Per-report session, tenant, run, storage, and audit inputs for linking."""
+
     session: Session
     tenant_id: UUID
     run_entry: ConnectorRunEntry
