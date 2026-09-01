@@ -93,6 +93,14 @@ PR #210 is historical: it merged on 2026-08-29 into the non-main
 | #210 (historical; merged 2026-08-29 into non-main `docs/deployment-readiness-audit`) | **#221–#225** (current P0-a … P0-e successors on `main`) |
 | Living schedule | Docs/21 status table on `main` after each P0 split merges |
 
+Update 2026-09-01: #221–#229 all carry pushed, suite-validated heads (none merged
+yet) — #221 3044/0, #222 3181/0 plus real backup/rehearsal scenarios, #223 3037/0,
+#224 3165/0, #226 174 bats, #227 2989/0, #228 3099/0, #225 719/719 and #229 588/588
+frontend. The #227 interlock is satisfied: the final shipped SHA is **b92feb63d**
+(2989 passed on fresh PostgreSQL), recorded by the continuation on 2026-09-01; the
+2026-08-31 states below are retained as the poll they replaced. Treat live PR
+states, not this static graph, as the source for merge ordering.
+
 As of the 2026-08-31 live poll, #221 and #225 are open/BLOCKED; #222–#224 are
 open/BEHIND; none is merged. #226 is open/draft/BEHIND with `ci-fast` failing, and
 #227 is open/draft/BLOCKED with no operator-supplied final SHA; its current candidate
@@ -128,6 +136,7 @@ $markers = @(
   '#222–#224 are open/BEHIND',
   'No migration/backfill required',
   'Final PR #227 SHA is supplied',
+  'the final shipped SHA is **b92feb63d**',
   'no environment fallback and no default rate',
   'SELF-grants by the just-created account',
   'typed `PAYMENT_NOT_FINALIZED` status',
