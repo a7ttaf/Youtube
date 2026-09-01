@@ -14,6 +14,7 @@ USER_ID = UUID("00000000-0000-0000-0000-000000010001")
 def auth_headers(
     role: str, scope_type: str = "global", scope_id: str | None = None
 ) -> dict[str, str]:
+    """Build trust-gateway auth headers for the given role and optional scope."""
     headers = {
         "x-user-id": str(USER_ID),
         "x-user-email": "raw-report-user@example.com",
@@ -27,10 +28,12 @@ def auth_headers(
 
 
 def build_database_url(tmp_path) -> str:
+    """Return the SQLite URL for an isolated per-test raw-file database."""
     return f"sqlite+pysqlite:///{(tmp_path / 'raw-report-files.db').as_posix()}"
 
 
 def seed_database(database_url: str) -> None:
+    """Create schema tables and seed the test user row for raw-file endpoint tests."""
     engine = create_engine(database_url)
     SecurityBase.metadata.create_all(engine)
     ReportBase.metadata.create_all(engine)
@@ -42,6 +45,7 @@ def seed_database(database_url: str) -> None:
 
 
 def test_system_integration_user_registers_raw_report_file_metadata_with_audit(tmp_path):
+    """The service role registers raw-file metadata with a sensitive connector audit row."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -107,6 +111,7 @@ def test_beta_operator_cannot_register_connector_raw_file_metadata(tmp_path):
 
 
 def test_connector_admin_reads_raw_report_file_metadata_with_audit(tmp_path):
+    """Connector Admin reads one raw file and the read is audited."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -139,6 +144,7 @@ def test_connector_admin_reads_raw_report_file_metadata_with_audit(tmp_path):
 
 
 def test_assistant_cannot_view_raw_report_files(tmp_path):
+    """A role without raw_files.view is denied even with a connector scope."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -153,6 +159,7 @@ def test_assistant_cannot_view_raw_report_files(tmp_path):
 
 
 def test_raw_report_file_registration_rejects_inline_or_local_storage_reference(tmp_path):
+    """Local or inline storage references are rejected before any write."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -178,6 +185,7 @@ def test_raw_report_file_registration_rejects_inline_or_local_storage_reference(
 
 
 def test_raw_report_file_registration_rejects_duplicate_artifact_metadata(tmp_path):
+    """Registering the same artifact metadata twice returns 409."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -208,6 +216,7 @@ def test_raw_report_file_registration_rejects_duplicate_artifact_metadata(tmp_pa
 
 
 def test_connector_admin_lists_raw_report_files_for_authorized_source_only(tmp_path):
+    """Listing returns only the connector-scoped source; other sources stay 403."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -255,6 +264,7 @@ def test_connector_admin_lists_raw_report_files_for_authorized_source_only(tmp_p
 
 
 def test_connector_admin_cannot_view_other_connector_raw_file(tmp_path):
+    """A raw file from a different connector returns 404, not its metadata."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -282,6 +292,7 @@ def test_connector_admin_cannot_view_other_connector_raw_file(tmp_path):
 
 
 def test_user_without_raw_file_permission_cannot_probe_raw_file_ids(tmp_path):
+    """The permission gate fires before ID parsing, blocking id probing."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))

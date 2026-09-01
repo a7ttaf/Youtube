@@ -73,6 +73,8 @@ if set(PERMISSION_SCOPE_TYPES) != set(Permission):
 
 @dataclass(frozen=True)
 class UserPermissionGrantEntry:
+    """One direct user permission grant row as returned to API clients."""
+
     id: str
     user_id: str
     permission_key: str
@@ -105,22 +107,24 @@ class UserPermissionGrantEntry:
 
 
 class UserPermissionGrantError(ValueError):
-    pass
+    """Base error for direct user permission grant operations."""
 
 
 class UserPermissionGrantConflictError(UserPermissionGrantError):
-    pass
+    """Raised when a grant conflicts with existing grant state."""
 
 
 class UserPermissionGrantNotFoundError(UserPermissionGrantError):
-    pass
+    """Raised when a referenced grant does not exist."""
 
 
 class UserPermissionGrantValidationError(UserPermissionGrantError):
-    pass
+    """Raised when grant or revoke input fails validation."""
 
 
 class SqlAlchemyUserPermissionGrantRepository:
+    """SQLAlchemy-backed repository for direct user permission grants."""
+
     def __init__(self, session: Session, *, tenant_id: UUID | str | None = None):
         """Bind direct permission grants to an explicit or request tenant."""
         self._session = session
@@ -428,6 +432,7 @@ def _normalize_scope(scope_type: str, scope_id: str | None) -> tuple[str, str | 
 
 
 def _normalize_required_string(value: str, field_name: str) -> str:
+    """Strip a required string and reject blank values."""
     normalized = value.strip()
     if not normalized:
         raise UserPermissionGrantValidationError(f"{field_name} must not be blank")
@@ -435,8 +440,10 @@ def _normalize_required_string(value: str, field_name: str) -> str:
 
 
 def _normalize_reason(value: str) -> str:
+    """Normalize a grant or revoke reason string."""
     return _normalize_required_string(value, "reason")
 
 
 def _scope_label(scope_type: str, scope_id: str | None) -> str:
+    """Render a human-readable label for a scope."""
     return "Global" if scope_id is None else f"{scope_type}:{scope_id}"

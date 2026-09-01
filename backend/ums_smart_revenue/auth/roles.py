@@ -19,6 +19,8 @@ from enum import StrEnum
 
 
 class RoleKey(StrEnum):
+    """Platform role keys, one entry per seeded role string."""
+
     SUPER_OWNER = "super_owner"
     CORPORATE_ADMIN = "corporate_admin"
     REVENUE_OPERATIONS_ADMIN = "revenue_operations_admin"
@@ -40,6 +42,8 @@ class RoleKey(StrEnum):
 
 @dataclass(frozen=True)
 class RoleDefinition:
+    """Frozen metadata and allowed scope types for one role."""
+
     role: RoleKey
     label: str
     description: str

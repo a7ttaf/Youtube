@@ -199,19 +199,25 @@ def test_no_context_clears_stale_context_when_clear_helper_is_absent():
     """Missing clear helper must not leave a stale tenant row on pooled backends."""
 
     class _Result:
+        """Minimal result stub answering one scalar value."""
+
         def __init__(self, value=None):
             self._value = value
 
         def scalar(self):
+            """Return the stubbed scalar value."""
             return self._value
 
     class _Connection:
+        """Minimal PostgreSQL connection stub recording executed SQL."""
+
         dialect = type("Dialect", (), {"name": "postgresql"})()
 
         def __init__(self):
             self.calls = []
 
         def exec_driver_sql(self, sql, parameters=None):
+            """Record the statement and answer the clear-helper probe."""
             self.calls.append((sql, parameters))
             if sql == "SELECT to_regprocedure(%s) IS NOT NULL":
                 return _Result(False)

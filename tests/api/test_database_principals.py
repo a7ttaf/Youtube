@@ -399,6 +399,7 @@ def test_database_principal_account_write_rolls_back_when_audit_fails(
     add_role_assignment(database_url, user_id=ACTOR_ID, role_key="corporate_admin")
 
     def fail_audit_recording(**_kwargs: object) -> None:
+        """Simulate an audit subsystem outage at write time."""
         raise RuntimeError("audit unavailable")
 
     monkeypatch.setattr(users_api, "record_audit_event", fail_audit_recording)

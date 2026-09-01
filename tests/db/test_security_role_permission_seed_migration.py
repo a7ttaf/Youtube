@@ -281,10 +281,12 @@ def _migration_module(path: Path, name: str) -> ModuleType:
 
 
 def _historical_migration_module() -> ModuleType:
+    """Load the frozen 20260825_0001 seed migration as a module."""
     return _migration_module(HISTORICAL_MIGRATION_PATH, "m_20260825_0001")
 
 
 def _repair_migration_module() -> ModuleType:
+    """Load the 20260825_0002 authorization-repair migration as a module."""
     return _migration_module(REPAIR_MIGRATION_PATH, "m_20260825_0002")
 
 

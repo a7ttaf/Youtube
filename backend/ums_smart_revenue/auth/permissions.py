@@ -3,6 +3,8 @@ from enum import StrEnum
 
 
 class Permission(StrEnum):
+    """Platform permission keys, one entry per API-facing permission string."""
+
     VIEW_ANALYTICS = "analytics.view"
     VIEW_CONFIDENCE = "analytics.view_confidence"
     VIEW_REVENUE = "finance.view_revenue"
@@ -34,6 +36,8 @@ class Permission(StrEnum):
 
 @dataclass(frozen=True)
 class PermissionDefinition:
+    """Frozen metadata (label, sensitivity, audit flag) for one permission."""
+
     permission: Permission
     label: str
     sensitive: bool
