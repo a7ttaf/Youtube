@@ -62,6 +62,8 @@ Rules:
 - Name test files `*.test.ts` / `*.test.tsx`. `.spec.*` is **not** collected.
 - Import the code under test through the `@/` alias, never a relative path.
   The alias is what makes the tests movable and the layout cheap to change.
+  The dev-proxy contract lives in `src/devProxy.ts`, so its test follows this
+  rule; the root `vite.config.ts` imports that Node-side module relatively.
 - Do not create `__tests__/` directories. That convention is retired.
 
 The layout is declared by `test.include` in `vitest.config.ts` and enforced by
@@ -113,7 +115,9 @@ own environment on top of all of them:
 4. `.env.development.local` (`.env.[mode].local`)
 5. the dashboard terminal's exported environment — highest
 
-If a protected route still 401s after following these steps, a stale
+The development server refuses to start when the token is blank; it does not
+open a proxy that is guaranteed to 401. If a protected route still 401s after
+following these steps, a stale non-blank
 `UMS_TRUSTED_GATEWAY_TOKEN` in one of those higher-precedence sources is why;
 clear it there rather than editing `.env` again.
 
@@ -239,18 +243,86 @@ cd frontend
 bun run dev
 ```
 
-The dev proxy (`vite.config.ts`) forwards every tenant-scoped route
-(`/revenue`, `/finance-close`, `/exports`, `/connectors`, `/adsense`,
-`/channels`, `/tenants`) to the backend and injects the full trusted-principal
-header set (`X-User-ID`, `X-User-Email`, `X-Role`, `X-Scope-Type`,
-`X-UMS-Trusted-Gateway-Token`, `X-UMS-Tenant`). The browser bundle never holds
-the gateway secret.
+The dev proxy (`vite.config.ts`) forwards every tenant-scoped route to the backend and
+injects the full trusted-principal header set (`X-User-ID`, `X-User-Email`, `X-Role`,
+`X-Scope-Type`, `X-UMS-Trusted-Gateway-Token`, `X-UMS-Tenant`, and optional
+`X-Scope-ID`). Caller-supplied trusted identity headers are removed at the incoming
+request boundary before http-proxy copies headers (and again in `proxyReq` when that
+event exists), including blank configured optionals, so browser input cannot survive
+as a principal claim or as a fallback even for `Expect: 100-continue` requests. The
+browser bundle never holds the gateway secret. The proxy's backend target defaults to
+loopback; HTTP is accepted only for verified loopback, while a non-loopback
+`VITE_DEV_BACKEND_URL` must be HTTPS and its exact origin must be listed in the Node-only
+`UMS_DEV_TRUSTED_BACKEND_ORIGINS` variable.
+
+`TENANT_SCOPED_ROUTES` (`devProxy.ts`) is the full list, in declaration order:
+
+```text
+/tenants  /session  /revenue  /finance-close  /exports  /connectors
+/adsense  /channels  /org-units  /groups       /audit    /users
+```
+
+Matching is on the exact first path segment: `/users` and `/users/123` proxy;
+`/users.evil`, encoded separators/traversal, absolute-form request targets, and a
+query that only mentions `/users` do not. Requests carrying an `Origin` must be
+same-origin with the Vite Host, and Vite retains its Host allowlist. `changeOrigin`
+rewrites the upstream Host to the validated backend target while preserving the
+safe browser Origin.
+
+> **This list used to be wrong here, and it was wrong in a way that hid a real bug.**
+> The paragraph above previously named seven of these routes and omitted `/session`,
+> `/org-units`, `/groups`, `/audit` and `/users`. `/org-units` and `/users` were also
+> genuinely missing from the proxy itself until 2026-08-25, which broke the Registry
+> view — see below.
+
+### What happens to a route that is *not* in that list
+
+Not "it is unproxied and reaches the backend anyway". The request **never leaves the
+dev server**, and the way it fails is easy to misread. Measured by booting this exact
+config through Vite's `createServer`:
+
+```text
+# Accept: application/json  — what src/lib/api/client.ts sends on every call
+{"path":"/reports/raw-files","status":404,"contentType":null,"bodyBytes":0}
+
+# Accept: text/html,...     — what a browser address-bar navigation sends
+{"path":"/reports/raw-files","status":200,"contentType":"text/html","bodyBytes":750}
+```
+
+Vite's html fallback **declines** `Accept: application/json`, so the client gets a bare
+**404 with a zero-length body and no `Content-Type` at all**. Paste the same URL into
+the address bar and `index.html` renders, which is exactly how the route ends up
+looking fine while every fetch to it has been failing.
+
+The consequence when this happened for real: `RegistryView` calls `useOrgUnits()` on
+mount, degrades to `orgUnitState.data ?? []`, and shows raw org-unit ids instead of
+Company/Sector names — no error anywhere. Worse, the same empty list feeds the **Mapping
+Change Request** company `<select>`, so the operator could not assign a channel to a
+company from the UI at all.
+
+`frontend/tests/devProxyRoutes.test.ts` now guards this by **deriving** the required
+set from TypeScript string and template literals across `src/**` — the proxy
+declaration itself lives outside `src/`, so it cannot seed the set — so a new API
+call to an unproxied prefix fails the suite instead of failing silently in the
+browser.
+
+**Known, currently harmless gap:** four backend prefixes are mounted and not proxied —
+`/reports`, `/security`, `/exchange-rates`, `/export-templates`. Nothing under
+`src/` calls them today, so there is no live frontend defect. `/security` is an
+auditor-gated authorization catalog, not a tenant-scoped dashboard route; adding it
+requires an explicit product and permission review. Add any other prefix to
+`TENANT_SCOPED_ROUTES` in the same change that adds its first frontend call, and the
+guard test will tell you if you forget.
 
 ### Demo headers the dev proxy injects
 
 Defaults live in `vite.config.ts` and are overridable via repo-root `.env`
 (`VITE_DEV_*`). To see finance money cells you MUST use a finance role — the
-default `assistant_analyst` has no finance visibility:
+default `assistant_analyst` has no finance visibility. It holds **2 of the 26**
+permissions in `backend/ums_smart_revenue/auth/permissions.py` (`analytics.view` and
+`analytics.view_confidence`); only `audit_viewer`, with one, is weaker. That is the
+single largest reason the app reads as an unwired mockup on a first run — the buttons
+are wired, the API denies them:
 
 ```dotenv
 # repo-root .env — for a finance demo
@@ -261,6 +333,18 @@ VITE_DEV_GATEWAY_ROLE=finance_admin
 VITE_DEV_GATEWAY_SCOPE_TYPE=global
 VITE_DEV_GATEWAY_TENANT_SLUG=ums
 ```
+
+The proxy is active only for Vite's development server; builds and **all preview
+servers** receive no trusted-header proxy, even `vite preview --mode development`.
+It fails before
+listening when `UMS_TRUSTED_GATEWAY_TOKEN` is blank. A non-global
+`VITE_DEV_GATEWAY_SCOPE_TYPE` also requires a non-blank
+`VITE_DEV_GATEWAY_SCOPE_ID`; global scope requires that id to be absent.
+
+`VITE_DEV_BACKEND_URL` must be an exact origin. Loopback may use HTTP and is
+trusted by default. To target a non-loopback backend, use HTTPS and add that exact
+origin to the Node-only `UMS_DEV_TRUSTED_BACKEND_ORIGINS` allowlist; without it
+Vite refuses to start rather than sending the gateway token to an untrusted host.
 
 `finance_admin` covers net-revenue, smart-alerts, finance-close + readiness,
 explain, exports, and AdSense payments. The Connectors **credentials** list

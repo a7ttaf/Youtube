@@ -1,0 +1,3479 @@
+import { existsSync, readFileSync, readdirSync } from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+
+import ts from "typescript";
+import { resolveConfig } from "vite";
+import { describe, expect, it, vi } from "vitest";
+
+import {
+  TENANT_SCOPED_ROUTES,
+  TRUSTED_GATEWAY_HEADERS,
+  buildTenantScopedProxy,
+  isSafeRouteUrl,
+  proxyContextForRoute,
+} from "../vite.config";
+
+// ============================================================================
+// Purpose: Guard the development proxy route and header contracts against
+//   omissions without making static inference the runtime security boundary.
+// Database/ORM: None.
+// Standards: The client/proxy share trustedRoutes.ts at runtime; AST discovery
+//   is a fail-closed change detector and EXPECTED_ROUTES audits expansions.
+// Blast Radius: Test-only development proxy coverage.
+// Connections:
+//   - File: frontend/vite.config.ts -> exports proxy route/build helpers.
+//   - File: frontend/src/lib/api -> contains the request literals scanned here.
+//   - File: frontend/tests/devProxySecurity.test.ts -> real HTTP boundary tests.
+// ============================================================================
+
+const HERE = path.dirname(fileURLToPath(import.meta.url));
+const FRONTEND_ROOT = path.resolve(HERE, "..");
+const SRC_DIR = path.join(FRONTEND_ROOT, "src");
+const canonicalFileIdentity = (
+  fileName: string,
+  caseSensitive = ts.sys.useCaseSensitiveFileNames,
+): string => {
+  const resolved = path.resolve(fileName);
+  return caseSensitive ? resolved : resolved.toLowerCase();
+};
+const CANONICAL_API_CLIENT_FILE = canonicalFileIdentity(
+  path.resolve(SRC_DIR, "lib", "api", "client.ts"),
+);
+const SOURCE_SUFFIXES = [".cts", ".mts", ".ts", ".tsx"];
+
+// Change-detector only; the compiler-derived assertion is the coverage proof.
+const EXPECTED_ROUTES = [
+  "/tenants",
+  "/session",
+  "/revenue",
+  "/finance-close",
+  "/exports",
+  "/connectors",
+  "/adsense",
+  "/channels",
+  "/org-units",
+  "/groups",
+  "/audit",
+  "/users",
+];
+
+// Prefixes we know the application calls today. Their only job is to prove the
+// scanner below still works: if a future syntax breaks it, the derived
+// assertion would pass vacuously on an empty set, and this fails loudly
+// instead. Shrinking this list to make a run green defeats the whole file.
+const SCANNER_HEALTH_PREFIXES = [
+  "/adsense",
+  "/audit",
+  "/channels",
+  "/connectors",
+  "/exports",
+  "/finance-close",
+  "/groups",
+  "/org-units",
+  "/revenue",
+  "/session",
+  "/tenants",
+];
+
+/** Recognize every TypeScript module form Vite can load for this application. */
+const hasApplicationSourceSuffix = (fileName: string): boolean =>
+  SOURCE_SUFFIXES.some((suffix) => fileName.endsWith(suffix));
+
+/** Check containment without string-prefix ambiguity across Windows drives. */
+const isWithinDirectory = (fileName: string, directory: string): boolean => {
+  const relative = path.relative(directory, fileName);
+  return relative !== "" &&
+    !relative.startsWith("..") &&
+    !path.isAbsolute(relative);
+};
+
+/** Resolve external module-script entries with the browser's HTML parser. */
+const viteHtmlModuleEntries = (html: string): string[] => {
+  const entries: string[] = [];
+  const document = new DOMParser().parseFromString(html, "text/html");
+  for (const element of document.querySelectorAll("*")) {
+    if (["embed", "iframe", "object"].includes(element.tagName.toLowerCase())) {
+      throw new Error("embedded executable HTML content is unsupported by route coverage");
+    }
+    for (const attribute of element.attributes) {
+      if (
+        attribute.name.toLowerCase().startsWith("on") ||
+        attribute.name.toLowerCase() === "srcdoc" ||
+        attribute.value.trim().toLowerCase().startsWith("javascript:")
+      ) {
+        throw new Error("inline executable HTML attributes are unsupported by route coverage");
+      }
+    }
+  }
+  for (const script of document.querySelectorAll("script")) {
+    if (script.getAttribute("type")?.trim().toLowerCase() !== "module") {
+      throw new Error("non-module executable scripts are unsupported by route coverage");
+    }
+    const rawSource = script.getAttribute("src")?.trim();
+    if (!rawSource) {
+      throw new Error("inline Vite module entries are unsupported by route coverage");
+    }
+    const url = new URL(rawSource, "http://vite-entry.invalid/");
+    if (url.origin !== "http://vite-entry.invalid") {
+      throw new Error(`remote Vite module entry is unsupported: ${rawSource}`);
+    }
+    let decodedPath: string;
+    try {
+      decodedPath = decodeURIComponent(url.pathname);
+    } catch {
+      throw new Error(`Vite module entry has invalid encoding: ${rawSource}`);
+    }
+    const resolved = path.resolve(
+      FRONTEND_ROOT,
+      decodedPath.startsWith("/") ? `.${decodedPath}` : decodedPath,
+    );
+    entries.push(resolved);
+  }
+  if (entries.length === 0) {
+    throw new Error("frontend/index.html declares no external module entry");
+  }
+  return entries;
+};
+
+/** Reject Rollup inputs other than the one HTML entry audited above. */
+const canonicalViteBuildEntries = (input: unknown): string[] => {
+  let rawEntries: unknown[];
+  if (input === undefined) {
+    rawEntries = [path.join(FRONTEND_ROOT, "index.html")];
+  } else if (typeof input === "string") {
+    rawEntries = [input];
+  } else if (Array.isArray(input)) {
+    rawEntries = input;
+  } else if (typeof input === "object" && input !== null) {
+    rawEntries = Object.values(input);
+  } else {
+    throw new Error("Vite build input has an unsupported shape");
+  }
+  if (rawEntries.some((entry) => typeof entry !== "string")) {
+    throw new Error("Vite build input contains a non-string entry");
+  }
+  const resolved = (rawEntries as string[]).map((entry) =>
+    canonicalFileIdentity(path.resolve(FRONTEND_ROOT, entry))
+  );
+  const canonicalHtml = canonicalFileIdentity(path.join(FRONTEND_ROOT, "index.html"));
+  if (resolved.length !== 1 || resolved[0] !== canonicalHtml) {
+    throw new Error("alternate Vite/Rollup build inputs are unsupported by route coverage");
+  }
+  return resolved;
+};
+
+/** Enumerate every HTML page Vite could serve from the frontend root. */
+const viteHtmlFiles = (directory = FRONTEND_ROOT): string[] => {
+  const files: string[] = [];
+  for (const entry of readdirSync(directory, { withFileTypes: true })) {
+    if ([".git", "coverage", "dist", "node_modules"].includes(entry.name)) {
+      continue;
+    }
+    const resolved = path.join(directory, entry.name);
+    if (entry.isDirectory()) {
+      files.push(...viteHtmlFiles(resolved));
+    } else if (entry.isFile() && entry.name.toLowerCase().endsWith(".html")) {
+      files.push(canonicalFileIdentity(resolved));
+    }
+  }
+  return files.sort();
+};
+
+/** Keep Vite on the one HTML page whose module graph is audited below. */
+const assertCanonicalViteHtmlFiles = (files: readonly string[]): string => {
+  const canonicalHtml = canonicalFileIdentity(path.join(FRONTEND_ROOT, "index.html"));
+  if (files.length !== 1 || files[0] !== canonicalHtml) {
+    throw new Error("additional Vite-served HTML pages are unsupported by route coverage");
+  }
+  return canonicalHtml;
+};
+
+/** Vite serves frontend/public statically at the site root, same-origin. */
+const PUBLIC_DIR = path.join(FRONTEND_ROOT, "public");
+
+/** Document suffixes a browser executes as a top-level same-origin document. */
+const PUBLIC_EXECUTABLE_DOCUMENT_SUFFIXES = [
+  ".html",
+  ".mht",
+  ".mhtml",
+  ".svg",
+  ".xhtml",
+  ".xml",
+];
+
+type PublicAsset = {
+  file: string;
+  content: string;
+};
+
+/** Enumerate every file Vite would serve statically from frontend/public. */
+const vitePublicAssets = (directory = PUBLIC_DIR): PublicAsset[] => {
+  if (!existsSync(directory)) {
+    return [];
+  }
+  const assets: PublicAsset[] = [];
+  for (const entry of readdirSync(directory, { withFileTypes: true })) {
+    const resolved = path.join(directory, entry.name);
+    if (entry.isDirectory()) {
+      assets.push(...vitePublicAssets(resolved));
+    } else if (entry.isFile()) {
+      assets.push({ file: resolved, content: readFileSync(resolved, "utf8") });
+    }
+  }
+  return assets.sort((left, right) => left.file.localeCompare(right.file));
+};
+
+/**
+ * Reject script-bearing documents served from frontend/public: sirv mounts the
+ * directory at the site root, so an inline script in an SVG/XHTML document
+ * executes same-origin next to the trusted development gateway. A public .html
+ * entry additionally fails the single-page assertion above, which still walks
+ * the public tree.
+ */
+const assertPublicAssetsCarryNoExecutableContent = (
+  assets: readonly PublicAsset[],
+): void => {
+  for (const { file, content } of assets) {
+    const executableDocument = PUBLIC_EXECUTABLE_DOCUMENT_SUFFIXES.some((suffix) =>
+      file.toLowerCase().endsWith(suffix),
+    );
+    if (!executableDocument) {
+      continue;
+    }
+    const normalized = content.toLowerCase();
+    if (normalized.includes("<script") || normalized.includes("javascript:")) {
+      throw new Error(
+        `executable script in a statically served public document is unsupported: ${file}`,
+      );
+    }
+  }
+};
+
+/** Reject Vite library/SSR entry modes that bypass the audited HTML root. */
+const assertCanonicalViteBuildConfig = (build: {
+  lib?: unknown;
+  rollupOptions: { input?: unknown };
+  ssr?: unknown;
+}): string[] => {
+  if (build.lib) {
+    throw new Error("Vite library build entries are unsupported by route coverage");
+  }
+  if (build.ssr !== false) {
+    throw new Error("Vite SSR build entries are unsupported by route coverage");
+  }
+  return canonicalViteBuildEntries(build.rollupOptions.input);
+};
+
+const API_CLIENT_METHOD_NAMES = [
+  "delete",
+  "get",
+  "getBlob",
+  "patch",
+  "post",
+  "put",
+] as const;
+const API_CLIENT_METHODS = new Set<string>(API_CLIENT_METHOD_NAMES);
+
+type StaticPrefix = {
+  complete: boolean;
+  text: string;
+};
+
+type EvaluationContext = {
+  checker: ts.TypeChecker;
+  substitutions: ReadonlyMap<ts.Symbol, ts.Expression>;
+  visiting: ReadonlySet<ts.Symbol>;
+};
+
+type InspectableFunction =
+  | ts.ArrowFunction
+  | ts.FunctionDeclaration
+  | ts.FunctionExpression
+  | ts.MethodDeclaration;
+
+/** Remove syntax wrappers that do not affect a string value. */
+const unwrapExpression = (expression: ts.Expression): ts.Expression => {
+  let current = expression;
+  while (
+    ts.isParenthesizedExpression(current) ||
+    ts.isAsExpression(current) ||
+    ts.isSatisfiesExpression(current) ||
+    ts.isNonNullExpression(current) ||
+    ts.isTypeAssertionExpression(current)
+  ) {
+    current = current.expression;
+  }
+  return current;
+};
+
+/** Resolve import aliases so declarations can be inspected across source files. */
+const resolvedSymbolAt = (
+  node: ts.Node,
+  checker: ts.TypeChecker,
+): ts.Symbol | undefined => {
+  const symbol = checker.getSymbolAtLocation(node);
+  return symbol && (symbol.flags & ts.SymbolFlags.Alias) !== 0
+    ? checker.getAliasedSymbol(symbol)
+    : symbol;
+};
+
+/** Return the immutable initializer for one identifier, if it is statically safe. */
+const immutableInitializer = (
+  identifier: ts.Identifier,
+  context: EvaluationContext,
+): { expression: ts.Expression; symbol: ts.Symbol } | undefined => {
+  const symbol = resolvedSymbolAt(identifier, context.checker);
+  if (!symbol) {
+    return undefined;
+  }
+  const substituted = context.substitutions.get(symbol);
+  if (substituted) {
+    return { expression: substituted, symbol };
+  }
+  const declaration = symbol.declarations?.find(ts.isVariableDeclaration);
+  if (
+    !declaration?.initializer ||
+    !ts.isVariableDeclarationList(declaration.parent) ||
+    (declaration.parent.flags & ts.NodeFlags.Const) === 0
+  ) {
+    return undefined;
+  }
+  return { expression: declaration.initializer, symbol };
+};
+
+/** Evaluate a complete compile-time string used before the request root boundary. */
+const knownString = (
+  rawExpression: ts.Expression,
+  context: EvaluationContext,
+): string | undefined => {
+  const expression = unwrapExpression(rawExpression);
+  if (ts.isStringLiteral(expression) || ts.isNoSubstitutionTemplateLiteral(expression)) {
+    return expression.text;
+  }
+  if (ts.isIdentifier(expression)) {
+    const initializer = immutableInitializer(expression, context);
+    if (!initializer || context.visiting.has(initializer.symbol)) {
+      return undefined;
+    }
+    return knownString(initializer.expression, {
+      ...context,
+      visiting: new Set([...context.visiting, initializer.symbol]),
+    });
+  }
+  if (
+    ts.isBinaryExpression(expression) &&
+    expression.operatorToken.kind === ts.SyntaxKind.PlusToken
+  ) {
+    const left = knownString(expression.left, context);
+    const right = knownString(expression.right, context);
+    return left === undefined || right === undefined ? undefined : left + right;
+  }
+  if (ts.isTemplateExpression(expression)) {
+    let value = expression.head.text;
+    for (const span of expression.templateSpans) {
+      const substitution = knownString(span.expression, context);
+      if (substitution === undefined) {
+        return undefined;
+      }
+      value += substitution + span.literal.text;
+    }
+    return value;
+  }
+  if (ts.isConditionalExpression(expression)) {
+    const whenTrue = knownString(expression.whenTrue, context);
+    const whenFalse = knownString(expression.whenFalse, context);
+    return whenTrue !== undefined && whenTrue === whenFalse ? whenTrue : undefined;
+  }
+  return undefined;
+};
+
+/** Enumerate statically known leading substrings across conditional expressions. */
+const prefixAlternatives = (
+  rawExpression: ts.Expression,
+  context: EvaluationContext,
+): StaticPrefix[] => {
+  const expression = unwrapExpression(rawExpression);
+  const complete = knownString(expression, context);
+  if (complete !== undefined) {
+    return [{ complete: true, text: complete }];
+  }
+  if (ts.isIdentifier(expression)) {
+    const initializer = immutableInitializer(expression, context);
+    if (!initializer || context.visiting.has(initializer.symbol)) {
+      return [{ complete: false, text: "" }];
+    }
+    return prefixAlternatives(initializer.expression, {
+      ...context,
+      visiting: new Set([...context.visiting, initializer.symbol]),
+    });
+  }
+  if (ts.isConditionalExpression(expression)) {
+    return [
+      ...prefixAlternatives(expression.whenTrue, context),
+      ...prefixAlternatives(expression.whenFalse, context),
+    ];
+  }
+  if (ts.isTemplateExpression(expression)) {
+    let alternatives: StaticPrefix[] = [{ complete: true, text: expression.head.text }];
+    for (const span of expression.templateSpans) {
+      alternatives = alternatives.flatMap((prefix) =>
+        prefix.complete
+          ? prefixAlternatives(span.expression, context).map((substitution) => ({
+              complete: substitution.complete,
+              text: prefix.text + substitution.text +
+                (substitution.complete ? span.literal.text : ""),
+            }))
+          : [prefix],
+      );
+    }
+    return alternatives;
+  }
+  if (
+    ts.isBinaryExpression(expression) &&
+    expression.operatorToken.kind === ts.SyntaxKind.PlusToken
+  ) {
+    return prefixAlternatives(expression.left, context).flatMap((left) =>
+      left.complete
+        ? prefixAlternatives(expression.right, context).map((right) => ({
+            complete: right.complete,
+            text: left.text + right.text,
+          }))
+        : [left],
+    );
+  }
+  return [{ complete: false, text: "" }];
+};
+
+/** Extract an exact first path segment only when the known prefix proves it. */
+const rootFromPrefix = ({ complete, text }: StaticPrefix): string | undefined => {
+  if (!text.startsWith("/") || text.startsWith("//")) {
+    return undefined;
+  }
+  const boundary = text.slice(1).search(/[/?#]/u);
+  const root = boundary >= 0 ? text.slice(0, boundary + 1) : complete ? text : "";
+  return /^\/[a-z][a-z0-9-]*$/iu.test(root) ? root : undefined;
+};
+
+/** Collect return expressions without crossing into a nested function body. */
+const returnExpressions = (body: ts.ConciseBody): ts.Expression[] => {
+  if (!ts.isBlock(body)) {
+    return [body];
+  }
+  const found: ts.Expression[] = [];
+  const visit = (node: ts.Node): void => {
+    if (node !== body && ts.isFunctionLike(node)) {
+      return;
+    }
+    if (ts.isReturnStatement(node) && node.expression) {
+      found.push(node.expression);
+      return;
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(body);
+  return found;
+};
+
+const ASSIGNMENT_OPERATORS = new Set<ts.SyntaxKind>([
+  ts.SyntaxKind.AmpersandAmpersandEqualsToken,
+  ts.SyntaxKind.AmpersandEqualsToken,
+  ts.SyntaxKind.AsteriskAsteriskEqualsToken,
+  ts.SyntaxKind.AsteriskEqualsToken,
+  ts.SyntaxKind.BarBarEqualsToken,
+  ts.SyntaxKind.BarEqualsToken,
+  ts.SyntaxKind.CaretEqualsToken,
+  ts.SyntaxKind.EqualsToken,
+  ts.SyntaxKind.GreaterThanGreaterThanEqualsToken,
+  ts.SyntaxKind.GreaterThanGreaterThanGreaterThanEqualsToken,
+  ts.SyntaxKind.LessThanLessThanEqualsToken,
+  ts.SyntaxKind.MinusEqualsToken,
+  ts.SyntaxKind.PercentEqualsToken,
+  ts.SyntaxKind.PlusEqualsToken,
+  ts.SyntaxKind.QuestionQuestionEqualsToken,
+  ts.SyntaxKind.SlashEqualsToken,
+]);
+
+/** Return whether a write target contains the exact bound parameter symbol. */
+const targetContainsSymbol = (
+  target: ts.Node,
+  symbol: ts.Symbol,
+  checker: ts.TypeChecker,
+): boolean => {
+  let found = false;
+  const visit = (node: ts.Node): void => {
+    if (ts.isIdentifier(node) && resolvedSymbolAt(node, checker) === symbol) {
+      found = true;
+      return;
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(target);
+  return found;
+};
+
+
+/** Resolve one expression to immutable function implementations. */
+const inspectableFunctionsForExpression = (
+  rawExpression: ts.Expression,
+  checker: ts.TypeChecker,
+  visiting: ReadonlySet<ts.Symbol> = new Set(),
+): InspectableFunction[] => {
+  const expression = unwrapExpression(rawExpression);
+  if (ts.isArrowFunction(expression) || ts.isFunctionExpression(expression)) {
+    return [expression];
+  }
+  const symbol = resolvedSymbolAt(expression, checker);
+  if (!symbol || visiting.has(symbol)) {
+    return [];
+  }
+  const nestedVisiting = new Set([...visiting, symbol]);
+  const functions: InspectableFunction[] = [];
+  for (const declaration of symbol.declarations ?? []) {
+    if (ts.isFunctionDeclaration(declaration) && declaration.body) {
+      throw new Error("function-declaration request path builders are unsupported");
+    } else if (ts.isMethodDeclaration(declaration) && declaration.body) {
+      throw new Error("method-backed request path builders are unsupported");
+    } else if (
+      ts.isVariableDeclaration(declaration) &&
+      declaration.initializer
+    ) {
+      const nested = inspectableFunctionsForExpression(
+        declaration.initializer,
+        checker,
+        nestedVisiting,
+      );
+      if (nested.length > 0) {
+        const list = declarationListFor(declaration);
+        if (!list || (list.flags & ts.NodeFlags.Const) === 0) {
+          throw new Error("called function alias is mutable");
+        }
+        functions.push(...nested);
+      }
+    } else if (ts.isPropertyAssignment(declaration)) {
+      throw new Error("property-backed request path builders are unsupported");
+    } else if (ts.isShorthandPropertyAssignment(declaration)) {
+      throw new Error("property-backed request path builders are unsupported");
+    }
+  }
+  return [...new Set(functions)];
+};
+
+/** Resolve a called path-builder declaration, including imported const aliases. */
+const calledFunctions = (
+  call: ts.CallExpression,
+  checker: ts.TypeChecker,
+): InspectableFunction[] =>
+  inspectableFunctionsForExpression(call.expression, checker);
+
+/** Prove the first path segment of a request expression or fail closed. */
+const proveRequestRoot = (
+  rawExpression: ts.Expression,
+  context: EvaluationContext,
+): string => {
+  const expression = unwrapExpression(rawExpression);
+  if (ts.isIdentifier(expression)) {
+    const initializer = immutableInitializer(expression, context);
+    if (!initializer || context.visiting.has(initializer.symbol)) {
+      throw new Error(`identifier ${expression.text} is not an immutable static path`);
+    }
+    return proveRequestRoot(initializer.expression, {
+      ...context,
+      visiting: new Set([...context.visiting, initializer.symbol]),
+    });
+  }
+  if (ts.isConditionalExpression(expression)) {
+    const roots = [
+      proveRequestRoot(expression.whenTrue, context),
+      proveRequestRoot(expression.whenFalse, context),
+    ];
+    if (roots[0] === roots[1]) {
+      return roots[0];
+    }
+    throw new Error(`conditional request roots disagree: ${roots.join(" vs ")}`);
+  }
+  if (ts.isCallExpression(expression)) {
+    if (expression.arguments.some(ts.isSpreadElement)) {
+      throw new Error("spread arguments in request path builders are unsupported");
+    }
+    const symbol = resolvedSymbolAt(expression.expression, context.checker);
+    if (!symbol || context.visiting.has(symbol)) {
+      throw new Error("request path builder is unresolved or recursive");
+    }
+    const functions = calledFunctions(expression, context.checker);
+    if (functions.length !== 1 || !functions[0]?.body) {
+      throw new Error("request path builder must have one inspectable implementation");
+    }
+    const nestedContext: EvaluationContext = {
+      checker: context.checker,
+      // Parameters are deliberately never substituted: production builders
+      // expose literal route heads, while parameter-controlled heads fail closed.
+      substitutions: context.substitutions,
+      visiting: new Set([...context.visiting, symbol]),
+    };
+    const roots = returnExpressions(functions[0].body).map((returned) =>
+      proveRequestRoot(returned, nestedContext),
+    );
+    if (roots.length > 0 && roots.every((root) => root === roots[0])) {
+      return roots[0];
+    }
+    throw new Error("request path builder has no single provable root");
+  }
+  const roots = prefixAlternatives(expression, context).map(rootFromPrefix);
+  if (roots.some((root) => !root)) {
+    throw new Error("expression has no statically provable leading path segment");
+  }
+  if (!roots.every((root) => root === roots[0])) {
+    throw new Error(`expression has conflicting request roots: ${roots.join(" vs ")}`);
+  }
+  return roots[0] as string;
+};
+
+/** True only for a type exposing the repository's complete client surface. */
+const isApiClientType = (
+  rawType: ts.Type,
+  checker: ts.TypeChecker,
+): boolean => {
+  const receiverType = checker.getNonNullableType(rawType);
+  return API_CLIENT_METHOD_NAMES.every(
+    (method) => checker.getPropertyOfType(receiverType, method) !== undefined,
+  );
+};
+
+const REACT_DEPENDENCY_HOOKS = new Set([
+  "useCallback",
+  "useEffect",
+  "useImperativeHandle",
+  "useLayoutEffect",
+  "useMemo",
+]);
+
+/** Return the static name selected by a property or element access. */
+const staticAccessName = (
+  access: ts.PropertyAccessExpression | ts.ElementAccessExpression,
+  checker: ts.TypeChecker,
+): string | undefined => {
+  if (ts.isPropertyAccessExpression(access)) {
+    return access.name.text;
+  }
+  if (!access.argumentExpression) {
+    return undefined;
+  }
+  const argument = unwrapExpression(access.argumentExpression);
+  return ts.isNumericLiteral(argument)
+    ? argument.text
+    : knownString(argument, {
+        checker,
+        substitutions: new Map(),
+        visiting: new Set(),
+      });
+};
+
+/** The only module allowed to own the two low-level fetch transports. */
+const isCanonicalApiClientModule = (sourceFile: ts.SourceFile): boolean =>
+  canonicalFileIdentity(sourceFile.fileName) === CANONICAL_API_CLIENT_FILE;
+
+/** Name a direct fetch call only when it sits in one canonical nested transport. */
+const sanctionedFetchOwner = (identifier: ts.Identifier): string | undefined => {
+  if (
+    !ts.isCallExpression(identifier.parent) ||
+    identifier.parent.expression !== identifier
+  ) {
+    return undefined;
+  }
+  let current: ts.Node | undefined = identifier.parent.parent;
+  let owner: ts.FunctionDeclaration | undefined;
+  while (current) {
+    if (
+      ts.isArrowFunction(current) ||
+      ts.isFunctionExpression(current) ||
+      ts.isMethodDeclaration(current) ||
+      ts.isFunctionDeclaration(current)
+    ) {
+      if (!ts.isFunctionDeclaration(current) || !current.name) {
+        return undefined;
+      }
+      owner = current;
+      break;
+    }
+    current = current.parent;
+  }
+  if (!owner?.name) {
+    return undefined;
+  }
+  const ownerName = owner.name.text;
+  if (ownerName !== "request" && ownerName !== "getBlob") {
+    return undefined;
+  }
+  current = owner.parent;
+  while (current) {
+    if (
+      ts.isVariableDeclaration(current) &&
+      ts.isIdentifier(current.name) &&
+      current.name.text === "useApiClient"
+    ) {
+      return ownerName;
+    }
+    current = current.parent;
+  }
+  return undefined;
+};
+
+const RAW_NETWORK_NAMES = new Set([
+  "EventSource",
+  "WebSocket",
+  "XMLHttpRequest",
+  "fetch",
+  "sendBeacon",
+]);
+const DYNAMIC_CODE_NAMES = new Set(["Function", "Reflect", "eval", "require"]);
+const DYNAMIC_SOURCE_NAMES = new Set(["importScripts", "serviceWorker"]);
+const WORKER_CONSTRUCTOR_NAMES = new Set(["SharedWorker", "Worker"]);
+const STRING_TIMER_NAMES = new Set(["setInterval", "setTimeout"]);
+const FORBIDDEN_REFLECTION_NAMES = new Set([
+  "getOwnPropertyDescriptor",
+  "getOwnPropertyDescriptors",
+  "getPrototypeOf",
+]);
+const FORBIDDEN_RUNTIME_NAMES = new Set([
+  ...RAW_NETWORK_NAMES,
+  ...DYNAMIC_CODE_NAMES,
+  ...DYNAMIC_SOURCE_NAMES,
+]);
+const BROWSER_GLOBAL_CONTAINERS = new Set([
+  "globalThis",
+  "navigator",
+  "self",
+  "window",
+]);
+
+/** Detect reflective/static raw-network selectors before they can be aliased. */
+const isReflectiveRawNetworkReference = (
+  node: ts.Node,
+  checker: ts.TypeChecker,
+): boolean => {
+  if (ts.isBindingElement(node) && node.propertyName) {
+    const property = node.propertyName;
+    if (ts.isIdentifier(property)) {
+      return FORBIDDEN_RUNTIME_NAMES.has(property.text);
+    }
+    if (ts.isStringLiteral(property) || ts.isNumericLiteral(property)) {
+      return FORBIDDEN_RUNTIME_NAMES.has(property.text);
+    }
+    if (ts.isComputedPropertyName(property)) {
+      const name = knownString(property.expression, {
+        checker,
+        substitutions: new Map(),
+        visiting: new Set(),
+      });
+      return name === undefined || FORBIDDEN_RUNTIME_NAMES.has(name);
+    }
+  }
+  if (!ts.isCallExpression(node)) {
+    return false;
+  }
+  const callee = unwrapExpression(node.expression);
+  if (
+    !(ts.isPropertyAccessExpression(callee) || ts.isElementAccessExpression(callee)) ||
+    staticAccessName(callee, checker) !== "get"
+  ) {
+    return false;
+  }
+  const receiver = unwrapExpression(callee.expression);
+  const target = node.arguments[0] && unwrapExpression(node.arguments[0]);
+  const selector = node.arguments[1];
+  if (!ts.isIdentifier(receiver) || receiver.text !== "Reflect" || !target) {
+    return false;
+  }
+  if (!selector) {
+    return true;
+  }
+  const name = knownString(selector, {
+    checker,
+    substitutions: new Map(),
+    visiting: new Set(),
+  });
+  return name === undefined ||
+    FORBIDDEN_RUNTIME_NAMES.has(name) ||
+    WORKER_CONSTRUCTOR_NAMES.has(name);
+};
+
+/** Reject aliases/dynamic indexing of browser-global containers. */
+const isUnsafeBrowserGlobalReference = (
+  node: ts.Node,
+  checker: ts.TypeChecker,
+): boolean => {
+  if (!ts.isIdentifier(node) || !BROWSER_GLOBAL_CONTAINERS.has(node.text)) {
+    return false;
+  }
+  const parent = node.parent;
+  if (ts.isPropertyAccessExpression(parent) && parent.name === node) {
+    return false;
+  }
+  if (
+    (ts.isPropertyAccessExpression(parent) || ts.isElementAccessExpression(parent)) &&
+    parent.expression === node
+  ) {
+    return ts.isElementAccessExpression(parent) &&
+      staticAccessName(parent, checker) === undefined;
+  }
+  return true;
+};
+
+/** Reject Vite source expansion that TypeScript does not add to its Program. */
+const isUnscannedImportMetaLoader = (
+  node: ts.Node,
+  checker: ts.TypeChecker,
+): boolean => {
+  if (!(ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node))) {
+    return false;
+  }
+  const receiver = unwrapExpression(node.expression);
+  if (
+    !ts.isMetaProperty(receiver) ||
+    receiver.keywordToken !== ts.SyntaxKind.ImportKeyword ||
+    receiver.name.text !== "meta"
+  ) {
+    return false;
+  }
+  const name = staticAccessName(node, checker);
+  return name === undefined || name === "glob" || name === "globEager";
+};
+
+/** Reject string-evaluating timers even when direct eval is absent. */
+const isStringCodeTimer = (
+  node: ts.Node,
+  checker: ts.TypeChecker,
+): boolean => {
+  if (!ts.isCallExpression(node) || node.arguments.length === 0) {
+    return false;
+  }
+  const callee = unwrapExpression(node.expression);
+  const name = ts.isIdentifier(callee)
+    ? callee.text
+    : ts.isPropertyAccessExpression(callee) || ts.isElementAccessExpression(callee)
+      ? staticAccessName(callee, checker)
+      : undefined;
+  if (name !== "setTimeout" && name !== "setInterval") {
+    return false;
+  }
+  const argument = node.arguments[0];
+  return Boolean(
+    argument &&
+    knownString(argument, {
+      checker,
+      substitutions: new Map(),
+      visiting: new Set(),
+    }) !== undefined,
+  );
+};
+
+/** Allow timers only as direct calls with a statically callable handler. */
+const assertSafeTimerReference = (
+  node: ts.Identifier | ts.PropertyAccessExpression | ts.ElementAccessExpression,
+  checker: ts.TypeChecker,
+): void => {
+  if (
+    ts.isIdentifier(node) &&
+    ts.isPropertyAccessExpression(node.parent) &&
+    node.parent.name === node
+  ) {
+    return;
+  }
+  const name = ts.isIdentifier(node) ? node.text : staticAccessName(node, checker);
+  if (!name || !STRING_TIMER_NAMES.has(name)) {
+    return;
+  }
+  const call = node.parent;
+  const handler = ts.isCallExpression(call) && call.expression === node
+    ? call.arguments[0]
+    : undefined;
+  if (
+    !handler ||
+    knownString(handler, {
+      checker,
+      substitutions: new Map(),
+      visiting: new Set(),
+    }) !== undefined ||
+    checker.getTypeAtLocation(handler).getCallSignatures().length === 0
+  ) {
+    throw new Error("timer references must be direct calls with a callable handler");
+  }
+};
+
+/** Prove a Vite worker entry is a literal compiler-scanned application file. */
+const assertScannedWorkerConstruction = (
+  worker: ts.NewExpression,
+  scannedFiles: ReadonlySet<string>,
+): void => {
+  const workerUrl = worker.arguments?.[0];
+  if (
+    !workerUrl ||
+    !ts.isNewExpression(unwrapExpression(workerUrl))
+  ) {
+    throw new Error("worker source must be one static new URL(..., import.meta.url)");
+  }
+  const urlConstruction = unwrapExpression(workerUrl) as ts.NewExpression;
+  const urlConstructor = unwrapExpression(urlConstruction.expression);
+  const rawSource = urlConstruction.arguments?.[0];
+  const rawBase = urlConstruction.arguments?.[1];
+  const base = rawBase && unwrapExpression(rawBase);
+  if (
+    !ts.isIdentifier(urlConstructor) ||
+    urlConstructor.text !== "URL" ||
+    !rawSource ||
+    !ts.isStringLiteral(rawSource) ||
+    !base ||
+    !ts.isPropertyAccessExpression(base) ||
+    base.name.text !== "url" ||
+    !ts.isMetaProperty(unwrapExpression(base.expression)) ||
+    (unwrapExpression(base.expression) as ts.MetaProperty).keywordToken !==
+      ts.SyntaxKind.ImportKeyword ||
+    (unwrapExpression(base.expression) as ts.MetaProperty).name.text !== "meta" ||
+    !rawSource.text.startsWith(".") ||
+    /[?#]/u.test(rawSource.text)
+  ) {
+    throw new Error("worker source must be one static new URL(..., import.meta.url)");
+  }
+  const resolved = path.resolve(
+    path.dirname(worker.getSourceFile().fileName),
+    rawSource.text,
+  );
+  if (
+    !isWithinDirectory(resolved, SRC_DIR) ||
+    !hasApplicationSourceSuffix(resolved) ||
+    !scannedFiles.has(canonicalFileIdentity(resolved))
+  ) {
+    throw new Error(`worker source is outside compiler-scanned src: ${resolved}`);
+  }
+};
+
+/** True only for a direct call to the audited API-client hook symbol. */
+const isUseApiClientCall = (
+  call: ts.CallExpression,
+  checker: ts.TypeChecker,
+  hookSymbols: ReadonlySet<ts.Symbol>,
+): boolean => {
+  const callee = unwrapExpression(call.expression);
+  const symbol = ts.isIdentifier(callee)
+    ? resolvedSymbolAt(callee, checker)
+    : undefined;
+  return Boolean(
+    symbol &&
+    hookSymbols.has(symbol) &&
+    isApiClientType(checker.getTypeAtLocation(call), checker),
+  );
+};
+
+/** Allow client identity only in React dependency arrays, never data transport. */
+const isAllowedDependencyReference = (
+  identifier: ts.Identifier,
+  checker: ts.TypeChecker,
+): boolean => {
+  const array = identifier.parent;
+  if (!ts.isArrayLiteralExpression(array) || !array.elements.includes(identifier)) {
+    return false;
+  }
+  const call = array.parent;
+  if (!ts.isCallExpression(call) || !call.arguments.includes(array)) {
+    return false;
+  }
+  const callee = unwrapExpression(call.expression);
+  if (!ts.isIdentifier(callee) || !REACT_DEPENDENCY_HOOKS.has(callee.text)) {
+    return false;
+  }
+  const rawSymbol = checker.getSymbolAtLocation(callee);
+  return Boolean(
+    rawSymbol?.declarations?.some((declaration) => {
+      if (!ts.isImportSpecifier(declaration)) {
+        return false;
+      }
+      const importDeclaration = declaration.parent.parent.parent;
+      return ts.isImportDeclaration(importDeclaration) &&
+        ts.isStringLiteral(importDeclaration.moduleSpecifier) &&
+        importDeclaration.moduleSpecifier.text === "react";
+    }),
+  );
+};
+
+/** Identify the canonical hook declaration before auditing any of its references. */
+const apiClientHookSymbols = (
+  programSourceFiles: readonly ts.SourceFile[],
+  checker: ts.TypeChecker,
+): ReadonlySet<ts.Symbol> => {
+  const symbols = new Set<ts.Symbol>();
+  for (const sourceFile of programSourceFiles) {
+    const virtualFixture = sourceFile.fileName.replaceAll("\\", "/")
+      .endsWith("/tests/virtual-route-scanner.ts");
+    const visit = (node: ts.Node): void => {
+      let name: ts.Identifier | undefined;
+      if (
+        isCanonicalApiClientModule(sourceFile) &&
+        ts.isVariableDeclaration(node) &&
+        ts.isIdentifier(node.name) &&
+        node.name.text === "useApiClient" &&
+        ts.isVariableStatement(node.parent.parent) &&
+        node.parent.parent.parent === sourceFile &&
+        node.parent.parent.modifiers?.some(
+          (modifier) => modifier.kind === ts.SyntaxKind.ExportKeyword,
+        )
+      ) {
+        name = node.name;
+      } else if (
+        virtualFixture &&
+        ts.isFunctionDeclaration(node) &&
+        node.parent === sourceFile &&
+        node.name?.text === "useApiClient" &&
+        !node.body
+      ) {
+        name = node.name;
+      }
+      if (name) {
+        const symbol = resolvedSymbolAt(name, checker);
+        const hookType = symbol
+          ? checker.getTypeOfSymbolAtLocation(symbol, name)
+          : undefined;
+        if (
+          symbol &&
+          hookType?.getCallSignatures().some((signature) =>
+            isApiClientType(signature.getReturnType(), checker),
+          )
+        ) {
+          symbols.add(symbol);
+        }
+      }
+      ts.forEachChild(node, visit);
+    };
+    visit(sourceFile);
+  }
+  if (symbols.size === 0) {
+    throw new Error("canonical useApiClient hook symbol is missing");
+  }
+  return symbols;
+};
+
+/** Hook declarations/imports are metadata; every value reference must be a direct origin. */
+const isHookDeclarationReference = (identifier: ts.Identifier): boolean => {
+  const parent = identifier.parent;
+  return (
+    ((ts.isVariableDeclaration(parent) ||
+      ts.isFunctionDeclaration(parent) ||
+      ts.isFunctionExpression(parent)) &&
+      parent.name === identifier) ||
+    ts.isImportSpecifier(parent) ||
+    ts.isExportSpecifier(parent)
+  );
+};
+
+/** Vite's DEFAULT_EXTENSIONS probe order for extensionless relative requests. */
+const VITE_DEFAULT_EXTENSIONS = [".mjs", ".js", ".mts", ".ts", ".jsx", ".tsx", ".json"];
+
+/**
+ * Fail closed when a relative specifier without an explicit .js-family
+ * extension resolves on disk to bytes outside the audited program: Vite probes
+ * its DEFAULT_EXTENSIONS and serves the first hit same-origin, while allowJs
+ * stays false so .js-family files and never-imported modules never enter the
+ * compiler sources this audit walks. The first existing candidate is the file
+ * Vite actually serves, so the probe order below is load-bearing.
+ */
+const assertSpecifierResolvesIntoAuditedProgram = (
+  specifier: string,
+  sourceFileName: string,
+  scannedFiles: ReadonlySet<string>,
+): void => {
+  if (!specifier.startsWith(".") && !specifier.startsWith("/")) {
+    return; // bare package specifiers are Node-resolved, not root-served
+  }
+  const specifierPath = specifier.split(/[?#]/u, 1)[0] ?? "";
+  if (!specifierPath || specifierPath.endsWith("/")) {
+    return;
+  }
+  const base = specifierPath.startsWith("/")
+    ? path.join(FRONTEND_ROOT, specifierPath)
+    : path.resolve(path.dirname(sourceFileName), specifierPath);
+  const candidates = [
+    ...VITE_DEFAULT_EXTENSIONS.map((extension) => base + extension),
+    ...VITE_DEFAULT_EXTENSIONS.map((extension) => path.join(base, `index${extension}`)),
+  ];
+  for (const candidate of candidates) {
+    if (!existsSync(candidate)) {
+      continue;
+    }
+    if (!scannedFiles.has(canonicalFileIdentity(candidate))) {
+      throw new Error(
+        'extensionless specifier resolves to Vite-served bytes outside the audited program: ' +
+          `${specifier} -> ${candidate}; require an explicit extension into the audited sources`,
+      );
+    }
+    return; // Vite serves the first existing candidate; it is audited.
+  }
+};
+
+/** Enforce the deliberately small direct-client syntax before route discovery. */
+const validateDirectApiClientContract = (
+  programSourceFiles: readonly ts.SourceFile[],
+  checker: ts.TypeChecker,
+): ReadonlySet<ts.Symbol> => {
+  const bindings = new Set<ts.Symbol>();
+  const origins: ts.CallExpression[] = [];
+  const scannedFiles = new Set(
+    programSourceFiles.map((sourceFile) => canonicalFileIdentity(sourceFile.fileName)),
+  );
+  const hookSymbols = apiClientHookSymbols(programSourceFiles, checker);
+  const visitOrigins = (node: ts.Node): void => {
+    if (
+      ts.isCallExpression(node) &&
+      isUseApiClientCall(node, checker, hookSymbols)
+    ) {
+      origins.push(node);
+      const declaration = node.parent;
+      if (
+        !ts.isVariableDeclaration(declaration) ||
+        declaration.initializer !== node ||
+        !ts.isIdentifier(declaration.name) ||
+        declaration.type ||
+        !ts.isVariableDeclarationList(declaration.parent) ||
+        (declaration.parent.flags & ts.NodeFlags.Const) === 0
+      ) {
+        throw new Error(
+          "useApiClient() must initialize one unannotated const identifier directly",
+        );
+      }
+      const symbol = resolvedSymbolAt(declaration.name, checker);
+      if (!symbol) {
+        throw new Error("useApiClient() direct binding symbol is unresolved");
+      }
+      bindings.add(symbol);
+    }
+    ts.forEachChild(node, visitOrigins);
+  };
+  programSourceFiles.forEach(visitOrigins);
+  const originSet = new Set(origins);
+
+  for (const origin of origins) {
+    const clientType = checker.getNonNullableType(checker.getTypeAtLocation(origin));
+    const properties = checker.getPropertiesOfType(clientType);
+    const methodNames = properties
+      .map((property) => property.getName())
+      .sort();
+    const expected = [...API_CLIENT_METHOD_NAMES].sort();
+    if (
+      methodNames.length !== expected.length ||
+      methodNames.some((method, index) => method !== expected[index])
+    ) {
+      throw new Error(
+        `API-client method surface changed: ${methodNames.join(", ") || "empty"}`,
+      );
+    }
+    for (const property of properties) {
+      const methodType = checker.getTypeOfSymbolAtLocation(property, origin);
+      const signatures = checker.getSignaturesOfType(methodType, ts.SignatureKind.Call);
+      const firstParameter = signatures[0]?.parameters[0];
+      const firstParameterType = firstParameter
+        ? checker.getTypeOfSymbolAtLocation(firstParameter, origin)
+        : undefined;
+      if (
+        signatures.length !== 1 ||
+        firstParameter?.getName() !== "path" ||
+        !firstParameterType ||
+        checker.typeToString(firstParameterType) !== "string"
+      ) {
+        throw new Error(
+          `API-client method ${property.getName()} must take string path as argument 0`,
+        );
+      }
+    }
+  }
+
+  const clientModulePresent = programSourceFiles.some(isCanonicalApiClientModule);
+  const fetchOwnerCounts = new Map<string, number>();
+  const visitUses = (node: ts.Node): void => {
+    const normalizedFile = node.getSourceFile().fileName.replaceAll("\\", "/");
+    if (ts.isNamespaceImport(node)) {
+      throw new Error(
+        `namespace imports are forbidden in scanned application sources: ${normalizedFile}`,
+      );
+    }
+    if (
+      ts.isCallExpression(node) &&
+      node.expression.kind === ts.SyntaxKind.ImportKeyword
+    ) {
+      throw new Error(
+        `dynamic module loading is forbidden in scanned application sources: ${normalizedFile}`,
+      );
+    }
+    if (
+      (ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) &&
+      node.moduleSpecifier &&
+      ts.isStringLiteral(node.moduleSpecifier)
+    ) {
+      const specifier = node.moduleSpecifier.text;
+      if (
+        /[?&](?:shared)?worker(?:&|$)/iu.test(specifier) ||
+        /\.(?:c|m)?jsx?(?:[?#]|$)/iu.test(specifier)
+      ) {
+        throw new Error(
+          `unscanned executable module import is forbidden: ${specifier}`,
+        );
+      }
+      // FIX: an extensionless or directory specifier still resolves through
+      // Vite's DEFAULT_EXTENSIONS to disk bytes the compiler program never
+      // includes (allowJs stays false), so prove the target is audited.
+      assertSpecifierResolvesIntoAuditedProgram(
+        specifier,
+        node.getSourceFile().fileName,
+        scannedFiles,
+      );
+    }
+    if (
+      ts.isIdentifier(node) &&
+      DYNAMIC_CODE_NAMES.has(node.text)
+    ) {
+      throw new Error(
+        `dynamic code execution is forbidden in scanned application sources: ${normalizedFile}`,
+      );
+    }
+    if (
+      ts.isIdentifier(node) ||
+      ts.isPropertyAccessExpression(node) ||
+      ts.isElementAccessExpression(node)
+    ) {
+      assertSafeTimerReference(node, checker);
+    }
+    const workerName = ts.isIdentifier(node)
+      ? node.text
+      : ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node)
+        ? staticAccessName(node, checker)
+        : undefined;
+    const workerPropertyName =
+      ts.isIdentifier(node) &&
+      ts.isPropertyAccessExpression(node.parent) &&
+      node.parent.name === node;
+    if (workerName && WORKER_CONSTRUCTOR_NAMES.has(workerName) && !workerPropertyName) {
+      if (!ts.isIdentifier(node)) {
+        throw new Error("worker constructors must use a direct audited identifier");
+      }
+      const parent = node.parent;
+      if (
+        ts.isTypeReferenceNode(parent) ||
+        ts.isTypeQueryNode(parent) ||
+        (ts.isTypeOfExpression(parent) && parent.expression === node)
+      ) {
+        // Type positions and an availability probe do not load a module.
+      } else if (ts.isNewExpression(parent) && parent.expression === node) {
+        assertScannedWorkerConstruction(parent, scannedFiles);
+      } else {
+        throw new Error(
+          `worker constructors cannot be aliased or escaped: ${normalizedFile}`,
+        );
+      }
+    }
+    const rawNetworkReference =
+      (ts.isIdentifier(node) && FORBIDDEN_RUNTIME_NAMES.has(node.text)) ||
+      ((ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node)) &&
+        (FORBIDDEN_RUNTIME_NAMES.has(staticAccessName(node, checker) ?? "") ||
+          FORBIDDEN_REFLECTION_NAMES.has(staticAccessName(node, checker) ?? "") ||
+          staticAccessName(node, checker) === "constructor")) ||
+      isReflectiveRawNetworkReference(node, checker) ||
+      isUnscannedImportMetaLoader(node, checker) ||
+      isStringCodeTimer(node, checker) ||
+      isUnsafeBrowserGlobalReference(node, checker);
+    if (rawNetworkReference) {
+      const owner =
+        isCanonicalApiClientModule(node.getSourceFile()) &&
+        ts.isIdentifier(node) &&
+        node.text === "fetch"
+          ? sanctionedFetchOwner(node)
+          : undefined;
+      if (!owner) {
+        throw new Error(
+          `unaudited network or dynamic-code access is forbidden outside canonical client transports: ${normalizedFile}`,
+        );
+      }
+      fetchOwnerCounts.set(owner, (fetchOwnerCounts.get(owner) ?? 0) + 1);
+    }
+    if (ts.isIdentifier(node)) {
+      const shorthandValue =
+        ts.isShorthandPropertyAssignment(node.parent) && node.parent.name === node
+          ? checker.getShorthandAssignmentValueSymbol(node.parent)
+          : undefined;
+      const symbol = shorthandValue && (shorthandValue.flags & ts.SymbolFlags.Alias) !== 0
+        ? checker.getAliasedSymbol(shorthandValue)
+        : (shorthandValue ?? resolvedSymbolAt(node, checker));
+      if (symbol && hookSymbols.has(symbol)) {
+        if (isHookDeclarationReference(node)) {
+          return;
+        }
+        if (
+          ts.isCallExpression(node.parent) &&
+          node.parent.expression === node &&
+          originSet.has(node.parent)
+        ) {
+          return;
+        }
+        throw new Error(
+          `useApiClient hook reference ${node.text} escapes direct origin syntax`,
+        );
+      }
+      if (symbol && bindings.has(symbol)) {
+        if (ts.isVariableDeclaration(node.parent) && node.parent.name === node) {
+          return;
+        }
+        const access = node.parent;
+        if (
+          (ts.isPropertyAccessExpression(access) ||
+            ts.isElementAccessExpression(access)) &&
+          access.expression === node &&
+          API_CLIENT_METHODS.has(staticAccessName(access, checker) ?? "") &&
+          ts.isCallExpression(access.parent) &&
+          access.parent.expression === access
+        ) {
+          return;
+        }
+        if (isAllowedDependencyReference(node, checker)) {
+          return;
+        }
+        throw new Error(
+          `API-client binding ${node.text} escapes direct method-call syntax`,
+        );
+      }
+    }
+    ts.forEachChild(node, visitUses);
+  };
+  programSourceFiles.forEach(visitUses);
+  if (clientModulePresent) {
+    for (const owner of ["request", "getBlob"]) {
+      if (fetchOwnerCounts.get(owner) !== 1) {
+        throw new Error(
+          `canonical client transport ${owner} must contain exactly one direct fetch call`,
+        );
+      }
+    }
+    if (fetchOwnerCounts.size !== 2) {
+      throw new Error("canonical API client contains an unexpected fetch transport");
+    }
+  }
+  return bindings;
+};
+
+/** Cheap guard before attempting provenance on arbitrary call arguments. */
+const hasApiClientMethodType = (
+  rawType: ts.Type,
+  checker: ts.TypeChecker,
+): boolean => {
+  const type = checker.getNonNullableType(rawType);
+  return API_CLIENT_METHOD_NAMES.some(
+    (method) => checker.getPropertyOfType(type, method) !== undefined,
+  );
+};
+
+/** Return whether a property chain rooted at this access is overwritten. */
+const propertyChainIsWritten = (rawAccess: ts.Expression): boolean => {
+  let current: ts.Node = rawAccess;
+  let parent = current.parent;
+  while (
+    parent &&
+    (((ts.isPropertyAccessExpression(parent) || ts.isElementAccessExpression(parent)) &&
+      parent.expression === current) ||
+      ((ts.isParenthesizedExpression(parent) ||
+        ts.isAsExpression(parent) ||
+        ts.isSatisfiesExpression(parent) ||
+        ts.isNonNullExpression(parent) ||
+        ts.isTypeAssertionExpression(parent)) &&
+        parent.expression === current))
+  ) {
+    current = parent;
+    parent = current.parent;
+  }
+  return Boolean(
+    parent &&
+      ((ts.isBinaryExpression(parent) &&
+        ASSIGNMENT_OPERATORS.has(parent.operatorToken.kind) &&
+        parent.left === current) ||
+        ((ts.isPrefixUnaryExpression(parent) || ts.isPostfixUnaryExpression(parent)) &&
+          (parent.operator === ts.SyntaxKind.PlusPlusToken ||
+            parent.operator === ts.SyntaxKind.MinusMinusToken) &&
+          parent.operand === current) ||
+        (ts.isDeleteExpression(parent) && parent.expression === current) ||
+        ((ts.isForOfStatement(parent) || ts.isForInStatement(parent)) &&
+          parent.initializer === current)),
+  );
+};
+
+/** Return whether a const object container stays on property-read paths only. */
+const objectContainerIsStable = (
+  identifier: ts.Identifier,
+  symbol: ts.Symbol,
+  checker: ts.TypeChecker,
+): boolean => {
+  let unstable = false;
+  const visit = (node: ts.Node): void => {
+    if (unstable) {
+      return;
+    }
+    if (ts.isIdentifier(node) && resolvedSymbolAt(node, checker) === symbol) {
+      if (ts.isVariableDeclaration(node.parent) && node.parent.name === node) {
+        return;
+      }
+      let current: ts.Node = node;
+      let parent = current.parent;
+      while (
+        parent &&
+        (ts.isParenthesizedExpression(parent) ||
+          ts.isAsExpression(parent) ||
+          ts.isSatisfiesExpression(parent) ||
+          ts.isNonNullExpression(parent) ||
+          ts.isTypeAssertionExpression(parent)) &&
+        parent.expression === current
+      ) {
+        current = parent;
+        parent = current.parent;
+      }
+      if (
+        parent &&
+        (ts.isPropertyAccessExpression(parent) || ts.isElementAccessExpression(parent)) &&
+        parent.expression === current &&
+        !propertyChainIsWritten(parent)
+      ) {
+        return;
+      }
+      if (parent && ts.isSpreadAssignment(parent) && parent.expression === current) {
+        return;
+      }
+      if (
+        parent &&
+        ts.isVariableDeclaration(parent) &&
+        parent.initializer === current &&
+        (ts.isObjectBindingPattern(parent.name) || ts.isArrayBindingPattern(parent.name))
+      ) {
+        return;
+      }
+      unstable = true;
+      return;
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(identifier.getSourceFile());
+  return !unstable;
+};
+
+type StaticObjectLiteral = {
+  object: ts.ObjectLiteralExpression;
+  unstableContainers: readonly string[];
+  visiting: ReadonlySet<ts.Symbol>;
+};
+
+/** Resolve an immutable const alias to an object literal used by a spread. */
+const staticObjectLiteral = (
+  rawExpression: ts.Expression,
+  checker: ts.TypeChecker,
+  visiting: ReadonlySet<ts.Symbol>,
+): StaticObjectLiteral | undefined => {
+  const expression = unwrapExpression(rawExpression);
+  if (ts.isObjectLiteralExpression(expression)) {
+    return { object: expression, unstableContainers: [], visiting };
+  }
+  if (!ts.isIdentifier(expression)) {
+    return undefined;
+  }
+  const symbol = resolvedSymbolAt(expression, checker);
+  if (!symbol || visiting.has(symbol)) {
+    return undefined;
+  }
+  const declaration = symbol.declarations?.find(ts.isVariableDeclaration);
+  const list = declaration && declarationListFor(declaration);
+  if (!declaration?.initializer || !list || (list.flags & ts.NodeFlags.Const) === 0) {
+    return undefined;
+  }
+  const nested = staticObjectLiteral(
+    declaration.initializer,
+    checker,
+    new Set([...visiting, symbol]),
+  );
+  if (!nested) {
+    return undefined;
+  }
+  return {
+    ...nested,
+    unstableContainers: objectContainerIsStable(expression, symbol, checker)
+      ? nested.unstableContainers
+      : [expression.text, ...nested.unstableContainers],
+  };
+};
+
+type ObjectPropertyResolution =
+  | {
+      expression: ts.Expression;
+      kind: "found";
+      unstableContainers: readonly string[];
+      visiting: ReadonlySet<ts.Symbol>;
+    }
+  | { kind: "missing" }
+  | { kind: "unknown" };
+
+/** Resolve one property with JavaScript object-spread overwrite ordering. */
+const objectLiteralPropertyInitializer = (
+  object: ts.ObjectLiteralExpression,
+  propertyName: string,
+  checker: ts.TypeChecker,
+  visiting: ReadonlySet<ts.Symbol>,
+): ObjectPropertyResolution => {
+  let resolution: ObjectPropertyResolution = { kind: "missing" };
+  for (const property of object.properties) {
+    if (ts.isSpreadAssignment(property)) {
+      const spread = staticObjectLiteral(property.expression, checker, visiting);
+      if (!spread) {
+        resolution = { kind: "unknown" };
+        continue;
+      }
+      const nested = objectLiteralPropertyInitializer(
+        spread.object,
+        propertyName,
+        checker,
+        spread.visiting,
+      );
+      if (nested.kind === "found") {
+        resolution = {
+          ...nested,
+          unstableContainers: [
+            ...spread.unstableContainers,
+            ...nested.unstableContainers,
+          ],
+        };
+      } else if (nested.kind === "unknown") {
+        resolution = nested;
+      }
+      continue;
+    }
+    const nameNode = property.name;
+    const name = nameNode &&
+      (ts.isIdentifier(nameNode) || ts.isStringLiteral(nameNode) ||
+      ts.isNumericLiteral(nameNode))
+      ? nameNode.text
+        : nameNode && ts.isComputedPropertyName(nameNode)
+        ? knownString(nameNode.expression, {
+            checker,
+            substitutions: new Map(),
+            visiting: new Set(),
+          })
+        : undefined;
+    if (name === undefined) {
+      resolution = { kind: "unknown" };
+      continue;
+    }
+    if (name !== propertyName) {
+      continue;
+    }
+    if (ts.isPropertyAssignment(property)) {
+      resolution = {
+        expression: property.initializer,
+        kind: "found",
+        unstableContainers: [],
+        visiting,
+      };
+    } else if (ts.isShorthandPropertyAssignment(property)) {
+      resolution = {
+        expression: property.name,
+        kind: "found",
+        unstableContainers: [],
+        visiting,
+      };
+    } else {
+      resolution = { kind: "unknown" };
+    }
+  }
+  return resolution;
+};
+
+type ResolvedPropertyInitializer = {
+  expression: ts.Expression;
+  unstableContainers: readonly string[];
+  visiting: ReadonlySet<ts.Symbol>;
+};
+
+/** Resolve a const object/property expression back to its literal initializer. */
+const immutablePropertyInitializer = (
+  rawAccess: ts.Expression,
+  checker: ts.TypeChecker,
+  visiting: ReadonlySet<ts.Symbol>,
+): ResolvedPropertyInitializer | undefined => {
+  const access = unwrapExpression(rawAccess);
+  if (!ts.isPropertyAccessExpression(access) && !ts.isElementAccessExpression(access)) {
+    return undefined;
+  }
+  const propertyName = ts.isPropertyAccessExpression(access)
+    ? access.name.text
+    : access.argumentExpression
+      ? ts.isNumericLiteral(unwrapExpression(access.argumentExpression))
+        ? (unwrapExpression(access.argumentExpression) as ts.NumericLiteral).text
+        : knownString(access.argumentExpression, {
+            checker,
+            substitutions: new Map(),
+            visiting: new Set(),
+          })
+      : undefined;
+  if (propertyName === undefined) {
+    return undefined;
+  }
+
+  let container = unwrapExpression(access.expression);
+  let nestedVisiting = visiting;
+  let unstableContainers: string[] = [];
+  while (ts.isIdentifier(container)) {
+    const symbol = resolvedSymbolAt(container, checker);
+    if (!symbol || nestedVisiting.has(symbol)) {
+      return undefined;
+    }
+    const declaration = symbol.declarations?.find(ts.isVariableDeclaration);
+    const list = declaration && declarationListFor(declaration);
+    if (!declaration?.initializer || !list || (list.flags & ts.NodeFlags.Const) === 0) {
+      return undefined;
+    }
+    if (!objectContainerIsStable(container, symbol, checker)) {
+      unstableContainers.push(container.text);
+    }
+    nestedVisiting = new Set([...nestedVisiting, symbol]);
+    container = unwrapExpression(declaration.initializer);
+  }
+  if (ts.isPropertyAccessExpression(container) || ts.isElementAccessExpression(container)) {
+    const nested = immutablePropertyInitializer(container, checker, nestedVisiting);
+    if (!nested) {
+      return undefined;
+    }
+    container = unwrapExpression(nested.expression);
+    nestedVisiting = nested.visiting;
+    unstableContainers = [...unstableContainers, ...nested.unstableContainers];
+  }
+  if (ts.isArrayLiteralExpression(container)) {
+    if (!/^(0|[1-9][0-9]*)$/u.test(propertyName)) {
+      return undefined;
+    }
+    if (container.elements.some(ts.isSpreadElement)) {
+      throw new Error(`API-client tuple index ${propertyName} cannot be proven`);
+    }
+    const index = Number(propertyName);
+    const element = container.elements[index];
+    return element && !ts.isOmittedExpression(element)
+      ? {
+          expression: element,
+          unstableContainers,
+          visiting: nestedVisiting,
+        }
+      : undefined;
+  }
+  if (!ts.isObjectLiteralExpression(container)) {
+    return undefined;
+  }
+  const resolution = objectLiteralPropertyInitializer(
+    container,
+    propertyName,
+    checker,
+    nestedVisiting,
+  );
+  if (resolution.kind === "unknown") {
+    throw new Error(`API-client object property ${propertyName} cannot be proven`);
+  }
+  return resolution.kind === "found"
+    ? {
+        expression: resolution.expression,
+        unstableContainers: [
+          ...unstableContainers,
+          ...resolution.unstableContainers,
+        ],
+        visiting: resolution.visiting,
+      }
+    : undefined;
+};
+
+/** True only for a receiver exposing the repository's complete client surface. */
+const isApiClientReceiver = (
+  rawReceiver: ts.Expression,
+  checker: ts.TypeChecker,
+  visiting: ReadonlySet<ts.Symbol> = new Set(),
+  clientParameters: ReadonlySet<ts.Symbol> = new Set(),
+): boolean => {
+  const receiver = unwrapExpression(rawReceiver);
+  if (isApiClientType(checker.getTypeAtLocation(receiver), checker)) {
+    return true;
+  }
+  if (ts.isPropertyAccessExpression(receiver) || ts.isElementAccessExpression(receiver)) {
+    const initializer = immutablePropertyInitializer(receiver, checker, visiting);
+    if (!initializer) {
+      return false;
+    }
+    const sourcesClient = isApiClientReceiver(
+      initializer.expression,
+      checker,
+      initializer.visiting,
+      clientParameters,
+    );
+    if (sourcesClient && initializer.unstableContainers.length > 0) {
+      throw new Error(
+        `API-client object container ${initializer.unstableContainers.join(
+          ", ",
+        )} is mutable or escapes`,
+      );
+    }
+    return sourcesClient;
+  }
+  if (!ts.isIdentifier(receiver)) {
+    return false;
+  }
+  const symbol = resolvedSymbolAt(receiver, checker);
+  if (!symbol || visiting.has(symbol)) {
+    return false;
+  }
+  if (clientParameters.has(symbol)) {
+    return true;
+  }
+  const binding = symbol.declarations?.find(ts.isBindingElement);
+  if (binding) {
+    if (
+      binding.initializer &&
+      isApiClientReceiver(
+        binding.initializer,
+        checker,
+        new Set([...visiting, symbol]),
+        clientParameters,
+      )
+    ) {
+      throw new Error(
+        "API-client argument escapes an unsupported call through a binding default",
+      );
+    }
+    const initializer = immutableBindingInitializer(binding, checker, visiting);
+    if (!initializer) {
+      return false;
+    }
+    const sourcesClient = isApiClientReceiver(
+      initializer.expression,
+      checker,
+      initializer.visiting,
+      clientParameters,
+    );
+    if (sourcesClient && initializer.unstableContainers.length > 0) {
+      throw new Error(
+        `API-client object container ${initializer.unstableContainers.join(
+          ", ",
+        )} is mutable or escapes`,
+      );
+    }
+    return sourcesClient;
+  }
+  const declaration = symbol.declarations?.find(ts.isVariableDeclaration);
+  if (!declaration?.initializer) {
+    return false;
+  }
+  const sourcesClient = isApiClientReceiver(
+    declaration.initializer,
+    checker,
+    new Set([...visiting, symbol]),
+    clientParameters,
+  );
+  if (!sourcesClient) {
+    return false;
+  }
+  const list = declarationListFor(declaration);
+  if (!list || (list.flags & ts.NodeFlags.Const) === 0) {
+    throw new Error(`API-client receiver alias ${receiver.text} is mutable`);
+  }
+  return true;
+};
+
+/** Return whether a function actually invokes an API-named method on a parameter. */
+const parameterUsesApiClientMethod = (
+  implementation: InspectableFunction,
+  parameterSymbol: ts.Symbol,
+  checker: ts.TypeChecker,
+): boolean => {
+  let found = false;
+  const visit = (node: ts.Node): void => {
+    if (found) {
+      return;
+    }
+    if (ts.isPropertyAccessExpression(node)) {
+      const receiver = unwrapExpression(node.expression);
+      if (
+        API_CLIENT_METHODS.has(node.name.text) &&
+        ts.isIdentifier(receiver) &&
+        resolvedSymbolAt(receiver, checker) === parameterSymbol
+      ) {
+        found = true;
+        return;
+      }
+    }
+    if (ts.isElementAccessExpression(node) && node.argumentExpression) {
+      const receiver = unwrapExpression(node.expression);
+      const method = knownString(node.argumentExpression, {
+        checker,
+        substitutions: new Map(),
+        visiting: new Set(),
+      });
+      if (
+        method !== undefined &&
+        API_CLIENT_METHODS.has(method) &&
+        ts.isIdentifier(receiver) &&
+        resolvedSymbolAt(receiver, checker) === parameterSymbol
+      ) {
+        found = true;
+        return;
+      }
+    }
+    ts.forEachChild(node, visit);
+  };
+  if (implementation.body) {
+    visit(implementation.body);
+  }
+  return found;
+};
+
+
+/** Return whether an access selects a method from the typed API-client surface. */
+const isApiClientMethodAccess = (
+  rawExpression: ts.Expression,
+  checker: ts.TypeChecker,
+  clientParameters: ReadonlySet<ts.Symbol> = new Set(),
+): boolean => {
+  const expression = unwrapExpression(rawExpression);
+  if (
+    ts.isPropertyAccessExpression(expression) &&
+    API_CLIENT_METHODS.has(expression.name.text) &&
+    isApiClientReceiver(expression.expression, checker, new Set(), clientParameters)
+  ) {
+    return true;
+  }
+  if (
+    ts.isElementAccessExpression(expression) &&
+    isApiClientReceiver(expression.expression, checker, new Set(), clientParameters)
+  ) {
+    const key = expression.argumentExpression
+      ? knownString(expression.argumentExpression, {
+          checker,
+          substitutions: new Map(),
+          visiting: new Set(),
+        })
+      : undefined;
+    if (key === undefined) {
+      throw new Error("computed API-client method cannot be proven");
+    }
+    return API_CLIENT_METHODS.has(key);
+  }
+  return false;
+};
+
+/** Return the const declaration list containing a variable or binding element. */
+const declarationListFor = (
+  declaration: ts.VariableDeclaration | ts.BindingElement,
+): ts.VariableDeclarationList | undefined => {
+  let current: ts.Node | undefined = declaration;
+  while (current && !ts.isVariableDeclaration(current)) {
+    current = current.parent;
+  }
+  const variable = current && ts.isVariableDeclaration(current) ? current : undefined;
+  return variable && ts.isVariableDeclarationList(variable.parent)
+    ? variable.parent
+    : undefined;
+};
+
+type StaticBindingPath = {
+  properties: string[];
+  root: ts.Expression | ts.ParameterDeclaration;
+  rootIsParameter: boolean;
+};
+
+/** Resolve a nested static object/array binding path to its root initializer. */
+const objectBindingPath = (
+  declaration: ts.BindingElement,
+  checker: ts.TypeChecker,
+): StaticBindingPath | undefined => {
+  const properties: string[] = [];
+  let current = declaration;
+  while (
+    ts.isObjectBindingPattern(current.parent) ||
+    ts.isArrayBindingPattern(current.parent)
+  ) {
+    const pattern = current.parent;
+    const property = ts.isArrayBindingPattern(pattern)
+      ? String(pattern.elements.indexOf(current))
+      : (() => {
+          const propertyNode = current.propertyName ?? current.name;
+          return ts.isIdentifier(propertyNode) || ts.isStringLiteral(propertyNode)
+            ? propertyNode.text
+            : ts.isComputedPropertyName(propertyNode)
+              ? knownString(propertyNode.expression, {
+                  checker,
+                  substitutions: new Map(),
+                  visiting: new Set(),
+                })
+              : undefined;
+        })();
+    if (!property || current.dotDotDotToken) {
+      return undefined;
+    }
+    properties.unshift(property);
+    const owner = current.parent.parent;
+    if (ts.isVariableDeclaration(owner)) {
+      return owner.initializer
+        ? { properties, root: owner.initializer, rootIsParameter: false }
+        : undefined;
+    }
+    if (ts.isParameter(owner)) {
+      return { properties, root: owner, rootIsParameter: true };
+    }
+    if (!ts.isBindingElement(owner) || owner.name !== current.parent) {
+      return undefined;
+    }
+    current = owner;
+  }
+  return undefined;
+};
+
+/** Resolve a const object-binding receiver back to the value it selected. */
+const immutableBindingInitializer = (
+  declaration: ts.BindingElement,
+  checker: ts.TypeChecker,
+  visiting: ReadonlySet<ts.Symbol>,
+): ResolvedPropertyInitializer | undefined => {
+  const path = objectBindingPath(declaration, checker);
+  if (!path) {
+    return undefined;
+  }
+  if (path.rootIsParameter) {
+    return undefined;
+  }
+  const list = declarationListFor(declaration);
+
+  let expression = path.root as ts.Expression;
+  let nestedVisiting = visiting;
+  let unstableContainers: string[] = !list ||
+    (list.flags & ts.NodeFlags.Const) === 0
+    ? [ts.isIdentifier(declaration.name) ? declaration.name.text : "binding"]
+    : [];
+  for (const propertyName of path.properties) {
+    const literal = unwrapExpression(expression);
+    if (ts.isArrayLiteralExpression(literal)) {
+      if (
+        literal.elements.some(ts.isSpreadElement) ||
+        !/^(0|[1-9][0-9]*)$/u.test(propertyName)
+      ) {
+        throw new Error(`API-client binding index ${propertyName} cannot be proven`);
+      }
+      const element = literal.elements[Number(propertyName)];
+      if (!element || ts.isOmittedExpression(element)) {
+        throw new Error(`API-client binding index ${propertyName} is empty`);
+      }
+      expression = element;
+      continue;
+    }
+    const object = staticObjectLiteral(expression, checker, nestedVisiting);
+    if (!object) {
+      return undefined;
+    }
+    unstableContainers = [
+      ...unstableContainers,
+      ...object.unstableContainers,
+    ];
+    const resolution = objectLiteralPropertyInitializer(
+      object.object,
+      propertyName,
+      checker,
+      object.visiting,
+    );
+    if (resolution.kind === "unknown") {
+      throw new Error(`API-client binding property ${propertyName} cannot be proven`);
+    }
+    if (resolution.kind === "missing") {
+      return undefined;
+    }
+    expression = resolution.expression;
+    nestedVisiting = resolution.visiting;
+    unstableContainers = [
+      ...unstableContainers,
+      ...resolution.unstableContainers,
+    ];
+  }
+  return { expression, unstableContainers, visiting: nestedVisiting };
+};
+
+/** Prove a nested object binding selects one method from an API-client value. */
+const bindingTargetsApiClientMethod = (
+  declaration: ts.BindingElement,
+  checker: ts.TypeChecker,
+): { rootIsParameter: boolean } | undefined => {
+  const path = objectBindingPath(declaration, checker);
+  if (!path) {
+    return undefined;
+  }
+  let currentType = checker.getNonNullableType(checker.getTypeAtLocation(path.root));
+  for (const [index, property] of path.properties.entries()) {
+    if (
+      index === path.properties.length - 1 &&
+      API_CLIENT_METHODS.has(property) &&
+      isApiClientType(currentType, checker)
+    ) {
+      return { rootIsParameter: path.rootIsParameter };
+    }
+    const propertySymbol = checker.getPropertyOfType(currentType, property);
+    if (!propertySymbol) {
+      return undefined;
+    }
+    currentType = checker.getNonNullableType(
+      checker.getTypeOfSymbolAtLocation(propertySymbol, declaration),
+    );
+  }
+  return undefined;
+};
+
+/** Trace destructured and assigned method aliases back to the typed client. */
+const identifierTargetsApiClientMethod = (
+  identifier: ts.Identifier,
+  checker: ts.TypeChecker,
+  visiting: ReadonlySet<ts.Symbol> = new Set(),
+  clientParameters: ReadonlySet<ts.Symbol> = new Set(),
+): boolean => {
+  const symbol = resolvedSymbolAt(identifier, checker);
+  if (!symbol || visiting.has(symbol)) {
+    return false;
+  }
+  const nestedVisiting = new Set([...visiting, symbol]);
+  for (const declaration of symbol.declarations ?? []) {
+    if (ts.isBindingElement(declaration) && ts.isObjectBindingPattern(declaration.parent)) {
+      const bindingMatch = bindingTargetsApiClientMethod(declaration, checker);
+      if (!bindingMatch) {
+        continue;
+      }
+      if (bindingMatch.rootIsParameter) {
+        throw new Error(
+          `destructured API-client parameter alias ${identifier.text} is unsupported`,
+        );
+      }
+      const list = declarationListFor(declaration);
+      if (!list || (list.flags & ts.NodeFlags.Const) === 0) {
+        throw new Error(`API-client method alias ${identifier.text} is mutable`);
+      }
+      return true;
+    }
+    if (!ts.isVariableDeclaration(declaration) || !declaration.initializer) {
+      continue;
+    }
+    const initializer = unwrapExpression(declaration.initializer);
+    const targetsMethod = isApiClientMethodAccess(
+      initializer,
+      checker,
+      clientParameters,
+    ) ||
+      (ts.isIdentifier(initializer) &&
+        identifierTargetsApiClientMethod(
+          initializer,
+          checker,
+          nestedVisiting,
+          clientParameters,
+        ));
+    if (!targetsMethod) {
+      continue;
+    }
+    const list = declarationListFor(declaration);
+    if (!list || (list.flags & ts.NodeFlags.Const) === 0) {
+      throw new Error(`API-client method alias ${identifier.text} is mutable`);
+    }
+    return true;
+  }
+  return false;
+};
+
+/** True only for calls through the repository's typed API-client surface. */
+const isApiClientCall = (
+  node: ts.CallExpression,
+  checker: ts.TypeChecker,
+  clientParameters: ReadonlySet<ts.Symbol>,
+): boolean => {
+  const callee = unwrapExpression(node.expression);
+  return isApiClientMethodAccess(callee, checker, clientParameters) ||
+    (ts.isIdentifier(callee) &&
+      identifierTargetsApiClientMethod(
+        callee,
+        checker,
+        new Set(),
+        clientParameters,
+      ));
+};
+
+
+/** Derive all request roots in one compiler-bound source file. */
+// FIX: The former literal-only scan silently dropped composed or type-erased
+// API-client calls; prove actual call provenance and roots or fail closed.
+const requestRootsInSourceFile = (
+  sourceFile: ts.SourceFile,
+  checker: ts.TypeChecker,
+  directClientBindings: ReadonlySet<ts.Symbol>,
+): string[] => {
+  const roots = new Set<string>();
+  const visit = (node: ts.Node): void => {
+    let apiClientCall = false;
+    if (ts.isCallExpression(node)) {
+      const callee = unwrapExpression(node.expression);
+      if (ts.isPropertyAccessExpression(callee) || ts.isElementAccessExpression(callee)) {
+        const receiver = unwrapExpression(callee.expression);
+        const receiverSymbol = ts.isIdentifier(receiver)
+          ? resolvedSymbolAt(receiver, checker)
+          : undefined;
+        apiClientCall = Boolean(
+          receiverSymbol &&
+          directClientBindings.has(receiverSymbol) &&
+          API_CLIENT_METHODS.has(staticAccessName(callee, checker) ?? ""),
+        );
+      }
+    }
+    if (ts.isCallExpression(node) && apiClientCall) {
+      const argument = node.arguments[0];
+      const position = sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile));
+      if (!argument) {
+        throw new Error(
+          `Cannot prove API request root at ${sourceFile.fileName}:${position.line + 1}: missing path argument`,
+        );
+      }
+      try {
+        roots.add(
+          proveRequestRoot(argument, {
+            checker,
+            substitutions: new Map(),
+            visiting: new Set(),
+          }),
+        );
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        throw new Error(
+          `Cannot prove API request root at ${sourceFile.fileName}:${position.line + 1}: ${detail}`,
+        );
+      }
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(sourceFile);
+  return [...roots].sort();
+};
+
+/** Build a compiler-bound single-file fixture for adversarial scanner tests. */
+export const discoverRequestedPrefixesInSource = (
+  source: string,
+  extraClientMethods: readonly string[] = [],
+  firstParameterNames: Readonly<Record<string, string>> = {},
+  canonicalClientFixture = false,
+): string[] => {
+  const fileName = canonicalClientFixture
+    ? CANONICAL_API_CLIENT_FILE
+    : path.join(FRONTEND_ROOT, "tests", "virtual-route-scanner.ts");
+  const methodNames = [...API_CLIENT_METHOD_NAMES, ...extraClientMethods];
+  const fixturePrelude = canonicalClientFixture
+    ? [
+        "export const useApiClient = () => {",
+        "  function request(path: string) { return fetch(path); }",
+        "  function getBlob(path: string) { return fetch(path); }",
+        "  return {",
+        ...API_CLIENT_METHOD_NAMES.map((method) =>
+          method === "getBlob"
+            ? "    getBlob,"
+            : `    ${method}: (path: string, ...rest: unknown[]) => request(path),`,
+        ),
+        "  };",
+        "};",
+        "const client = useApiClient();",
+      ].join("\n")
+    : [
+        "type ReturnType<T> = T extends (...args: never[]) => infer R ? R : never;",
+        "interface RouteScannerApiClient {",
+        ...methodNames.map(
+          (method) =>
+            `  ${method}(${firstParameterNames[method] ?? "path"}: string, ...rest: unknown[]): unknown;`,
+        ),
+        "}",
+        "declare function useApiClient(): RouteScannerApiClient;",
+        "const client = useApiClient();",
+      ].join("\n");
+  const compilerSource = `${fixturePrelude}\n${source}`;
+  const options: ts.CompilerOptions = {
+    module: ts.ModuleKind.ESNext,
+    noLib: true,
+    noResolve: true,
+    target: ts.ScriptTarget.ES2022,
+  };
+  const sourceFile = ts.createSourceFile(
+    fileName,
+    compilerSource,
+    options.target ?? ts.ScriptTarget.ES2022,
+    true,
+    ts.ScriptKind.TS,
+  );
+  const host: ts.CompilerHost = {
+    fileExists: (candidate) => path.resolve(candidate) === path.resolve(fileName),
+    getCanonicalFileName: (candidate) => candidate.toLowerCase(),
+    getCurrentDirectory: () => FRONTEND_ROOT,
+    getDefaultLibFileName: () => "lib.d.ts",
+    getNewLine: () => "\n",
+    getSourceFile: (candidate) =>
+      path.resolve(candidate) === path.resolve(fileName) ? sourceFile : undefined,
+    readFile: (candidate) =>
+      path.resolve(candidate) === path.resolve(fileName) ? compilerSource : undefined,
+    useCaseSensitiveFileNames: () => false,
+    writeFile: () => undefined,
+  };
+  const program = ts.createProgram({ host, options, rootNames: [fileName] });
+  const checker = program.getTypeChecker();
+  const directClientBindings = validateDirectApiClientContract([sourceFile], checker);
+  return requestRootsInSourceFile(sourceFile, checker, directClientBindings);
+};
+
+/** Keep every compiler-loaded application file, including imports outside src/frontend. */
+const applicationProgramSourceFiles = (program: ts.Program): ts.SourceFile[] =>
+  program.getSourceFiles().filter((sourceFile) => {
+    const normalizedFile = sourceFile.fileName.replaceAll("\\", "/");
+    return !sourceFile.isDeclarationFile &&
+      !normalizedFile.split("/").includes("node_modules") &&
+      hasApplicationSourceSuffix(sourceFile.fileName);
+  });
+
+// ============================================================================
+// Purpose: Derive the backend prefixes the frontend actually requests.
+// Database/ORM: None.
+// Standards: Inspect typed API-client call arguments, resolve immutable local and
+//   imported path builders, and fail closed whenever the root cannot be proven.
+// Blast Radius: Test-only coverage; no runtime or authorization effect.
+// Connections:
+//   - File: frontend/vite.config.ts -> TENANT_SCOPED_ROUTES.
+//   - File: frontend/src/lib/api -> request call sites.
+// ============================================================================
+export const discoverRequestedPrefixes = (): string[] => {
+  const configPath = path.join(FRONTEND_ROOT, "tsconfig.json");
+  const config = ts.readConfigFile(configPath, ts.sys.readFile);
+  if (config.error) {
+    throw new Error(ts.flattenDiagnosticMessageText(config.error.messageText, "\n"));
+  }
+  const parsed = ts.parseJsonConfigFileContent(config.config, ts.sys, FRONTEND_ROOT);
+  if (parsed.errors.length > 0) {
+    throw new Error(
+      parsed.errors
+        .map((error) => ts.flattenDiagnosticMessageText(error.messageText, "\n"))
+        .join("\n"),
+    );
+  }
+  // FIX: Use the TypeScript config's source universe as the root authority;
+  // filesystem-only walking silently missed supported module forms and imports.
+  const files = parsed.fileNames.filter(
+    (fileName) =>
+      isWithinDirectory(fileName, SRC_DIR) && hasApplicationSourceSuffix(fileName),
+  );
+  if (files.length === 0) {
+    throw new Error("TypeScript config contains no frontend application source files");
+  }
+  const configuredRoots = new Set(
+    files.map((fileName) => canonicalFileIdentity(fileName)),
+  );
+  const htmlFile = assertCanonicalViteHtmlFiles(viteHtmlFiles());
+  // FIX: frontend/public is served statically at the site root; script-bearing
+  // documents there execute same-origin and were never enumerated by the
+  // HTML-only walk above.
+  assertPublicAssetsCarryNoExecutableContent(vitePublicAssets());
+  const htmlEntries = viteHtmlModuleEntries(readFileSync(htmlFile, "utf8"));
+  for (const entry of htmlEntries) {
+    if (
+      !isWithinDirectory(entry, SRC_DIR) ||
+      !configuredRoots.has(canonicalFileIdentity(entry))
+    ) {
+      throw new Error(
+        `Vite module entry is outside the compiler-scanned src roots: ${entry}`,
+      );
+    }
+  }
+  const program = ts.createProgram({ options: parsed.options, rootNames: files });
+  const checker = program.getTypeChecker();
+  const programSourceFiles = applicationProgramSourceFiles(program);
+  for (const file of files) {
+    if (!program.getSourceFile(file)) {
+      throw new Error(`TypeScript program omitted ${file}`);
+    }
+  }
+  const directClientBindings = validateDirectApiClientContract(
+    programSourceFiles,
+    checker,
+  );
+  const found = new Set<string>();
+  for (const sourceFile of programSourceFiles) {
+    for (const root of requestRootsInSourceFile(
+      sourceFile,
+      checker,
+      directClientBindings,
+    )) {
+      found.add(root);
+    }
+  }
+  return [...found].sort();
+};
+
+/** Prefixes the application requests that the given proxy list does not cover. */
+export const uncoveredPrefixes = (prefixes: string[], routes: readonly string[]): string[] =>
+  prefixes.filter((prefix) => !routes.includes(prefix)).sort();
+
+const REQUESTED_PREFIXES = discoverRequestedPrefixes();
+
+const BACKEND_TARGET = "http://127.0.0.1:8000";
+
+// Deliberately includes the gateway token: the point of the proxy is that this
+// header is added in Node and never reaches the browser bundle.
+const GATEWAY_HEADERS: [string, string][] = [
+  ["X-User-ID", "00000000-0000-0000-0000-0000000000aa"],
+  ["X-Role", "finance_admin"],
+  ["X-UMS-Trusted-Gateway-Token", "test-token"],
+];
+
+type ProxyReqHandler = (proxyReq: {
+  getHeaderNames: () => string[];
+  removeHeader: (header: string) => void;
+  setHeader: (header: string, value: string) => void;
+}) => void;
+
+type ConfigurableProxyEntry = {
+  target: string;
+  changeOrigin: boolean;
+  configure: (proxy: { on: (event: string, fn: ProxyReqHandler) => void }) => void;
+};
+
+/** Narrow one built proxy entry, failing loudly rather than skipping an odd shape. */
+const asConfigurableEntry = (entry: unknown, route: string): ConfigurableProxyEntry => {
+  if (typeof entry !== "object" || entry === null) {
+    throw new Error(`expected an object proxy entry for ${route}`);
+  }
+  const candidate = entry as Partial<ConfigurableProxyEntry>;
+  if (typeof candidate.target !== "string" || typeof candidate.configure !== "function") {
+    throw new Error(`expected ${route} to declare a target and a configure hook`);
+  }
+  return candidate as ConfigurableProxyEntry;
+};
+
+/** Run a route's configure hook and collect its ordered proxyReq mutations. */
+const headerMutations = (
+  entry: ConfigurableProxyEntry,
+  route: string,
+): { removed: string[]; injected: [string, string][] } => {
+  const removed: string[] = [];
+  const injected: [string, string][] = [];
+  let handler: ProxyReqHandler | undefined;
+  entry.configure({
+    on: (event, fn) => {
+      if (event === "proxyReq") {
+        handler = fn;
+      }
+    },
+  });
+  if (!handler) {
+    throw new Error(`expected ${route} to register a proxyReq handler`);
+  }
+  handler({
+    getHeaderNames: () => [],
+    removeHeader: (header: string) => {
+      removed.push(header);
+    },
+    setHeader: (header: string, value: string) => {
+      injected.push([header, value]);
+    },
+  });
+  return { removed, injected };
+};
+
+describe("dev proxy route coverage (derived from frontend/src)", () => {
+  it("keeps canonical path identity case-sensitive on case-sensitive hosts", () => {
+    const lower = path.join(FRONTEND_ROOT, "src", "lib", "api", "client.ts");
+    const upper = path.join(FRONTEND_ROOT, "src", "lib", "api", "Client.ts");
+    expect(canonicalFileIdentity(lower, true)).not.toBe(
+      canonicalFileIdentity(upper, true),
+    );
+  });
+
+  it("requires every HTML module entry to stay inside compiler-scanned src", () => {
+    const [valid] = viteHtmlModuleEntries(
+      '<script src="/src/main.tsx" type="module"></script>',
+    );
+    const [outside] = viteHtmlModuleEntries(
+      '<script type="module" src="/shared/main.ts"></script>',
+    );
+    expect(valid && isWithinDirectory(valid, SRC_DIR)).toBe(true);
+    expect(outside && isWithinDirectory(outside, SRC_DIR)).toBe(false);
+    expect(() => viteHtmlModuleEntries('<script type="module"></script>')).toThrow(
+      /inline Vite module entries are unsupported/iu,
+    );
+  });
+
+  it("does not hide an unquoted outside-src module entry behind a valid entry", () => {
+    const entries = viteHtmlModuleEntries([
+      '<script type="module" src="/src/main.tsx"></script>',
+      "<script type=module src=/shared/hidden.ts></script>",
+    ].join(""));
+    expect(entries).toHaveLength(2);
+    expect(entries.some((entry) => !isWithinDirectory(entry, SRC_DIR))).toBe(true);
+  });
+
+  it.each([
+    '<script>fetch("/reports/raw-files")</script>',
+    '<script src="/raw.js"></script>',
+  ])("fails closed on a classic executable script: %s", (html) => {
+    expect(() => viteHtmlModuleEntries([
+      '<script type="module" src="/src/main.tsx"></script>',
+      html,
+    ].join(""))).toThrow(/non-module executable scripts are unsupported/iu);
+  });
+
+  it.each([
+    '<body onload="fetch(\'/reports/raw-files\')"></body>',
+    '<iframe srcdoc="<script>fetch(\'/reports/raw-files\')</script>"></iframe>',
+    '<a href="javascript:fetch(\'/reports/raw-files\')">load</a>',
+  ])("fails closed on executable non-module HTML: %s", (html) => {
+    expect(() => viteHtmlModuleEntries([
+      '<script type="module" src="/src/main.tsx"></script>',
+      html,
+    ].join(""))).toThrow(/executable HTML/iu);
+  });
+
+  it("rejects alternate Vite/Rollup build inputs", () => {
+    expect(() => canonicalViteBuildEntries({
+      app: "index.html",
+      hidden: "../shared/hidden.ts",
+    })).toThrow(/alternate Vite\/Rollup build inputs are unsupported/iu);
+  });
+
+  it("rejects any additional Vite-served HTML page", () => {
+    expect(() => assertCanonicalViteHtmlFiles([
+      canonicalFileIdentity(path.join(FRONTEND_ROOT, "index.html")),
+      canonicalFileIdentity(path.join(FRONTEND_ROOT, "admin.html")),
+    ])).toThrow(/additional Vite-served HTML pages are unsupported/iu);
+    expect(assertCanonicalViteHtmlFiles(viteHtmlFiles())).toBe(
+      canonicalFileIdentity(path.join(FRONTEND_ROOT, "index.html")),
+    );
+  });
+
+  it.each([
+    {
+      lib: { entry: "../shared/hidden.ts" },
+      rollupOptions: {},
+      ssr: false,
+    },
+    {
+      lib: false,
+      rollupOptions: {},
+      ssr: "../shared/hidden.ts",
+    },
+  ])("rejects alternate Vite library/SSR build entry modes", (build) => {
+    expect(() => assertCanonicalViteBuildConfig(build)).toThrow(
+      /Vite (?:library|SSR) build entries are unsupported/iu,
+    );
+  });
+
+  it("keeps the resolved production build on the one audited HTML entry", async () => {
+    const config = await resolveConfig(
+      {
+        configFile: path.join(FRONTEND_ROOT, "vite.config.ts"),
+        logLevel: "silent",
+        root: FRONTEND_ROOT,
+      },
+      "build",
+      "production",
+    );
+    expect(assertCanonicalViteBuildConfig(config.build)).toEqual([
+      canonicalFileIdentity(path.join(FRONTEND_ROOT, "index.html")),
+    ]);
+  });
+
+  it("pins the dev server /@fs surface to the audited frontend root", async () => {
+    vi.stubEnv("UMS_TRUSTED_GATEWAY_TOKEN", "fs-allow-pin-token");
+    try {
+      const config = await resolveConfig(
+        {
+          configFile: path.join(FRONTEND_ROOT, "vite.config.ts"),
+          logLevel: "silent",
+          root: FRONTEND_ROOT,
+        },
+        "serve",
+        "development",
+      );
+      expect(config.server.fs.allow.map((entry) => canonicalFileIdentity(entry))).toEqual([
+        canonicalFileIdentity(FRONTEND_ROOT),
+      ]);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("treats literal fragments as non-transport metadata but rejects encoded hashes", () => {
+    expect(isSafeRouteUrl("/users#section", "/users")).toBe(true);
+    expect(isSafeRouteUrl("/users?view=all#section", "/users")).toBe(true);
+    expect(isSafeRouteUrl("/users/%23section", "/users")).toBe(false);
+  });
+
+  it.each(["\t", "\n", "\r"])(
+    "rejects a control-prefixed dot segment before browser URL normalization: %j",
+    (control) => {
+      expect(isSafeRouteUrl(`/revenue/${control}../hidden`, "/revenue")).toBe(false);
+    },
+  );
+
+  it("audits compiler-loaded .mts/.cts and application imports outside src", () => {
+    const names = [
+      path.join(FRONTEND_ROOT, "src", "entry.ts"),
+      path.resolve(FRONTEND_ROOT, "..", "shared", "outside.mts"),
+      path.resolve(FRONTEND_ROOT, "..", "shared", "worker.cts"),
+    ];
+    const sources = new Map(
+      names.map((name) => [
+        path.resolve(name).toLowerCase(),
+        ts.createSourceFile(name, "export {};", ts.ScriptTarget.ES2022, true),
+      ]),
+    );
+    const options: ts.CompilerOptions = { noLib: true, noResolve: true };
+    const host: ts.CompilerHost = {
+      fileExists: (candidate) => sources.has(path.resolve(candidate).toLowerCase()),
+      getCanonicalFileName: (candidate) => candidate.toLowerCase(),
+      getCurrentDirectory: () => FRONTEND_ROOT,
+      getDefaultLibFileName: () => "lib.d.ts",
+      getNewLine: () => "\n",
+      getSourceFile: (candidate) => sources.get(path.resolve(candidate).toLowerCase()),
+      readFile: () => undefined,
+      useCaseSensitiveFileNames: () => false,
+      writeFile: () => undefined,
+    };
+    const program = ts.createProgram({ host, options, rootNames: names });
+    expect(
+      applicationProgramSourceFiles(program)
+        .map((sourceFile) => path.extname(sourceFile.fileName))
+        .sort(),
+    ).toEqual([".cts", ".mts", ".ts"]);
+  });
+
+  it("still finds the API calls we know exist, so the scan cannot pass vacuously", () => {
+    for (const prefix of SCANNER_HEALTH_PREFIXES) {
+      expect(REQUESTED_PREFIXES, `scanner lost ${prefix}`).toContain(prefix);
+    }
+  });
+
+  it('resolves the composed request root in client.get("/" + "reports")', () => {
+    const prefixes = discoverRequestedPrefixesInSource('client.get("/" + "reports");');
+    expect(prefixes).toEqual(["/reports"]);
+    expect(uncoveredPrefixes(prefixes, TENANT_SCOPED_ROUTES)).toEqual(["/reports"]);
+  });
+
+  it("tracks the typed API-client surface after the local binding is renamed", () => {
+    const source = [
+      "const api = useApiClient();",
+      'api.get("/reports/raw-files");',
+    ].join("\n");
+    const prefixes = discoverRequestedPrefixesInSource(source);
+    expect(prefixes).toEqual(["/reports"]);
+    expect(uncoveredPrefixes(prefixes, TENANT_SCOPED_ROUTES)).toEqual(["/reports"]);
+  });
+
+  it("fails closed when the canonical API-client hook itself is aliased", () => {
+    const source = [
+      "const factory = useApiClient;",
+      "const api = factory();",
+      'api.get("/reports/raw-files");',
+    ].join("\n");
+    expect(() => discoverRequestedPrefixesInSource(source)).toThrow(
+      /useApiClient hook reference useApiClient escapes direct origin syntax/iu,
+    );
+  });
+
+  it("fails closed on computed access through an API-client namespace import", () => {
+    const source = [
+      'import * as apiModule from "@/lib/api/client";',
+      'const hookName = "useApiClient" as const;',
+      "const api = apiModule[hookName]();",
+      'api.get("/reports/decoy");',
+    ].join("\n");
+    expect(() => discoverRequestedPrefixesInSource(source)).toThrow(
+      /namespace imports are forbidden in scanned application sources/iu,
+    );
+  });
+
+  it.each([
+    [
+      "Vite import.meta.glob",
+      'const modules = import.meta.glob("../shared/hidden.ts", { eager: true });',
+    ],
+    [
+      "module Worker URL",
+      'new Worker(new URL("../shared/hidden.ts", import.meta.url), { type: "module" });',
+    ],
+    [
+      "computed global Worker URL",
+      'new globalThis["Worker"](new URL("../shared/hidden.ts", import.meta.url));',
+    ],
+    [
+      "computed global Worker string",
+      'new globalThis["Worker"]("/raw.js");',
+    ],
+    [
+      "computed global SharedWorker string",
+      'new globalThis["SharedWorker"]("/raw.js");',
+    ],
+  ])("fails closed on %s outside the compiler source graph", (_label, source) => {
+    expect(() => discoverRequestedPrefixesInSource(source)).toThrow(
+      /unaudited network or dynamic-code access is forbidden outside canonical client transports|worker source is outside compiler-scanned src|worker constructors must use a direct audited identifier/iu,
+    );
+  });
+
+  it.each([
+    'import "./raw.js";',
+    'import HiddenWorker from "../shared/hidden.ts?worker"; void HiddenWorker;',
+  ])("fails closed on an unscanned executable import: %s", (source) => {
+    expect(() => discoverRequestedPrefixesInSource(source)).toThrow(
+      /unscanned executable module import is forbidden/iu,
+    );
+  });
+
+  it("fails closed on an extensionless import resolving to unscanned .js bytes", () => {
+    expect(() =>
+      discoverRequestedPrefixesInSource(
+        'import bypass from "./fixtures/extensionless-bypass"; void bypass;',
+      ),
+    ).toThrow(
+      /extensionless specifier resolves to Vite-served bytes outside the audited program/iu,
+    );
+  });
+
+  it("fails closed on a public SVG document carrying an inline script", () => {
+    expect(() =>
+      assertPublicAssetsCarryNoExecutableContent([
+        {
+          file: path.join(PUBLIC_DIR, "evil.svg"),
+          content:
+            '<svg xmlns="http://www.w3.org/2000/svg"><script>fetch("/session")</script></svg>',
+        },
+      ]),
+    ).toThrow(/executable script in a statically served public document/iu);
+  });
+
+  it("fails closed on a javascript: URI in a served public document", () => {
+    expect(() =>
+      assertPublicAssetsCarryNoExecutableContent([
+        {
+          file: path.join(PUBLIC_DIR, "evil.xhtml"),
+          content:
+            "<html><body><a href=\"JaVaScRiPt:fetch('/session')\">go</a></body></html>",
+        },
+      ]),
+    ).toThrow(/executable script in a statically served public document/iu);
+  });
+
+  it("passes non-executable public assets such as fonts", () => {
+    expect(() =>
+      assertPublicAssetsCarryNoExecutableContent([
+        {
+          file: path.join(PUBLIC_DIR, "fonts", "font.woff2"),
+          content: "   font-bytes",
+        },
+      ]),
+    ).not.toThrow();
+    expect(() =>
+      assertPublicAssetsCarryNoExecutableContent(vitePublicAssets()),
+    ).not.toThrow();
+  });
+
+  it("keeps bare, explicit-extension, and audited-target imports unchanged", () => {
+    const scannedFiles = new Set([CANONICAL_API_CLIENT_FILE]);
+    const importingFile = path.join(SRC_DIR, "lib", "api", "consumer.ts");
+    expect(() =>
+      assertSpecifierResolvesIntoAuditedProgram("react", importingFile, scannedFiles),
+    ).not.toThrow();
+    expect(() =>
+      assertSpecifierResolvesIntoAuditedProgram(
+        "./client",
+        importingFile,
+        scannedFiles,
+      ),
+    ).not.toThrow();
+    expect(() =>
+      assertSpecifierResolvesIntoAuditedProgram(
+        "./client.css",
+        importingFile,
+        scannedFiles,
+      ),
+    ).not.toThrow();
+  });
+
+  it.each([
+    'new (Reflect.get(globalThis, "Worker"))("/raw.js");',
+    'new (Reflect.get(globalThis, "SharedWorker"))("/raw.js");',
+  ])("fails closed on a reflected worker constructor: %s", (source) => {
+    expect(() => discoverRequestedPrefixesInSource(source)).toThrow(
+      /unaudited network or dynamic-code access is forbidden outside canonical client transports|dynamic code execution is forbidden/iu,
+    );
+  });
+
+  it("fails closed when a client origin is hidden by a type annotation", () => {
+    const source = [
+      "const api: { get(path: string): unknown } = useApiClient();",
+      'api.get("/reports/raw-files");',
+    ].join("\n");
+    expect(() => discoverRequestedPrefixesInSource(source)).toThrow(
+      /useApiClient\(\) must initialize one unannotated const identifier directly/iu,
+    );
+  });
+
+  it("fails closed when the client crosses a receiver-parameter boundary", () => {
+    const source = [
+      "function load(api: { get(path: string): unknown }) {",
+      '  api.get("/reports/raw-files");',
+      "}",
+      "load(useApiClient());",
+    ].join("\n");
+    expect(() => discoverRequestedPrefixesInSource(source)).toThrow(
+      /useApiClient\(\) must initialize one unannotated const identifier directly/iu,
+    );
+  });
+
+  it("fails closed when the client crosses a function-alias boundary", () => {
+    const source = [
+      "function load(api: { get(path: string): unknown }) {",
+      '  api.get("/reports/raw-files");',
+      "}",
+      "const runner = load;",
+      "runner(useApiClient());",
+    ].join("\n");
+    expect(() => discoverRequestedPrefixesInSource(source)).toThrow(
+      /useApiClient\(\) must initialize one unannotated const identifier directly/iu,
+    );
+  });
+
+  it("fails closed when the client crosses an object-method boundary", () => {
+    const source = [
+      "const loaders = {",
+      "  load(api: { get(path: string): unknown }) {",
+      '    api.get("/reports/raw-files");',
+      "  },",
+      "};",
+      "loaders.load(useApiClient());",
+    ].join("\n");
+    expect(() => discoverRequestedPrefixesInSource(source)).toThrow(
+      /useApiClient\(\) must initialize one unannotated const identifier directly/iu,
+    );
+  });
+
+  it("fails closed when the client crosses a function-valued property", () => {
+    const source = [
+      "const loaders = {",
+      "  load: (api: { get(path: string): unknown }) => {",
+      '    api.get("/reports/raw-files");',
+      "  },",
+      "};",
+      "loaders.load(useApiClient());",
+    ].join("\n");
+    expect(() => discoverRequestedPrefixesInSource(source)).toThrow(
+      /useApiClient\(\) must initialize one unannotated const identifier directly/iu,
+    );
+  });
+
+  it("fails closed when the client crosses a shorthand-property function", () => {
+    const source = [
+      "function load(api: { get(path: string): unknown }) {",
+      '  api.get("/reports/raw-files");',
+      "}",
+      "const loaders = { load };",
+      "loaders.load(useApiClient());",
+    ].join("\n");
+    expect(() => discoverRequestedPrefixesInSource(source)).toThrow(
+      /useApiClient\(\) must initialize one unannotated const identifier directly/iu,
+    );
+  });
+
+  it("fails closed when a client argument escapes an unsupported call", () => {
+    const source = [
+      "declare function opaque(value: { get(path: string): unknown }): void;",
+      "opaque(useApiClient());",
+    ].join("\n");
+    expect(() => discoverRequestedPrefixesInSource(source)).toThrow(
+      /useApiClient\(\) must initialize one unannotated const identifier directly/iu,
+    );
+  });
+
+  it("fails closed when an erased client alias escapes an unsupported call", () => {
+    const source = [
+      "declare function forward(value: unknown): void;",
+      "const erased: unknown = useApiClient();",
+      "forward(erased);",
+    ].join("\n");
+    expect(() => discoverRequestedPrefixesInSource(source)).toThrow(
+      /useApiClient\(\) must initialize one unannotated const identifier directly/iu,
+    );
+  });
+
+  it("fails closed when an erased client tuple entry escapes an unsupported call", () => {
+    const source = [
+      "declare function forward(value: unknown): void;",
+      "const clients: readonly [unknown] = [useApiClient()];",
+      "forward(clients[0]);",
+    ].join("\n");
+    expect(() => discoverRequestedPrefixesInSource(source)).toThrow(
+      /useApiClient\(\) must initialize one unannotated const identifier directly/iu,
+    );
+  });
+
+  it("fails closed when a destructured erased tuple client escapes", () => {
+    const source = [
+      "declare function forward(value: unknown): void;",
+      "const [erased]: readonly [unknown] = [useApiClient()];",
+      "forward(erased);",
+    ].join("\n");
+    expect(() => discoverRequestedPrefixesInSource(source)).toThrow(
+      /useApiClient\(\) must initialize one unannotated const identifier directly/iu,
+    );
+  });
+
+  it("fails closed when a destructuring default supplies an erased client", () => {
+    const source = [
+      "declare function forward(value: unknown): void;",
+      "const { api = useApiClient() }: { api?: unknown } = {};",
+      "forward(api);",
+    ].join("\n");
+    expect(() => discoverRequestedPrefixesInSource(source)).toThrow(
+      /useApiClient\(\) must initialize one unannotated const identifier directly/iu,
+    );
+  });
+
+  it("fails closed when the client is stored in an object literal", () => {
+    const source = [
+      "const holder: { api: { get(path: string): unknown } } = {",
+      "  api: useApiClient(),",
+      "};",
+      'holder.api.get("/reports/raw-files");',
+    ].join("\n");
+    expect(() => discoverRequestedPrefixesInSource(source)).toThrow(
+      /useApiClient\(\) must initialize one unannotated const identifier directly/iu,
+    );
+  });
+
+  it("fails closed when the client is transported through an object spread", () => {
+    const source = [
+      "const source = { api: useApiClient() };",
+      "const holder: { api: { get(path: string): unknown } } = { ...source };",
+      'holder.api.get("/reports/raw-files");',
+    ].join("\n");
+    expect(() => discoverRequestedPrefixesInSource(source)).toThrow(
+      /useApiClient\(\) must initialize one unannotated const identifier directly/iu,
+    );
+  });
+
+  it("fails closed when the client is selected by object destructuring", () => {
+    const source = [
+      "const source = { api: useApiClient() };",
+      "const { api }: { api: { get(path: string): unknown } } = source;",
+      'api.get("/reports/raw-files");',
+    ].join("\n");
+    expect(() => discoverRequestedPrefixesInSource(source)).toThrow(
+      /useApiClient\(\) must initialize one unannotated const identifier directly/iu,
+    );
+  });
+
+  it("fails closed when a narrowed client container property is overwritten", () => {
+    const source = [
+      "const holder: { api: { get(path: string): unknown } } = {",
+      "  api: useApiClient(),",
+      "};",
+      "holder.api = { get: (_path: string) => undefined };",
+      'holder.api.get("/reports/raw-files");',
+    ].join("\n");
+    expect(() => discoverRequestedPrefixesInSource(source)).toThrow(
+      /useApiClient\(\) must initialize one unannotated const identifier directly/iu,
+    );
+  });
+
+  it("fails closed on a nullable annotated client binding", () => {
+    const source = [
+      "const api: ReturnType<typeof useApiClient> | undefined = useApiClient();",
+      'api?.get("/reports/raw-files");',
+    ].join("\n");
+    expect(() => discoverRequestedPrefixesInSource(source)).toThrow(
+      /useApiClient\(\) must initialize one unannotated const identifier directly/iu,
+    );
+  });
+
+  it("tracks a literal computed method on the typed API-client surface", () => {
+    const source = [
+      "const api = useApiClient();",
+      'api["get"]("/reports/raw-files");',
+    ].join("\n");
+    expect(discoverRequestedPrefixesInSource(source)).toEqual(["/reports"]);
+  });
+
+  it("fails closed on a destructured API-client method alias", () => {
+    const source = [
+      "const api = useApiClient();",
+      "const { post } = api;",
+      'post("/reports/jobs");',
+    ].join("\n");
+    expect(() => discoverRequestedPrefixesInSource(source)).toThrow(
+      /API-client binding api escapes direct method-call syntax/iu,
+    );
+  });
+
+  it("fails closed on the narrowed-method destructuring counterexample", () => {
+    const source = [
+      "const api: { get(path: string): unknown } = useApiClient();",
+      "const { get } = api;",
+      'get("/reports/raw-files");',
+    ].join("\n");
+    expect(() => discoverRequestedPrefixesInSource(source)).toThrow(
+      /useApiClient\(\) must initialize one unannotated const identifier directly/iu,
+    );
+  });
+
+  it("fails closed on a client hidden by nested object destructuring", () => {
+    const source = [
+      "const holder = { api: useApiClient() };",
+      "const { api: { get } } = holder;",
+      'get("/reports/raw-files");',
+    ].join("\n");
+    expect(() => discoverRequestedPrefixesInSource(source)).toThrow(
+      /useApiClient\(\) must initialize one unannotated const identifier directly/iu,
+    );
+  });
+
+  it("fails closed on a destructured API-client parameter alias", () => {
+    const source = [
+      "function load({ get }: RouteScannerApiClient) {",
+      '  get("/reports/raw-files");',
+      "}",
+      "load(useApiClient());",
+    ].join("\n");
+    expect(() => discoverRequestedPrefixesInSource(source)).toThrow(
+      /useApiClient\(\) must initialize one unannotated const identifier directly/iu,
+    );
+  });
+
+  it.each([
+    [
+      "bound wrapper",
+      [
+        "const api = useApiClient();",
+        "const get = api.get.bind(api);",
+        'get("/reports/raw-files");',
+      ].join("\n"),
+    ],
+    [
+      "callback forwarding",
+      [
+        "declare function forward(value: unknown): void;",
+        "const api = useApiClient();",
+        "forward(api.get);",
+      ].join("\n"),
+    ],
+    [
+      "const-alias forwarding",
+      [
+        "declare function forward(value: unknown): void;",
+        "const api = useApiClient();",
+        "const get = api.get;",
+        "forward(get);",
+      ].join("\n"),
+    ],
+    [
+      "destructured-alias forwarding",
+      [
+        "declare function forward(value: unknown): void;",
+        "const api = useApiClient();",
+        "const { post } = api;",
+        "forward(post);",
+      ].join("\n"),
+    ],
+  ])("fails closed on unsupported API-client method escape through %s", (_label, source) => {
+    expect(() => discoverRequestedPrefixesInSource(source)).toThrow(
+      /API-client binding api escapes direct method-call syntax/iu,
+    );
+  });
+
+  it.each([
+    [
+      "identity-return wrapper",
+      [
+        "function identity<T>(value: T): T { return value; }",
+        "const erased = identity<unknown>(useApiClient());",
+      ].join("\n"),
+    ],
+    [
+      "function alias returning the client",
+      [
+        "function erase(value: RouteScannerApiClient): unknown { return value; }",
+        "const alias = erase;",
+        "const erased = alias(useApiClient());",
+      ].join("\n"),
+    ],
+    [
+      "object-return wrapper",
+      "const holder = { api: useApiClient() };",
+    ],
+    [
+      "tuple transport",
+      "const tuple = [useApiClient()] as const;",
+    ],
+    [
+      "constructor transport",
+      [
+        "class Box { constructor(readonly value: unknown) {} }",
+        "const box = new Box(useApiClient());",
+      ].join("\n"),
+    ],
+    [
+      "zero-argument closure",
+      "const make = (): unknown => useApiClient();",
+    ],
+    [
+      "class getter",
+      "class Holder { get api(): unknown { return useApiClient(); } }",
+    ],
+    [
+      "logical expression",
+      [
+        "declare const enabled: boolean;",
+        "const erased = enabled && useApiClient();",
+      ].join("\n"),
+    ],
+    [
+      "later assignment",
+      [
+        "let erased: unknown;",
+        "erased = useApiClient();",
+      ].join("\n"),
+    ],
+    [
+      "destructuring assignment",
+      [
+        "let erased: unknown;",
+        "({ api: erased } = { api: useApiClient() });",
+      ].join("\n"),
+    ],
+    [
+      "object rest",
+      "const { keep, ...rest } = { keep: true, api: useApiClient() };",
+    ],
+  ])("fails closed when useApiClient is laundered through %s", (_label, source) => {
+    expect(() => discoverRequestedPrefixesInSource(source)).toThrow(
+      /useApiClient\(\) must initialize one unannotated const identifier directly/iu,
+    );
+  });
+
+  it.each([
+    [
+      "wrapper argument",
+      [
+        "const api = useApiClient();",
+        "declare function erase(value: unknown): unknown;",
+        "const erased = erase(api);",
+      ].join("\n"),
+    ],
+    [
+      "mutable object holder",
+      [
+        "const api = useApiClient();",
+        "const holder: { value: unknown } = { value: undefined };",
+        "holder.value = api;",
+      ].join("\n"),
+    ],
+    [
+      "mutable tuple holder",
+      [
+        "const api = useApiClient();",
+        "const tuple: unknown[] = [];",
+        "tuple[0] = api;",
+      ].join("\n"),
+    ],
+    [
+      "higher-order callback",
+      [
+        "const api = useApiClient();",
+        "declare function later(callback: () => unknown): void;",
+        "later(() => api);",
+      ].join("\n"),
+    ],
+    [
+      "object shorthand",
+      [
+        "const api = useApiClient();",
+        "declare function load(holder: { api: unknown }): void;",
+        "load({ api });",
+      ].join("\n"),
+    ],
+    [
+      "object-rest laundering",
+      [
+        "const api = useApiClient();",
+        "const source = { keep: true, api };",
+        "const { keep, ...rest } = source;",
+        "void rest;",
+      ].join("\n"),
+    ],
+  ])("fails closed when a direct client binding escapes through %s", (_label, source) => {
+    expect(() => discoverRequestedPrefixesInSource(source)).toThrow(
+      /API-client binding api escapes direct method-call syntax/iu,
+    );
+  });
+
+  it.each([
+    ["direct", 'fetch("/reports/raw-files");'],
+    [
+      "aliased computed member",
+      [
+        'const send = globalThis["fetch"];',
+        'send("/reports/raw-files");',
+      ].join("\n"),
+    ],
+    [
+      "Reflect.get alias",
+      [
+        'const send = Reflect.get(globalThis, "fetch");',
+        'send("/reports/raw-files");',
+      ].join("\n"),
+    ],
+    [
+      "Reflect.get through document.defaultView",
+      'Reflect.get(document.defaultView!, "fetch")("/reports/raw-files");',
+    ],
+    [
+      "Object.getOwnPropertyDescriptor through document.defaultView",
+      'Object.getOwnPropertyDescriptor(document.defaultView!, "fetch")!.value("/reports/raw-files");',
+    ],
+    [
+      "aliased Reflect.get",
+      'const read = Reflect.get; read(document.defaultView!, "fetch")("/reports/raw-files");',
+    ],
+    [
+      "Function constructor chain",
+      '((() => {}).constructor as FunctionConstructor)("return fetch(\\"/reports/raw-files\\")")();',
+    ],
+    [
+      "XMLHttpRequest",
+      'new XMLHttpRequest().open("GET", "/reports/raw-files");',
+    ],
+    [
+      "sendBeacon",
+      'navigator.sendBeacon("/reports/raw-files", "payload");',
+    ],
+    [
+      "EventSource",
+      'new EventSource("/reports/raw-files");',
+    ],
+    [
+      "WebSocket",
+      'new WebSocket("ws://127.0.0.1/reports/raw-files");',
+    ],
+  ])("fails closed on %s raw network access", (_label, source) => {
+    expect(() => discoverRequestedPrefixesInSource(source)).toThrow(
+      /unaudited network or dynamic-code access is forbidden outside canonical client transports|dynamic code execution is forbidden/iu,
+    );
+  });
+
+  it.each([
+    'setTimeout("fetch(\\"/hidden\\")", 0);',
+    'setTimeout(atob("ZmV0Y2goJy9oaWRkZW4nKQ=="), 0);',
+    'setTimeout(window.name, 0);',
+    'const timer = setTimeout; timer("fetch(\\"/hidden\\")", 0);',
+    '(0, setTimeout)("fetch(\\"/hidden\\")", 0);',
+  ])("fails closed when a string timer escapes direct-call syntax: %s", (source) => {
+    expect(() => discoverRequestedPrefixesInSource(source)).toThrow(
+      /timer references must be direct calls with a callable handler|unaudited network or dynamic-code access is forbidden/iu,
+    );
+  });
+
+  it.each([
+    ["direct eval", 'eval("client.get(\\"/hidden\\")");'],
+    ["Function constructor", 'new Function("return fetch(\\"/hidden\\")");'],
+    ["computed global eval", 'globalThis["eval"]("void 0");'],
+    [
+      "computed global Function constructor",
+      'globalThis["Function"]("return void 0")();',
+    ],
+    [
+      "reflected eval",
+      'Reflect.get(globalThis, "eval")("void 0");',
+    ],
+    [
+      "reflected Function constructor",
+      'Reflect.get(globalThis, "Function")("return void 0")();',
+    ],
+  ])("fails closed on %s dynamic code", (_label, source) => {
+    expect(() => discoverRequestedPrefixesInSource(source)).toThrow(
+      /dynamic code execution is forbidden|unaudited network or dynamic-code access is forbidden/iu,
+    );
+  });
+
+  it("fails closed on an exported fetch wrapper inside the canonical client module", () => {
+    const source = 'export const loadRaw = () => fetch("/reports/raw-files");';
+    expect(() =>
+      discoverRequestedPrefixesInSource(source, [], {}, true),
+    ).toThrow(/unaudited network or dynamic-code access is forbidden outside canonical client transports/iu);
+  });
+
+  it("fails closed when the API-client method surface gains an unscanned transport", () => {
+    expect(() => discoverRequestedPrefixesInSource("", ["trace"])).toThrow(
+      /API-client method surface changed:.*trace/iu,
+    );
+  });
+
+  it("fails closed when an existing method moves its path away from argument 0", () => {
+    expect(() =>
+      discoverRequestedPrefixesInSource("", [], { get: "scope" }),
+    ).toThrow(/API-client method get must take string path as argument 0/iu);
+  });
+
+  it("anchors useApiClient to the canonical declaration, not a structural shadow", () => {
+    const source = [
+      "{",
+      "  const useApiClient = () => ({",
+      ...API_CLIENT_METHOD_NAMES.map(
+        (method) => `    ${method}: (_path: string) => undefined,`,
+      ),
+      "  });",
+      "  const shadow = useApiClient();",
+      '  shadow.get("/reports/decoy");',
+      "}",
+    ].join("\n");
+    expect(discoverRequestedPrefixesInSource(source)).toEqual([]);
+  });
+
+  it("does not accept a nested exported hook lookalike inside the canonical module", () => {
+    const source = [
+      "namespace Decoy {",
+      "  export const useApiClient = () => ({",
+      ...API_CLIENT_METHOD_NAMES.map(
+        (method) => `    ${method}: (_path: string) => undefined,`,
+      ),
+      "  });",
+      "  const shadow = useApiClient();",
+      '  shadow.get("/reports/decoy");',
+      "}",
+    ].join("\n");
+    expect(
+      discoverRequestedPrefixesInSource(source, [], {}, true),
+    ).toEqual([]);
+  });
+
+  it("does not mistake a local hook lookalike for an approved React dependency sink", () => {
+    const source = [
+      "declare function useEffect(effect: () => void, dependencies: unknown[]): void;",
+      "const api = useApiClient();",
+      "useEffect(() => undefined, [api]);",
+    ].join("\n");
+    expect(() => discoverRequestedPrefixesInSource(source)).toThrow(
+      /API-client binding api escapes direct method-call syntax/iu,
+    );
+  });
+
+  it("resolves a const-backed interpolation in client.get(`/${resource}/daily`)", () => {
+    // Build the interpolation delimiter without putting a template-like string
+    // in this test module; the virtual source is exactly the regression shape.
+    const interpolation = String.fromCharCode(36, 123);
+    const source = [
+      'const resource = "reports";',
+      ["client.get(`/", interpolation, "resource}/daily`);"].join(""),
+    ].join("\n");
+    const prefixes = discoverRequestedPrefixesInSource(source);
+    expect(prefixes).toEqual(["/reports"]);
+    expect(uncoveredPrefixes(prefixes, TENANT_SCOPED_ROUTES)).toEqual(["/reports"]);
+  });
+
+  it("fails closed when a dynamic expression controls the request root", () => {
+    const interpolation = String.fromCharCode(36, 123);
+    const source = [
+      "declare function runtimeResource(): string;",
+      "const resource = runtimeResource();",
+      ["client.get(`/", interpolation, "resource}/daily`);"].join(""),
+    ].join("\n");
+    expect(() => discoverRequestedPrefixesInSource(source)).toThrow(
+      /Cannot prove API request root.*statically provable/iu,
+    );
+  });
+
+  it("fails closed when a path builder reassigns a substituted parameter", () => {
+    const interpolation = String.fromCharCode(36, 123);
+    const source = [
+      "declare function runtimeResource(): string;",
+      "const build = (root: string) => {",
+      "  root = runtimeResource();",
+      ["  return `/", interpolation, "root}/daily`;"].join(""),
+      "};",
+      'client.get(build("reports"));',
+    ].join("\n");
+    expect(() => discoverRequestedPrefixesInSource(source)).toThrow(
+      /expression has no statically provable leading path segment/iu,
+    );
+  });
+
+  it("fails closed when a default initializer reassigns a builder parameter", () => {
+    const interpolation = String.fromCharCode(36, 123);
+    const source = [
+      "declare function runtimeResource(): string;",
+      "const build = (",
+      "  root: string,",
+      "  ignored = (root = runtimeResource()),",
+      ") => {",
+      ["  return `/", interpolation, "root}/daily`;"].join(""),
+      "};",
+      'client.get(build("reports"));',
+    ].join("\n");
+    expect(() => discoverRequestedPrefixesInSource(source)).toThrow(
+      /expression has no statically provable leading path segment/iu,
+    );
+  });
+
+  it("fails closed when a mutable binding replaces a path builder", () => {
+    const source = [
+      "declare const runtimeBuilder: () => string;",
+      'let build = () => "/reports";',
+      "build = runtimeBuilder;",
+      "client.get(build());",
+    ].join("\n");
+    expect(() => discoverRequestedPrefixesInSource(source)).toThrow(
+      /called function alias is mutable|request path builder must have one inspectable implementation/iu,
+    );
+  });
+
+  it("fails closed when spread arguments obscure path-builder parameter positions", () => {
+    const source = [
+      'const build = (_ignored: string, root = "/hidden") => root;',
+      "const none = [] as const;",
+      'client.get(build(...none, "/reports"));',
+    ].join("\n");
+    expect(() => discoverRequestedPrefixesInSource(source)).toThrow(
+      /spread arguments in request path builders are unsupported/iu,
+    );
+  });
+
+  it("fails closed when a function-declaration path builder is reassigned", () => {
+    const source = [
+      "declare const runtimeBuilder: (path: string) => string;",
+      "function route(path: string) { return path; }",
+      "route = runtimeBuilder;",
+      'client.get(route("/reports"));',
+    ].join("\n");
+    expect(() => discoverRequestedPrefixesInSource(source)).toThrow(
+      /function-declaration request path builders are unsupported/iu,
+    );
+  });
+
+  it.each([
+    [
+      "new receiver",
+      [
+        "class Routes { route(path: string) { return path; } }",
+        'client.get(new Routes().route("/reports"));',
+      ].join("\n"),
+    ],
+    [
+      "const instance receiver",
+      [
+        "class Routes { route(path: string) { return path; } }",
+        "const routes = new Routes();",
+        'client.get(routes.route("/reports"));',
+      ].join("\n"),
+    ],
+    [
+      "object-property builder",
+      [
+        "const builders = { route: (path: string) => path };",
+        'client.get(builders.route("/reports"));',
+      ].join("\n"),
+    ],
+  ])("fails closed on a method/property path builder through %s", (_label, source) => {
+    expect(() => discoverRequestedPrefixesInSource(source)).toThrow(
+      /method-backed request path builders are unsupported|property-backed request path builders are unsupported/iu,
+    );
+  });
+
+  it("fails closed when for-of overwrites a substituted builder parameter", () => {
+    const interpolation = String.fromCharCode(36, 123);
+    const source = [
+      "declare function runtimeRoots(): string[];",
+      "const build = (root: string) => {",
+      "  for (root of runtimeRoots()) {}",
+      ["  return `/", interpolation, "root}/daily`;"].join(""),
+      "};",
+      'client.get(build("reports"));',
+    ].join("\n");
+    expect(() => discoverRequestedPrefixesInSource(source)).toThrow(
+      /expression has no statically provable leading path segment/iu,
+    );
+  });
+
+  it("ignores API-looking paths that are not API-client call arguments", () => {
+    const source = '// client.get("/reports/raw-files")\nconst x = "/hidden";\n';
+    expect(discoverRequestedPrefixesInSource(source)).toEqual([]);
+  });
+
+  it("proxies every statically discovered canonical-client prefix", () => {
+    expect(uncoveredPrefixes(REQUESTED_PREFIXES, TENANT_SCOPED_ROUTES)).toEqual([]);
+  });
+
+  it("would have caught the historical /org-units omission", () => {
+    // The list exactly as it stood before W0.2. This is the whole point of the
+    // rewrite: the previous revision of this file compared TENANT_SCOPED_ROUTES
+    // to a hand-copy of itself, so against THIS list it was still green.
+    // `/users` does not appear in the expectation because nothing under src/
+    // calls it yet — it is proxied ahead of the UI that will.
+    const preW02Routes = [
+      "/tenants",
+      "/session",
+      "/revenue",
+      "/finance-close",
+      "/exports",
+      "/connectors",
+      "/adsense",
+      "/channels",
+      "/groups",
+      "/audit",
+    ];
+    expect(uncoveredPrefixes(REQUESTED_PREFIXES, preW02Routes)).toEqual(["/org-units"]);
+  });
+
+  // REJECT side of the matrix. One case per prefix the application actually
+  // calls: drop that prefix from the list and the check must name it. This is
+  // what the old hand-copied assertion could not do — it compared the list to
+  // itself, so an omission was invisible on both sides.
+  it.each(REQUESTED_PREFIXES)(
+    "fails when %s is omitted from TENANT_SCOPED_ROUTES",
+    (prefix) => {
+      const withoutPrefix = TENANT_SCOPED_ROUTES.filter((route) => route !== prefix);
+      expect(uncoveredPrefixes(REQUESTED_PREFIXES, withoutPrefix)).toEqual([prefix]);
+    },
+  );
+});
+
+describe("dev proxy route list", () => {
+  it("proxies exactly the tenant-scoped routes (change-detector for additions)", () => {
+    expect(TENANT_SCOPED_ROUTES).toEqual(EXPECTED_ROUTES);
+  });
+
+  it("includes /org-units so the Registry view's Company/Sector names resolve", () => {
+    // Regression guard: RegistryView calls useOrgUnits() on mount. Unproxied,
+    // that GET is answered by the dev server itself with an empty 404, the
+    // columns show raw ids for the whole session, and the mapping form's
+    // company picker holds nothing but its placeholder — with no error
+    // surfaced anywhere.
+    expect(TENANT_SCOPED_ROUTES).toContain("/org-units");
+  });
+
+  it("includes /users, which rides the same trusted-gateway lane", () => {
+    // Listed ahead of the UI that will call it, so the first screen to need it
+    // does not have to rediscover the unproxied-route 404. It is therefore
+    // expected NOT to appear in REQUESTED_PREFIXES yet.
+    expect(TENANT_SCOPED_ROUTES).toContain("/users");
+  });
+
+  it("builds a header-injecting entry for every route", () => {
+    const proxy = buildTenantScopedProxy(TENANT_SCOPED_ROUTES, BACKEND_TARGET, GATEWAY_HEADERS);
+    expect(Object.keys(proxy)).toEqual(EXPECTED_ROUTES.map(proxyContextForRoute));
+    for (const route of EXPECTED_ROUTES) {
+      const entry = asConfigurableEntry(proxy[proxyContextForRoute(route)], route);
+      expect(entry.target).toBe(BACKEND_TARGET);
+      expect(entry.changeOrigin).toBe(true);
+      expect(headerMutations(entry, route)).toEqual({
+        removed: TRUSTED_GATEWAY_HEADERS,
+        injected: GATEWAY_HEADERS,
+      });
+    }
+  });
+});

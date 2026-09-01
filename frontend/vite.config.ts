@@ -1,35 +1,32 @@
 import path from "node:path";
-import { fileURLToPath, URL } from "node:url";
+import { fileURLToPath } from "node:url";
 
 import tailwindcss from "@tailwindcss/vite";
 import react from "@vitejs/plugin-react";
-import { defineConfig, loadEnv } from "vite";
+import { defineConfig, loadEnv, type Plugin } from "vite";
 
-// Every backend API prefix the dashboard calls in dev must be proxied with the
-// same injected trusted-principal headers as /tenants, so the browser bundle
-// never holds the gateway secret and the backend's
-// current_principal_from_headers dependency succeeds. Mirrors the production
-// reverse-proxy model where the trusted gateway injects principal identity.
-const TENANT_SCOPED_ROUTES = [
-  "/tenants",
-  // /session/me hydrates the authenticated principal's capabilities and uses
-  // the same trusted-gateway auth as /tenants/me, so it must be proxied with the
-  // injected principal headers in dev or the bootstrap call would 401.
-  "/session",
-  "/revenue",
-  "/finance-close",
-  "/exports",
-  "/connectors",
-  "/adsense",
-  "/channels",
-  // The Groups view's list/clear/archive calls hit /groups and must ride the
-  // same injected trusted-principal proxying in dev as the other tenant routes.
-  "/groups",
-  // /audit/events bootstraps on the Audit view mount and uses the same
-  // trusted-gateway auth, so it must be proxied with the injected principal
-  // headers in dev or the bootstrap call would 401.
-  "/audit",
-];
+import {
+  DEFAULT_BACKEND_TARGET,
+  TENANT_SCOPED_ROUTES,
+  TRUSTED_BACKEND_ORIGINS_ENV,
+  buildTenantScopedProxy,
+  parseTrustedBackendOrigins,
+  resolveDevBackendTarget,
+  resolveGatewayHeaders,
+} from "./devProxy";
+
+export {
+  DEFAULT_BACKEND_TARGET,
+  TENANT_SCOPED_ROUTES,
+  TRUSTED_BACKEND_ORIGINS_ENV,
+  TRUSTED_GATEWAY_HEADERS,
+  buildTenantScopedProxy,
+  isSafeRouteUrl,
+  parseTrustedBackendOrigins,
+  proxyContextForRoute,
+  resolveDevBackendTarget,
+  resolveGatewayHeaders,
+} from "./devProxy";
 
 // Repo root is one level above this file (frontend/vite.config.ts -> ..).
 // Resolving relative to import.meta.url (not process.cwd()) makes the env
@@ -38,124 +35,149 @@ const TENANT_SCOPED_ROUTES = [
 // without this, loadEnv resolved to frontend/.env and silently skipped the
 // repo-root .env where UMS_TRUSTED_GATEWAY_TOKEN and the VITE_DEV_* dev
 // defaults are documented, leaving the dev proxy 401-ing.
-const REPO_ROOT = path.resolve(
-  path.dirname(fileURLToPath(import.meta.url)),
-  "..",
-);
+const FRONTEND_ROOT = path.dirname(fileURLToPath(import.meta.url));
+const REPO_ROOT = path.resolve(FRONTEND_ROOT, "..");
 
-// The full trusted-principal header set the dev proxy injects, as
-// [header, env var, fallback] triples. The set is what makes the backend's
-// current_principal_from_headers dependency succeed in the default
-// UMS_AUTHZ_SOURCE=headers mode (it requires X-User-ID, X-User-Email, X-Role,
-// X-Scope-Type, and the gateway token). Per-header notes:
-//   - SECURITY: the trusted-gateway token is read from a non-VITE_ env var only.
-//     Any VITE_*-prefixed variable Vite reads here also becomes available to
-//     client code via import.meta.env at build time, which would leak the token
-//     into the browser bundle. Server-only names (UMS_TRUSTED_GATEWAY_TOKEN)
-//     stay confined to Node and never reach the browser.
-//   - X-UMS-Tenant is overridden or supplied by the proxy. The bootstrap call
-//     from <TenantProvider> ships with no slug, and downstream calls may carry a
-//     stale "ums" — the proxy is the authority during dev, matching the
-//     production gateway contract, which is the source of truth for tenant
-//     identity rather than the browser bundle. The "ums" fallback keeps local
-//     dev pointed at the seeded tenant unless explicitly overridden.
-//   - X-Scope-ID is optional: it applies to non-global dev identities only, and
-//     its empty fallback omits it, which is safe for global-scope dev.
-// The non-secret dev defaults (user id/email/role/scope_type/tenant slug) keep
-// the VITE_DEV_ prefix only because they are intentionally non-secret.
-const GATEWAY_HEADER_SOURCES: [header: string, envVar: string, fallback: string][] = [
-  ["X-User-ID", "VITE_DEV_GATEWAY_USER_ID", "00000000-0000-0000-0000-0000000000aa"],
-  ["X-User-Email", "VITE_DEV_GATEWAY_USER_EMAIL", "dev@ums.local"],
-  ["X-Role", "VITE_DEV_GATEWAY_ROLE", "assistant_analyst"],
-  ["X-Scope-Type", "VITE_DEV_GATEWAY_SCOPE_TYPE", "global"],
-  ["X-UMS-Trusted-Gateway-Token", "UMS_TRUSTED_GATEWAY_TOKEN", ""],
-  ["X-UMS-Tenant", "VITE_DEV_GATEWAY_TENANT_SLUG", "ums"],
-  ["X-Scope-ID", "VITE_DEV_GATEWAY_SCOPE_ID", ""],
-];
+/** True only for the development serve command; builds and preview stay inert. */
+export const shouldEnableDevGateway = (
+  command: string,
+  mode: string,
+  isPreview = false,
+): boolean => command === "serve" && mode === "development" && !isPreview;
 
-// Resolve that set once per config load, in declaration order. A blank value —
-// an empty fallback, or an env var explicitly set to "" — drops its header, so
-// the proxy sends exactly the headers the previous per-header guards sent.
-const resolveGatewayHeaders = (env: Record<string, string>): [string, string][] => {
-  const resolved = GATEWAY_HEADER_SOURCES.map(
-    ([header, envVar, fallback]) => [header, env[envVar] ?? fallback] as [string, string],
-  );
-  return resolved.filter(([, value]) => value !== "");
-};
-
-/**
- * Load repo-root env and derive the dev-proxy inputs (backend target +
- * injected trusted-principal headers), emitting the missing-token startup
- * hint when the gateway secret is absent. Extracted from defineConfig to keep
- * its body under the cyclomatic-complexity threshold.
- */
-const loadDevProxy = (mode: string) => {
-  const env = loadEnv(mode, REPO_ROOT, "");
-  const backendTarget = env.VITE_DEV_BACKEND_URL ?? "http://127.0.0.1:8000";
-  const gatewayHeaders = resolveGatewayHeaders(env);
-  const gatewayToken = env.UMS_TRUSTED_GATEWAY_TOKEN ?? "";
-
-  if (mode === "development" && !gatewayToken) {
-    console.warn(
-      "[vite] UMS_TRUSTED_GATEWAY_TOKEN is empty; " +
-        `proxied routes (${TENANT_SCOPED_ROUTES.join(", ")}) will 401.`,
-    );
+/** True only for explicit loopback bind hosts; wildcard/network binds are unsafe. */
+export const isLoopbackDevServerHost = (host: string | boolean | undefined): boolean => {
+  if (typeof host !== "string") {
+    return false;
   }
-  return { backendTarget, gatewayHeaders };
+  const normalized = host.trim().replace(/^\[|\]$/gu, "").replace(/\.$/u, "")
+    .toLowerCase();
+  if (normalized === "localhost" || normalized === "::1") {
+    return true;
+  }
+  const octets = normalized.split(".");
+  return octets.length === 4 &&
+    octets[0] === "127" &&
+    octets.every((octet) => /^\d{1,3}$/u.test(octet) && Number(octet) <= 255);
 };
 
-/**
- * Build the Vite proxy config for every tenant-scoped route, injecting the
- * resolved trusted-principal headers on each proxyReq so the backend's
- * current_principal_from_headers dependency succeeds in dev.
- */
-const buildTenantScopedProxy = (
-  routes: readonly string[],
-  backendTarget: string,
-  gatewayHeaders: [string, string][],
-): Record<string, object> =>
-  Object.fromEntries(
-    routes.map((route) => [
-      route,
-      {
-        target: backendTarget,
-        changeOrigin: true,
-        configure(proxy: { on: (event: string, fn: (req: unknown) => void) => void }) {
-          proxy.on("proxyReq", (proxyReq: unknown) => {
-            for (const [header, value] of gatewayHeaders) {
-              (proxyReq as { setHeader: (h: string, v: string) => void }).setHeader(header, value);
-            }
-          });
-        },
-      },
-    ]),
-  );
+// ============================================================================
+// Purpose: Recheck Vite's final resolved bind host after CLI/inline overrides.
+// Database/ORM: None.
+// Standards: Fail closed before listen whenever the trusted dev proxy would be
+//   reachable through a wildcard or non-loopback interface.
+// Blast Radius: Development server startup and trusted-header proxy exposure.
+// Connections:
+//   - File: frontend/devProxy.ts -> proxy injects trusted gateway claims.
+//   - File: frontend/tests/devProxySecurity.test.ts -> real override probes.
+// ============================================================================
+const resolvedDevGatewayHostGuard = (): Plugin => {
+  /** Fail closed unless the resolved server is loopback-bound and not middleware. */
+  const assertSafeServerBoundary = (server: {
+    host?: string | boolean;
+    middlewareMode?: boolean | { server: unknown };
+  }): void => {
+    if (server.middlewareMode) {
+      throw new Error(
+        "trusted development gateway cannot run in Vite middleware mode",
+      );
+    }
+    const { host } = server;
+    if (!isLoopbackDevServerHost(host)) {
+      throw new Error(
+        `trusted development gateway requires an explicit loopback Vite host; received ${String(host)}`,
+      );
+    }
+  };
+  return {
+    name: "ums-dev-gateway-loopback-host-guard",
+    configResolved(config) {
+      // FIX: Inline/CLI host overrides win after the file's server.host value;
+      // middleware mode can also mount this proxy on an external HTTP server.
+      assertSafeServerBoundary(config.server);
+    },
+    configureServer(server) {
+      assertSafeServerBoundary(server.config.server);
+    },
+  };
+};
 
-export default defineConfig(({ mode }) => {
+// ============================================================================
+// Purpose: Resolve the complete development proxy only for Vite's development
+//   serve command; build and preview modes receive no trusted-header proxy.
+// Database/ORM: None.
+// Standards: Fail closed on blank token/scope configuration and validate the
+//   backend target before any request can carry a trusted header.
+// Blast Radius: Frontend development server only.
+// Connections:
+//   - File: frontend/devProxy.ts -> owns boundary validation and proxy hooks.
+//   - File: frontend/tests/devProxySecurity.test.ts -> proves activation modes.
+// ============================================================================
+export const resolveDevGatewayProxy = (
+  command: string,
+  mode: string,
+  env: Record<string, string>,
+  isPreview = false,
+) => {
+  if (!shouldEnableDevGateway(command, mode, isPreview)) {
+    return undefined;
+  }
+  const trustedOrigins = parseTrustedBackendOrigins(
+    env[TRUSTED_BACKEND_ORIGINS_ENV] ?? "",
+  );
+  const backendTarget = resolveDevBackendTarget(
+    env.VITE_DEV_BACKEND_URL ?? DEFAULT_BACKEND_TARGET,
+    trustedOrigins,
+  );
+  const gatewayHeaders = resolveGatewayHeaders(env);
+  return buildTenantScopedProxy(
+    TENANT_SCOPED_ROUTES,
+    backendTarget,
+    gatewayHeaders,
+    trustedOrigins,
+  );
+};
+
+export default defineConfig(({ command, mode, isPreview }) => {
   // ============================================================================
   // Purpose: Load env from the repository root in Node only. VITE_-prefixed
   //          names are EXPOSED to the client bundle via import.meta.env, so
   //          secrets must use non-VITE_ names (UMS_TRUSTED_GATEWAY_TOKEN).
   //          Non-secret dev defaults (user id/email/role/scope_type) keep the
   //          VITE_DEV_ prefix only because they are intentionally non-secret.
+  // Database/ORM: None.
   // Standards: Server-only secret read from process env; never embedded in code.
   //            envDir is pinned to REPO_ROOT so root `.env.example` documents
   //            the canonical location and `cd frontend && npm run dev` cannot
   //            silently load a different env file.
   // Blast Radius: Frontend dev proxy only — no production bundle exposure.
+  // Connections:
+  //   - File: frontend/devProxy.ts -> validates routes, target, origin, and headers.
+  //   - File: .env.example -> documents the development gateway inputs.
   // ============================================================================
-  const { backendTarget, gatewayHeaders } = loadDevProxy(mode);
+  const devProxy = shouldEnableDevGateway(command, mode, isPreview)
+    ? resolveDevGatewayProxy(command, mode, loadEnv(mode, REPO_ROOT, ""), isPreview)
+    : undefined;
 
   return {
-    plugins: [react(), tailwindcss()],
+    plugins: [
+      ...(devProxy ? [resolvedDevGatewayHostGuard()] : []),
+      react(),
+      tailwindcss(),
+    ],
     envDir: REPO_ROOT,
     resolve: {
       alias: {
-        "@": fileURLToPath(new URL("./src", import.meta.url)),
+        "@": path.resolve(FRONTEND_ROOT, "src"),
       },
     },
     server: {
-      proxy: buildTenantScopedProxy(TENANT_SCOPED_ROUTES, backendTarget, gatewayHeaders),
+      host: "127.0.0.1",
+      // FIX: /@fs defaults to Vite's workspace-root search, which can reach
+      // past frontend/ to repo-root bytes the dev-gateway audit never
+      // enumerates. Pin the servable filesystem to the audited frontend root.
+      fs: { allow: [FRONTEND_ROOT] },
+      ...(devProxy ? { proxy: devProxy } : {}),
     },
   };
 });

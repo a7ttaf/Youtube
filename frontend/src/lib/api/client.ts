@@ -3,17 +3,19 @@ import { useMemo } from "react";
 
 import { useTenant } from "@/contexts/TenantContext";
 
+import { assertTrustedApiRoute } from "./trustedRoutes";
+
+// The JSON media type this client both requests and detects. Named once so the
+// Accept header, the Content-Type it sets on JSON bodies, and the response
+// content-type sniff in parseBody can never drift apart.
+const JSON_MEDIA_TYPE = "application/json";
+
 /**
  * Typed error thrown by the API client for any non-2xx response (and for a 2xx
  * response whose declared-JSON body fails to parse). Carries the HTTP status,
  * the parsed (or raw-text) response body, and the resolved request URL so
  * callers can branch on `instanceof ApiError` + status (e.g. 403 scope guards).
  */
-// The JSON media type this client both requests and detects. Named once so the
-// Accept header, the Content-Type it sets on JSON bodies, and the response
-// content-type sniff in parseBody can never drift apart.
-const JSON_MEDIA_TYPE = "application/json";
-
 export class ApiError extends Error {
   readonly name = "ApiError";
   constructor(
@@ -29,17 +31,37 @@ export class ApiError extends Error {
 /**
  * Resolve a request path against the configured API origin.
  *
- * An already-absolute http(s) URL is returned untouched. Otherwise the path is
+ * An absolute http(s) URL is accepted only when its origin matches either the
+ * configured API base or the browser's own origin. Otherwise the path is
  * prefixed with VITE_API_BASE_URL (trailing slashes stripped); when no base is
- * configured this returns the original relative path unchanged, so same-origin
- * deployments keep byte-identical relative URLs. Exported so non-JSON surfaces
- * (e.g. binary download anchors) can target the same API origin the JSON client
- * uses instead of hard-coding a relative href against the frontend origin.
+ * configured this returns the original relative path unchanged. Exported so
+ * non-JSON surfaces can target the same audited API origin as the JSON client.
  */
 export const resolveUrl = (path: string): string => {
-  if (/^https?:\/\//i.test(path)) return path;
+  // FIX: The canonical browser client and trusted dev proxy now consume the
+  // same route-root contract; a new request cannot outrun proxy coverage.
+  assertTrustedApiRoute(path);
   const raw = import.meta.env.VITE_API_BASE_URL ?? "";
   const base = raw.replace(/\/+$/, "");
+  if (/^https?:\/\//i.test(path)) {
+    const requestUrl = new URL(path);
+    const trustedOrigins = new Set<string>();
+    if (/^https?:\/\//i.test(base)) {
+      trustedOrigins.add(new URL(base).origin);
+    }
+    const browserOrigin = globalThis.location?.origin;
+    if (browserOrigin) {
+      trustedOrigins.add(browserOrigin);
+    }
+    if (
+      requestUrl.username ||
+      requestUrl.password ||
+      !trustedOrigins.has(requestUrl.origin)
+    ) {
+      throw new Error("API request URL origin is outside the configured API origin");
+    }
+    return path;
+  }
   const normalisedPath = path.startsWith("/") ? path : `/${path}`;
   return `${base}${normalisedPath}`;
 };
