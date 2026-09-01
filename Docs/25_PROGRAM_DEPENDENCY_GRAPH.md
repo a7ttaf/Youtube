@@ -76,7 +76,7 @@ PR #210 is historical: it merged on 2026-08-29 into the non-main
 | --- | --- |
 | All current #220 review threads resolved | Re-check after the final push; the DAG status above must be updated from the same repoll |
 | P0-a…P0-e merged to `main` | A1, beta runbook, living Docs/21 status |
-| USD manifest preflight + immutable PostgreSQL import-batch ledger + audited replacement + resumable import + complete-roster/exact-fact-set comparison green (implemented and suite-validated on `feat/p02a-manual-import-gate` 7dd97dd0a, 3135 passed / 0 failed on fresh PostgreSQL — pending push/merge; merge before the first real import) | Any real manual revenue import / claim that a month is complete |
+| USD manifest preflight + immutable PostgreSQL import-batch ledger + audited replacement + resumable import + complete-roster/exact-fact-set comparison green (implemented and suite-validated on `feat/p02a-manual-import-gate` cd9ef6555 — 3135 passed / 0 failed on fresh PostgreSQL at 7dd97dd0a plus the 7-test runner battery over the real app at cd9ef6555, which caught and fixed two runner API-shape defects; pending push/merge; merge before the first real import) | Any real manual revenue import / claim that a month is complete |
 | Proposed `ci-fast` + `ci-database` + `ci-frontend` gates in #226 | Future review-readiness gate; not active on current `main` |
 | Final reviewed PR #227 SHA supplied, exact contract verified, then merged | U2 country ingest; intermediate/open heads are not shipped evidence |
 | D-U1 AdSense rate confirmed + config row written | U3 estimate surfaces |

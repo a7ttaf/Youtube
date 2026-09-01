@@ -237,19 +237,22 @@ The beta import runner and API boundary must fail closed as one contract:
 **Acceptance criteria (P0.2a):**
 - [x] Missing/mixed/EGP source metadata turns the preflight RED with zero facts written
   (implemented + tested: non-USD rejection and exactly-USD-literal tests)
-- [ ] Kill-after-N test leaves a partial month; rerun converges to the exact intended set without duplicates
-  (runner script shipped but not yet test-driven — open until a runner-level test exists)
+- [x] Kill-after-N test leaves a partial month; rerun converges to the exact intended set without duplicates
+  (runner-level test drives the real script over a TestClient socket:
+  test_runner_converges_partial_month_and_rerun_is_idempotent)
 - [x] Reduced-manifest test starts with an extra stale manual fact; audited open-month
   replacement removes/supersedes that extra and retry remains idempotent
   (implemented + tested: provenance-preserving removal, replay idempotency)
-- [ ] Post-import comparison covers the complete active roster, proves every active
+- [x] Post-import comparison covers the complete active roster, proves every active
   `revenue_required` channel is in the manifest, and rejects stale manual facts outside it
-  (roster post-check implemented in `scripts/import_manual_manifest.py`; open until a
-  runner-level test proves it end-to-end)
-- [ ] The runner reports complete only when the exact set/amount/report-id/control-total
+  (runner-level tests: missing revenue_required channel is preflight RED; the post-check
+  fails on a stale manual fact and when verification cannot match)
+- [x] The runner reports complete only when the exact set/amount/report-id/control-total
   comparison passes; absence of `CHANNELS_MISSING_REVENUE_FACTS` alone is never proof
-  (service-boundary totals/counts are tested; the runner's own completion rule is open
-  until a runner-level test exists)
+  (runner-level wrong-total/verification-mismatch tests abort before completion;
+  the battery — 7 tests over the real app — also caught and fixed two API-shape
+  defects the service tests could not see: the channels roster is a bare array and
+  facts list under `facts`)
 - [x] Batch output records source hash/id and the attributed bootstrap UUID without storing secrets
   (implemented + tested: ledger-row fields, actor, completion, hash canonicalization)
 - [x] Replacement/import idempotency is backed by an immutable PostgreSQL batch
