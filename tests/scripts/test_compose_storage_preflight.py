@@ -7,6 +7,7 @@ import os
 import subprocess
 import sys
 import textwrap
+from collections.abc import Callable
 from copy import deepcopy
 from pathlib import Path
 from types import SimpleNamespace
@@ -903,102 +904,61 @@ def test_guarded_model_rejects_source_rewrite_even_when_canonical_path_matches(
         )
 
 
-@pytest.mark.parametrize(
-    "mutation",
-    [
-        "extra-service",
-        "missing-service",
-        "project-name",
-        "root-user",
-        "missing-user",
-        "different-image",
-        "migrate-image",
-        "migrate-root-user",
-        "mutable-pull-policy",
-        "different-build",
-        "profile-bypass",
-        "backend-rw",
-        "privileged",
-        "cap-add",
-        "create-host-path",
-        "different-source",
-        "nested-target",
-        "ambiguous-root-target",
-        "alternate-source-access",
-    ],
-)
-def test_rendered_model_mutations_fail_closed(tmp_path: Path, mutation: str) -> None:
-    """Rendered submount, image/user, service, and alternate-access bypasses fail."""
-    source = (tmp_path / "store").resolve()
-    model = _storage_model(source)
-    services = model["services"]
-    assert isinstance(services, dict)
-    app = services["app"]
-    app_dev = services["app-dev"]
-    assert isinstance(app, dict) and isinstance(app_dev, dict)
-    app_volumes = app["volumes"]
-    assert isinstance(app_volumes, list)
-    app_mount = app_volumes[0]
-    assert isinstance(app_mount, dict)
-
+def _mutate_service_projection(
+    model: dict[str, object],
+    services: dict[str, object],
+    mutation: str,
+) -> None:
+    """Mutate the projected service set or the rendered project name."""
     if mutation == "extra-service":
         services["rogue"] = {"volumes": []}
     elif mutation == "missing-service":
         del services["migrate"]
     elif mutation == "project-name":
         model["name"] = "attacker-project"
-    elif mutation == "root-user":
+    else:
+        raise AssertionError(f"unhandled mutation {mutation}")
+
+
+def _mutate_app_service(
+    app: dict[str, object],
+    *,
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    """Mutate the app service identity, build, or privilege boundary."""
+    if mutation == "root-user":
         app["user"] = "0:0"
     elif mutation == "missing-user":
         del app["user"]
     elif mutation == "different-image":
         app["image"] = "attacker:latest"
-    elif mutation == "migrate-image":
-        migrate = services["migrate"]
-        assert isinstance(migrate, dict)
-        migrate["image"] = "attacker:latest"
-    elif mutation == "migrate-root-user":
-        migrate = services["migrate"]
-        assert isinstance(migrate, dict)
-        migrate["user"] = "0:0"
     elif mutation == "mutable-pull-policy":
         app["pull_policy"] = "missing"
     elif mutation == "different-build":
         app["build"] = {"context": str(tmp_path), "dockerfile": "Dockerfile"}
-    elif mutation == "profile-bypass":
-        app_dev["profiles"] = None
-    elif mutation == "backend-rw":
-        app_dev_volumes = app_dev["volumes"]
-        assert isinstance(app_dev_volumes, list)
-        backend_mount = app_dev_volumes[0]
-        assert isinstance(backend_mount, dict)
-        backend_mount["read_only"] = False
     elif mutation == "privileged":
         app["privileged"] = True
     elif mutation == "cap-add":
         app["cap_add"] = ["SYS_ADMIN"]
-    elif mutation == "create-host-path":
-        app_mount["bind"] = {"create_host_path": True}
-    elif mutation == "different-source":
-        app_dev_volumes = app_dev["volumes"]
-        assert isinstance(app_dev_volumes, list)
-        app_dev_mount = app_dev_volumes[-1]
-        assert isinstance(app_dev_mount, dict)
-        app_dev_mount["source"] = str(tmp_path / "other")
-    elif mutation == "nested-target":
-        app_volumes.append(
-            {
-                "type": "bind",
-                "source": str(tmp_path / "other"),
-                "target": "/var/lib/ums/artifacts/nested",
-                "bind": {"create_host_path": False},
-            }
-        )
-    elif mutation == "ambiguous-root-target":
-        app_mount["target"] = "/var/lib/ums/artifacts/."
+    else:
+        raise AssertionError(f"unhandled mutation {mutation}")
+
+
+def _mutate_migrate_service(
+    services: dict[str, object],
+    *,
+    source: Path,
+    mutation: str,
+) -> None:
+    """Mutate the migrate service image, user, or volume projection."""
+    migrate = services["migrate"]
+    assert isinstance(migrate, dict)
+    if mutation == "migrate-image":
+        migrate["image"] = "attacker:latest"
+    elif mutation == "migrate-root-user":
+        migrate["user"] = "0:0"
     elif mutation == "alternate-source-access":
-        migrate = services["migrate"]
-        assert isinstance(migrate, dict)
         migrate["volumes"] = [
             {
                 "type": "bind",
@@ -1010,8 +970,177 @@ def test_rendered_model_mutations_fail_closed(tmp_path: Path, mutation: str) -> 
     else:
         raise AssertionError(f"unhandled mutation {mutation}")
 
+
+def _mutate_app_dev_service(
+    app_dev: dict[str, object],
+    *,
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    """Mutate the app-dev profile boundary, backend bind, or child source."""
+    if mutation == "profile-bypass":
+        app_dev["profiles"] = None
+    elif mutation == "backend-rw":
+        app_dev_volumes = app_dev["volumes"]
+        assert isinstance(app_dev_volumes, list)
+        backend_mount = app_dev_volumes[0]
+        assert isinstance(backend_mount, dict)
+        backend_mount["read_only"] = False
+    elif mutation == "different-source":
+        app_dev_volumes = app_dev["volumes"]
+        assert isinstance(app_dev_volumes, list)
+        app_dev_mount = app_dev_volumes[-1]
+        assert isinstance(app_dev_mount, dict)
+        app_dev_mount["source"] = str(tmp_path / "other")
+    else:
+        raise AssertionError(f"unhandled mutation {mutation}")
+
+
+def _mutate_app_mount(
+    app_mount: dict[str, object],
+    app_volumes: object,
+    *,
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    """Mutate the app child bind options or add a nested storage target."""
+    if mutation == "create-host-path":
+        app_mount["bind"] = {"create_host_path": True}
+    elif mutation == "nested-target":
+        assert isinstance(app_volumes, list)
+        app_volumes.append(
+            {
+                "type": "bind",
+                "source": str(tmp_path / "other"),
+                "target": "/var/lib/ums/artifacts/nested",
+                "bind": {"create_host_path": False},
+            }
+        )
+    elif mutation == "ambiguous-root-target":
+        app_mount["target"] = "/var/lib/ums/artifacts/."
+    else:
+        raise AssertionError(f"unhandled mutation {mutation}")
+
+
+def _require_model_fails_closed(model: dict[str, object]) -> None:
+    """Require the validator to reject one mutated rendered model."""
     with pytest.raises(compose_launcher.StoragePathError):
         compose_launcher._validate_rendered_model(model, project_root=PROJECT_ROOT)
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "extra-service",
+        "missing-service",
+        "project-name",
+    ],
+)
+def test_rendered_service_projection_mutations_fail_closed(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    """Service-set and project-name projection bypasses fail closed."""
+    model = _storage_model((tmp_path / "store").resolve())
+    services = model["services"]
+    assert isinstance(services, dict)
+    _mutate_service_projection(model, services, mutation)
+    _require_model_fails_closed(model)
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "root-user",
+        "missing-user",
+        "different-image",
+        "mutable-pull-policy",
+        "different-build",
+        "privileged",
+        "cap-add",
+    ],
+)
+def test_rendered_app_service_mutations_fail_closed(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    """App image, user, build, pull-policy, and privilege bypasses fail closed."""
+    model = _storage_model((tmp_path / "store").resolve())
+    services = model["services"]
+    assert isinstance(services, dict)
+    app = services["app"]
+    assert isinstance(app, dict)
+    _mutate_app_service(app, tmp_path=tmp_path, mutation=mutation)
+    _require_model_fails_closed(model)
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "migrate-image",
+        "migrate-root-user",
+        "alternate-source-access",
+    ],
+)
+def test_rendered_migrate_service_mutations_fail_closed(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    """Migrate image, user, and alternate-storage-access bypasses fail closed."""
+    source = (tmp_path / "store").resolve()
+    model = _storage_model(source)
+    services = model["services"]
+    assert isinstance(services, dict)
+    _mutate_migrate_service(services, source=source, mutation=mutation)
+    _require_model_fails_closed(model)
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "profile-bypass",
+        "backend-rw",
+        "different-source",
+    ],
+)
+def test_rendered_app_dev_service_mutations_fail_closed(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    """App-dev profile, backend bind, and child source bypasses fail closed."""
+    model = _storage_model((tmp_path / "store").resolve())
+    services = model["services"]
+    assert isinstance(services, dict)
+    app_dev = services["app-dev"]
+    assert isinstance(app_dev, dict)
+    _mutate_app_dev_service(app_dev, tmp_path=tmp_path, mutation=mutation)
+    _require_model_fails_closed(model)
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "create-host-path",
+        "nested-target",
+        "ambiguous-root-target",
+    ],
+)
+def test_rendered_app_mount_mutations_fail_closed(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    """App child bind option and nested/ambiguous target bypasses fail closed."""
+    model = _storage_model((tmp_path / "store").resolve())
+    services = model["services"]
+    assert isinstance(services, dict)
+    app = services["app"]
+    assert isinstance(app, dict)
+    app_volumes = app["volumes"]
+    assert isinstance(app_volumes, list)
+    app_mount = app_volumes[0]
+    assert isinstance(app_mount, dict)
+    _mutate_app_mount(app_mount, app_volumes, tmp_path=tmp_path, mutation=mutation)
+    _require_model_fails_closed(model)
 
 
 def test_rendered_model_input_is_not_mutated(tmp_path: Path) -> None:
@@ -1751,29 +1880,20 @@ def test_nonzero_partial_create_audits_all_ids_and_removes_only_mismatch(
     assert all("--volumes" not in command and "-v" not in command for command, _ in calls)
 
 
-@pytest.mark.parametrize(
-    ("ps_returncode", "malformed_line"),
-    [
-        (0, "not-an-id"),
-        (17, None),
-    ],
-    ids=["mixed-malformed-output", "nonzero-with-valid-output"],
-)
-def test_failed_create_remediates_valid_ids_before_untrusted_ps_fails_closed(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    ps_returncode: int,
-    malformed_line: str | None,
-) -> None:
-    """Partial ps output must not hide a valid unsafe app container ID."""
-    source = (tmp_path / "store").resolve()
-    expected_sources = {child: source / child for child in storage.STORAGE_CHILDREN}
-    request = compose_launcher._parse_request(["up", "app"])
-    container_id = "b" * 64
+def _failed_create_ps_lines(container_id: str, malformed_line: str | None) -> list[str]:
+    """Return the ps output lines, optionally with malformed enumeration noise."""
     ps_lines = [container_id]
     if malformed_line is not None:
         ps_lines.append(malformed_line)
-    calls: list[tuple[list[str], bool]] = []
+    return ps_lines
+
+
+def _failed_create_mounts(
+    expected_sources: dict[str, Path],
+    *,
+    tmp_path: Path,
+) -> list[dict[str, object]]:
+    """Return inspected mounts whose artifacts source was swapped by an attacker."""
     mounts = [
         {
             "Type": "bind",
@@ -1784,14 +1904,18 @@ def test_failed_create_remediates_valid_ids_before_untrusted_ps_fails_closed(
         for child, target in compose_launcher.STORAGE_TARGETS.items()
     ]
     mounts[0]["Source"] = str(tmp_path / "attacker")
+    return mounts
 
-    class Guard:
-        """Guard stand-in whose assertion is deliberately inert here."""
 
-        @staticmethod
-        def assert_current() -> None:
-            """No-op assertion: this scenario exercises cleanup, not proof."""
-            assert True  # inert by design; the cleanup path is the scenario
+def _failed_create_daemon(
+    calls: list[tuple[list[str], bool]],
+    *,
+    ps_returncode: int,
+    ps_lines: list[str],
+    mounts: list[dict[str, object]],
+    container_id: str,
+) -> Callable[..., SimpleNamespace]:
+    """Build the recorder answering the reviewed failed-create daemon matrix."""
 
     def fake_daemon(
         command: list[str],
@@ -1828,19 +1952,15 @@ def test_failed_create_remediates_valid_ids_before_untrusted_ps_fails_closed(
             return SimpleNamespace(returncode=0, stdout=container_id, stderr="")
         raise AssertionError(f"unexpected daemon command: {command!r}")
 
-    monkeypatch.setattr(compose_launcher, "_run_daemon_checked", fake_daemon)
-    with pytest.raises(
-        compose_launcher.StoragePathError,
-        match="cannot prove complete enumeration",
-    ):
-        compose_launcher._run_guarded_storage_up(
-            request,
-            cwd=tmp_path,
-            env={"DOCKER_HOST": "npipe:////./pipe/docker_engine"},
-            identity_guard=Guard(),  # type: ignore[arg-type]
-            expected_sources=expected_sources,
-        )
+    return fake_daemon
 
+
+def _assert_failed_create_cleanup(
+    calls: list[tuple[list[str], bool]],
+    *,
+    container_id: str,
+) -> None:
+    """Prove remediation inspected and removed only the valid scoped ID."""
     inspections = [command for command, _ in calls if command[1:3] == ["container", "inspect"]]
     assert inspections == [
         [
@@ -1856,6 +1976,63 @@ def test_failed_create_remediates_valid_ids_before_untrusted_ps_fails_closed(
     assert removals == [["docker", "container", "rm", "--force", container_id]]
     assert all("not-an-id" not in command for command, _ in calls)
     assert all("--volumes" not in command and "-v" not in command for command, _ in calls)
+
+
+@pytest.mark.parametrize(
+    ("ps_returncode", "malformed_line"),
+    [
+        (0, "not-an-id"),
+        (17, None),
+    ],
+    ids=["mixed-malformed-output", "nonzero-with-valid-output"],
+)
+def test_failed_create_remediates_valid_ids_before_untrusted_ps_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    ps_returncode: int,
+    malformed_line: str | None,
+) -> None:
+    """Partial ps output must not hide a valid unsafe app container ID."""
+    source = (tmp_path / "store").resolve()
+    expected_sources = {child: source / child for child in storage.STORAGE_CHILDREN}
+    request = compose_launcher._parse_request(["up", "app"])
+    container_id = "b" * 64
+    ps_lines = _failed_create_ps_lines(container_id, malformed_line)
+    calls: list[tuple[list[str], bool]] = []
+    mounts = _failed_create_mounts(expected_sources, tmp_path=tmp_path)
+
+    class Guard:
+        """Guard stand-in whose assertion is deliberately inert here."""
+
+        @staticmethod
+        def assert_current() -> None:
+            """No-op assertion: this scenario exercises cleanup, not proof."""
+            assert True  # inert by design; the cleanup path is the scenario
+
+    monkeypatch.setattr(
+        compose_launcher,
+        "_run_daemon_checked",
+        _failed_create_daemon(
+            calls,
+            ps_returncode=ps_returncode,
+            ps_lines=ps_lines,
+            mounts=mounts,
+            container_id=container_id,
+        ),
+    )
+    with pytest.raises(
+        compose_launcher.StoragePathError,
+        match="cannot prove complete enumeration",
+    ):
+        compose_launcher._run_guarded_storage_up(
+            request,
+            cwd=tmp_path,
+            env={"DOCKER_HOST": "npipe:////./pipe/docker_engine"},
+            identity_guard=Guard(),  # type: ignore[arg-type]
+            expected_sources=expected_sources,
+        )
+
+    _assert_failed_create_cleanup(calls, container_id=container_id)
 
 
 def test_main_keeps_identity_and_immutable_image_pinned_through_final_up(

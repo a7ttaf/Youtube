@@ -609,6 +609,58 @@ def _require_posix_boundary_owners(
             )
 
 
+def _require_posix_entry_policy(
+    current: Path,
+    *,
+    metadata: os.stat_result,
+    allowed_uids: set[int],
+    allowed_gids: set[int],
+) -> bool:
+    """Enforce type, ownership, mode, and operator access for one entry.
+
+    Returns whether the entry is a directory, so the caller's recursive walk
+    enqueues children only after every guard on the parent has passed.
+    """
+    is_directory = stat.S_ISDIR(metadata.st_mode)
+    is_regular = stat.S_ISREG(metadata.st_mode)
+    if not (is_directory or is_regular):
+        raise StoragePathError(
+            f"POSIX storage contains a non-file/non-directory entry: {current!s}"
+        )
+    if metadata.st_uid not in allowed_uids:
+        raise StoragePathError(
+            f"POSIX storage owner uid {metadata.st_uid} is not the operator or app uid: {current!s}"
+        )
+    if metadata.st_gid not in allowed_gids:
+        raise StoragePathError(
+            f"POSIX storage group gid {metadata.st_gid} is not an operator or app group: "
+            f"{current!s}"
+        )
+    mode = stat.S_IMODE(metadata.st_mode)
+    if mode & 0o022:
+        raise StoragePathError(f"POSIX storage grants group/world write ({mode:#05o}): {current!s}")
+    if mode & 0o007:
+        raise StoragePathError(f"POSIX storage grants world permissions ({mode:#05o}): {current!s}")
+    if mode & (stat.S_ISUID | stat.S_ISVTX):
+        raise StoragePathError(
+            f"POSIX storage has forbidden setuid/sticky mode ({mode:#05o}): {current!s}"
+        )
+    if mode & stat.S_ISGID and not is_directory:
+        raise StoragePathError(f"POSIX storage regular file has forbidden setgid mode: {current!s}")
+    required_access = os.R_OK | (os.X_OK if is_directory else 0)
+    try:
+        operator_access = os.access(current, required_access)
+    except OSError as exc:
+        raise StoragePathError(
+            f"cannot prove operator access to POSIX storage {current!s}"
+        ) from exc
+    if not operator_access:
+        raise StoragePathError(
+            f"current operator cannot read/traverse POSIX storage entry {current!s}"
+        )
+    return is_directory
+
+
 # ============================================================================
 # Purpose: Prove every POSIX storage descendant is a regular file/directory
 #   owned only by the current operator or the non-root application principal,
@@ -647,51 +699,12 @@ def _require_posix_storage_policy(path: Path) -> None:
             metadata = current.stat(follow_symlinks=False)
         except OSError as exc:
             raise StoragePathError(f"cannot inspect POSIX storage policy for {current!s}") from exc
-        is_directory = stat.S_ISDIR(metadata.st_mode)
-        is_regular = stat.S_ISREG(metadata.st_mode)
-        if not (is_directory or is_regular):
-            raise StoragePathError(
-                f"POSIX storage contains a non-file/non-directory entry: {current!s}"
-            )
-        if metadata.st_uid not in allowed_uids:
-            raise StoragePathError(
-                f"POSIX storage owner uid {metadata.st_uid} is not the operator or app uid: "
-                f"{current!s}"
-            )
-        if metadata.st_gid not in allowed_gids:
-            raise StoragePathError(
-                f"POSIX storage group gid {metadata.st_gid} is not an operator or app group: "
-                f"{current!s}"
-            )
-        mode = stat.S_IMODE(metadata.st_mode)
-        if mode & 0o022:
-            raise StoragePathError(
-                f"POSIX storage grants group/world write ({mode:#05o}): {current!s}"
-            )
-        if mode & 0o007:
-            raise StoragePathError(
-                f"POSIX storage grants world permissions ({mode:#05o}): {current!s}"
-            )
-        if mode & (stat.S_ISUID | stat.S_ISVTX):
-            raise StoragePathError(
-                f"POSIX storage has forbidden setuid/sticky mode ({mode:#05o}): {current!s}"
-            )
-        if mode & stat.S_ISGID and not is_directory:
-            raise StoragePathError(
-                f"POSIX storage regular file has forbidden setgid mode: {current!s}"
-            )
-        required_access = os.R_OK | (os.X_OK if is_directory else 0)
-        try:
-            operator_access = os.access(current, required_access)
-        except OSError as exc:
-            raise StoragePathError(
-                f"cannot prove operator access to POSIX storage {current!s}"
-            ) from exc
-        if not operator_access:
-            raise StoragePathError(
-                f"current operator cannot read/traverse POSIX storage entry {current!s}"
-            )
-        if is_directory:
+        if _require_posix_entry_policy(
+            current,
+            metadata=metadata,
+            allowed_uids=allowed_uids,
+            allowed_gids=allowed_gids,
+        ):
             pending.extend(_directory_entries(current))
 
 
@@ -838,30 +851,12 @@ def _windows_path_key(value: object) -> str:
     return os.path.normcase(os.path.abspath(value))
 
 
-# ============================================================================
-# Purpose: Query the Windows DACL for every non-reparse storage descendant and
-#   prove exact owner, deny, allow-rights, root-protection, and inheritance rules.
-# Database/ORM: None.
-# Standards: Trusted PowerShell module root; numeric rights masks; all query
-#   rows are reconciled to the enumerated path set; malformed evidence fails closed.
-# Blast Radius: Host confidentiality and operator recoverability of finance data.
-# Connections:
-#   - File: docker-compose.yml -> Windows host-ACL operating contract.
-#   - File: tests/scripts/test_compose_storage_preflight.py -> ACL counterexamples.
-# ============================================================================
-def _require_windows_host_acl(path: Path) -> None:
-    """Fail closed unless Windows host ACLs contain only approved principals.
-    Docker Desktop's Linux VM ``stat`` output is intentionally not used as a
-    confidentiality proof. The NTFS DACL is the source of truth on Windows;
-    this query checks every non-reparse descendant and rejects any broad allow
-    ACE. The error includes the explicit operator-run ``icacls`` action.
-    """
-    if os.name != "nt":
-        return
+def _run_windows_acl_query(path: Path) -> subprocess.CompletedProcess[str]:
+    """Run the trusted PowerShell inventory query for one storage root."""
     try:
         shell_command, shell_environment = _windows_acl_process_spec()
         shell_environment["UMS_STORAGE_ACL_PATH"] = str(path)
-        result = subprocess.run(
+        return subprocess.run(
             [*shell_command, "-Command", _WINDOWS_ACL_QUERY],
             capture_output=True,
             text=True,
@@ -875,13 +870,15 @@ def _require_windows_host_acl(path: Path) -> None:
             "cannot inspect Windows host ACLs; install/enable PowerShell and run "
             f"{_windows_acl_remediation(path)}"
         ) from exc
-    if result.returncode != 0:
-        raise StoragePathError(
-            "Windows host ACL inspection failed; run the explicit remediation command "
-            f"and retry: {_windows_acl_remediation(path)}"
-        )
+
+
+def _windows_acl_payload_shapes(
+    stdout: str,
+    path: Path,
+) -> tuple[str, list[object], list[object], list[object]]:
+    """Parse the query output and prove its current SID and array shapes."""
     try:
-        payload = json.loads(result.stdout)
+        payload = json.loads(stdout)
         if not isinstance(payload, dict):
             raise ValueError("ACL payload must be an object")
         current_sid = payload["CurrentSid"]
@@ -902,6 +899,17 @@ def _require_windows_host_acl(path: Path) -> None:
             or not isinstance(owners, list)
         ):
             raise ValueError("ACL paths/access/owners must be arrays")
+    except (TypeError, ValueError, KeyError) as exc:
+        raise StoragePathError(
+            "Windows host ACL inspection returned invalid data; run the explicit "
+            f"remediation command and retry: {_windows_acl_remediation(path)}"
+        ) from exc
+    return current_sid, paths, rows, owners
+
+
+def _windows_acl_path_inventory(paths: list[object], path: Path) -> tuple[list[str], str]:
+    """Return the complete deduplicated path keys plus the storage root key."""
+    try:
         path_keys = [_windows_path_key(item) for item in paths]
         if not path_keys or len(set(path_keys)) != len(path_keys):
             raise ValueError("ACL path inventory is empty or duplicated")
@@ -913,12 +921,15 @@ def _require_windows_host_acl(path: Path) -> None:
             "Windows host ACL inspection returned invalid data; run the explicit "
             f"remediation command and retry: {_windows_acl_remediation(path)}"
         ) from exc
+    return path_keys, root_key
 
-    allowed_sids = {
-        current_sid.casefold(),
-        "S-1-5-18".casefold(),
-        "S-1-5-32-544".casefold(),
-    }
+
+def _windows_acl_normalized_rows(
+    rows: list[object],
+    path_keys: list[str],
+    path: Path,
+) -> list[tuple[str, dict[str, object]]]:
+    """Reconcile every access row to the enumerated path inventory."""
     normalized_rows: list[tuple[str, dict[str, object]]] = []
     try:
         for row in rows:
@@ -933,25 +944,15 @@ def _require_windows_host_acl(path: Path) -> None:
             "Windows host ACL inspection returned invalid data; run the explicit "
             f"remediation command and retry: {_windows_acl_remediation(path)}"
         ) from exc
+    return normalized_rows
 
-    broad_allow = [
-        row
-        for _, row in normalized_rows
-        if str(row.get("Type", "")).casefold() == "allow"
-        and str(row.get("Sid", "")).casefold() not in allowed_sids
-    ]
-    if broad_allow:
-        sample = ", ".join(
-            f"{row.get('Sid', '?')} on {row.get('Path', path)}" for row in broad_allow[:4]
-        )
-        raise StoragePathError(
-            "Windows host ACL allows unapproved principals (container chmod/stat is "
-            f"not proof of NTFS confidentiality: {sample}); run {_windows_acl_remediation(path)}"
-        )
-    rows_by_path: dict[str, list[dict[str, object]]] = {path_key: [] for path_key in path_keys}
-    for row_key, row in normalized_rows:
-        rows_by_path[row_key].append(row)
 
+def _windows_acl_owner_inventory(
+    owners: list[object],
+    rows_by_path: dict[str, list[dict[str, object]]],
+    path: Path,
+) -> dict[str, dict[str, object]]:
+    """Reconcile the owner inventory to exactly the enumerated path set."""
     owners_by_path: dict[str, dict[str, object]] = {}
     try:
         for owner in owners:
@@ -972,77 +973,152 @@ def _require_windows_host_acl(path: Path) -> None:
             "Windows host ACL inspection returned invalid data; run the explicit "
             f"remediation command and retry: {_windows_acl_remediation(path)}"
         ) from exc
+    return owners_by_path
+
+
+def _require_windows_descendant_acl(
+    checked_path: str,
+    path_rows: list[dict[str, object]],
+    owner: dict[str, object],
+    *,
+    allowed_sids: set[str],
+    current_sid: str,
+    path: Path,
+) -> list[dict[str, object]]:
+    """Prove owner, readable entries, no deny, and operator modify access."""
+    owner_sid = str(owner["OwnerSid"]).casefold()
+    if owner_sid not in allowed_sids:
+        raise StoragePathError(
+            f"Windows host ACL owner is not an approved principal on {checked_path}; "
+            f"run {_windows_acl_remediation(path)}"
+        )
+    if not path_rows:
+        raise StoragePathError(
+            f"Windows host ACL has no readable entries for {checked_path}; "
+            f"run {_windows_acl_remediation(path)}"
+        )
+    if any(str(row.get("Type", "")).casefold() == "deny" for row in path_rows):
+        raise StoragePathError(
+            f"Windows host ACL contains a deny entry on {checked_path}; "
+            f"run {_windows_acl_remediation(path)}"
+        )
+    operator_allow = [
+        row
+        for row in path_rows
+        if str(row.get("Sid", "")).casefold() == current_sid.casefold()
+        and str(row.get("Type", "")).casefold() == "allow"
+    ]
+    if not operator_allow or not any(_windows_rights_satisfy_modify(row) for row in operator_allow):
+        raise StoragePathError(
+            f"Windows host ACL does not prove operator read/write access on {checked_path}; "
+            f"run {_windows_acl_remediation(path)}"
+        )
+    return operator_allow
+
+
+def _require_windows_root_acl(
+    checked_path: str,
+    owner: dict[str, object],
+    operator_allow: list[dict[str, object]],
+    *,
+    path: Path,
+) -> None:
+    """Prove the fresh root is DACL-protected and inheritably operator-writable."""
+    if owner["AreAccessRulesProtected"] is not True:
+        raise StoragePathError(
+            "Windows storage root still inherits parent ACL changes; run "
+            f"{_windows_acl_remediation(path)}"
+        )
+    if not any(
+        _windows_rights_satisfy_modify(row)
+        and _windows_row_is_inheritable(row)
+        and row.get("IsInherited") is False
+        for row in operator_allow
+    ):
+        raise StoragePathError(
+            "Windows host ACL does not prove inheritable operator access on the "
+            f"fresh storage root {checked_path}; run {_windows_acl_remediation(path)}"
+        )
+
+
+# ============================================================================
+# Purpose: Query the Windows DACL for every non-reparse storage descendant and
+#   prove exact owner, deny, allow-rights, root-protection, and inheritance rules.
+# Database/ORM: None.
+# Standards: Trusted PowerShell module root; numeric rights masks; all query
+#   rows are reconciled to the enumerated path set; malformed evidence fails closed.
+# Blast Radius: Host confidentiality and operator recoverability of finance data.
+# Connections:
+#   - File: docker-compose.yml -> Windows host-ACL operating contract.
+#   - File: tests/scripts/test_compose_storage_preflight.py -> ACL counterexamples.
+# ============================================================================
+def _require_windows_host_acl(path: Path) -> None:
+    """Fail closed unless Windows host ACLs contain only approved principals.
+    Docker Desktop's Linux VM ``stat`` output is intentionally not used as a
+    confidentiality proof. The NTFS DACL is the source of truth on Windows;
+    this query checks every non-reparse descendant and rejects any broad allow
+    ACE. The error includes the explicit operator-run ``icacls`` action.
+    """
+    if os.name != "nt":
+        return
+    result = _run_windows_acl_query(path)
+    if result.returncode != 0:
+        raise StoragePathError(
+            "Windows host ACL inspection failed; run the explicit remediation command "
+            f"and retry: {_windows_acl_remediation(path)}"
+        )
+    current_sid, paths, rows, owners = _windows_acl_payload_shapes(result.stdout, path)
+    path_keys, root_key = _windows_acl_path_inventory(paths, path)
+
+    allowed_sids = {
+        current_sid.casefold(),
+        "S-1-5-18".casefold(),
+        "S-1-5-32-544".casefold(),
+    }
+    normalized_rows = _windows_acl_normalized_rows(rows, path_keys, path)
+
+    broad_allow = [
+        row
+        for _, row in normalized_rows
+        if str(row.get("Type", "")).casefold() == "allow"
+        and str(row.get("Sid", "")).casefold() not in allowed_sids
+    ]
+    if broad_allow:
+        sample = ", ".join(
+            f"{row.get('Sid', '?')} on {row.get('Path', path)}" for row in broad_allow[:4]
+        )
+        raise StoragePathError(
+            "Windows host ACL allows unapproved principals (container chmod/stat is "
+            f"not proof of NTFS confidentiality: {sample}); run {_windows_acl_remediation(path)}"
+        )
+    rows_by_path: dict[str, list[dict[str, object]]] = {path_key: [] for path_key in path_keys}
+    for row_key, row in normalized_rows:
+        rows_by_path[row_key].append(row)
+
+    owners_by_path = _windows_acl_owner_inventory(owners, rows_by_path, path)
 
     display_by_key = dict(zip(path_keys, (str(item) for item in paths), strict=True))
     for checked_key, path_rows in rows_by_path.items():
         checked_path = display_by_key[checked_key]
-        owner = owners_by_path[checked_key]
-        owner_sid = str(owner["OwnerSid"]).casefold()
-        if owner_sid not in allowed_sids:
-            raise StoragePathError(
-                f"Windows host ACL owner is not an approved principal on {checked_path}; "
-                f"run {_windows_acl_remediation(path)}"
-            )
-        if not path_rows:
-            raise StoragePathError(
-                f"Windows host ACL has no readable entries for {checked_path}; "
-                f"run {_windows_acl_remediation(path)}"
-            )
-        if any(str(row.get("Type", "")).casefold() == "deny" for row in path_rows):
-            raise StoragePathError(
-                f"Windows host ACL contains a deny entry on {checked_path}; "
-                f"run {_windows_acl_remediation(path)}"
-            )
-        operator_allow = [
-            row
-            for row in path_rows
-            if str(row.get("Sid", "")).casefold() == current_sid.casefold()
-            and str(row.get("Type", "")).casefold() == "allow"
-        ]
-        if not operator_allow or not any(
-            _windows_rights_satisfy_modify(row) for row in operator_allow
-        ):
-            raise StoragePathError(
-                f"Windows host ACL does not prove operator read/write access on {checked_path}; "
-                f"run {_windows_acl_remediation(path)}"
-            )
+        operator_allow = _require_windows_descendant_acl(
+            checked_path,
+            path_rows,
+            owners_by_path[checked_key],
+            allowed_sids=allowed_sids,
+            current_sid=current_sid,
+            path=path,
+        )
         if checked_key == root_key:
-            if owner["AreAccessRulesProtected"] is not True:
-                raise StoragePathError(
-                    "Windows storage root still inherits parent ACL changes; run "
-                    f"{_windows_acl_remediation(path)}"
-                )
-            if not any(
-                _windows_rights_satisfy_modify(row)
-                and _windows_row_is_inheritable(row)
-                and row.get("IsInherited") is False
-                for row in operator_allow
-            ):
-                raise StoragePathError(
-                    "Windows host ACL does not prove inheritable operator access on the "
-                    f"fresh storage root {checked_path}; run {_windows_acl_remediation(path)}"
-                )
+            _require_windows_root_acl(
+                checked_path,
+                owners_by_path[checked_key],
+                operator_allow,
+                path=path,
+            )
 
 
-# ============================================================================
-# Purpose: Canonicalize and validate the host directory before Docker mounts it.
-# Database/ORM: None.
-# Standards: Fail closed on traversal, roots/system paths, checkout paths,
-#   symlinks, broad directories, missing attestation, inaccessible sources, and
-#   unverified Windows host ACLs; never mutate an unsafe target.
-# Blast Radius: Host filesystem path selection and durable artifact/blob data.
-# Connections:
-#   - File: docker-compose.yml -> Consumes the canonical path for bind mounts.
-#   - File: scripts/compose.py -> Runs this preflight before Docker Compose.
-# ============================================================================
-def validate_storage_path(
-    raw_value: str | os.PathLike[str] | None = None,
-    *,
-    project_root: Path | None = None,
-    require_exists: bool = True,
-    require_attestation: bool = True,
-) -> Path:
-    """Return a safe canonical storage path, optionally before attestation."""
+def _storage_raw_text(raw_value: str | os.PathLike[str] | None) -> str:
+    """Resolve the operator-supplied raw text and reject control characters."""
     if raw_value is None:
         raw_text = os.environ.get(STORAGE_ENV_VAR, "") or DEFAULT_STORAGE_SOURCE
     else:
@@ -1052,13 +1128,19 @@ def validate_storage_path(
         raw_text = DEFAULT_STORAGE_SOURCE
     if "\x00" in raw_text or "\n" in raw_text or "\r" in raw_text:
         raise StoragePathError(f"{STORAGE_ENV_VAR} contains a forbidden control character")
-    _reject_dotdot_segments(raw_text)
+    return raw_text
 
-    root = (project_root or Path(__file__).resolve().parents[1]).resolve(strict=True)
+
+def _storage_candidate(raw_text: str, root: Path) -> Path:
+    """Resolve one raw spelling to a checkout-relative or absolute candidate."""
     candidate = Path(raw_text).expanduser()
     if not candidate.is_absolute():
         candidate = root / candidate
+    return candidate
 
+
+def _reject_forbidden_canonical(candidate: Path, root: Path) -> Path:
+    """Reject links and filesystem/checkout/system locations, then canonicalize."""
     symlink = _first_symlink(candidate)
     if symlink is not None:
         raise StoragePathError(
@@ -1095,6 +1177,34 @@ def validate_storage_path(
         Path("/var/lib").resolve(strict=False),
     }:
         raise StoragePathError(f"storage source must not be a transient system root: {canonical!s}")
+    return canonical
+
+
+# ============================================================================
+# Purpose: Canonicalize and validate the host directory before Docker mounts it.
+# Database/ORM: None.
+# Standards: Fail closed on traversal, roots/system paths, checkout paths,
+#   symlinks, broad directories, missing attestation, inaccessible sources, and
+#   unverified Windows host ACLs; never mutate an unsafe target.
+# Blast Radius: Host filesystem path selection and durable artifact/blob data.
+# Connections:
+#   - File: docker-compose.yml -> Consumes the canonical path for bind mounts.
+#   - File: scripts/compose.py -> Runs this preflight before Docker Compose.
+# ============================================================================
+def validate_storage_path(
+    raw_value: str | os.PathLike[str] | None = None,
+    *,
+    project_root: Path | None = None,
+    require_exists: bool = True,
+    require_attestation: bool = True,
+) -> Path:
+    """Return a safe canonical storage path, optionally before attestation."""
+    raw_text = _storage_raw_text(raw_value)
+    _reject_dotdot_segments(raw_text)
+
+    root = (project_root or Path(__file__).resolve().parents[1]).resolve(strict=True)
+    candidate = _storage_candidate(raw_text, root)
+    canonical = _reject_forbidden_canonical(candidate, root)
 
     if not canonical.exists():
         if require_exists:
@@ -1142,6 +1252,83 @@ def _real_directory_identity(path: Path) -> tuple[int, int]:
     return metadata.st_dev, metadata.st_ino
 
 
+def _create_missing_default_store(canonical: Path, default_path: Path) -> None:
+    """Create only the reserved missing default root, rechecking identity."""
+    if not canonical.exists():
+        if canonical != default_path:
+            raise StoragePathError(
+                f"custom storage path does not exist: {canonical!s}; create and secure "
+                "it explicitly before --adopt-existing"
+            )
+        try:
+            canonical.parent.mkdir(mode=0o770, exist_ok=True)
+            if _first_symlink(canonical) is not None:
+                raise StoragePathError(
+                    "reserved storage parent became a symlink or junction during creation"
+                )
+            canonical.mkdir(mode=0o770, exist_ok=False)
+        except OSError as exc:
+            raise StoragePathError(f"cannot create storage source {canonical!s}") from exc
+        if canonical.resolve(strict=True) != default_path:
+            raise StoragePathError("reserved storage identity changed during creation")
+
+
+def _require_adoptable_custom_store(
+    canonical: Path,
+    *,
+    default_path: Path,
+    sentinel_exists: bool,
+    adopt_existing: bool,
+) -> None:
+    """Require explicit adoption before an existing custom root is completed."""
+    if not sentinel_exists and canonical != default_path and not adopt_existing:
+        raise StoragePathError(
+            f"custom existing storage {canonical!s} has no {STORAGE_SENTINEL_NAME}; "
+            "run the validator once with --create --adopt-existing after reviewing it"
+        )
+    if canonical != default_path and not adopt_existing:
+        missing_children = [name for name in STORAGE_CHILDREN if not (canonical / name).exists()]
+        if missing_children:
+            raise StoragePathError(
+                f"custom storage {canonical!s} is incomplete ({', '.join(missing_children)}); "
+                "the launcher will not mutate it implicitly, so prepare it explicitly "
+                "with --create --adopt-existing"
+            )
+
+
+def _create_storage_children(canonical: Path, root_identity: tuple[int, int]) -> None:
+    """Create only the two reviewed direct children, as the current host operator.
+
+    The root identity is rechecked immediately before and after each write so a
+    junction/root replacement cannot redirect later writes.
+    """
+    for child_name in STORAGE_CHILDREN:
+        child = canonical / child_name
+        if not child.exists():
+            if _real_directory_identity(canonical) != root_identity:
+                raise StoragePathError("storage root identity changed before child creation")
+            try:
+                child.mkdir(mode=0o770, exist_ok=False)
+            except OSError as exc:
+                raise StoragePathError(f"cannot create storage child {child!s}") from exc
+        _real_directory_identity(child)
+        if _real_directory_identity(canonical) != root_identity:
+            raise StoragePathError("storage root identity changed during child creation")
+
+
+def _attest_storage_root(
+    canonical: Path,
+    *,
+    sentinel_exists: bool,
+    root_identity: tuple[int, int],
+) -> None:
+    """Create the path-bound sentinel behind the same identity boundary."""
+    if not sentinel_exists:
+        if _real_directory_identity(canonical) != root_identity:
+            raise StoragePathError("storage root identity changed before attestation")
+        _create_sentinel(canonical)
+
+
 # ============================================================================
 # Purpose: Create only the reserved default root or explicitly adopt an existing
 #   custom root, with identity checks around every bounded host write.
@@ -1169,23 +1356,7 @@ def prepare_storage_path(
         require_attestation=False,
     )
     default_path = _default_storage_path(root)
-    if not canonical.exists():
-        if canonical != default_path:
-            raise StoragePathError(
-                f"custom storage path does not exist: {canonical!s}; create and secure "
-                "it explicitly before --adopt-existing"
-            )
-        try:
-            canonical.parent.mkdir(mode=0o770, exist_ok=True)
-            if _first_symlink(canonical) is not None:
-                raise StoragePathError(
-                    "reserved storage parent became a symlink or junction during creation"
-                )
-            canonical.mkdir(mode=0o770, exist_ok=False)
-        except OSError as exc:
-            raise StoragePathError(f"cannot create storage source {canonical!s}") from exc
-        if canonical.resolve(strict=True) != default_path:
-            raise StoragePathError("reserved storage identity changed during creation")
+    _create_missing_default_store(canonical, default_path)
 
     # Reject a custom un-attested directory before creating children or a
     # sentinel. Adoption is a separate explicit operator action.
@@ -1193,48 +1364,23 @@ def prepare_storage_path(
     _reject_storage_submounts(canonical)
     _reject_nested_reparse_points(canonical)
     sentinel_exists = _validate_sentinel(canonical, required=False)
-    if not sentinel_exists and canonical != default_path and not adopt_existing:
-        raise StoragePathError(
-            f"custom existing storage {canonical!s} has no {STORAGE_SENTINEL_NAME}; "
-            "run the validator once with --create --adopt-existing after reviewing it"
-        )
-    if canonical != default_path and not adopt_existing:
-        missing_children = [name for name in STORAGE_CHILDREN if not (canonical / name).exists()]
-        if missing_children:
-            raise StoragePathError(
-                f"custom storage {canonical!s} is incomplete ({', '.join(missing_children)}); "
-                "the launcher will not mutate it implicitly, so prepare it explicitly "
-                "with --create --adopt-existing"
-            )
+    _require_adoptable_custom_store(
+        canonical,
+        default_path=default_path,
+        sentinel_exists=sentinel_exists,
+        adopt_existing=adopt_existing,
+    )
 
     _require_posix_storage_policy(canonical)
     _require_operator_group_access(canonical)
     _require_windows_host_acl(canonical)
     root_identity = _real_directory_identity(canonical)
-
-    # Create only the two reviewed direct children, as the current host
-    # operator. Recheck the root identity immediately before and after each
-    # write so a junction/root replacement cannot redirect later writes.
-    for child_name in STORAGE_CHILDREN:
-        child = canonical / child_name
-        if not child.exists():
-            if _real_directory_identity(canonical) != root_identity:
-                raise StoragePathError("storage root identity changed before child creation")
-            try:
-                child.mkdir(mode=0o770, exist_ok=False)
-            except OSError as exc:
-                raise StoragePathError(f"cannot create storage child {child!s}") from exc
-        _real_directory_identity(child)
-        if _real_directory_identity(canonical) != root_identity:
-            raise StoragePathError("storage root identity changed during child creation")
+    _create_storage_children(canonical, root_identity)
 
     _reject_storage_submounts(canonical)
     _reject_nested_reparse_points(canonical)
     _require_windows_host_acl(canonical)
-    if not sentinel_exists:
-        if _real_directory_identity(canonical) != root_identity:
-            raise StoragePathError("storage root identity changed before attestation")
-        _create_sentinel(canonical)
+    _attest_storage_root(canonical, sentinel_exists=sentinel_exists, root_identity=root_identity)
 
     if _real_directory_identity(canonical) != root_identity:
         raise StoragePathError("storage root identity changed during preparation")
