@@ -19,10 +19,13 @@ from enum import StrEnum
 
 
 class RoleKey(StrEnum):
+    """Every role key the platform can assign or check."""
+
     SUPER_OWNER = "super_owner"
     CORPORATE_ADMIN = "corporate_admin"
     REVENUE_OPERATIONS_ADMIN = "revenue_operations_admin"
     FINANCE_ADMIN = "finance_admin"
+    BETA_OPERATOR = "beta_operator"
     FINANCE_APPROVER = "finance_approver"
     FINANCE_VIEWER = "finance_viewer"
     TV_SECTOR_MANAGER = "tv_sector_manager"
@@ -39,6 +42,8 @@ class RoleKey(StrEnum):
 
 @dataclass(frozen=True)
 class RoleDefinition:
+    """Admin-facing metadata and allowed scope types for one role."""
+
     role: RoleKey
     label: str
     description: str
@@ -73,6 +78,12 @@ ROLE_DEFINITIONS: dict[RoleKey, RoleDefinition] = {
         RoleKey.FINANCE_ADMIN,
         "Finance Admin",
         "Finance owner for revenue, reconciliation, overrides, and month close.",
+        allowed_scope_types=_GLOBAL,
+    ),
+    RoleKey.BETA_OPERATOR: RoleDefinition(
+        RoleKey.BETA_OPERATOR,
+        "Beta Operator",
+        "First-beta finance operator with manual revenue-upload access.",
         allowed_scope_types=_GLOBAL,
     ),
     RoleKey.FINANCE_APPROVER: RoleDefinition(

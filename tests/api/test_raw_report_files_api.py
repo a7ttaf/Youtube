@@ -14,6 +14,7 @@ USER_ID = UUID("00000000-0000-0000-0000-000000010001")
 def auth_headers(
     role: str, scope_type: str = "global", scope_id: str | None = None
 ) -> dict[str, str]:
+    """Build trusted-gateway auth headers for the given role and scope."""
     headers = {
         "x-user-id": str(USER_ID),
         "x-user-email": "raw-report-user@example.com",
@@ -27,10 +28,12 @@ def auth_headers(
 
 
 def build_database_url(tmp_path) -> str:
+    """Return the SQLite URL for an isolated per-test raw-report-files database."""
     return f"sqlite+pysqlite:///{(tmp_path / 'raw-report-files.db').as_posix()}"
 
 
 def seed_database(database_url: str) -> None:
+    """Create security and report schema tables and seed the test user row."""
     engine = create_engine(database_url)
     SecurityBase.metadata.create_all(engine)
     ReportBase.metadata.create_all(engine)
@@ -42,6 +45,7 @@ def seed_database(database_url: str) -> None:
 
 
 def test_system_integration_user_registers_raw_report_file_metadata_with_audit(tmp_path):
+    """Registering a raw file persists metadata plus a sensitive REPORT_IMPORTED audit row."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -77,7 +81,37 @@ def test_system_integration_user_registers_raw_report_file_metadata_with_audit(t
     assert audit_log.sensitive is True
 
 
+def test_beta_operator_cannot_register_connector_raw_file_metadata(tmp_path):
+    """Manual revenue-fact access does not widen the connector provenance surface."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    client = TestClient(create_app(database_url=database_url))
+
+    response = client.post(
+        "/reports/raw-files",
+        headers=auth_headers("beta_operator"),
+        json={
+            "source": "youtube_reporting",
+            "report_type": "YOUTUBE_CMS_REVENUE",
+            "report_month": "2026-03",
+            "storage_uri": "s3://ums-raw-reports/youtube/2026-03/cms.csv",
+            "checksum": "sha256:83f8b7d92d8a",
+            "parse_status": "DOWNLOADED",
+            "reason": "Attempt connector provenance registration",
+        },
+    )
+
+    engine = create_engine(database_url)
+    with Session(engine) as session:
+        assert session.scalars(select(RawReportFileORM)).all() == []
+        assert session.scalars(select(AuditLogORM)).all() == []
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Missing permission: connectors.run_jobs"
+
+
 def test_connector_admin_reads_raw_report_file_metadata_with_audit(tmp_path):
+    """connector_admin reads one raw file and the view writes a RAW_FILE_VIEWED audit row."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -110,6 +144,7 @@ def test_connector_admin_reads_raw_report_file_metadata_with_audit(tmp_path):
 
 
 def test_assistant_cannot_view_raw_report_files(tmp_path):
+    """assistant_analyst is denied with the raw_files.view permission detail."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -124,6 +159,7 @@ def test_assistant_cannot_view_raw_report_files(tmp_path):
 
 
 def test_raw_report_file_registration_rejects_inline_or_local_storage_reference(tmp_path):
+    """A local filesystem storage_uri is rejected with the approved-object-storage detail."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -149,6 +185,7 @@ def test_raw_report_file_registration_rejects_inline_or_local_storage_reference(
 
 
 def test_raw_report_file_registration_rejects_duplicate_artifact_metadata(tmp_path):
+    """Re-registering the same artifact metadata returns 409, not a second row."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -179,6 +216,7 @@ def test_raw_report_file_registration_rejects_duplicate_artifact_metadata(tmp_pa
 
 
 def test_connector_admin_lists_raw_report_files_for_authorized_source_only(tmp_path):
+    """Listing returns only the connector-scoped source; other sources stay 403."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -226,6 +264,7 @@ def test_connector_admin_lists_raw_report_files_for_authorized_source_only(tmp_p
 
 
 def test_connector_admin_cannot_view_other_connector_raw_file(tmp_path):
+    """A connector-scoped admin gets 404, not the body, for another connector's file."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -253,6 +292,7 @@ def test_connector_admin_cannot_view_other_connector_raw_file(tmp_path):
 
 
 def test_user_without_raw_file_permission_cannot_probe_raw_file_ids(tmp_path):
+    """Permission is checked before validation, so even bad ids get 403, not 404."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))

@@ -47,6 +47,7 @@ PERMISSION_SCOPE_TYPES: dict[Permission, frozenset[str]] = {
     Permission.EXPORT_ANALYTICS_REPORT: _EXPORT_SCOPE_TYPES,
     Permission.EXPORT_REVENUE_REPORT: _EXPORT_SCOPE_TYPES,
     Permission.MANAGE_EXPORT_TEMPLATES: frozenset({ScopeType.GLOBAL.value, ScopeType.EXPORT.value}),
+    Permission.IMPORT_MANUAL_REVENUE: _GLOBAL_SCOPE_TYPES,
     Permission.MANAGE_CHANNELS: _ORG_SCOPE_TYPES,
     Permission.MANAGE_ORG_MAPPING: _ORG_SCOPE_TYPES,
     Permission.MANAGE_GROUPS: _ORG_SCOPE_TYPES,
@@ -72,6 +73,8 @@ if set(PERMISSION_SCOPE_TYPES) != set(Permission):
 
 @dataclass(frozen=True)
 class UserPermissionGrantEntry:
+    """Serialized state of one direct user permission grant."""
+
     id: str
     user_id: str
     permission_key: str
@@ -104,22 +107,24 @@ class UserPermissionGrantEntry:
 
 
 class UserPermissionGrantError(ValueError):
-    pass
+    """Base error for direct user permission grant operations."""
 
 
 class UserPermissionGrantConflictError(UserPermissionGrantError):
-    pass
+    """A conflicting active grant already exists for the same scope."""
 
 
 class UserPermissionGrantNotFoundError(UserPermissionGrantError):
-    pass
+    """The referenced grant does not exist or is already inactive."""
 
 
 class UserPermissionGrantValidationError(UserPermissionGrantError):
-    pass
+    """Grant input failed validation before any storage write."""
 
 
 class SqlAlchemyUserPermissionGrantRepository:
+    """Tenant-scoped persistence for direct user permission grants."""
+
     def __init__(self, session: Session, *, tenant_id: UUID | str | None = None):
         """Bind direct permission grants to an explicit or request tenant."""
         self._session = session
@@ -418,6 +423,7 @@ def _normalize_scope(scope_type: str, scope_id: str | None) -> tuple[str, str | 
 
 
 def _normalize_required_string(value: str, field_name: str) -> str:
+    """Strip a required input string and reject blank values."""
     normalized = value.strip()
     if not normalized:
         raise UserPermissionGrantValidationError(f"{field_name} must not be blank")
@@ -425,8 +431,10 @@ def _normalize_required_string(value: str, field_name: str) -> str:
 
 
 def _normalize_reason(value: str) -> str:
+    """Require a nonblank audit reason string."""
     return _normalize_required_string(value, "reason")
 
 
 def _scope_label(scope_type: str, scope_id: str | None) -> str:
+    """Render a human-readable scope label for audit records."""
     return "Global" if scope_id is None else f"{scope_type}:{scope_id}"

@@ -1,5 +1,5 @@
 -- Initial UMS security seed data.
--- Safe to re-run after security_schema.sql.
+-- Safe to re-run against a database migrated to Alembic head.
 --
 -- RUNTIME CONTRACT (Track-E, post-FORCE migration 20260612_0002):
 -- After migration 20260612_0002 the tenant-scoped tables carry FORCE ROW LEVEL
@@ -9,24 +9,30 @@
 -- reference writes (roles, permissions, role_permission_assignments) are NOT
 -- in TENANT_SCOPED_TABLES and are unaffected by FORCE.
 --
--- Run this raw reseed as one of:
---   (a) a superuser or BYPASSRLS role -- both bypass FORCE; this is what the
---       current deployment uses (the postgres superuser), OR
---   (b) the non-superuser table owner AFTER establishing a real tenant context
---       with the privileged setter, e.g.
---         SELECT set_app_current_tenant_id('<tenant-uuid>');
---       so the FORCEd policies match a concrete tenant instead of seeing NULL.
+-- Run this raw reseed only as a privileged catalog-maintenance role (the
+-- application app_tenant/app_platform lanes deliberately cannot mutate the
+-- roles/permissions catalogs) and only after establishing the target tenant on
+-- the SAME database backend with the privileged, parameterized setter, e.g.
+--     SELECT set_app_current_tenant_id('<validated-tenant-uuid>'::uuid);
+-- The access_scopes INSERT below reads that trusted backend context instead of
+-- the transitional UMS tenant server default. Missing context therefore fails
+-- closed at the tenant_id NOT NULL boundary, including for a superuser whose
+-- RLS bypass would otherwise hide the mistake.
 --
 -- NOTE: `SET row_security = OFF` is NOT a bypass -- PostgreSQL raises an error
 -- instead of filtering when a policy would otherwise apply, and `SET LOCAL` is
 -- a no-op outside an explicit transaction block, so neither helps an owner
--- reseed FORCEd tables. The tenant-aware in-repo source of truth is the Python
--- seed path (backend/ums_smart_revenue/auth/seed.py); prefer it for
--- tenant-scoped seeding.
+-- reseed FORCEd tables. Run the setter + this file in one transaction with the
+-- client configured to stop on the first error; otherwise a statement failure
+-- can leave a partial catalog refresh. For tenant bootstrap, prefer
+-- scripts/bootstrap_operator.py, which validates --tenant and creates the
+-- global scope on demand through the tenant-aware role repository.
 
-INSERT INTO access_scopes (scope_type, scope_id, label)
-VALUES ('global', NULL, 'Global')
-ON CONFLICT DO NOTHING;
+INSERT INTO access_scopes (tenant_id, scope_type, scope_id, label)
+VALUES (app_current_tenant_id(), 'global', NULL, 'Global')
+ON CONFLICT (tenant_id, scope_type)
+    WHERE scope_type = 'global' AND scope_id IS NULL
+DO UPDATE SET label = EXCLUDED.label;
 
 DELETE FROM user_role_assignments
 WHERE scope_id IN (SELECT id FROM access_scopes WHERE scope_type = 'graph-read');
@@ -50,6 +56,7 @@ VALUES
     ('corporate_admin', 'Corporate Admin', 'Global platform administrator without default finance visibility.', false),
     ('revenue_operations_admin', 'Revenue Operations Admin', 'Global operational admin for ingestion, registry quality, and analytics.', false),
     ('finance_admin', 'Finance Admin', 'Finance owner for revenue, reconciliation, overrides, and month close.', false),
+    ('beta_operator', 'Beta Operator', 'First-beta finance operator with manual revenue-upload access.', false),
     ('finance_approver', 'Finance Approver', 'Second-control approver for finance overrides and month unlocks.', false),
     ('finance_viewer', 'Finance Viewer', 'Read-only finance role for granted organization scopes.', false),
     ('tv_sector_manager', 'TV Sector Manager', 'Sector-scoped management role for TV analytics and report operations.', false),
@@ -80,6 +87,7 @@ VALUES
     ('finance.lock_month', 'Lock finance month', true, true),
     ('finance.unlock_month', 'Unlock finance month', true, true),
     ('finance.change_allocation_rule', 'Change allocation rule', true, true),
+    ('finance.import_manual_revenue', 'Import manual revenue facts', true, true),
     ('exports.analytics', 'Export analytics report', true, true),
     ('exports.revenue', 'Export revenue report', true, true),
     ('exports.manage_templates', 'Manage export templates', true, true),
@@ -99,6 +107,13 @@ ON CONFLICT (key) DO UPDATE
 SET label = EXCLUDED.label,
     sensitive = EXCLUDED.sensitive,
     audit_on_use = EXCLUDED.audit_on_use;
+
+-- FIX: An earlier PR #223 draft mapped beta_operator to connectors.run_jobs,
+-- which authorizes every connector rather than the bounded manual-revenue flow.
+-- Remove that exact unsafe draft edge so a manually re-run seed converges.
+DELETE FROM role_permission_assignments
+WHERE role_key = 'beta_operator'
+  AND permission_key = 'connectors.run_jobs';
 
 INSERT INTO role_permission_assignments (role_key, permission_key)
 SELECT 'super_owner' AS role_key, key AS permission_key FROM permissions
@@ -141,6 +156,21 @@ VALUES
     ('finance_admin', 'exports.revenue'),
     ('finance_admin', 'audit.view'),
     ('finance_admin', 'roles.assign'),
+    ('beta_operator', 'analytics.view'),
+    ('beta_operator', 'analytics.view_confidence'),
+    ('beta_operator', 'finance.view_revenue'),
+    ('beta_operator', 'finance.view_finalized_payments'),
+    ('beta_operator', 'finance.view_bank_reconciliation'),
+    ('beta_operator', 'finance.manage_bank_reconciliation'),
+    ('beta_operator', 'finance.create_manual_override'),
+    ('beta_operator', 'finance.approve_manual_override'),
+    ('beta_operator', 'finance.lock_month'),
+    ('beta_operator', 'finance.unlock_month'),
+    ('beta_operator', 'finance.change_allocation_rule'),
+    ('beta_operator', 'finance.import_manual_revenue'),
+    ('beta_operator', 'exports.analytics'),
+    ('beta_operator', 'exports.revenue'),
+    ('beta_operator', 'audit.view'),
     ('finance_approver', 'analytics.view'),
     ('finance_approver', 'analytics.view_confidence'),
     ('finance_approver', 'finance.view_revenue'),
@@ -187,4 +217,3 @@ VALUES
     ('data_steward', 'registry.manage_org_mapping'),
     ('data_steward', 'registry.manage_groups')
 ON CONFLICT DO NOTHING;
-

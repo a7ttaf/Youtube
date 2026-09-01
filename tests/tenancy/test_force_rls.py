@@ -2,8 +2,8 @@
 
 Two layers of evidence:
 
-PRIMARY (migration state) — after ``alembic upgrade head`` every table in
-:data:`TENANT_SCOPED_TABLES` has ``pg_class.relforcerowsecurity = TRUE``, and a
+PRIMARY (migration state) — at revision ``20260612_0002`` every table in
+:data:`_FORCE_REVISION_TENANT_TABLES` has ``pg_class.relforcerowsecurity = TRUE``, and a
 single-step downgrade flips it back to ``FALSE`` for all of them. This mirrors
 the ``relrowsecurity`` loop in ``tests/db/test_tenant_rls_migration.py`` for the
 ENABLE migration, one tier up: ENABLE makes non-owner roles subject; FORCE makes
@@ -26,12 +26,47 @@ import sqlalchemy as sa
 from alembic import command
 from alembic.config import Config
 
+from tests.db._pg_schema_helpers import reset_public_schema
 from tests.db._postgres_helpers import require_postgres_url
-from ums_smart_revenue.db.rls import TENANT_SCOPED_TABLES
 
 # The revision immediately below the FORCE migration (its down_revision); the
 # primary test downgrades to it to assert the FORCE flag is cleared.
 _PRE_FORCE_REVISION = "20260612_0001"
+
+# FIX: The reversible FORCE-RLS round-trip must stop at its own revision;
+# dynamic head now includes the intentionally irreversible authorization floor.
+_FORCE_REVISION = "20260612_0002"
+
+# This independent literal pins the schema owned by 20260612_0002. Later
+# tenant-scoped tables install FORCE in their own migrations and must not make
+# this historical round-trip assert against relations that do not exist yet.
+_FORCE_REVISION_TENANT_TABLES: tuple[str, ...] = (
+    "access_scopes",
+    "adsense_content_owner_links",
+    "adsense_payments",
+    "api_connector_credentials",
+    "audit_logs",
+    "bank_reconciliation_entries",
+    "channel_group_members",
+    "channel_groups",
+    "committed_allocation_runs",
+    "connector_run_raw_files",
+    "connector_runs",
+    "content_owner_channel_links",
+    "deduction_components",
+    "export_jobs",
+    "finance_month_close",
+    "google_revenue_source_rows",
+    "monthly_channel_revenue_facts",
+    "number_explanations",
+    "org_units",
+    "raw_report_files",
+    "revenue_manual_overrides",
+    "user_permission_grants",
+    "user_role_assignments",
+    "users",
+    "youtube_channels",
+)
 
 _OWNER_ROLE = "force_rls_owner_test"
 _OWNER_PW = "pw"
@@ -67,7 +102,7 @@ def _force_flags(conn: sa.Connection) -> dict[str, bool]:
             "JOIN pg_namespace n ON c.relnamespace = n.oid "
             "WHERE n.nspname = 'public' AND c.relname = ANY(:names)"
         ),
-        {"names": list(TENANT_SCOPED_TABLES)},
+        {"names": list(_FORCE_REVISION_TENANT_TABLES)},
     ).all()
     return dict(rows)
 
@@ -76,22 +111,24 @@ def test_force_rls_migration_sets_force_flag_on_all_tenant_tables():
     """Verify upgrade FORCEs every tenant table and downgrade clears it."""
     url = require_postgres_url()
     cfg = _alembic_config(url)
-    command.upgrade(cfg, "head")
+    reset_public_schema(url)
+    command.upgrade(cfg, _FORCE_REVISION)
     engine = sa.create_engine(url)
     try:
         with engine.connect() as conn:
             flags = _force_flags(conn)
-            for table in TENANT_SCOPED_TABLES:
+            for table in _FORCE_REVISION_TENANT_TABLES:
                 assert flags.get(table) is True, f"{table} not FORCEd"
         # One step back removes only the FORCE flag; ENABLE/policy stay intact.
         command.downgrade(cfg, _PRE_FORCE_REVISION)
         with engine.connect() as conn:
             flags = _force_flags(conn)
-            for table in TENANT_SCOPED_TABLES:
+            for table in _FORCE_REVISION_TENANT_TABLES:
                 assert flags.get(table, False) is False, f"{table} still FORCEd"
     finally:
         engine.dispose()
-        # Leave the DB at head for the rest of the PG tier.
+        # Re-run the owned upgrade before restoring current head for the PG tier.
+        command.upgrade(cfg, _FORCE_REVISION)
         command.upgrade(cfg, "head")
 
 

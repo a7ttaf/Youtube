@@ -3,6 +3,8 @@ from enum import StrEnum
 
 
 class Permission(StrEnum):
+    """Every permission key the platform can grant or check."""
+
     VIEW_ANALYTICS = "analytics.view"
     VIEW_CONFIDENCE = "analytics.view_confidence"
     VIEW_REVENUE = "finance.view_revenue"
@@ -17,6 +19,7 @@ class Permission(StrEnum):
     EXPORT_ANALYTICS_REPORT = "exports.analytics"
     EXPORT_REVENUE_REPORT = "exports.revenue"
     MANAGE_EXPORT_TEMPLATES = "exports.manage_templates"
+    IMPORT_MANUAL_REVENUE = "finance.import_manual_revenue"
     MANAGE_CHANNELS = "registry.manage_channels"
     MANAGE_ORG_MAPPING = "registry.manage_org_mapping"
     MANAGE_GROUPS = "registry.manage_groups"
@@ -33,6 +36,8 @@ class Permission(StrEnum):
 
 @dataclass(frozen=True)
 class PermissionDefinition:
+    """Admin-facing metadata and sensitivity flags for one permission."""
+
     permission: Permission
     label: str
     sensitive: bool
@@ -119,6 +124,12 @@ PERMISSION_DEFINITIONS: dict[Permission, PermissionDefinition] = {
     Permission.MANAGE_EXPORT_TEMPLATES: PermissionDefinition(
         Permission.MANAGE_EXPORT_TEMPLATES,
         "Manage export templates",
+        sensitive=True,
+        audit_on_use=True,
+    ),
+    Permission.IMPORT_MANUAL_REVENUE: PermissionDefinition(
+        Permission.IMPORT_MANUAL_REVENUE,
+        "Import manual revenue facts",
         sensitive=True,
         audit_on_use=True,
     ),
