@@ -525,11 +525,13 @@ def test_scheduled_tick_isolates_two_tenants_under_rls(
 def test_scheduled_reticks_are_idempotent_then_a_change_writes(
     pg_url: str, owner_engine: sa.Engine, service_actor: str, resolves_ok: None
 ) -> None:
-    """A converged re-tick writes ZERO new audit rows; a renamed snapshot then writes rows.
+    """A converged re-tick writes only lifecycle edges, then a rename writes domain rows.
 
     The twin (a third tick with a renamed group) is the anti-vacuity guard: it
-    proves the zero-assertion is not trivially true because the worker never
-    writes anything.
+    proves the zero-domain-change assertion is not trivially true because the
+    worker never writes anything. Every accepted scheduled job now also writes
+    one durable submission intent plus one dispatch edge; those governance rows
+    are required for crash recovery and are asserted exactly, not ignored.
     """
     _seed_credential(owner_engine, tenant_id=TENANT_A, owner=OWNER_A, user_id=USER_A)
     _seed_channel(owner_engine, tenant_id=TENANT_A, channel_id=CHAN_A1, owner=OWNER_A, name="A One")
@@ -545,17 +547,51 @@ def test_scheduled_reticks_are_idempotent_then_a_change_writes(
         _tick_and_wait(scheduler, activated)
         after_create = _audit_count(owner_engine, tenant_id=TENANT_A)
         assert after_create > 0, "the first tick must write audit rows"
+        create_events = _audit_events(owner_engine, tenant_id=TENANT_A)
+        create_group_events = sum(
+            event_type
+            in {
+                AuditEventType.GROUP_UPDATED.value,
+                AuditEventType.GROUPS_SYNCED.value,
+            }
+            for event_type, _details in create_events
+        )
 
-        # Tick 2: identical snapshot -> everything UNCHANGED -> ZERO new rows.
+        # Tick 2: identical snapshot -> no GROUP_UPDATED/GROUPS_SYNCED rows,
+        # but the durable queued/dispatch lifecycle contributes exactly two.
         _tick_and_wait(scheduler, activated)
-        assert _audit_count(owner_engine, tenant_id=TENANT_A) == after_create
+        unchanged_events = _audit_events(owner_engine, tenant_id=TENANT_A)
+        assert len(unchanged_events) == after_create + 2
+        unchanged_group_events = sum(
+            event_type
+            in {
+                AuditEventType.GROUP_UPDATED.value,
+                AuditEventType.GROUPS_SYNCED.value,
+            }
+            for event_type, _details in unchanged_events
+        )
+        assert unchanged_group_events == create_group_events
+        for action in ("job_submitted", "job_dispatch_started"):
+            before = sum(details.get("action") == action for _, details in create_events)
+            after = sum(details.get("action") == action for _, details in unchanged_events)
+            assert after == before + 1
         unchanged = _stored_group(owner_engine, tenant_id=TENANT_A, cms_group_id=GROUP_A)
         assert unchanged is not None and unchanged[1] == "Alpha Sector"
 
-        # Twin: a renamed group DOES add rows, so the zero above is not vacuous.
+        # Twin: a renamed group DOES add domain rows, so the invariant above is
+        # not vacuous lifecycle noise.
         snapshots[OWNER_A] = [(GROUP_A, "Alpha Sector HD", (CHAN_A1, CHAN_A2))]
         _tick_and_wait(scheduler, activated)
-        assert _audit_count(owner_engine, tenant_id=TENANT_A) > after_create
+        renamed_events = _audit_events(owner_engine, tenant_id=TENANT_A)
+        renamed_group_events = sum(
+            event_type
+            in {
+                AuditEventType.GROUP_UPDATED.value,
+                AuditEventType.GROUPS_SYNCED.value,
+            }
+            for event_type, _details in renamed_events
+        )
+        assert renamed_group_events > unchanged_group_events
         renamed = _stored_group(owner_engine, tenant_id=TENANT_A, cms_group_id=GROUP_A)
         assert renamed is not None and renamed[1] == "Alpha Sector HD"
     finally:

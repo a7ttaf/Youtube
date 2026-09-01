@@ -22,7 +22,7 @@ from uuid import UUID, uuid4
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine, select
+from sqlalchemy import create_engine, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -47,7 +47,10 @@ from ums_smart_revenue.connectors.google.errors import (
     OAuthRefreshError,
     SecretFetchError,
 )
-from ums_smart_revenue.connectors.runs.executor import ConnectorJobActor
+from ums_smart_revenue.connectors.runs.executor import (
+    ConnectorJobActor,
+    ConnectorJobExecutor,
+)
 from ums_smart_revenue.db.connector_models import ConnectorRunORM
 from ums_smart_revenue.db.org_models import OrgBase
 from ums_smart_revenue.db.report_models import ReportBase
@@ -57,6 +60,7 @@ from ums_smart_revenue.db.security_models import (
     SecurityBase,
     UserORM,
 )
+from ums_smart_revenue.db.session import build_session_factory
 from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
 
 USER_ID = UUID("00000000-0000-0000-0000-000000004001")
@@ -133,6 +137,7 @@ class _FakeExecutor:
         self.submit_calls: list[dict] = []
         self.activate_calls: list[dict] = []
         self.cancel_calls: list[dict] = []
+        self.audit_failure_calls: list[dict] = []
 
     def has_active_job(self, **kwargs) -> bool:
         return self.active
@@ -152,12 +157,20 @@ class _FakeExecutor:
         self.cancel_calls.append({"reservation": reservation})
         return True
 
+    def audit_failed_before_start(self, **kwargs):
+        """Record the durable activation-failure handoff."""
+        self.audit_failure_calls.append(kwargs)
+        return True
+
 
 class _FakeReservation:
     """Marker object for the in-flight slot the executor will activate on commit."""
 
     def __init__(self, kwargs: dict) -> None:
         self.kwargs = kwargs
+        self.job_id = uuid4()
+        for name, value in kwargs.items():
+            setattr(self, name, value)
 
 
 def _set_service_actor_env() -> None:
@@ -426,8 +439,10 @@ def test_revenue_operations_admin_can_request_connector_job_and_audit(tmp_path):
     assert call["dry_run"] is False
     assert isinstance(call["actor_identity"], ConnectorJobActor)
     # Reserve-then-activate: the route held a slot during request handling
-    # and the after_commit hook activated it (recorded by the fake).
+    # and outer transaction finalization activated it (recorded by the fake).
     assert len(fake.activate_calls) == 1
+    reservation = fake.activate_calls[0]["reservation"]
+    assert audit_log.request_id == str(reservation.job_id)
     assert fake.cancel_calls == []
 
 
@@ -499,8 +514,9 @@ def test_request_connector_job_live_requires_unexpired_credential_smoke(tmp_path
     assert fake.cancel_calls == []
 
 
-def test_request_connector_job_missing_permission_403(tmp_path):
-    """assistant_analyst is denied with the run_jobs permission detail (no audit)."""
+@pytest.mark.parametrize("role", ["assistant_analyst", "beta_operator"])
+def test_request_connector_job_missing_permission_403(tmp_path, role):
+    """Non-connector roles are denied with the run_jobs detail and no submission."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     _seed_active_credential(database_url)
@@ -509,7 +525,7 @@ def test_request_connector_job_missing_permission_403(tmp_path):
 
     response = client.post(
         "/connectors/jobs",
-        headers=auth_headers("assistant_analyst"),
+        headers=auth_headers(role),
         json={
             "connector_key": "youtube_reporting",
             "account_id": "content-owner-1",
@@ -754,6 +770,53 @@ def test_request_connector_job_orphan_supersede_then_accept(tmp_path):
     assert fake.cancel_calls == []
 
 
+def test_request_connector_job_fresh_running_run_cancels_reserved_slot(tmp_path) -> None:
+    """A committed duplicate-run rejection never activates its reservation."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    _seed_active_credential(database_url)
+    seed_connector_run(
+        database_url,
+        connector_key="youtube_reporting",
+        account_id="content-owner-1",
+        report_month="2026-03",
+        status="RUNNING",
+        error_summary=None,
+        started_at=datetime.now(UTC),
+    )
+    fake = _FakeExecutor(active=False)
+
+    response = TestClient(_enable_executor_app(database_url, fake)).post(
+        "/connectors/jobs",
+        headers=auth_headers(
+            "revenue_operations_admin",
+            "connector",
+            "youtube_reporting",
+        ),
+        json={
+            "connector_key": "youtube_reporting",
+            "account_id": "content-owner-1",
+            "report_month": "2026-03",
+            "reason": "Fresh run must block",
+        },
+    )
+
+    assert response.status_code == 409
+    assert len(fake.submit_calls) == 1
+    assert fake.activate_calls == []
+    assert len(fake.cancel_calls) == 1
+    assert fake.audit_failure_calls == []
+    engine = create_engine(database_url)
+    try:
+        with Session(engine) as session:
+            audit_rows = list(session.scalars(select(AuditLogORM)).all())
+    finally:
+        engine.dispose()
+    assert len(audit_rows) == 1
+    assert audit_rows[0].details["action"] == "job_rejected"
+    assert audit_rows[0].details["rejection"] == "duplicate_in_flight"
+
+
 def test_request_connector_job_503_service_principal_unavailable(tmp_path):
     """Missing UMS_GOOGLE_CONNECTOR_SERVICE_ACTOR_ID -> 503 + job_rejected/
     service_principal_unavailable.
@@ -883,14 +946,12 @@ def test_request_connector_job_accepts_hyphen_alias_for_underscore_credential(
 
 
 def test_request_connector_job_after_rollback_cancels_reservation(tmp_path, monkeypatch) -> None:
-    """The after_rollback hook drops the reservation if the session rolls back.
+    """The outer-transaction finalizer cancels exactly once on rollback.
 
     Pins the fix for: a DB error in find_active_runs_for_scope() / finish_run()
-    or the route-owned audit write between submit_if_absent and
-    _enqueue_after_commit must not leave the reservation wedged in the
-    executor registry. The route attaches the rollback hook right after
-    submit_if_absent so any exception in the supersede / audit-write path
-    cleans up the slot.
+    or the route-owned audit write after submit_if_absent must not leave the
+    reservation wedged in the executor registry. The route attaches its
+    lifecycle hooks immediately so the outer rollback cleans up the slot.
     """
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
@@ -929,26 +990,22 @@ def test_request_connector_job_after_rollback_cancels_reservation(tmp_path, monk
     # rolled back. The 500 may or may not surface depending on FastAPI's
     # exception handler; the contract we care about is the executor state.
     assert response.status_code == 500
-    # submit_if_absent was called, the rollback hook fired, the reservation
-    # was cancelled. Activate was never called. The fake's ``cancel_calls``
-    # only sees explicit ``cancel_reservation`` invocations, not hook fires
-    # (the real SQLAlchemy after_rollback event bypasses the fake), so we
-    # only assert activate was not called.
+    # submit_if_absent was called and the outer rollback finalized exactly
+    # once. No activation or failure-audit side effect is allowed.
     assert len(fake.submit_calls) == 1
     assert fake.activate_calls == []
+    assert len(fake.cancel_calls) == 1
+    assert fake.audit_failure_calls == []
 
 
-def test_request_connector_job_activate_failure_writes_bucket_a_audit(
-    tmp_path, monkeypatch
-) -> None:
-    """If executor.activate() raises after the audit commits, a job_failed_before_start
-    audit row is written.
+def test_request_connector_job_activate_failure_writes_bucket_a_audit(tmp_path) -> None:
+    """Activation failure is handed off after the committed checkout releases.
 
     Pins the fix for: an accepted 202 with no worker enqueue (e.g. the
     ThreadPoolExecutor rejecting new work during app shutdown) must not
-    disappear from the audited run lifecycle. The after_commit hook
-    catches the activation failure and persists a Bucket-A audit row on
-    a fresh session.
+    disappear from the audited run lifecycle. The outer transaction-end hook
+    catches the activation failure and persists a Bucket-A audit row on a
+    fresh session after SQLite returns its sole connection to QueuePool.
     """
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
@@ -964,21 +1021,6 @@ def test_request_connector_job_activate_failure_writes_bucket_a_audit(
     fake = _ActivateFailExecutor(active=False)
     app = _enable_executor_app(database_url, fake)
 
-    # Wrap the real executor's _audit_failed_before_start on the instance
-    # so we can record its calls (and have it still write the real audit).
-    # _FakeExecutor doesn't ship with that method, so install a passthrough.
-
-    def _noop(*_args, **_kwargs):
-        return None
-
-    real_audit = _ActivateFailExecutor.__dict__.get("_audit_failed_before_start")
-    if real_audit is None:
-        # The fake's parent class doesn't define it; we just verify the
-        # code path tries to call it (the after_commit handler invokes
-        # ``executor._audit_failed_before_start``; the missing attribute
-        # is what we're protecting against, so we monkey-patch it onto
-        # the fake instance as a no-op to keep the handler from raising).
-        _ActivateFailExecutor._audit_failed_before_start = staticmethod(_noop)  # type: ignore[attr-defined]
     client = TestClient(app)
 
     response = client.post(
@@ -991,27 +1033,23 @@ def test_request_connector_job_activate_failure_writes_bucket_a_audit(
             "reason": "Activate should fail and write audit",
         },
     )
-    # The 202 returns to the client; the after_commit hook then fails
-    # activation and writes the audit asynchronously.
+    # The 202 returns to the client; outer transaction finalization then fails
+    # activation and writes the audit synchronously after checkout release.
     assert response.status_code == 202
     assert len(fake.submit_calls) == 1
     assert len(fake.activate_calls) == 1
     # The reservation was cancelled when activate failed.
     assert len(fake.cancel_calls) == 1
-    # Give the hook a moment to finish writing the audit. In the unit
-    # test environment the hook ran synchronously in after_commit, so
-    # the audit attempt has already been made. We assert the
-    # _audit_failed_before_start path was invoked (or attempted) by
-    # checking that the fake has the method installed; the real
-    # _audit_failed_before_start would persist a row in the DB.
-    assert hasattr(fake, "_audit_failed_before_start")
+    assert len(fake.audit_failure_calls) == 1
+    reservation = fake.activate_calls[0]["reservation"]
+    assert fake.audit_failure_calls[0]["job_id"] == reservation.job_id
 
 
 def test_request_connector_job_activate_runs_only_after_commit(tmp_path):
-    """The after_commit hook activates the reservation; rollback drops the slot.
+    """Outer transaction completion activates once; rollback drops the slot.
 
-    Happy path: the after_commit hook is fired by FastAPI's session_dependency
-    wrapper, so ``activate`` is recorded exactly once and no cancel happens.
+    Happy path: session_dependency commits and releases its checkout before
+    ``activate`` is recorded exactly once, and no cancel happens.
     The matching rollback path is covered at the executor level by
     ``test_cancel_reservation_drops_in_flight_slot`` (the route's hook wiring
     shares the same one-shot guard).
@@ -1036,6 +1074,202 @@ def test_request_connector_job_activate_runs_only_after_commit(tmp_path):
     assert len(fake.submit_calls) == 1
     assert len(fake.activate_calls) == 1
     assert fake.cancel_calls == []
+
+
+def test_request_connector_job_activation_failure_persists_with_real_sqlite_executor(
+    tmp_path,
+) -> None:
+    """Real QueuePool(1) writes the failure audit after request checkin."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    _seed_active_credential(database_url)
+    os.environ["UMS_CONNECTOR_JOB_EXECUTOR_ENABLED"] = "true"
+    _set_service_actor_env()
+    app = create_app(database_url=database_url)
+    executor = app.state.connector_job_executor
+    assert isinstance(executor, ConnectorJobExecutor)
+    # Closing the real pool preserves submit_if_absent but makes activate()
+    # raise the same RuntimeError used by ThreadPoolExecutor during shutdown.
+    executor._executor.shutdown(wait=True)
+
+    try:
+        response = TestClient(app).post(
+            "/connectors/jobs",
+            headers=auth_headers(
+                "revenue_operations_admin",
+                "connector",
+                "youtube_reporting",
+            ),
+            json={
+                "connector_key": "youtube_reporting",
+                "account_id": "content-owner-1",
+                "report_month": "2026-03",
+                "reason": "Real activation failure audit",
+            },
+        )
+        assert response.status_code == 202
+
+        engine = create_engine(database_url)
+        try:
+            with Session(engine) as session:
+                rows = list(
+                    session.scalars(
+                        select(AuditLogORM).where(AuditLogORM.event_type == "CONNECTOR_JOB_RUN")
+                    ).all()
+                )
+        finally:
+            engine.dispose()
+    finally:
+        executor.close()
+
+    assert len(rows) == 2
+    assert {row.details["action"] for row in rows} == {
+        "job_submitted",
+        "job_failed_before_start",
+    }
+    request_ids = {row.request_id for row in rows}
+    assert None not in request_ids
+    assert len(request_ids) == 1
+    failure = next(row for row in rows if row.details["action"] == "job_failed_before_start")
+    assert failure.details["error_class"] == "RuntimeError"
+
+
+def test_request_connector_job_activation_can_open_fresh_sqlite_session(
+    tmp_path,
+) -> None:
+    """Activation runs after QueuePool checkin and sees the committed intent."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    _seed_active_credential(database_url)
+    factory = build_session_factory(database_url)
+
+    class _CheckoutProbeExecutor(_FakeExecutor):
+        """Executor that records the audit rows visible at activation time."""
+
+        seen_actions: list[str]
+
+        def __init__(self) -> None:
+            super().__init__(active=False)
+            self.seen_actions = []
+
+        def activate(self, reservation):  # type: ignore[override]
+            self.activate_calls.append({"reservation": reservation})
+            with factory() as probe_session:
+                """Inspect the committed audit rows during reservation activation."""
+                rows = probe_session.scalars(
+                    select(AuditLogORM).where(AuditLogORM.request_id == str(reservation.job_id))
+                ).all()
+                self.seen_actions = [str(row.details["action"]) for row in rows]
+
+    fake = _CheckoutProbeExecutor()
+    response = TestClient(_enable_executor_app(database_url, fake)).post(
+        "/connectors/jobs",
+        headers=auth_headers(
+            "revenue_operations_admin",
+            "connector",
+            "youtube_reporting",
+        ),
+        json={
+            "connector_key": "youtube_reporting",
+            "account_id": "content-owner-1",
+            "report_month": "2026-03",
+            "reason": "Checkout order probe",
+        },
+    )
+
+    assert response.status_code == 202
+    assert fake.seen_actions == ["job_submitted"]
+    assert len(fake.activate_calls) == 1
+    assert fake.cancel_calls == []
+
+
+def test_reservation_lifecycle_ignores_nested_transaction_events(tmp_path) -> None:
+    """SAVEPOINT events cannot activate, cancel, or duplicate a reservation."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    factory = build_session_factory(database_url)
+    fake = _FakeExecutor(active=False)
+    reservation = _FakeReservation(
+        {
+            "tenant_id": UUID(UMS_TENANT_ID),
+            "connector_key": "youtube_reporting",
+            "account_id": "content-owner-1",
+            "report_month": "2026-03",
+            "dry_run": False,
+            "triggered_by_user_id": USER_ID,
+            "actor_identity": ConnectorJobActor(
+                user_id=str(USER_ID),
+                email="connector-user@example.com",
+            ),
+        }
+    )
+
+    with factory() as session:
+        accept = connectors_module._attach_reservation_lifecycle_hooks(
+            session=session,
+            executor=fake,
+            reservation=reservation,
+        )
+        accept()
+        with session.begin():
+            with session.begin_nested():
+                session.execute(text("SELECT 1"))
+            try:
+                with session.begin_nested():
+                    session.execute(text("SELECT 1"))
+                    raise RuntimeError("rollback nested savepoint")
+            except RuntimeError as exc:
+                assert str(exc) == "rollback nested savepoint"
+            assert fake.activate_calls == []
+            assert fake.cancel_calls == []
+        assert len(fake.activate_calls) == 1
+        assert fake.cancel_calls == []
+
+        # The listeners remain attached to the reusable Session, but closure
+        # state is already settled before side effects and prevents duplicates.
+        with session.begin():
+            session.execute(text("SELECT 1"))
+
+    assert len(fake.activate_calls) == 1
+    assert fake.cancel_calls == []
+
+
+def test_nested_commit_then_outer_rollback_cancels_reservation(tmp_path) -> None:
+    """A SAVEPOINT commit cannot arm activation across an outer rollback."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    factory = build_session_factory(database_url)
+    fake = _FakeExecutor(active=False)
+    reservation = _FakeReservation(
+        {
+            "tenant_id": UUID(UMS_TENANT_ID),
+            "connector_key": "youtube_reporting",
+            "account_id": "content-owner-1",
+            "report_month": "2026-03",
+            "dry_run": False,
+            "triggered_by_user_id": USER_ID,
+            "actor_identity": ConnectorJobActor(
+                user_id=str(USER_ID),
+                email="connector-user@example.com",
+            ),
+        }
+    )
+
+    with factory() as session:
+        accept = connectors_module._attach_reservation_lifecycle_hooks(
+            session=session,
+            executor=fake,
+            reservation=reservation,
+        )
+        accept()
+        transaction = session.begin()
+        with session.begin_nested():
+            session.execute(text("SELECT 1"))
+        transaction.rollback()
+
+    assert fake.activate_calls == []
+    assert len(fake.cancel_calls) == 1
+    assert fake.audit_failure_calls == []
 
 
 def test_connector_admin_can_test_connection_ok(tmp_path):
@@ -1870,7 +2104,8 @@ def test_derive_credential_health_state_missing_without_secret_ref():
 
 def test_derive_credential_health_state_auth_failed_precedence_over_missing():
     """auth_failed is evaluated before missing: a failed refresh with no secret
-    still derives 'auth_failed' (locks the documented rule precedence)."""
+    still derives 'auth_failed' (locks the documented rule precedence).
+    """
     as_of = datetime(2026, 6, 14, 12, 0, tzinfo=UTC)
     entry = ConnectorCredentialEntry(
         id="x",
@@ -2031,9 +2266,7 @@ def test_content_owners_group_manager_without_manage_connectors_gets_200(tmp_pat
     """The Qodo regression: MANAGE_GROUPS without MANAGE_CONNECTORS may load owners."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
-    _seed_credential_row(
-        database_url, connector_key="youtube-analytics", account_id="OwnerAaa"
-    )
+    _seed_credential_row(database_url, connector_key="youtube-analytics", account_id="OwnerAaa")
     client = TestClient(create_app(database_url=database_url))
 
     response = client.get(
@@ -2050,9 +2283,7 @@ def test_content_owners_returns_only_active_rows_for_requested_connector(tmp_pat
     """Revoked rows and other connector keys stay out of the picker payload."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
-    _seed_credential_row(
-        database_url, connector_key="youtube-analytics", account_id="OwnerActive"
-    )
+    _seed_credential_row(database_url, connector_key="youtube-analytics", account_id="OwnerActive")
     _seed_credential_row(
         database_url,
         connector_key="youtube-analytics",
@@ -2078,9 +2309,7 @@ def test_content_owners_discloses_only_account_id(tmp_path):
     """No credential UUIDs, has_secret_ref, status, or telemetry leave the route."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
-    _seed_credential_row(
-        database_url, connector_key="youtube-analytics", account_id="OwnerAaa"
-    )
+    _seed_credential_row(database_url, connector_key="youtube-analytics", account_id="OwnerAaa")
     client = TestClient(create_app(database_url=database_url))
 
     response = client.get(
@@ -2136,9 +2365,7 @@ def test_content_owners_forbids_company_scoped_group_manager(tmp_path):
     response = client.get(
         "/connectors/content-owners",
         params={"connector_key": "youtube-analytics"},
-        headers=auth_headers(
-            "data_steward", "company", "00000000-0000-0000-0000-000000003201"
-        ),
+        headers=auth_headers("data_steward", "company", "00000000-0000-0000-0000-000000003201"),
     )
 
     assert response.status_code == 403

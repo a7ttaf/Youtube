@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 from ums_smart_revenue.auth.audit_service import AuditSink
 from ums_smart_revenue.auth.models import UserPrincipal
 from ums_smart_revenue.auth.sql_audit_sink import SqlAlchemyAuditSink
+from ums_smart_revenue.config.logging_config import redact_exception_summary
 from ums_smart_revenue.connectors.google.audit import (
     build_connector_service_principal,
 )
@@ -165,7 +166,10 @@ def _record_projection_failure_on_run(
     from ums_smart_revenue.auth.audit_service import record_audit_event
     from ums_smart_revenue.auth.scopes import AccessScope
 
-    error_summary = f"normalize failed: {type(exc).__name__}: {exc!s}"
+    # FIX: SQLAlchemy/driver strings can render a bound private value before
+    # their SQL/parameter suffix. Format from the exception object so database
+    # failures are class-only before the durable connector_runs write.
+    error_summary = f"normalize failed: {redact_exception_summary(exc)}"
     try:
         run_id = UUID(run.id)
     except (ValueError, TypeError, AttributeError):

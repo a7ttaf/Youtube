@@ -79,7 +79,8 @@ $env:UMS_AUTHZ_SOURCE = "headers"
 uv run alembic upgrade head
 
 # 5) Run the API
-uv run uvicorn ums_smart_revenue.app:app --reload --host 0.0.0.0 --port 8000
+uv run uvicorn ums_smart_revenue.app:app --reload --host 0.0.0.0 --port 8000 \
+  --timeout-graceful-shutdown 10
 ```
 
 On Linux/macOS, run step 3 in bash instead — steps 1, 2, 4, and 5 are the same

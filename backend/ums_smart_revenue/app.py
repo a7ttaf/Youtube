@@ -7,9 +7,13 @@
 # Connections:
 #   - File: backend/ums_smart_revenue/api/export_templates.py -> Router wiring.
 #   - File: backend/ums_smart_revenue/config/settings.py -> Runtime settings.
+#   - File: backend/ums_smart_revenue/config/logging_config.py -> The ASGI
+#     lifespan owns the one-time process logging configuration (P0.6).
 # ============================================================================
 """FastAPI application factory and router wiring."""
 
+import logging
+import threading
 from collections.abc import Iterable
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
@@ -72,6 +76,12 @@ from ums_smart_revenue.api.session import router as session_router
 from ums_smart_revenue.api.source_rows import router as source_rows_router
 from ums_smart_revenue.api.tenants import router as tenants_router
 from ums_smart_revenue.api.users import router as users_router
+from ums_smart_revenue.config.logging_config import (
+    LoggingConfiguration,
+    configure_logging,
+    release_logging_output,
+    restore_logging,
+)
 from ums_smart_revenue.config.settings import (
     AUTHZ_SOURCE_DATABASE,
     AUTHZ_SOURCE_HEADERS,
@@ -87,6 +97,10 @@ from ums_smart_revenue.db.session import (
     build_session_factory,
     session_dependency,
 )
+from ums_smart_revenue.ops.health import (
+    ReadinessUnavailableError,
+    check_database_readiness,
+)
 from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
 from ums_smart_revenue.tenancy.context import TENANT_CTX
 from ums_smart_revenue.tenancy.models import Tenant, TenantStatus
@@ -100,6 +114,68 @@ from ums_smart_revenue.tenancy.resolver import (
     SessionFactory as TenantSessionFactory,
 )
 
+logger = logging.getLogger(__name__)
+
+
+# ============================================================================
+# Purpose: Release one lifespan's output/level ownership after bounded shutdown,
+#   while retaining its independent redaction-safety lease until every
+#   scheduler, executor, and retained audit thread reaches real termination.
+# Database/ORM: None directly; surviving connector workers and a scheduler tick
+#   may finish their already-open transactions before their wait methods return.
+# Standards: The watcher is daemonized so it cannot extend the container's
+#   bounded stop window. A failed completion observation retains safety
+#   fail-closed; it is never interpreted as proof that the workers terminated.
+# Blast Radius: Process logging and background-worker teardown ordering only.
+# Connections:
+#   - File: backend/ums_smart_revenue/connectors/runs/executor.py -> exposes the
+#     retained close-time futures through wait_for_shutdown_completion().
+#   - File: backend/ums_smart_revenue/connectors/runs/scheduler.py -> joins any
+#     scheduler thread that survived its bounded close().
+# ============================================================================
+def _defer_logging_restore_until_workers_finish(
+    *,
+    configuration: LoggingConfiguration,
+    scheduler: GroupSyncScheduler | None,
+    executor: ConnectorJobExecutor | None,
+) -> None:
+    """Release output now and redaction only after all survivors exit."""
+    # FIX: Output ownership and redaction safety are different lifetimes.
+    # Restore levels/detach the UMS output handler now, but keep the exact
+    # safety filters on every configured handler until both wait contracts
+    # positively confirm that no background thread can emit another record.
+    release_logging_output(configuration)
+
+    def _wait_and_restore() -> None:
+        """Restore redaction safety only after both wait contracts confirm quiescence."""
+        try:
+            if scheduler is not None:
+                scheduler.wait_for_shutdown_completion()
+            if executor is not None:
+                executor.wait_for_shutdown_completion()
+        except Exception:  # noqa: BLE001 — safety must remain fail-closed
+            # FIX: An observer exception is not a termination edge. Releasing
+            # the safety filters here let a still-running audit/worker thread
+            # publish raw exception SQL or credentials through foreign/root
+            # handlers. Retaining one safety lease is the safe failure mode.
+            logger.exception("Background-worker completion wait failed")
+            return
+        restore_logging(configuration)
+
+    watcher = threading.Thread(
+        target=_wait_and_restore,
+        name="ums-logging-release-watcher",
+        daemon=True,
+    )
+    try:
+        watcher.start()
+    except Exception:
+        # A watcher-start failure falls back to the same positive termination
+        # checks synchronously. If a check fails, _wait_and_restore deliberately
+        # retains redaction safety rather than guessing that workers stopped.
+        logger.exception("Logging-release watcher failed to start; waiting synchronously")
+        _wait_and_restore()
+
 
 def create_app(*, database_url: str | None = None, authz_source: str | None = None) -> FastAPI:
     """Create the FastAPI application with optional SQL-backed authorization."""
@@ -112,37 +188,92 @@ def create_app(*, database_url: str | None = None, authz_source: str | None = No
         raise ValueError("database authz_source requires database_url or UMS_DATABASE_URL")
 
     # ========================================================================
-    # Purpose: Close the module-owned GroupSyncScheduler and ConnectorJobExecutor
-    #   on app shutdown so the tick thread and worker threads tear down
+    # Purpose: Install the process logging configuration on startup, then on
+    #   shutdown close the module-owned GroupSyncScheduler and
+    #   ConnectorJobExecutor so the tick thread and worker threads tear down
     #   deterministically (each one's weakref.finalize GC backstop is a safety
-    #   net, not the primary teardown). No startup work.
-    # Database/ORM: None directly; both own their own session factories.
+    #   net, not the primary teardown), and finally release the logging state.
+    # Database/ORM: None directly; both workers own their own session factories.
     # Standards: getattr-guarded so a disabled app (no scheduler, no executor)
     #   shuts down cleanly. Fail-closed default OFF means the import-time app
     #   spawns no threads. Close ORDER matters: scheduler FIRST (stop ticking,
     #   so it can submit no further jobs), THEN executor (drain in-flight
     #   workers) -- closing the executor first would let a scheduler tick
-    #   submit into an already-shutting-down pool.
-    # Blast Radius: Process lifecycle / threads only. No finance, auth, audit,
-    #   or graph projection impact.
+    #   submit into an already-shutting-down pool. When bounded close leaves a
+    #   survivor, a daemon completion watcher releases output but retains the
+    #   redaction-safety lease until both workers actually finish; otherwise
+    #   restore_logging releases both leases inline.
+    #   Logging is configured HERE and not in create_app because create_app
+    #   runs at import (`app = create_app()` at the foot of this module) --
+    #   configuring there would make importing this module reconfigure the
+    #   importing process's logging, which is how a test suite becomes
+    #   order-dependent. The lifespan runs once per served process.
+    # Blast Radius: Process lifecycle / threads / root logger only. No finance,
+    #   auth, audit, or graph projection impact.
     # Connections:
+    #   - File: backend/ums_smart_revenue/config/logging_config.py ->
+    #     configure_logging / restore_logging.
     #   - File: backend/ums_smart_revenue/connectors/runs/executor.py -> close().
     #   - File: backend/ums_smart_revenue/connectors/runs/scheduler.py -> close().
     # ========================================================================
     @asynccontextmanager
     async def _lifespan(fastapi_app: FastAPI):
-        """Yield through serving, then close the scheduler and executor if present."""
+        """Configure logging, serve, then close the workers and release logging."""
+        logging_configuration = configure_logging(level=settings.log_level)
         try:
-            yield
-        finally:
-            # Scheduler first (stop ticking), then executor (drain workers) --
-            # see the Standards note above for why the order is load-bearing.
-            scheduler = getattr(fastapi_app.state, "group_sync_scheduler", None)
-            if scheduler is not None:
-                scheduler.close()
             executor = getattr(fastapi_app.state, "connector_job_executor", None)
             if executor is not None:
-                executor.close()
+                # FIX: Recover the prior process's committed-but-undispatched
+                # job intents before this process can accept requests or start
+                # the scheduler. audit_logs remains the durable handoff when a
+                # shutdown audit thread is killed mid-write.
+                executor.recover_abandoned_submission_intents()
+            scheduler = getattr(fastapi_app.state, "group_sync_scheduler", None)
+            if scheduler is not None:
+                scheduler.start()
+            yield
+        finally:
+            shutdown_errors: list[Exception] = []
+            scheduler_clean = True
+            executor_clean = True
+            scheduler = getattr(fastapi_app.state, "group_sync_scheduler", None)
+            executor = getattr(fastapi_app.state, "connector_job_executor", None)
+            try:
+                # Scheduler first (stop ticking), then executor (drain workers)
+                # -- see the Standards note above for why the order matters.
+                if scheduler is not None:
+                    try:
+                        scheduler_clean = scheduler.close()
+                    except Exception as exc:  # noqa: BLE001 — preserve after full cleanup
+                        logger.exception("Group-sync scheduler close failed")
+                        scheduler_clean = False
+                        shutdown_errors.append(exc)
+                if executor is not None:
+                    try:
+                        executor_clean = executor.close()
+                        if not executor_clean:
+                            logger.error(
+                                "Connector executor shutdown was not clean; durable "
+                                "submission intents will be reconciled at next startup"
+                            )
+                    except Exception as exc:  # noqa: BLE001 — preserve after logging release
+                        logger.exception("Connector executor close failed")
+                        executor_clean = False
+                        shutdown_errors.append(exc)
+            finally:
+                # FIX: A bounded-close survivor retains this lifespan's lease
+                # only until the explicit completion APIs observe every worker
+                # and scheduler thread exit. Exactly one branch owns restore.
+                if scheduler_clean and executor_clean:
+                    restore_logging(logging_configuration)
+                else:
+                    _defer_logging_restore_until_workers_finish(
+                        configuration=logging_configuration,
+                        scheduler=scheduler,
+                        executor=executor,
+                    )
+            if shutdown_errors:
+                raise ExceptionGroup("background worker shutdown failed", shutdown_errors)
 
     _app = FastAPI(
         title="UMS Smart Revenue Control Center API",
@@ -151,8 +282,10 @@ def create_app(*, database_url: str | None = None, authz_source: str | None = No
         lifespan=_lifespan,
     )
 
+    readiness_session_factory: SessionFactory | None = None
     if resolved_database_url:
         session_factory = build_session_factory(resolved_database_url)
+        readiness_session_factory = session_factory
         sqlite_database = _is_sqlite_database_url(resolved_database_url)
         platform_session_factory = build_platform_session_factory(resolved_database_url)
         _wire_connector_background_workers(
@@ -190,7 +323,7 @@ def create_app(*, database_url: str | None = None, authz_source: str | None = No
     _app.include_router(users_router)
 
     def health_payload() -> dict[str, object]:
-        """Return service and pinned runtime health metadata."""
+        """Return liveness metadata without claiming dependencies are ready."""
         return {
             "status": "ok",
             "service": "ums-smart-revenue",
@@ -210,6 +343,32 @@ def create_app(*, database_url: str | None = None, authz_source: str | None = No
     def livez() -> dict[str, object]:
         """Return liveness probe status."""
         return health_payload()
+
+    # ========================================================================
+    # Purpose: Expose dependency readiness separately from process liveness so
+    #   an app with an unavailable/unconfigured database is not advertised as
+    #   ready merely because the FastAPI process is responding.
+    # Database/ORM: The health service performs one ``SELECT 1`` through the
+    #   configured SessionFactory; no schema or row is changed.
+    # Standards: Thin route boundary; typed service failure becomes a safe
+    #   503 response without leaking driver/DSN details.
+    # Blast Radius: Unauthenticated operational probe and container startup;
+    #   no authorization, finance, audit, tenancy, or export behavior.
+    # Connections:
+    #   - File: backend/ums_smart_revenue/ops/health.py -> dependency check.
+    #   - File: docker-compose.yml -> app healthcheck uses /readyz.
+    #   - File: Dockerfile -> image healthcheck uses /readyz.
+    # ========================================================================
+    @_app.get("/readyz", tags=["system"])
+    def readyz() -> dict[str, object]:
+        """Return readiness only when the configured database is reachable."""
+        try:
+            check_database_readiness(readiness_session_factory)
+        except ReadinessUnavailableError:
+            raise HTTPException(status_code=503, detail="Service not ready") from None
+        payload = health_payload()
+        payload["checks"] = {"database": "ok"}
+        return payload
 
     return _app
 
@@ -272,7 +431,6 @@ def _wire_connector_background_workers(
             interval_seconds=settings.group_sync_interval_hours * 3600,
             service_actor_id=settings.google_connector_service_actor_id,
         )
-        scheduler.start()
         fastapi_app.state.group_sync_scheduler = scheduler
 
 

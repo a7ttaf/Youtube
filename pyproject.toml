@@ -66,3 +66,11 @@ extend-exclude = ["*.md"]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "N", "UP"]
+
+# This file is a hash-pinned copy of the published authorization catalog.
+# Reformatting its historical long lines would violate the migration audit trail.
+[tool.ruff.lint.per-file-ignores]
+"backend/ums_smart_revenue/db/frozen_security_catalog.py" = ["E501"]
+
+[tool.ruff.format]
+exclude = ["backend/ums_smart_revenue/db/frozen_security_catalog.py"]

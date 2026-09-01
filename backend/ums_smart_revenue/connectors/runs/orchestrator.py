@@ -87,6 +87,7 @@ from sqlalchemy.orm import Session
 from ums_smart_revenue.auth.audit_service import AuditSink
 from ums_smart_revenue.auth.models import UserPrincipal
 from ums_smart_revenue.auth.sql_audit_sink import SqlAlchemyAuditSink
+from ums_smart_revenue.config.logging_config import redact_exception_summary
 from ums_smart_revenue.config.settings import (
     GOOGLE_CONNECTOR_SERVICE_ACTOR_ID_ENV,
 )
@@ -1334,7 +1335,11 @@ def _finish_failed_live_run(
             connector_run_id=UUID(run_entry.id),
             status="FAILED",
             counts=counts,
-            error_summary=f"{type(exc).__name__}: {exc!s}",
+            # FIX: Format from the exception object before persistence. A
+            # SQLAlchemy exception string can expose a bound private value
+            # before its later SQL/parameters suffix, beyond string-only SQL
+            # redaction.
+            error_summary=redact_exception_summary(exc),
         )
         # Spec §8.4: CONNECTOR_JOB_RUN/FINISHED is committed with finish_run so
         # the terminal state and its audit row share one transaction.

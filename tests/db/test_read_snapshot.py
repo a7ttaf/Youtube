@@ -1,8 +1,8 @@
 # ============================================================================
 # Purpose: Dialect-contract pins for db.read_snapshot.begin_composed_read_snapshot
-#   — the non-Postgres branch must be a transparent no-op (SQLite serializes
-#   every lane through one shared StaticPool connection, so its reads are
-#   already snapshot-consistent within a transaction and the REPEATABLE READ
+#   — the non-Postgres branch must be a transparent no-op (SQLite reuses the
+#   request Session across lanes and serializes independent checkouts through
+#   one QueuePool slot, so its reads are already snapshot-consistent and the REPEATABLE READ
 #   token does not even exist for its dialect).
 # Database/ORM: Real SQLite sessions only; the Postgres-side behavior (begin
 #   REPEATABLE READ, reject active transactions, reset at checkin) is pinned
@@ -34,7 +34,8 @@ def test_non_postgres_session_is_a_no_op() -> None:
 
 def test_non_postgres_active_transaction_is_tolerated() -> None:
     """The dialect gate precedes the transaction guard: SQLite lanes share
-    one session, so an already-begun transaction must not be rejected there."""
+    one session, so an already-begun transaction must not be rejected there.
+    """
     engine = create_engine("sqlite+pysqlite:///:memory:")
     with Session(engine) as session:
         session.execute(text("SELECT 1"))
