@@ -17,6 +17,7 @@ import {
   useWriteInFlightLatch,
 } from "@/contexts/WriteInFlightContext";
 import type { Role, ViewKey } from "@/lib/mock/data";
+import ErrorBoundary, { reloadDocumentForRecovery } from "./ErrorBoundary";
 import { BrandIcon, NAV_ICONS } from "./icons";
 import AuditView from "./views/AuditView";
 import CloseView from "./views/CloseView";
@@ -1054,37 +1055,54 @@ const AppShell = () => {
   const importScopeSettled = isImportScopeSettled(sessionBootstrap.session, tenantSettled);
   const copy = VIEW_COPY[view];
 
+  // ============================================================================
+  // Purpose: Keep every view-owned render, including the command workflow rail,
+  //   inside one stable error boundary while the shell chrome remains mounted.
+  // Database/ORM: None (frontend composition only).
+  // Standards: Navigation changes reset the boundary through resetKey; recovery
+  //   reloads the document so server state is reconciled before another write.
+  // Blast Radius: View availability and recovery; session/auth gating above is
+  //   unchanged and remains fail-closed.
+  // Connections:
+  //   - File: frontend/src/components/srcc/ErrorBoundary.tsx -> safe fallback,
+  //     redacted report, focus target, and reload action.
+  //   - File: frontend/src/contexts/WriteInFlightContext.tsx -> existing import
+  //     navigation latch remains outside the guarded view state and stays armed
+  //     until a pending request settles even if the boundary unmounts its flow.
+  // ============================================================================
 
   return (
     <WriteInFlightProvider value={writeInFlight}>
-    <div className="app">
-      {import.meta.env.DEV && <TenantProofTag label={proofLabel} />}
-      <Sidebar
-        view={view}
-        onSelectView={handleViewChange}
-        previewRole={previewRole}
-        onSelectPreviewRole={setPreviewRole}
-        displayedRole={displayedRole}
-        canViewFinance={canViewFinance}
-        blockedReason={navBlockedReason}
-      />
-      <main className="main">
-        <Topbar title={copy.title} subtitle={copy.subtitle} />
-        <ViewRouter
+      <div className="app">
+        {import.meta.env.DEV && <TenantProofTag label={proofLabel} />}
+        <Sidebar
           view={view}
-          permissions={permissions}
-          canViewFinance={canViewFinance}
+          onSelectView={handleViewChange}
+          previewRole={previewRole}
+          onSelectPreviewRole={setPreviewRole}
           displayedRole={displayedRole}
-          traceChannelId={traceChannelId}
-          importScope={importScope}
-          importScopeSettled={importScopeSettled}
-          onOpenTrace={(channelId) => {
-            setTraceChannelId(channelId);
-            setView("trace");
-          }}
+          canViewFinance={canViewFinance}
+          blockedReason={navBlockedReason}
         />
-      </main>
-    </div>
+        <main className="main">
+          <Topbar title={copy.title} subtitle={copy.subtitle} />
+          <ErrorBoundary resetKey={view} onReload={reloadDocumentForRecovery}>
+            <ViewRouter
+              view={view}
+              permissions={permissions}
+              canViewFinance={canViewFinance}
+              displayedRole={displayedRole}
+              traceChannelId={traceChannelId}
+              importScope={importScope}
+              importScopeSettled={importScopeSettled}
+              onOpenTrace={(channelId) => {
+                setTraceChannelId(channelId);
+                setView("trace");
+              }}
+            />
+          </ErrorBoundary>
+        </main>
+      </div>
     </WriteInFlightProvider>
   );
 };

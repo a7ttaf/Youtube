@@ -624,6 +624,14 @@ closed unmerged and superseded by the consolidated batch in #156.
   The summary tiles are now wired to the live `GET /audit/summary` aggregate-count
   route (see the audit summary endpoint entry below); the Retention tile stays a
   static policy constant.
+- ⏳ View error boundary (branch `feat/p1-error-boundary`, unmerged) —
+  `frontend/src/components/srcc/ErrorBoundary.tsx` wraps `<ViewRouter/>` in
+  AppShell. A render-time crash now degrades to
+  one themed panel with an allowlisted error category and correlation ID;
+  recovery performs a full document reload/re-fetch and warns that a write may
+  already have committed. Remaining: provider/root, Sidebar, and Topbar
+  renders are still outside this boundary; a registry import's shell latch now
+  stays armed through a view crash until the pending request settles.
 - ✅ Rolling month window (PR #211, item P1.2) — the frozen
   `DEFAULT_MONTH = "2026-03"` / `MONTH_OPTIONS` literals and the view-owned
   month selectors now all derive from `frontend/src/lib/months.ts`:
