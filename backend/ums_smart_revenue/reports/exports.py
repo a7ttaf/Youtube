@@ -50,6 +50,7 @@ _DEFAULT_TENANT_UUID = UUID(UMS_TENANT_ID)
 
 @dataclass(frozen=True)
 class ExportJobEntry:
+    """Immutable snapshot of one export job row as the API layer consumes it."""
     id: str
     export_type: str
     scope_type: str
@@ -75,6 +76,7 @@ class ExportJobEntry:
     template_id: str | None = None
 
     def to_api(self) -> dict[str, object]:
+        """Serialize the job entry into the backend export-job JSON contract."""
         return {
             "id": self.id,
             "template_id": self.template_id,
@@ -104,6 +106,7 @@ class ExportJobEntry:
 
 @dataclass(frozen=True)
 class ExportJobPage:
+    """One page of export jobs plus the pagination cursor fields."""
     items: list[ExportJobEntry]
     limit: int
     offset: int
@@ -112,6 +115,7 @@ class ExportJobPage:
 
 @dataclass(frozen=True)
 class ExportJobVisibilityFilter:
+    """One allowlist clause describing which export jobs a principal may list."""
     export_types: frozenset[str]
     scope_type: str | None = None
     scope_id: str | None = None
@@ -120,6 +124,7 @@ class ExportJobVisibilityFilter:
 
 @dataclass(frozen=True)
 class ExportTemplateEntry:
+    """Immutable snapshot of one reusable export layout template row."""
     id: str
     name: str
     export_type: str
@@ -131,6 +136,7 @@ class ExportTemplateEntry:
     updated_at: datetime
 
     def to_api(self) -> dict[str, object]:
+        """Serialize the template entry into the backend template JSON contract."""
         return {
             "id": self.id,
             "name": self.name,
@@ -146,6 +152,7 @@ class ExportTemplateEntry:
 
 @dataclass(frozen=True)
 class ExportTemplatePage:
+    """One page of export templates plus the pagination cursor fields."""
     items: list[ExportTemplateEntry]
     limit: int
     offset: int
@@ -153,14 +160,17 @@ class ExportTemplatePage:
 
 
 class ExportJobError(ValueError):
+    """Base class for export-job domain failures raised at the repository boundary."""
     pass
 
 
 class ExportJobNotFoundError(ExportJobError):
+    """Raised when an export job id does not exist, or belongs to another actor."""
     pass
 
 
 class ExportJobValidationError(ExportJobError):
+    """Raised when an export job request fails field or state validation."""
     pass
 
 
@@ -169,18 +179,22 @@ class ExportJobTerminalStateError(ExportJobValidationError):
 
 
 class ExportTemplateError(ValueError):
+    """Base class for export-template domain failures raised at the repository boundary."""
     pass
 
 
 class ExportTemplateNotFoundError(ExportTemplateError):
+    """Raised when an export template id does not exist in the requesting tenant."""
     pass
 
 
 class ExportTemplateValidationError(ExportTemplateError):
+    """Raised when an export template request fails field or state validation."""
     pass
 
 
 class SqlAlchemyExportTemplateRepository:
+    """SQLAlchemy repository for reusable export layout templates, tenant-scoped."""
     def __init__(self, session: Session, *, tenant_id: UUID | str | None = None):
         """Bind export template reads and writes to an explicit or request tenant."""
         self._session = session
@@ -207,6 +221,7 @@ class SqlAlchemyExportTemplateRepository:
         actor_user_id: str,
         description: str | None = None,
     ) -> ExportTemplateEntry:
+        """Validate and insert a new active export template with a tenant-unique name."""
         normalized_name = _normalize_template_name(name)
         normalized_export_type = _normalize_template_export_type(export_type)
         normalized_layout_config = _normalize_template_layout_config(layout_config)
@@ -230,6 +245,7 @@ class SqlAlchemyExportTemplateRepository:
     def get_template(
         self, template_id: str, *, include_inactive: bool = True
     ) -> ExportTemplateEntry:
+        """Return one export template, optionally including deactivated rows."""
         row = self._get_template_row(template_id, include_inactive=include_inactive)
         return self._to_template_entry(row)
 
@@ -241,6 +257,7 @@ class SqlAlchemyExportTemplateRepository:
         limit: int = 50,
         offset: int = 0,
     ) -> ExportTemplatePage:
+        """Return a validated, newest-first page of tenant export templates."""
         if limit < 1 or limit > MAX_EXPORT_TEMPLATE_PAGE_SIZE:
             raise ExportTemplateValidationError(
                 f"limit must be between 1 and {MAX_EXPORT_TEMPLATE_PAGE_SIZE}"
@@ -288,6 +305,7 @@ class SqlAlchemyExportTemplateRepository:
         layout_config_provided: bool = False,
         is_active: bool | None = None,
     ) -> ExportTemplateEntry:
+        """Apply the supplied metadata changes to a template under a row lock."""
         row = self._get_template_row(template_id, include_inactive=True, for_update=True)
         if name is not None:
             normalized_name = _normalize_template_name(name)
@@ -306,6 +324,7 @@ class SqlAlchemyExportTemplateRepository:
         return self._to_template_entry(row)
 
     def deactivate_template(self, template_id: str) -> ExportTemplateEntry:
+        """Soft-delete a template by flipping is_active off under a row lock."""
         row = self._get_template_row(template_id, include_inactive=True, for_update=True)
         row.is_active = False
         row.updated_at = datetime.now(UTC)
@@ -319,6 +338,7 @@ class SqlAlchemyExportTemplateRepository:
         include_inactive: bool,
         for_update: bool = False,
     ) -> ExportTemplateORM:
+        """Fetch one tenant template row, optionally locking it for update."""
         template_uuid = _parse_uuid_for_template(template_id, field_name="template_id")
         statement = select(ExportTemplateORM).where(
             ExportTemplateORM.id == template_uuid,
@@ -339,6 +359,7 @@ class SqlAlchemyExportTemplateRepository:
         *,
         excluding_id: UUID | None = None,
     ) -> None:
+        """Refuse a template name already used in the tenant, optionally excluding one row."""
         statement = select(ExportTemplateORM.id).where(
             ExportTemplateORM.tenant_id == self._tenant_id,
             ExportTemplateORM.name == name,
@@ -351,6 +372,7 @@ class SqlAlchemyExportTemplateRepository:
 
     @staticmethod
     def _to_template_entry(row: ExportTemplateORM) -> ExportTemplateEntry:
+        """Convert a template ORM row into its frozen entry, deep-copying the layout JSON."""
         layout_config = _clone_json_object(row.layout_config)
         return ExportTemplateEntry(
             id=str(row.id),
@@ -366,6 +388,7 @@ class SqlAlchemyExportTemplateRepository:
 
 
 class SqlAlchemyExportJobRepository:
+    """SQLAlchemy repository for export jobs and their artifact lifecycle, tenant-scoped."""
     def __init__(self, session: Session, *, tenant_id: UUID | str | None = None):
         """Bind export job reads and writes to an explicit or request tenant."""
         self._session = session
@@ -391,7 +414,12 @@ class SqlAlchemyExportJobRepository:
     #       dependency whose teardown commit this front-runs.
     # ========================================================================
     def commit_unit_of_work(self) -> None:
-        """Commit the request-scoped session this repository reads and writes."""
+        """Commit the request-scoped session this repository reads and writes.
+
+        Raises:
+            SQLAlchemyError: when the durability commit fails. The API boundary
+                catches this and translates it into a safe HTTP 503 response.
+        """
         self._session.commit()
 
     # ========================================================================
@@ -417,6 +445,7 @@ class SqlAlchemyExportJobRepository:
         scope_channel_ids: tuple[str, ...] | frozenset[str] | None = None,
         template_id: str | None = None,
     ) -> ExportJobEntry:
+        """Validate the request and insert a QUEUED job with its frozen channel snapshot."""
         normalized_export_type = _normalize_export_type(export_type)
         normalized_scope_type, normalized_scope_id = _normalize_scope(scope_type, scope_id)
         normalized_template_id = self._resolve_template_id(
@@ -461,6 +490,7 @@ class SqlAlchemyExportJobRepository:
         *,
         requested_by: str | None = None,
     ) -> ExportJobEntry:
+        """Return one tenant export job, optionally restricted to its requesting actor."""
         export_uuid = _parse_uuid(export_id, field_name="export_id")
         row = self._session.scalars(
             select(ExportJobORM).where(
@@ -495,6 +525,7 @@ class SqlAlchemyExportJobRepository:
         byte_size: int,
         checksum_sha256: str,
     ) -> ExportJobEntry:
+        """Atomically mark a non-terminal job COMPLETED with its artifact metadata."""
         row = self._get_row_for_update(export_id)
         if row.status in _TERMINAL_EXPORT_JOB_STATUSES:
             raise ExportJobTerminalStateError(
@@ -524,6 +555,7 @@ class SqlAlchemyExportJobRepository:
         export_id: str,
         failure_reason: str,
     ) -> ExportJobEntry:
+        """Atomically mark a non-terminal job FAILED and clear its artifact metadata."""
         row = self._get_row_for_update(export_id)
         if row.status in _TERMINAL_EXPORT_JOB_STATUSES:
             raise ExportJobTerminalStateError(
@@ -551,6 +583,7 @@ class SqlAlchemyExportJobRepository:
         limit: int = 50,
         offset: int = 0,
     ) -> ExportJobPage:
+        """Return a validated page of tenant jobs filtered by actor visibility."""
         if limit < 1 or limit > MAX_EXPORT_JOB_PAGE_SIZE:
             raise ExportJobValidationError(
                 f"limit must be between 1 and {MAX_EXPORT_JOB_PAGE_SIZE}"
@@ -587,10 +620,12 @@ class SqlAlchemyExportJobRepository:
         )
 
     def _month_lock_status(self, month: str) -> str:
+        """Return the finance month-close status for the job's month, defaulting to OPEN."""
         row = self._session.get(FinanceMonthCloseORM, (self._tenant_id, month))
         return row.status if row is not None else "OPEN"
 
     def _resolve_template_id(self, template_id: str | None, *, export_type: str) -> UUID | None:
+        """Validate an active, type-matching template under a row lock and return its UUID."""
         if template_id is None:
             return None
         template_uuid = _parse_uuid(template_id, field_name="template_id")
@@ -621,6 +656,7 @@ class SqlAlchemyExportJobRepository:
         return template_uuid
 
     def _get_row(self, export_id: str) -> ExportJobORM:
+        """Fetch one tenant export job row or raise ExportJobNotFoundError."""
         export_uuid = _parse_uuid(export_id, field_name="export_id")
         row = self._session.scalars(
             select(ExportJobORM).where(
@@ -633,6 +669,7 @@ class SqlAlchemyExportJobRepository:
         return row
 
     def _get_row_for_update(self, export_id: str) -> ExportJobORM:
+        """Fetch one tenant export job row FOR UPDATE or raise if it is missing."""
         export_uuid = _parse_uuid(export_id, field_name="export_id")
         statement = (
             select(ExportJobORM)
@@ -649,6 +686,7 @@ class SqlAlchemyExportJobRepository:
 
     @staticmethod
     def _to_entry(row: ExportJobORM) -> ExportJobEntry:
+        """Convert a job ORM row into its frozen entry, normalizing the channel snapshot."""
         stored = row.scope_channel_ids
         scope_channel_ids: tuple[str, ...] | None
         if stored is None:
@@ -681,6 +719,7 @@ class SqlAlchemyExportJobRepository:
 
 
 def _visibility_filter_condition(visibility_filter: ExportJobVisibilityFilter):
+    """Build the SQLAlchemy condition enforcing one principal visibility allowlist."""
     if visibility_filter.scope_type is None and visibility_filter.scope_id is not None:
         raise ExportJobValidationError(
             "visibility filter must include scope_type when scope_id is set"
@@ -702,10 +741,12 @@ def _visibility_filter_condition(visibility_filter: ExportJobVisibilityFilter):
 
 
 def is_finance_export_type(export_type: str) -> bool:
+    """Return whether the export type reads finance source data."""
     return export_type in FINANCE_EXPORT_TYPES
 
 
 def _normalize_template_export_type(value: str) -> str:
+    """Validate an export type, translated to the template error boundary."""
     try:
         return _normalize_export_type(value)
     except ExportJobValidationError as exc:
@@ -713,6 +754,7 @@ def _normalize_template_export_type(value: str) -> str:
 
 
 def _normalize_template_name(value: str) -> str:
+    """Validate a template name, translated to the template error boundary."""
     try:
         return _normalize_required_string(value, "name")
     except ExportJobValidationError as exc:
@@ -720,6 +762,7 @@ def _normalize_template_name(value: str) -> str:
 
 
 def _normalize_optional_string(value: str | None, field_name: str) -> str | None:
+    """Trim an optional string to None and refuse non-string values."""
     if value is None:
         return None
     if not isinstance(value, str):
@@ -729,6 +772,7 @@ def _normalize_optional_string(value: str | None, field_name: str) -> str | None
 
 
 def _normalize_template_layout_config(value: dict[str, object]) -> dict[str, object]:
+    """Validate a layout config's shape, budget, and JSON-serializability, then clone it."""
     if not isinstance(value, dict):
         raise ExportTemplateValidationError("layout_config must be an object")
     _validate_template_layout_value(value, depth=1, key_count=0)
@@ -741,6 +785,7 @@ def _normalize_template_layout_config(value: dict[str, object]) -> dict[str, obj
 
 
 def _validate_template_layout_value(value: object, *, depth: int, key_count: int) -> int:
+    """Recursively enforce layout depth and key-count budgets; return the key total."""
     if depth > MAX_EXPORT_TEMPLATE_LAYOUT_DEPTH:
         raise ExportTemplateValidationError(
             f"layout_config nesting must be {MAX_EXPORT_TEMPLATE_LAYOUT_DEPTH} levels or fewer"
@@ -767,6 +812,7 @@ def _validate_template_layout_value(value: object, *, depth: int, key_count: int
 
 
 def _clone_json_object(value: dict[str, object]) -> dict[str, object]:
+    """Round-trip a layout config through canonical JSON within the byte budget."""
     encoded = json.dumps(value, sort_keys=True, allow_nan=False)
     if len(encoded.encode("utf-8")) > MAX_EXPORT_TEMPLATE_LAYOUT_BYTES:
         raise ExportTemplateValidationError(
@@ -779,6 +825,7 @@ def _clone_json_object(value: dict[str, object]) -> dict[str, object]:
 
 
 def _flush_template_write(session: Session) -> None:
+    """Flush a template write, translating the tenant-unique-name violation."""
     try:
         session.flush()
     except IntegrityError as exc:
@@ -790,6 +837,7 @@ def _flush_template_write(session: Session) -> None:
 
 
 def _is_export_template_name_integrity_error(exc: IntegrityError) -> bool:
+    """Detect the tenant+name unique-constraint violation across database drivers."""
     original = exc.orig
     diagnostics = getattr(original, "diag", None)
     constraint_name = getattr(diagnostics, "constraint_name", None) or getattr(
@@ -805,6 +853,7 @@ def _is_export_template_name_integrity_error(exc: IntegrityError) -> bool:
 
 
 def _normalize_export_type(value: str) -> str:
+    """Validate a known export type or raise ExportJobValidationError."""
     normalized = _normalize_required_string(value, "export_type")
     if normalized not in ALLOWED_EXPORT_TYPES:
         raise ExportJobValidationError(f"Unknown export_type: {value}")
@@ -812,6 +861,7 @@ def _normalize_export_type(value: str) -> str:
 
 
 def _normalize_scope(scope_type: str, scope_id: str | None) -> tuple[str, str | None]:
+    """Validate the scope pair; global forbids scope_id, every other scope requires it."""
     normalized_scope_type = _normalize_required_string(scope_type, "scope_type")
     normalized_scope_id = scope_id.strip() if isinstance(scope_id, str) else scope_id
     if normalized_scope_type not in ALLOWED_EXPORT_SCOPE_TYPES:
@@ -828,11 +878,13 @@ def _normalize_scope(scope_type: str, scope_id: str | None) -> tuple[str, str | 
 
 
 def _validate_month(month: str) -> None:
+    """Require a calendar YYYY-MM month string."""
     if not MONTH_PATTERN.fullmatch(month):
         raise ExportJobValidationError("month must use YYYY-MM with a calendar month from 01 to 12")
 
 
 def _normalize_currency(value: str) -> str:
+    """Require USD until exchange-rate support exists."""
     normalized = _normalize_required_string(value, "currency").upper()
     if normalized != "USD":
         raise ExportJobValidationError(
@@ -842,6 +894,7 @@ def _normalize_currency(value: str) -> str:
 
 
 def _normalize_required_string(value: str, field_name: str) -> str:
+    """Trim a required string and refuse blanks."""
     normalized = value.strip()
     if not normalized:
         raise ExportJobValidationError(f"{field_name} must not be blank")
@@ -849,6 +902,7 @@ def _normalize_required_string(value: str, field_name: str) -> str:
 
 
 def _normalize_artifact_uri(value: str) -> str:
+    """Require a file_url pointing at approved artifact storage prefixes."""
     normalized = _normalize_required_string(value, "file_url")
     if not normalized.startswith(ALLOWED_EXPORT_ARTIFACT_URI_PREFIXES):
         raise ExportJobValidationError("file_url must point to approved artifact storage")
@@ -856,12 +910,14 @@ def _normalize_artifact_uri(value: str) -> str:
 
 
 def _normalize_artifact_byte_size(value: int) -> int:
+    """Require a non-negative artifact byte size."""
     if value < 0:
         raise ExportJobValidationError("artifact_byte_size must be greater than or equal to 0")
     return value
 
 
 def _normalize_sha256(value: str) -> str:
+    """Require a lowercase 64-character hex SHA-256 digest."""
     normalized = _normalize_required_string(value, "artifact_checksum_sha256").lower()
     if len(normalized) != 64 or not all(char in "0123456789abcdef" for char in normalized):
         raise ExportJobValidationError("artifact_checksum_sha256 must be a 64-character hex digest")
@@ -869,6 +925,7 @@ def _normalize_sha256(value: str) -> str:
 
 
 def _parse_uuid(value: str, *, field_name: str = "actor_user_id") -> UUID:
+    """Parse a UUID, raising the export-job validation error on malformed input."""
     try:
         return UUID(value)
     except ValueError as exc:
@@ -876,6 +933,7 @@ def _parse_uuid(value: str, *, field_name: str = "actor_user_id") -> UUID:
 
 
 def _parse_uuid_for_template(value: str, *, field_name: str) -> UUID:
+    """Parse a UUID, translated to the template error boundary."""
     try:
         return _parse_uuid(value, field_name=field_name)
     except ExportJobValidationError as exc:
@@ -883,6 +941,7 @@ def _parse_uuid_for_template(value: str, *, field_name: str) -> UUID:
 
 
 def _actor_identity_uuid(value: str, *, field_name: str = "actor_user_id") -> UUID:
+    """Parse an actor identity into a UUID through the shared identity helper."""
     try:
         return actor_identity_uuid(value, field_name=field_name)
     except ValueError as exc:
@@ -913,6 +972,7 @@ def _normalize_scope_channel_ids(
     scope_type: str,
     scope_channel_ids: tuple[str, ...] | frozenset[str] | None,
 ) -> tuple[str, ...] | None:
+    """Validate, dedupe, and sort the frozen channel set; None is allowed only for global."""
     if scope_type == "global":
         if scope_channel_ids is not None:
             raise ExportJobValidationError("scope_channel_ids must be omitted for global exports")
