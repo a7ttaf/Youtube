@@ -3097,7 +3097,7 @@ _script_names_a_checker() {
     fi
     case "$tok" in
       -*) continue ;;
-      run|exec|dlx|--) continue ;;
+      run|exec|dlx) continue ;;
     esac
     target="$tok"
   done
