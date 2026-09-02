@@ -42,12 +42,11 @@ const rootReportSinkFailures: unknown[] = [];
 
 /**
  * Snapshot of the sink-failure trail, oldest first. A defensive COPY, not the
- * backing array: the `readonly` type annotation alone is compile-time only, so
- * handing out the live array would let a caller mutate or FREEZE it — and a
- * frozen backing array would make the next `push` inside the root error
- * callback throw, breaking the never-raise contract this trail exists to
- * protect. The internal array never escapes.
+ * backing array; the internal array never escapes.
  */
+// FIX: the accessor returned the live backing array behind a compile-time
+// readonly annotation, so a caller could freeze it and the next recording
+// push would throw from the root error callback — it returns a fresh copy now.
 export const recordedRootReportFailures = (): readonly unknown[] => {
   return [...rootReportSinkFailures];
 };
