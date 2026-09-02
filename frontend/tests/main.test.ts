@@ -151,5 +151,15 @@ describe("React root error callbacks", () => {
     expect(recordedRootReportFailures()).not.toBe(snapshot);
     expect(() => rootOptions.onUncaughtError(error, {} as ErrorInfo)).not.toThrow();
     expect(recordedRootReportFailures().length).toBe(failuresBefore + 3);
+
+    // And every retained entry is SAFE METADATA ONLY. The raw caught failure
+    // objects — the secret-bearing error and the throwing sink's own Error —
+    // must never reach the trail, or a diagnostics read in production could
+    // serve the exact data the sanitized-report contract keeps off console.
+    for (const entry of recordedRootReportFailures()) {
+      expect(JSON.stringify(entry)).not.toContain(secret);
+      expect(JSON.stringify(entry)).not.toContain("console sink is broken");
+      expect(entry).toEqual({ stage: expect.any(String), at: expect.any(Number) });
+    }
   });
 });
