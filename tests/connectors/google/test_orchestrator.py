@@ -688,6 +688,36 @@ def test_csv_adapter_rejects_out_of_context_exponent_as_typed_row_error() -> Non
         )
 
 
+def test_csv_adapter_accepts_tiny_exponent_amounts() -> None:
+    """Tiny finite amounts (sub-cent exponents) remain valid CSV revenue.
+
+    The overflow guard bounds only the UPPER adjusted exponent — a tiny
+    addend cannot trap ``decimal.Overflow`` and was always accepted, so a
+    lower bound would have silently zeroed legitimate revenue without a
+    documented contract change (review: tiny valid revenue is rejected).
+    """
+    payload = _csv_to_parser_payload(
+        raw_bytes=(
+            b"date,channel_id,estimated_partner_revenue,currencyCode\n"
+            b"2026-05-01,UC_orch_alpha,1E-19,USD\n"
+            b"2026-05-02,UC_orch_alpha,1E-300,USD\n"
+        ),
+        report_id="r-tiny-exponent",
+        report_type="content_owner_estimated_revenue_a1",
+        month="2026-05",
+    )
+
+    # Both daily rows aggregate into ONE monthly total per (channel, owner,
+    # currency) key; the tinier addend is absorbed by the larger one.
+    from decimal import Decimal
+
+    assert len(payload["rows"]) == 1, "tiny-exponent rows must be counted, not dropped"
+    assert Decimal(payload["rows"][0]["metrics"]["estimatedRevenue"]) == (
+        Decimal("1E-19") + Decimal("1E-300")
+    )
+    assert payload["rows"][0]["metrics"]["currencyCode"] == "USD"
+
+
 def test_csv_adapter_preserves_camel_case_revenue_payload_shape() -> None:
     """The existing ``estimatedRevenue`` alias remains a valid finance input."""
     payload = _csv_to_parser_payload(
