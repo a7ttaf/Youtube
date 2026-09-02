@@ -94,6 +94,11 @@ gs_setup() {
   (
     cd "$GS_SB"
     git init -q -b feature/x .
+    # A sandbox-local identity: `git merge` cannot take -c identity flags and
+    # a machine without a global git identity (every CI runner) would leave
+    # the merge-commit fixtures unable to create their commits.
+    git config user.email t@t
+    git config user.name t
     # The copied gate scripts stay out of the history under test. ci/checks/
     # defines the secret patterns as literal text and several of them match
     # themselves — the `DATABASE_URL` alternative is its own witness — so a

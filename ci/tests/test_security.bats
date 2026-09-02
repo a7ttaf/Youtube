@@ -2,6 +2,14 @@
 
 setup() {
   REPO_ROOT="$(cd "$(dirname "$BATS_TEST_FILENAME")/../.." && pwd)"
+  # The only suite that was missing this: without the clear, an ambient gate
+  # run exports its push range, and every sandboxed scanner invocation below
+  # answers a question about THIS repository's push instead of the sandbox's
+  # staged bytes. Invisible on a developer machine (no ambient gate env), 17
+  # red cases on the first real Linux CI run.
+  # shellcheck source=ci/tests/gate_env.bash
+  source "$REPO_ROOT/ci/tests/gate_env.bash"
+  ci::tests::clear_gate_env
   SECURITY_SB="$(mktemp -d "${TMPDIR:-/tmp}/ums-security-bats.XXXXXX")"
   mkdir -p "$SECURITY_SB/ci/checks" "$SECURITY_SB/ci/lib"
   cp "$REPO_ROOT/ci/checks/security.sh" "$REPO_ROOT/ci/checks/common.sh" \
