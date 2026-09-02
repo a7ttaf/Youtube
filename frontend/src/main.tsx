@@ -64,7 +64,7 @@ const rootReportSinkFailures: RootReportFailure[] = [];
 // the module; a reporting failure can carry sensitive data the sanitize
 // contract keeps off every channel, so entries are now stage + timestamp only.
 export const recordedRootReportFailures = (): readonly RootReportFailure[] => {
-  return [...rootReportSinkFailures];
+  return rootReportSinkFailures.map((failure) => ({ ...failure }));
 };
 
 /**
