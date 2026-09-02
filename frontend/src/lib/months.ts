@@ -1,5 +1,5 @@
 // ============================================================================
-// Purpose: Derive the month keys the dashboard chrome offers from the CURRENT
+// Purpose: Derive the month keys the dashboard views offer from the CURRENT
 //   calendar date instead of a frozen literal. Replaces the hardcoded
 //   "2026-03" default and the ["2026-03".."2025-12"] option list, which went
 //   stale the moment real time moved past March 2026 and left every wired view
@@ -18,8 +18,8 @@
 // Connections:
 //   - File: frontend/src/components/srcc/shared.tsx -> DEFAULT_MONTH and
 //     MONTH_OPTIONS are computed here; the five wired views consume those.
-//   - File: frontend/src/components/srcc/AppShell.tsx -> Topbar month <select>
-//     renders monthKeyLabel over the same MONTH_OPTIONS.
+//   - File: frontend/src/components/srcc/views/CommandView.tsx -> its request-
+//     wired Month control consumes MONTH_OPTIONS through shared.tsx.
 //   - File: frontend/src/components/srcc/views/ConnectorsView.tsx -> formatDate
 //     documents the UTC-shift trap this module avoids; its month state seeds
 //     from lastCompleteMonthKey (the ingest/payment WRITE default).

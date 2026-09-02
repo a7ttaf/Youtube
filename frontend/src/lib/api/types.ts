@@ -544,11 +544,15 @@ export type NumberExplanation = {
 //   the Exports screen. Fields are matched 1:1 against the backend serializers
 //   (not guessed); nullable fields serialize as null. An export is requested
 //   (POST), tracked through its lifecycle (QUEUED -> COMPLETED | FAILED |
-//   CANCELLED), and its artifact is downloaded over a plain browser anchor
-//   (binary, NOT through the JSON-strict useApiClient). The download routes
-//   generate-on-demand: a QUEUED job builds + persists + streams its bytes on
-//   first request, so QUEUED and COMPLETED jobs are both downloadable (QUEUED
-//   triggers generation; COMPLETED serves the cached artifact).
+//   CANCELLED), and its artifact is delivered through the two-leg handshake:
+//   the authenticated `?prepare=true` request rides useApiClient (shared
+//   tenant headers; trusted-gateway identity stays a deployment concern) and
+//   returns 204, then the browser's native download manager consumes the
+//   same-origin GET — no Blob buffering and no object URL in SPA memory. The
+//   download routes generate-on-demand: a QUEUED job builds + persists +
+//   streams its bytes on first request, so QUEUED and COMPLETED jobs are both
+//   downloadable (QUEUED triggers generation; COMPLETED serves the cached
+//   artifact).
 // Standards: Read-only typed boundary at the API surface; no logic here. Money
 //   is not a concern on these shapes (jobs carry currency code + month, not
 //   amounts); artifact_byte_size is an integer.
