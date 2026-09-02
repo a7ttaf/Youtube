@@ -142,5 +142,14 @@ describe("React root error callbacks", () => {
     }
     // And the primary sink was never re-entered after its first failure.
     expect(throwingSink).toHaveBeenCalledTimes(2);
+
+    // The accessor hands out a DEFENSIVE COPY, not the live backing array.
+    // Freezing (or mutating) a snapshot therefore cannot reach the internal
+    // trail, so a later recording push still cannot throw from the root
+    // callback — pinning the runtime guarantee the `readonly` type can't.
+    const snapshot = Object.freeze(recordedRootReportFailures());
+    expect(recordedRootReportFailures()).not.toBe(snapshot);
+    expect(() => rootOptions.onUncaughtError(error, {} as ErrorInfo)).not.toThrow();
+    expect(recordedRootReportFailures().length).toBe(failuresBefore + 3);
   });
 });

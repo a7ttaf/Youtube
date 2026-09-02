@@ -44,6 +44,11 @@ const boundaryReports = (): unknown[][] =>
     String(call[0]).includes("[ErrorBoundary] view render failed"),
   );
 
+/** The category the boundary reports for a thrown plain TypeError. One constant
+ * shared by the fallback and report assertions, so a category rename cannot
+ * leave one assertion describing a payload the other no longer matches. */
+const EXPECTED_TYPEERROR_CATEGORY = "TypeError";
+
 /** Build a child that throws the supplied value on every render. */
 const explodingComponent = (thrown: unknown): (() => ReactNode) => {
   return function Exploding(): ReactNode {
@@ -128,7 +133,7 @@ describe("ErrorBoundary", () => {
     );
 
     const fallback = screen.getByTestId("view-error-fallback");
-    expect(within(fallback).getByText("TypeError")).toBeInTheDocument();
+    expect(within(fallback).getByText(EXPECTED_TYPEERROR_CATEGORY)).toBeInTheDocument();
     expect(fallback.textContent).not.toContain(sensitiveMessage);
     expect(fallback).toHaveTextContent("A write may already have committed");
 
@@ -136,7 +141,7 @@ describe("ErrorBoundary", () => {
     expect(correlation).toHaveTextContent(/^Reference: [0-9a-f-]{36}$/iu);
     expect(onReport).toHaveBeenCalledTimes(1);
     expect(onReport).toHaveBeenCalledWith({
-      category: "TypeError",
+      category: EXPECTED_TYPEERROR_CATEGORY,
       correlationId: expect.stringMatching(/^[0-9a-f-]{36}$/iu),
     });
     // An approved sink receives the safe event; the boundary never logs raw
@@ -212,7 +217,7 @@ describe("ErrorBoundary", () => {
 
     expect(screen.getByText("shell chrome")).toBeInTheDocument();
     const fallback = screen.getByTestId("view-error-fallback");
-    expect(within(fallback).getByText("TypeError")).toBeInTheDocument();
+    expect(within(fallback).getByText(EXPECTED_TYPEERROR_CATEGORY)).toBeInTheDocument();
     // Delivery fell back to the console with the SAME sanitized payload, and
     // the delivery-failure marker is NOT set — the fallback channel worked.
     const deliveryReports = consoleErrorSpy.mock.calls.filter((call) =>
@@ -220,7 +225,7 @@ describe("ErrorBoundary", () => {
     );
     expect(deliveryReports).toHaveLength(1);
     expect(deliveryReports[0][1]).toEqual({
-      category: "TypeError",
+      category: EXPECTED_TYPEERROR_CATEGORY,
       correlationId: expect.stringMatching(/^[0-9a-f-]{36}$/iu),
     });
     expect(fallback).not.toHaveAttribute("data-report-delivery");

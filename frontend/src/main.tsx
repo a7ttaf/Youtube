@@ -40,9 +40,16 @@ const MAX_RECORDED_REPORT_FAILURES = 100;
  */
 const rootReportSinkFailures: unknown[] = [];
 
-/** Read-only view of the sink-failure trail for observers and tests. */
+/**
+ * Snapshot of the sink-failure trail, oldest first. A defensive COPY, not the
+ * backing array: the `readonly` type annotation alone is compile-time only, so
+ * handing out the live array would let a caller mutate or FREEZE it — and a
+ * frozen backing array would make the next `push` inside the root error
+ * callback throw, breaking the never-raise contract this trail exists to
+ * protect. The internal array never escapes.
+ */
 export const recordedRootReportFailures = (): readonly unknown[] => {
-  return rootReportSinkFailures;
+  return [...rootReportSinkFailures];
 };
 
 /**
