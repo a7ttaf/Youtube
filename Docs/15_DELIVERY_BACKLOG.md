@@ -338,6 +338,11 @@ closed unmerged and superseded by the consolidated batch in #156.
   score (PR #69) and CommandView now renders human confidence badges
   (`confidenceDisplay` helper, raw code in title/aria — Track C,
   `feat/audit-track-c`). Remaining: finance adoption/validation of the labels.
+  Branch `fix/p1-confidence-cap`: the explain confidence cap was a no-op — a
+  warned fact clamped to exactly `0.9000` and the `>= 0.9000` label rule still
+  called it HIGH, so a warned high-score fact could retain the HIGH badge. The
+  label rule is now warnings-aware (`warnings => label != HIGH`); the score
+  clamp is unchanged, and warning presence remains explicit in `warnings`.
 - ✅ Explain-number API — shipped: POST
   /revenue/channels/{channel_id}/months/{month}/explain
   (build_channel_month_revenue_explanation; per-metric source/formula/
@@ -620,16 +625,16 @@ closed unmerged and superseded by the consolidated batch in #156.
   route (see the audit summary endpoint entry below); the Retention tile stays a
   static policy constant.
 - ⏳ View error boundary (branch `feat/p1-error-boundary`, unmerged) —
-  `frontend/src/components/srcc/ErrorBoundary.tsx` wraps `<ViewRouter/>` and
-  the command workflow rail in AppShell. A render-time crash now degrades to
+  `frontend/src/components/srcc/ErrorBoundary.tsx` wraps `<ViewRouter/>` in
+  AppShell. A render-time crash now degrades to
   one themed panel with an allowlisted error category and correlation ID;
   recovery performs a full document reload/re-fetch and warns that a write may
   already have committed. Remaining: provider/root, Sidebar, and Topbar
   renders are still outside this boundary; a registry import's shell latch now
   stays armed through a view crash until the pending request settles.
-- ⏳ Rolling month window (item P1.2, branch `feat/p1-rolling-months`) — the
-  frozen `DEFAULT_MONTH = "2026-03"` / `MONTH_OPTIONS` literals and the AppShell
-  topbar month `<select>` now all derive from `frontend/src/lib/months.ts`:
+- ✅ Rolling month window (PR #211, item P1.2) — the frozen
+  `DEFAULT_MONTH = "2026-03"` / `MONTH_OPTIONS` literals and the view-owned
+  month selectors now all derive from `frontend/src/lib/months.ts`:
   current calendar month + the 3 before it, from LOCAL date components with an
   injectable `now`. Integration follow-ups on the same branch, from the audit of
   what the new current-month default exposed: (a) Month Close reads the
@@ -644,7 +649,8 @@ closed unmerged and superseded by the consolidated batch in #156.
   (c) `scripts/seed_demo_month.py` and `scripts/smoke_mvp.py` compute their
   default `--month` at run time (local civil date) instead of the frozen
   `"2026-03"`, and `frontend/README.md` documents seeding the current month with
-  both a bash and a PowerShell form. Converts to `✅ PR #N` on merge.
+  both a bash and a PowerShell form. Month selection is exclusively view-owned;
+  PR #212 removes the shell-level selector whose value never drove a request.
 
 ## P2 — Advanced features
 
@@ -1822,6 +1828,15 @@ single P-tier above.
   viewers narrowed to their granted connector ids (no foreign-credential leak);
   offset-paginated (`limit` ≤ `100`). Token-health frontend wired into
   ConnectorsView. Read-only: no audit write, no migration.
+- ⏳ PR #212 (open, branch `feat/p1-demock-chrome`) — remaining: merge the
+  completed AppShell chrome de-mocking (item P1.3). `NAV_GROUPS`/`VIEW_COPY`
+  become honest static config owned by the shell
+  (no invented nav counts, no month/scope/currency in the page copy);
+  `WORKFLOW_STEPS` + its rail, the operational-cue strip, the "Raw files gated"
+  pill, and the five handler-less header controls (Scope, Month, **Currency**,
+  Refresh, Create Export) are DELETED, not wired — the currency selector
+  permanently, per the single-currency decision; month and scope selection stay
+  inside the views whose state drives the corresponding requests.
 - ✅ Import stepper UI — PR-B of the import/sync UI arc (2026-08-09, branch
   `feat/import-stepper-ui`) — closes the arc PR-A opened: the Registry
   header's disabled Bulk Import placeholder becomes a live **Import CSV**
