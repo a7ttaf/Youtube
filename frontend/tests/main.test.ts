@@ -192,4 +192,38 @@ describe("React root error callbacks", () => {
       at: null,
     });
   });
+
+  it("keeps recording the newest failure once the trail is saturated", async () => {
+    // The cap used to SKIP recording once full — including in the warn
+    // fallback's catch, where the capacity guard made the catch complete
+    // without any observable action. The trail now ages out its OLDEST entry,
+    // so saturation can never swallow the newest failure.
+    const { recordedRootReportFailures } = (await import("@/main")) as {
+      recordedRootReportFailures: () => readonly unknown[];
+    };
+    const consoleWarnSpy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    vi.spyOn(console, "error").mockImplementation(() => {
+      throw new Error("sink down");
+    });
+    const error = new TypeError("saturating emit");
+
+    // Drive the trail to and past its cap.
+    for (let i = 0; i < 101; i += 1) {
+      rootOptions.onUncaughtError(error, {} as ErrorInfo);
+    }
+    expect(recordedRootReportFailures().length).toBe(100);
+
+    // The next failure — with the warn fallback failing TOO — must still land.
+    consoleWarnSpy.mockImplementation(() => {
+      throw new Error("warn gone too");
+    });
+    expect(() => rootOptions.onUncaughtError(error, {} as ErrorInfo)).not.toThrow();
+
+    const trail = recordedRootReportFailures();
+    expect(trail.length).toBe(100);
+    expect(trail[trail.length - 1]).toEqual({
+      stage: "warn-fallback",
+      at: expect.any(Number),
+    });
+  });
 });

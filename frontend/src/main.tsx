@@ -73,7 +73,8 @@ const safeTimestampOf = (): number | null => {
 
 /**
  * Failures that escaped while PRODUCING or EMITTING a root report, oldest
- * first, capped. The reporting path must never raise (a throwing sink would
+ * first, keeping the most recent MAX_RECORDED_REPORT_FAILURES entries. The
+ * reporting path must never raise (a throwing sink would
  * become a second uncaught application error), but a swallowed failure would
  * hide broken diagnostics — so every escape lands here as SAFE METADATA ONLY.
  * The caught failure objects are never retained anywhere: a reporting failure
@@ -106,24 +107,30 @@ export const recordedRootReportFailures = (): readonly RootReportFailure[] => {
  * record. The caught failure object is dropped, never stored.
  */
 const recordRootReportFailure = (stage: RootReportFailureStage): void => {
-  if (rootReportSinkFailures.length < MAX_RECORDED_REPORT_FAILURES) {
-    rootReportSinkFailures.push({ stage, at: safeTimestampOf() });
+  // Aging, not skipping. Once the trail is saturated the OLDEST entry is
+  // evicted so the newest failure is still recorded — a silent skip at the
+  // cap would swallow exactly the evidence the trail exists to keep, and a
+  // catch that records nothing violates the no-silent-swallow rule.
+  if (rootReportSinkFailures.length >= MAX_RECORDED_REPORT_FAILURES) {
+    rootReportSinkFailures.shift();
   }
+  rootReportSinkFailures.push({ stage, at: safeTimestampOf() });
   try {
     // Safe payload only: the trail size — never a raw failure's contents.
     console.warn("[ReactRoot] root error report could not be emitted", {
       recordedFailures: rootReportSinkFailures.length,
     });
   } catch {
-    // Even the warn channel is gone; the trail entry above stays the record.
-    // Push the fallback stage directly instead of recursing into this helper
-    // — retrying warn here would loop forever.
-    if (rootReportSinkFailures.length < MAX_RECORDED_REPORT_FAILURES) {
-      rootReportSinkFailures.push({
-        stage: REPORT_FAILURE_WARN_FALLBACK,
-        at: safeTimestampOf(),
-      });
+    // Even the warn channel is gone; this fallback failure is recorded with
+    // the same aging instead of being dropped. Push directly rather than
+    // recursing into this helper — retrying warn here would loop forever.
+    if (rootReportSinkFailures.length >= MAX_RECORDED_REPORT_FAILURES) {
+      rootReportSinkFailures.shift();
     }
+    rootReportSinkFailures.push({
+      stage: REPORT_FAILURE_WARN_FALLBACK,
+      at: safeTimestampOf(),
+    });
   }
 };
 
