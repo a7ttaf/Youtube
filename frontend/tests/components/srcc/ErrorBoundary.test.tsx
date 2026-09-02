@@ -164,6 +164,68 @@ describe("ErrorBoundary", () => {
     expect(JSON.stringify(reports[0])).not.toContain(sensitiveMessage);
   });
 
+  it("survives a THROWING console sink and marks the card instead of unmounting", () => {
+    // The delivery-failure path used to call the same console.error again
+    // unprotected; a second throw escaped componentDidCatch and unmounted the
+    // shell the boundary exists to keep. Now the already-rendered card is
+    // marked as the record of the failed delivery.
+    consoleErrorSpy.mockImplementation((...args: unknown[]) => {
+      if (String(args[0]).includes("[ErrorBoundary]")) {
+        throw new Error("console sink is broken");
+      }
+    });
+    const Exploding = explodingComponent(new TypeError("crash beside a broken console"));
+
+    render(
+      <div>
+        <p>shell chrome</p>
+        <ErrorBoundary resetKey="groups">
+          <Exploding />
+        </ErrorBoundary>
+      </div>,
+    );
+
+    // The shell around the boundary survives, and the recovery card stays.
+    expect(screen.getByText("shell chrome")).toBeInTheDocument();
+    const fallback = screen.getByTestId("view-error-fallback");
+    expect(
+      within(fallback).getByRole("button", { name: /reload and reconcile/iu }),
+    ).toBeEnabled();
+    // The failed delivery is recorded on the card itself — the only channel left.
+    expect(fallback).toHaveAttribute("data-report-delivery", "failed");
+  });
+
+  it("survives a THROWING telemetry sink and reports through the console instead", () => {
+    const Exploding = explodingComponent(new TypeError("crash beside a broken sink"));
+    const onReport = vi.fn(() => {
+      throw new Error("telemetry transport rejected");
+    });
+
+    render(
+      <div>
+        <p>shell chrome</p>
+        <ErrorBoundary resetKey="registry" onReport={onReport}>
+          <Exploding />
+        </ErrorBoundary>
+      </div>,
+    );
+
+    expect(screen.getByText("shell chrome")).toBeInTheDocument();
+    const fallback = screen.getByTestId("view-error-fallback");
+    expect(within(fallback).getByText("TypeError")).toBeInTheDocument();
+    // Delivery fell back to the console with the SAME sanitized payload, and
+    // the delivery-failure marker is NOT set — the fallback channel worked.
+    const deliveryReports = consoleErrorSpy.mock.calls.filter((call) =>
+      String(call[0]).includes("[ErrorBoundary] report delivery failed"),
+    );
+    expect(deliveryReports).toHaveLength(1);
+    expect(deliveryReports[0][1]).toEqual({
+      category: "TypeError",
+      correlationId: expect.stringMatching(/^[0-9a-f-]{36}$/iu),
+    });
+    expect(fallback).not.toHaveAttribute("data-report-delivery");
+  });
+
   it("falls back safely for a non-string Error.name", () => {
     const thrown = new Error("secret message");
     Object.defineProperty(thrown, "name", { value: undefined });

@@ -261,7 +261,15 @@ class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundaryState> {
     } catch {
       // A custom sink must not become a second render failure. The fallback
       // report remains safe if the sink itself rejects the event.
-      console.error("[ErrorBoundary] report delivery failed", report);
+      try {
+        console.error("[ErrorBoundary] report delivery failed", report);
+      } catch {
+        // The console itself is the failing sink here. Mark the already
+        // rendered card as the record of the failed delivery instead of
+        // letting a second throw escape the lifecycle method — that throw
+        // would unmount the surviving shell this boundary exists to keep.
+        this.fallbackRef.current?.setAttribute("data-report-delivery", "failed");
+      }
     }
 
     // componentDidCatch runs after the fallback DOM is committed, so focus the
