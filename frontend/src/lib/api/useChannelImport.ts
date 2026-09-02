@@ -127,6 +127,7 @@ const PLAN_OUTCOMES = [OUTCOME_CREATE, OUTCOME_UPDATE, OUTCOME_UNCHANGED, OUTCOM
 const IMPORT_CMS_STATUS = "INSIDE_CMS";
 const CMS_STATUSES = [IMPORT_CMS_STATUS, "OUTSIDE_CMS", "UNKNOWN"] as const;
 
+/** True when the value is one of the CMS statuses a request may declare and a response may echo. */
 const isCmsStatus = (value: unknown): boolean => {
   return CMS_STATUSES.some((status) => status === value);
 };
@@ -161,6 +162,7 @@ const isNonBlankString = (value: unknown): boolean => {
  */
 const CHANNEL_ID_PATTERN = /^UC[A-Za-z0-9_-]{22}$/u;
 
+/** True when the value has the exact shape the backend's channel-id parser accepts. */
 const isChannelId = (value: unknown): boolean => {
   return typeof value === "string" && CHANNEL_ID_PATTERN.test(value);
 };
@@ -225,6 +227,7 @@ const PYTHON_UNSTRIPPED = new RegExp(`^[${PYTHON_SPACE}]|[${PYTHON_SPACE}]$`, "u
 // ============================================================================
 const PYTHON_STRIPPABLE = new RegExp(`^[${PYTHON_SPACE}]+|[${PYTHON_SPACE}]+$`, "gu");
 
+/** Strip exactly the characters Python's `str.strip()` would remove. */
 const pythonStrip = (value: string): string => value.replace(PYTHON_STRIPPABLE, "");
 
 // ============================================================================
@@ -255,6 +258,7 @@ const pythonStrip = (value: string): string => value.replace(PYTHON_STRIPPABLE, 
 // ============================================================================
 const WIRE_NEWLINE = /\r\n|\r|\n/gu;
 
+/** Normalize every newline variant to the CRLF the wire contract uses. */
 const toWireText = (value: string): string => value.replace(WIRE_NEWLINE, "\r\n");
 
 /**
@@ -277,10 +281,12 @@ const isParserText = (value: unknown): boolean => {
   );
 };
 
+/** True when the value is one of the plan outcomes the backend can emit. */
 const isOutcome = (value: unknown): boolean => {
   return typeof value === "string" && PLAN_OUTCOMES.some((outcome) => outcome === value);
 };
 
+/** True for a declared group action, or null — a row without a group has none. */
 const isGroupAction = (value: unknown): boolean => {
   return value === null || GROUP_ACTIONS.some((action) => action === value);
 };
@@ -329,6 +335,7 @@ const isChangeSide = (value: unknown): boolean => {
   return value === null || typeof value === "string" || typeof value === "boolean";
 };
 
+/** True when the value is a from/to pair whose sides are renderable scalars. */
 const isFieldChange = (value: unknown): boolean => {
   if (!isPlainObject(value)) {
     return false;
@@ -373,6 +380,7 @@ const isChangeMap = (value: unknown): boolean => {
 const MAX_IMPORT_ROWS = 5000;
 const MAX_PLAN_ROW_NUMBER = MAX_IMPORT_ROWS * 2;
 
+/** True for a 1-based row number within the largest the parser can emit. */
 const isRowNumber = (value: unknown): boolean => {
   return (
     typeof value === "number" &&
@@ -382,6 +390,7 @@ const isRowNumber = (value: unknown): boolean => {
   );
 };
 
+/** True when the value is a string, or null where the backend permits it. */
 const isNullableString = (value: unknown): boolean => {
   return value === null || typeof value === "string";
 };
@@ -753,6 +762,7 @@ const ROW_CHECKS: ReadonlyArray<(row: Record<string, unknown>) => boolean> = [
   explainsErrorRows,
 ];
 
+/** True when the value is a plan row satisfying every per-row check in ROW_CHECKS. */
 const isPlanRow = (row: unknown): boolean => {
   if (!isPlainObject(row)) {
     return false;
@@ -986,6 +996,7 @@ const PLAN_CHECKS: ReadonlyArray<(rows: ReadonlyArray<Record<string, unknown>>) 
   channelRowsAgree,
 ];
 
+/** True when the value is a non-empty row list passing every whole-plan check in PLAN_CHECKS. */
 const isPlanRows = (value: unknown): boolean => {
   if (!Array.isArray(value) || value.length === 0 || !value.every(isPlanRow)) {
     return false;
@@ -1104,6 +1115,7 @@ const diffsMatchTheirFields = (plan: Record<string, unknown>): boolean => {
   });
 };
 
+/** True when every declared outcome tally equals the rows actually carrying it. */
 const countsMatchRows = (candidate: Record<string, unknown>): boolean => {
   const counts = candidate.counts as Record<string, number>;
   const rows = candidate.rows as ChannelImportRowResult[];

@@ -69,6 +69,8 @@ const recordRootReportFailure = (reportingFailure: unknown): void => {
   }
 };
 
+/** Build the safe report and emit it to console.error; a failure anywhere on
+ * this path is recorded and degraded, never re-raised into React. */
 const emitSafeRootReport = (
   kind: "uncaught" | "recoverable",
   error: unknown,

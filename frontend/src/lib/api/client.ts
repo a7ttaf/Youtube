@@ -14,6 +14,13 @@ import { useTenant } from "@/contexts/TenantContext";
 // content-type sniff in parseBody can never drift apart.
 const JSON_MEDIA_TYPE = "application/json";
 
+/**
+ * The shared failure boundary of every request: a non-2xx response, or a 2xx
+ * whose body cannot be strict-parsed. Carries the status, the parsed body and
+ * the request URL so callers can branch on status without re-reading the
+ * response. `name` is pinned to "ApiError" because the flow's failure
+ * classifier trusts that allowlisted name.
+ */
 export class ApiError extends Error {
   readonly name = "ApiError";
   constructor(
