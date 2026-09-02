@@ -31,17 +31,45 @@ import "@/styles.css";
  * console in a long-lived tab cannot grow it without bound. */
 const MAX_RECORDED_REPORT_FAILURES = 100;
 
-/** Which step of the reporting pipeline failed. Fixed, allowlisted literals —
- * never the failure's own message, stack, or fields, which can carry exactly
- * the raw error data the sanitized-report contract keeps off every channel. */
-type RootReportFailureStage = "report-build" | "primary-sink" | "warn-fallback";
+/** Which step of the reporting pipeline failed, named ONCE so the stage type
+ * and the recording call sites cannot drift apart on a spelling. Fixed,
+ * allowlisted identifiers — never the failure's own message, stack, or
+ * fields, which can carry exactly the raw error data the sanitized-report
+ * contract keeps off every channel. */
+const REPORT_FAILURE_REPORT_BUILD = "report-build";
+const REPORT_FAILURE_PRIMARY_SINK = "primary-sink";
+const REPORT_FAILURE_WARN_FALLBACK = "warn-fallback";
+
+type RootReportFailureStage =
+  | typeof REPORT_FAILURE_REPORT_BUILD
+  | typeof REPORT_FAILURE_PRIMARY_SINK
+  | typeof REPORT_FAILURE_WARN_FALLBACK;
 
 /** A safe, non-retaining record of one failure on the reporting path. */
 type RootReportFailure = Readonly<{
   stage: RootReportFailureStage;
-  /** When the failure was recorded, in ms since the epoch. */
-  at: number;
+  /** When the failure was recorded, in ms since the epoch; null when the
+   * clock itself was unavailable, so the entry stays truthful. */
+  at: number | null;
 }>;
+
+/**
+ * The recording clock, guarded. `Date.now` is an overridable global, and a
+ * hostile or failing one must never throw out of a root error callback —
+ * which is the guarantee this whole reporting path exists to keep. A dead
+ * clock becomes an explicit null timestamp, not an exception and not a
+ * fabricated time.
+ */
+const safeTimestampOf = (): number | null => {
+  try {
+    const now = Date.now();
+    return Number.isFinite(now) ? now : null;
+  } catch {
+    // Explicit conversion, not a swallow: the unavailable clock degrades to
+    // a null timestamp and the failure's stage is still recorded.
+    return null;
+  }
+};
 
 /**
  * Failures that escaped while PRODUCING or EMITTING a root report, oldest
@@ -69,15 +97,17 @@ export const recordedRootReportFailures = (): readonly RootReportFailure[] => {
 
 /**
  * Record an escape from the reporting path itself — the observable handling
- * that replaces a silent catch. The degraded notice goes to console.warn, a
- * DIFFERENT channel, because console.error may be the very sink that just
- * failed; if even warn is gone, that failure is recorded too and the trail
- * remains the record. Nothing here rethrows into React, and the caught
- * failure object is dropped, never stored.
+ * that replaces a silent catch. Every step is guarded (the clock helper, the
+ * push on a never-escaping array, and the warn channel below), because this
+ * runs inside catch blocks of the root error callbacks: NOTHING here may
+ * throw into React. The degraded notice goes to console.warn, a DIFFERENT
+ * channel, because console.error may be the very sink that just failed; if
+ * even warn is gone, that failure is recorded too and the trail remains the
+ * record. The caught failure object is dropped, never stored.
  */
 const recordRootReportFailure = (stage: RootReportFailureStage): void => {
   if (rootReportSinkFailures.length < MAX_RECORDED_REPORT_FAILURES) {
-    rootReportSinkFailures.push({ stage, at: Date.now() });
+    rootReportSinkFailures.push({ stage, at: safeTimestampOf() });
   }
   try {
     // Safe payload only: the trail size — never a raw failure's contents.
@@ -89,7 +119,10 @@ const recordRootReportFailure = (stage: RootReportFailureStage): void => {
     // Push the fallback stage directly instead of recursing into this helper
     // — retrying warn here would loop forever.
     if (rootReportSinkFailures.length < MAX_RECORDED_REPORT_FAILURES) {
-      rootReportSinkFailures.push({ stage: "warn-fallback", at: Date.now() });
+      rootReportSinkFailures.push({
+        stage: REPORT_FAILURE_WARN_FALLBACK,
+        at: safeTimestampOf(),
+      });
     }
   }
 };
@@ -106,7 +139,7 @@ const emitSafeRootReport = (
   } catch {
     // Report construction failed before any sink was touched; record the
     // escape and fall through to a degraded, still-safe notice.
-    recordRootReportFailure("report-build");
+    recordRootReportFailure(REPORT_FAILURE_REPORT_BUILD);
   }
   if (report !== null) {
     try {
@@ -114,7 +147,7 @@ const emitSafeRootReport = (
     } catch {
       // The primary sink failed mid-emit; record the escape instead of
       // discarding it or re-entering the same failing channel.
-      recordRootReportFailure("primary-sink");
+      recordRootReportFailure(REPORT_FAILURE_PRIMARY_SINK);
     }
   }
 };

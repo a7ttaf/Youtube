@@ -162,4 +162,34 @@ describe("React root error callbacks", () => {
       expect(entry).toEqual({ stage: expect.any(String), at: expect.any(Number) });
     }
   });
+
+  it("never lets a failing clock escape the recording callback", async () => {
+    // `Date.now` is an overridable global, and recordRootReportFailure runs
+    // inside the root error callbacks' catch blocks — a throwing clock used
+    // to escape from there into React, breaking the never-raise guarantee.
+    // The guarded clock degrades to a null timestamp and the stage is still
+    // recorded.
+    const { recordedRootReportFailures } = (await import("@/main")) as {
+      recordedRootReportFailures: () => readonly unknown[];
+    };
+    const failuresBefore = recordedRootReportFailures().length;
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    vi.spyOn(console, "error").mockImplementation(() => {
+      throw new Error("sink down");
+    });
+    vi.spyOn(Date, "now").mockImplementation(() => {
+      throw new Error("clock unavailable");
+    });
+
+    expect(() =>
+      rootOptions.onUncaughtError(new TypeError("emit beside a dead clock"), {} as ErrorInfo),
+    ).not.toThrow();
+
+    const trail = recordedRootReportFailures();
+    expect(trail.length).toBe(failuresBefore + 1);
+    expect(trail[trail.length - 1]).toEqual({
+      stage: "primary-sink",
+      at: null,
+    });
+  });
 });
