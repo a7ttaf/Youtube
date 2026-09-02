@@ -311,10 +311,26 @@ const hasUnsafeFilenameShape = (value: string): boolean => {
   );
 };
 
-// FIX: Windows reserves device names regardless of extension — "CON.txt" is
-// just as unusable as "CON" — so a persisted artifact_filename equal to one
-// of them must fall back to the deterministic job-id name instead of being
-// handed to the anchor download attribute verbatim.
+// ============================================================================
+// Purpose: Hold the Windows reserved device names a persisted artifact
+//   filename must never be handed to an anchor download as. Windows refuses
+//   these names for local files REGARDLESS of extension ("CON.txt" is as
+//   unusable as "CON"), so a backend value equal to one of them has to fall
+//   back to the deterministic job-id filename instead.
+// Database/ORM: None (frontend) — a static name set over typed job metadata.
+// Standards: Comparison is case-insensitive on the extension-stripped base,
+//   because Windows reserves the base name; the set is fixed by the platform,
+//   not by this app, so it is deliberately exhaustive and literal.
+//   FIX: This guard was missing entirely — a persisted "CON"/"con.txt" passed
+//   through unchanged and became the local download filename.
+// Blast Radius: Local download presentation only — which name the browser
+//   suggests when saving. No finance value, authorization, or backend state.
+// Connections:
+//   - Function: safeDownloadFilename -> rejects reserved bases before the
+//     value reaches an anchor download attribute.
+//   - File: backend/ums_smart_revenue/api/exports.py -> the persisted
+//     artifact_filename this guards at the UI's half of the handshake.
+// ============================================================================
 const WINDOWS_RESERVED_DEVICE_NAMES = new Set([
   "CON",
   "PRN",

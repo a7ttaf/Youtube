@@ -372,6 +372,29 @@ class SqlAlchemyExportJobRepository:
         self._tenant_id = _resolve_tenant_id(tenant_id)
 
     # ========================================================================
+    # Purpose: Commit the request-scoped unit of work that this repository's
+    #   writes participate in, so export completion metadata is durable before
+    #   an artifact response (the prepare 204 or the byte-bearing GET) starts.
+    # Database/ORM: session.commit() on the request-scoped tenant session.
+    # Standards: Transaction BOUNDARY only — no queries or row writes live
+    #   here; reads and writes stay in their own methods, and SQLAlchemy
+    #   transaction control stays behind the repository layer instead of the
+    #   route module.
+    # Blast Radius: Export completion durability. A failure here means the
+    #   caller must fail closed (503, no 204, no artifact bytes) rather than
+    #   serve a download over metadata that never persisted.
+    # Connections:
+    #   - File: backend/ums_smart_revenue/api/exports.py -> the two-leg
+    #       handshake (_prepared_artifact_response and the download routes)
+    #       commits through this before responding.
+    #   - File: backend/ums_smart_revenue/api/dependencies.py -> the yield
+    #       dependency whose teardown commit this front-runs.
+    # ========================================================================
+    def commit_unit_of_work(self) -> None:
+        """Commit the request-scoped session this repository reads and writes."""
+        self._session.commit()
+
+    # ========================================================================
     # Purpose: Create an export job and freeze its resolved channel set so
     #   later membership edits to the source group/sector/company cannot
     #   change the data returned for the same export_id.

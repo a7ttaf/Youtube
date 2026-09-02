@@ -650,7 +650,7 @@ def download_analytics_summary_csv(
             ),
         )
         return _prepared_artifact_response(
-            session=session, filename=artifact.filename
+            repository=repository, filename=artifact.filename
         )
 
     # FIX: Ordering here is the audit's truth. The filename is validated
@@ -661,7 +661,7 @@ def download_analytics_summary_csv(
     # then is the download audit recorded and committed — immediately before
     # the bytes themselves. Any failure lands as a 503 with no false trail.
     _require_safe_artifact_filename(artifact.filename)
-    _commit_tenant_session_before_response(session=session)
+    _commit_tenant_session_before_response(repository=repository)
     _commit_export_artifact_audit_before_response(
         audit_sink=audit_sink,
         record_audit=lambda: _record_analytics_export_artifact_audit(
@@ -808,7 +808,7 @@ def download_finance_workbook(
                 include_download_event=False,
             ),
         )
-        return _prepared_artifact_response(session=session, filename=filename)
+        return _prepared_artifact_response(repository=repository, filename=filename)
 
     # FIX: Ordering here is the audit's truth. The filename is validated
     # FIRST (an unsafe persisted name must fail closed as a 500 without ever
@@ -818,7 +818,7 @@ def download_finance_workbook(
     # then is the download audit recorded and committed — immediately before
     # the bytes themselves. Any failure lands as a 503 with no false trail.
     _require_safe_artifact_filename(filename)
-    _commit_tenant_session_before_response(session=session)
+    _commit_tenant_session_before_response(repository=repository)
     _commit_export_artifact_audit_before_response(
         audit_sink=audit_sink,
         record_audit=lambda: _record_finance_export_artifact_audit(
@@ -975,7 +975,7 @@ def download_executive_pdf(
                 include_download_event=False,
             ),
         )
-        return _prepared_artifact_response(session=session, filename=filename)
+        return _prepared_artifact_response(repository=repository, filename=filename)
 
     # FIX: Ordering here is the audit's truth. The filename is validated
     # FIRST (an unsafe persisted name must fail closed as a 500 without ever
@@ -985,7 +985,7 @@ def download_executive_pdf(
     # then is the download audit recorded and committed — immediately before
     # the bytes themselves. Any failure lands as a 503 with no false trail.
     _require_safe_artifact_filename(filename)
-    _commit_tenant_session_before_response(session=session)
+    _commit_tenant_session_before_response(repository=repository)
     _commit_export_artifact_audit_before_response(
         audit_sink=audit_sink,
         record_audit=lambda: _record_finance_export_artifact_audit(
@@ -1144,7 +1144,7 @@ def download_branded_slide_pack(
                 include_download_event=False,
             ),
         )
-        return _prepared_artifact_response(session=session, filename=filename)
+        return _prepared_artifact_response(repository=repository, filename=filename)
 
     # FIX: Ordering here is the audit's truth. The filename is validated
     # FIRST (an unsafe persisted name must fail closed as a 500 without ever
@@ -1154,7 +1154,7 @@ def download_branded_slide_pack(
     # then is the download audit recorded and committed — immediately before
     # the bytes themselves. Any failure lands as a 503 with no false trail.
     _require_safe_artifact_filename(filename)
-    _commit_tenant_session_before_response(session=session)
+    _commit_tenant_session_before_response(repository=repository)
     _commit_export_artifact_audit_before_response(
         audit_sink=audit_sink,
         record_audit=lambda: _record_finance_export_artifact_audit(
@@ -1209,14 +1209,16 @@ def _tenant_uuid(user: UserPrincipal) -> UUID:
 #   - File: backend/ums_smart_revenue/api/dependencies.py -> Request-scope commit.
 #   - File: frontend/src/components/srcc/views/ExportsView.tsx -> Native GET start.
 # ============================================================================
-def _prepared_artifact_response(*, session: Session, filename: str) -> Response:
+def _prepared_artifact_response(
+    *, repository: SqlAlchemyExportJobRepository, filename: str
+) -> Response:
     """Commit prepared artifact metadata, then return a non-cacheable 204 response."""
     # The 204 tells the browser a download is ready, so the filename must be
     # provably safe HERE, not only at the download's header builder: an unsafe
     # persisted name that passed preparation would fail the download only
     # after its audit row had already been committed.
     _require_safe_artifact_filename(filename)
-    _commit_tenant_session_before_response(session=session)
+    _commit_tenant_session_before_response(repository=repository)
     return Response(
         status_code=status.HTTP_204_NO_CONTENT,
         headers={"Cache-Control": _ARTIFACT_CACHE_CONTROL},
@@ -1265,20 +1267,38 @@ def _commit_export_artifact_audit_before_response(
         ) from exc
 
 
-def _commit_tenant_session_before_response(*, session: Session) -> None:
-    """Durably commit tenant-backed export metadata before any response starts.
-
-    The request-scoped session's teardown commit runs after the response is
-    sent, so both handshake legs — the prepare 204 and the byte-bearing GET —
-    commit here first. Otherwise a failed teardown commit would leave served
-    bytes or a ready download over export-job metadata that never persisted.
-    """
-    # FIX: The ordinary GET used to commit only the audit sink and let the
-    # yield-dependency teardown commit the tenant session after the artifact
-    # bytes were already on the wire — a failed teardown left a delivered
-    # download over completion metadata that never persisted.
+# ============================================================================
+# Purpose: Durably commit tenant-backed export metadata before any response
+#   starts. The request-scoped session's teardown commit runs after the
+#   response is sent, so BOTH handshake legs — the prepare 204 and the
+#   byte-bearing GET — commit here first; otherwise a failed teardown commit
+#   would leave served bytes or a ready download over export-job metadata
+#   that never persisted.
+# Database/ORM: Commits the request-scoped tenant Session through
+#   SqlAlchemyExportJobRepository.commit_unit_of_work — the transaction
+#   boundary lives behind the repository, not in this route module.
+# Standards: Fail closed — a commit failure is translated to a typed 503 and
+#   never swallowed, so neither handshake leg can announce or deliver an
+#   artifact over unpersisted metadata.
+#   FIX: The ordinary GET used to commit only the audit sink and let the
+#   yield-dependency teardown commit the tenant session after the artifact
+#   bytes were already on the wire — a failed teardown left a delivered
+#   download over completion metadata that never persisted.
+# Blast Radius: Export completion durability on all four artifact routes plus
+#   the prepare 204; download-audit truthfulness (EXPORT_DOWNLOADED is only
+#   recorded after this commit succeeds).
+# Connections:
+#   - File: backend/ums_smart_revenue/reports/exports.py ->
+#       commit_unit_of_work, the repository transaction boundary used here.
+#   - File: backend/ums_smart_revenue/api/dependencies.py -> the yield
+#       session dependency whose teardown commit this front-runs.
+# ============================================================================
+def _commit_tenant_session_before_response(
+    *, repository: SqlAlchemyExportJobRepository
+) -> None:
+    """Commit tenant export metadata through the repository before responding."""
     try:
-        session.commit()
+        repository.commit_unit_of_work()
     except SQLAlchemyError as exc:
         logger.exception("Export artifact session commit failed")
         raise HTTPException(

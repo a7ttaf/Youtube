@@ -51,6 +51,7 @@ from ums_smart_revenue.reports.exports import (
     ExportJobEntry,
     ExportJobTerminalStateError,
     ExportJobValidationError,
+    SqlAlchemyExportJobRepository,
 )
 
 SECTOR_ID = UUID("00000000-0000-0000-0000-000000023001")
@@ -664,17 +665,18 @@ def test_finance_workbook_prepare_is_bodyless_and_real_get_reauthorizes(
 def test_prepared_artifact_response_fails_closed_when_commit_fails():
     """Do not expose the 204 start signal when artifact metadata is not durable."""
 
-    class FailingCommitSession:
-        """Session stand-in whose commit always fails, testing fail-close."""
+    class FailingCommitRepository:
+        """Repository stand-in whose unit-of-work commit always fails."""
 
         @staticmethod
-        def commit() -> NoReturn:
+        def commit_unit_of_work() -> NoReturn:
             """Raise, simulating a durability failure at metadata commit."""
             raise SQLAlchemyError("commit failed")
 
     with pytest.raises(HTTPException) as raised:
         _prepared_artifact_response(
-            session=cast(Session, FailingCommitSession()), filename="ums-finance.xlsx"
+            repository=cast(SqlAlchemyExportJobRepository, FailingCommitRepository()),
+            filename="ums-finance.xlsx",
         )
 
     assert raised.value.status_code == 503
@@ -685,22 +687,23 @@ def test_prepared_artifact_response_rejects_unsafe_filename_before_committing():
     """The 204 must not announce a download whose filename would fail the header.
 
     Validation precedes the metadata commit, so an unsafe persisted name
-    fails the prepare leg closed without touching the session — the download
-    leg can never reach its post-audit header failure.
+    fails the prepare leg closed without touching the repository — the
+    download leg can never reach its post-audit header failure.
     """
     commits: list[str] = []
 
-    class RecordingSession:
-        """Session stand-in recording its commits."""
+    class RecordingRepository:
+        """Repository stand-in recording its unit-of-work commits."""
 
         @staticmethod
-        def commit() -> None:
+        def commit_unit_of_work() -> None:
             """Record that the prepare leg reached its metadata commit."""
             commits.append("commit")
 
     with pytest.raises(HTTPException) as raised:
         _prepared_artifact_response(
-            session=cast(Session, RecordingSession()), filename='ums-finance-2026-03".xlsx'
+            repository=cast(SqlAlchemyExportJobRepository, RecordingRepository()),
+            filename='ums-finance-2026-03".xlsx',
         )
 
     assert raised.value.status_code == 500
@@ -834,7 +837,7 @@ class _ValueErrorAuditSink(InMemoryAuditSink):
         self.unit_of_work = _FailingAuditCommitUnitOfWork()
         self.sql_unit_of_work = self.unit_of_work
 
-    def transaction(self):
+    def transaction(self) -> NoReturn:
         """Raise a non-SQLAlchemy exception before the audit block is entered."""
         raise ValueError("audit reason normalization failed")
 
