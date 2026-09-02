@@ -434,7 +434,19 @@ _check_should_skip() {
     return 0
   fi
 
-  # 2. Skip by changeset if incremental and no relevant files changed
+  # 2. Skip by changeset if incremental and no relevant files changed.
+  #
+  # But never when the push publishes objects the changeset cannot describe:
+  # tag, other-ref, or notes tips are outside the branch-range diff the
+  # changeset derives from, and refs/notes/* may legally point at an arbitrary
+  # application commit. Filtering content lanes on worktree knowledge that does
+  # not cover those bytes is the same fail-open the narrow-path ruling closed
+  # (a notes push must run the full application plan). Branch-range pushes
+  # (NEW_SHA alone) keep incremental filtering: there the worktree does speak
+  # for the pushed tree.
+  if [ -n "${CI_GATE_PUSH_TAG_TIPS:-}${CI_GATE_PUSH_OTHER_TIPS:-}${CI_GATE_PUSH_NOTES_TIPS:-}" ]; then
+    return 1
+  fi
   if [ "${CI_GATE_INCREMENTAL:-1}" = "1" ] && [ -n "${_CI_CHANGESET_CHECKS:-}" ]; then
     local found=0
     local ck

@@ -183,8 +183,12 @@ security_utf16_secret() {
     # Populate a status-clean index/worktree from the safe replacement while
     # HEAD still names the original credential-bearing commit.
     git reset -q --hard "$secret_tip"
-    git init -q --bare remote.git
+    # The status is captured before remote.git exists and with the redirect
+    # target excluded, or the status lists its own artifacts into the
+    # untracked set.
+    echo ".replacement-status" >> .git/info/exclude
     git status --porcelain > .replacement-status
+    git init -q --bare remote.git
   )
   [ ! -s "$SECURITY_SB/.replacement-status" ]
 
@@ -215,10 +219,11 @@ security_utf16_secret() {
     cd "$SECURITY_SB"
     unset GIT_NO_REPLACE_OBJECTS
     git update-ref "refs/custom-replace/$secret_tip" "$safe_tip"
-    GIT_REPLACE_REF_BASE=refs/custom-replace git reset -q --hard "$secret_tip"
+    # Git's ref-pattern trimming requires the base to end in a slash.
+    GIT_REPLACE_REF_BASE=refs/custom-replace/ git reset -q --hard "$secret_tip"
   )
 
-  run bash -c "cd '$SECURITY_SB' && GIT_REPLACE_REF_BASE=refs/custom-replace \
+  run bash -c "cd '$SECURITY_SB' && GIT_REPLACE_REF_BASE=refs/custom-replace/ \
     CI_GATE_PUSH_OLD_SHA='$base' CI_GATE_PUSH_NEW_SHA='$secret_tip' \
     bash ci/checks/security.sh 2>&1"
 

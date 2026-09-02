@@ -1978,7 +1978,16 @@ YML
   ) >/dev/null 2>&1
 
   _pf_lanes() { # _pf_lanes <env assignments...>
-    ( cd "$sb" && env "$@" CI_GATE_USE_LANES=0 bash ci/preflight.sh --mode "$MODE_UNDER_TEST" 2>&1 ) \
+    # Hermetic against the surrounding gate: its exported scheduling context
+    # (changed files, incremental/caching, mode) must not reach the sandboxed
+    # preflight, whose lanes these assertions construct from scratch. A fresh
+    # cache per invocation, or the next invocation replays this one's cached
+    # RAN: markers under a different push context.
+    _PF_LANE_CACHE="$(mktemp -d "${TMPDIR:-/tmp}/ums-lane-cache.XXXXXX")"
+    ( cd "$sb" && env -u CI_GATE_CHANGED_FILES -u CI_GATE_INCREMENTAL \
+        -u CI_GATE_CACHE_ENABLED -u CI_GATE_MODE "$@" CI_GATE_USE_LANES=0 \
+        CI_GATE_CACHE_DIR="$_PF_LANE_CACHE" \
+        bash ci/preflight.sh --mode "$MODE_UNDER_TEST" 2>&1 ) \
       | grep -o 'RAN:[a-z-]*' | sed 's/RAN://' | sort -u | tr '\n' ' '
   }
 
@@ -2002,18 +2011,18 @@ YML
   [[ "$output" != *build* ]]
   [[ "$output" != *security* ]]
 
-  # Notes publish no application tree, but their commit/tree/blob objects can
-  # carry credentials. The short path therefore retains security without
-  # widening back to the application or shell-self-test lanes.
+  # A notes ref disqualifies the content-free path: refs/notes/* is only a
+  # naming convention and Git accepts an arbitrary application commit there,
+  # so a notes push schedules the full application plan plus the security
+  # object scan (the same ruling as the lanes.conf test below).
   run _pf_lanes CI_GATE_PUSH_DELETIONS_ONLY=1 CI_GATE_PUSH_NOTES_TIPS=HEAD \
                 CI_GATE_PUSH_OUTGOING_REFS=refs/notes/commits
   [ "$status" -eq 0 ]
   [[ "$output" == *branch-protection* ]]
   [[ "$output" == *security* ]]
-  [[ "$output" != *node* ]]
-  [[ "$output" != *test-layout* ]]
-  [[ "$output" != *tests-shell* ]]
-  [[ "$output" != *build* ]]
+  [[ "$output" == *node* ]]
+  [[ "$output" == *test-layout* ]]
+  [[ "$output" == *tests-shell* ]]
 
   # And `full` is a deliberate whole-tree run. It is not a push at all, so an
   # environment variable left over from one must not narrow it.
@@ -2281,7 +2290,12 @@ YML
 
   _pf_lanes() { # _pf_lanes <mode> <env assignments...>
     local _m="$1"; shift
-    ( cd "$sb" && env "$@" bash ci/preflight.sh --mode "$_m" 2>&1 ) \
+    # Hermetic against the surrounding gate, as above; fresh cache as above.
+    _PF_LANE_CACHE="$(mktemp -d "${TMPDIR:-/tmp}/ums-lane-cache.XXXXXX")"
+    ( cd "$sb" && env -u CI_GATE_CHANGED_FILES -u CI_GATE_INCREMENTAL \
+        -u CI_GATE_CACHE_ENABLED -u CI_GATE_MODE "$@" \
+        CI_GATE_CACHE_DIR="$_PF_LANE_CACHE" \
+        bash ci/preflight.sh --mode "$_m" 2>&1 ) \
       | grep -o 'RAN:[a-z-]*' | sed 's/RAN://' | sort -u | tr '\n' ' '
   }
 
