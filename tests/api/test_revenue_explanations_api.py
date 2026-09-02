@@ -1,3 +1,4 @@
+import json
 from datetime import UTC, datetime
 from decimal import Decimal
 from uuid import UUID, uuid4
@@ -70,7 +71,8 @@ def build_database_url(tmp_path) -> str:
 
 def seed_database(database_url: str) -> None:
     """Create org/security/finance/explanation tables and seed
-    channel, users, facts, and overrides."""
+    channel, users, facts, and overrides.
+    """
     engine = create_engine(database_url)
     OrgBase.metadata.create_all(engine)
     SecurityBase.metadata.create_all(engine)
@@ -154,7 +156,8 @@ def test_finance_viewer_gets_adjusted_revenue_explanation_with_audit_and_snapsho
     tmp_path,
 ):
     """Assert a finance_viewer gets a 200 adjusted_gross explanation
-    with a pending-override warning, snapshot, log."""
+    with a pending-override warning, snapshot, log.
+    """
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -170,14 +173,30 @@ def test_finance_viewer_gets_adjusted_revenue_explanation_with_audit_and_snapsho
         audit_log = session.scalars(select(AuditLogORM)).one()
 
     assert response.status_code == 200
-    assert response.json()["metric"] == "adjusted_gross_revenue_usd"
+    body = response.json()
+    assert set(body) == {
+        "month",
+        "entity_type",
+        "entity_id",
+        "metric",
+        "value",
+        "currency",
+        "formula",
+        "confidence",
+        "components",
+        "warnings",
+        "audit_event",
+    }
+    assert body["metric"] == "adjusted_gross_revenue_usd"
     assert response.json()["value"] == "1125.5"
     assert response.json()["currency"] == "USD"
     assert (
         response.json()["formula"]
         == "baseline_gross_revenue_usd + approved_manual_override_total_usd"
     )
-    assert response.json()["confidence"]["label"] == "HIGH"
+    # The seeded month carries a PENDING override, so the response warns; a
+    # warned explanation can never carry the HIGH badge (see _confidence).
+    assert response.json()["confidence"] == {"label": "MEDIUM", "score": "0.9"}
     assert response.json()["components"] == [
         {
             "key": "baseline_gross_revenue_usd",
@@ -202,13 +221,15 @@ def test_finance_viewer_gets_adjusted_revenue_explanation_with_audit_and_snapsho
     assert response.json()["audit_event"]["event_type"] == "REVENUE_VIEWED"
     assert explanation.value == Decimal("1125.50")
     assert explanation.metric == "adjusted_gross_revenue_usd"
+    assert json.loads(explanation.confidence) == {"label": "MEDIUM", "score": "0.9"}
     assert audit_log.event_type == "REVENUE_VIEWED"
     assert audit_log.sensitive is True
 
 
 def test_assistant_cannot_get_revenue_explanation(tmp_path):
     """Assert an assistant_analyst is denied the explain endpoint
-    with 403 and a missing finance.view_revenue detail."""
+    with 403 and a missing finance.view_revenue detail.
+    """
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -224,7 +245,8 @@ def test_assistant_cannot_get_revenue_explanation(tmp_path):
 
 def test_revenue_explanation_rejects_unsupported_metric(tmp_path):
     """Assert an unsupported metric query returns 422
-    with an unsupported-explanation-metric detail."""
+    with an unsupported-explanation-metric detail.
+    """
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -283,7 +305,8 @@ def test_net_revenue_explanation_global_finance_returns_value_provenance_and_plu
     tmp_path,
 ):
     """Assert a global finance principal gets a 200 net_revenue_usd
-    explanation with plural audits and one snapshot."""
+    explanation with plural audits and one snapshot.
+    """
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -316,7 +339,8 @@ def test_net_revenue_explanation_org_scoped_finance_viewer_403_on_net_200_on_gro
     tmp_path,
 ):
     """Assert an org-scoped finance_viewer is denied net_revenue_usd
-    (403) but allowed adjusted_gross_revenue (200)."""
+    (403) but allowed adjusted_gross_revenue (200).
+    """
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -336,7 +360,8 @@ def test_net_revenue_explanation_org_scoped_finance_viewer_403_on_net_200_on_gro
 
 def test_net_revenue_explanation_no_facts_channel_returns_422(tmp_path):
     """Assert net_revenue_usd for a fact-less channel returns 422
-    and persists no explanation snapshot."""
+    and persists no explanation snapshot.
+    """
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     # Seed an active channel with NO revenue facts for the gated month so the
@@ -374,7 +399,8 @@ def test_net_revenue_explanation_no_facts_channel_returns_422(tmp_path):
 
 def test_net_revenue_explanation_idempotent_upsert_coexists_with_gross(tmp_path):
     """Assert repeated net explains upsert to one row that coexists
-    with the adjusted_gross_revenue_usd snapshot."""
+    with the adjusted_gross_revenue_usd snapshot.
+    """
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
