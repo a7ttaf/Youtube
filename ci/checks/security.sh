@@ -144,6 +144,7 @@ security_infra_failure() {
 
 security_temp_dir=""
 
+# shellcheck disable=SC2317  # invoked indirectly via the EXIT trap below
 cleanup_security_temp() {
   [ -z "$security_temp_dir" ] || rm -rf -- "$security_temp_dir"
 }

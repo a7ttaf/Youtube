@@ -106,6 +106,17 @@ jobs:
           fi
           make verify
 
+      # The bats suites write per-test failures to junit XML and the runner's
+      # stderr file, neither of which reaches the console log — a red
+      # tests-shell lane was unattributable from the run log alone.
+      - name: Surface bats failures
+        if: ${{ failure() }}
+        run: |
+          echo '=== shell.stderr ==='
+          cat ci/reports/junit/shell.stderr 2>/dev/null || true
+          echo '=== failing cases from shell.xml ==='
+          grep -B1 -A6 '<failure' ci/reports/junit/shell.xml 2>/dev/null || true
+
       - name: Full formatting contract
         if: ${{ always() }}
         run: uv run --locked bash ci/checks/format.sh

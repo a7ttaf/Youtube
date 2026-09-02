@@ -3081,7 +3081,7 @@ _script_names_a_checker() {
       # and the lane exited 0. The two halves of one question, and only one of
       # them was being asked.
       case "$tok" in
-        run|exec|dlx|--) continue ;;
+        run|exec|dlx) continue ;;
       esac
       _fwd="${_fwd} ${_fwd_raw}"
       continue
