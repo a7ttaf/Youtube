@@ -194,13 +194,13 @@ class ExportTemplateValidationError(ExportTemplateError):
 
 class SqlAlchemyExportTemplateRepository:
     """SQLAlchemy repository for reusable export layout templates, tenant-scoped."""
+
     def __init__(self, session: Session, *, tenant_id: UUID | str | None = None):
         """Bind export template reads and writes to an explicit or request tenant."""
         self._session = session
         self._tenant_id = _resolve_tenant_id(tenant_id)
 
     # ========================================================================
-
     # Purpose: Persist reusable export layout configuration while keeping
     #   finance and analytics source selection controlled by export jobs.
     # Database/ORM: INSERT INTO export_templates.
@@ -389,13 +389,13 @@ class SqlAlchemyExportTemplateRepository:
 
 class SqlAlchemyExportJobRepository:
     """SQLAlchemy repository for export jobs and their artifact lifecycle, tenant-scoped."""
+
     def __init__(self, session: Session, *, tenant_id: UUID | str | None = None):
         """Bind export job reads and writes to an explicit or request tenant."""
         self._session = session
         self._tenant_id = _resolve_tenant_id(tenant_id)
 
     # ========================================================================
-
     # Purpose: Commit the request-scoped unit of work that this repository's
     #   writes participate in, so export completion metadata is durable before
     #   an artifact response (the prepare 204 or the byte-bearing GET) starts.
