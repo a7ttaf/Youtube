@@ -439,6 +439,63 @@ describe("CommandView wired to net-revenue", () => {
   });
 });
 
+// A successful net-revenue read that carries no channel rows: the honest
+// empty-data state the workspace must survive now that the mock side panels
+// (which always had rows) are gone.
+const NET_REVENUE_EMPTY: NetRevenueResponse = {
+  ...NET_REVENUE_BODY,
+  channel_count: 0,
+  calculated_channel_count: 0,
+  channels: [],
+};
+
+describe("CommandView de-mocked side panels (P1.4)", () => {
+  it("renders none of the fabricated issue / close / readiness panels", async () => {
+    routeFetch(() => jsonResponse(NET_REVENUE_BODY));
+    renderCommandView(true);
+
+    await waitFor(() =>
+      expect(screen.getAllByText("UC-DRAMA-01").length).toBeGreaterThan(0),
+    );
+
+    // Panel titles from the deleted mock panels.
+    expect(screen.queryByText("Issue Queue")).not.toBeInTheDocument();
+    expect(screen.queryByText("Month Close Controls")).not.toBeInTheDocument();
+    expect(screen.queryByText("Export Readiness")).not.toBeInTheDocument();
+
+    // Distinctive fabricated row copy from ISSUES / CLOSE_STEPS / EXPORT_READINESS.
+    expect(
+      screen.queryByText("Outside-CMS source missing"),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByText("YouTube reports normalized"),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByText("Raw appendix restricted")).not.toBeInTheDocument();
+
+    // And the "sample data" scaffolding those panels carried is gone entirely.
+    expect(screen.queryByText("Mock")).not.toBeInTheDocument();
+    expect(screen.queryByText(/Sample data/)).not.toBeInTheDocument();
+  });
+
+  it("keeps the workspace honest and crash-free when the month has no channels", async () => {
+    routeFetch(() => jsonResponse(NET_REVENUE_EMPTY));
+    renderCommandView(true);
+
+    // The real table states its own emptiness instead of a mock panel filling
+    // the screen with invented rows.
+    await waitFor(() =>
+      expect(
+        screen.getByText("No channels for this month and scope."),
+      ).toBeInTheDocument(),
+    );
+    expect(screen.getByText("No channel selected")).toBeInTheDocument();
+    // The header count comes from the real response (other panels report their
+    // own zero counts too, hence getAllByText).
+    expect(screen.getAllByText("0 channels").length).toBeGreaterThan(0);
+    expect(screen.queryByText("Outside-CMS source missing")).not.toBeInTheDocument();
+  });
+});
+
 describe("CommandView dynamic scope selector", () => {
   it("populates the scope selector from GET /revenue/scopes", async () => {
     routeFetch(

@@ -2055,6 +2055,20 @@ single P-tier above.
   mock). All display fields derived client-side (avatar, CMS badge, source
   label, state per Option A, trace key). Extracted to `views/RegistryView.tsx`;
   16 new Vitest tests. All six dashboard pages off mock data.
+- ⏳ Summary-dataset de-mock (P1.4) — branch `feat/p1-demock-views` (unmerged):
+  Command Center drops the fabricated Issue Queue, Month Close Controls, and
+  Export Readiness panels while retaining its live revenue, alert, explanation,
+  and reconciliation reads; Month Close drops the mock Reconciliation Equation
+  and keeps the API readiness/blocker workflow; Registry drops Registry Controls
+  plus the unsourced revenue/change tiles and keeps two counts derived from
+  `GET /channels`; Exports drops Export Guardrails and uses the live job/create
+  APIs for all four artifact types. Its bounded-memory download handshake now
+  authenticates and generates with `?prepare=true`, surfaces typed failures,
+  durably commits artifact metadata before its non-cacheable 204, then starts
+  an independently authorized, non-cacheable same-origin native GET and
+  refreshes persisted completion metadata. Seven fabricated datasets are
+  removed from `lib/mock/data.ts`; no missing API source is replaced with
+  invented data.
 - ✅ Soft Dark design system — PR #79, on `feat/design-system-softdark` (stacked
   on Registry Phase 2): `frontend/src/styles.css` token values converted to the
   UMS Revenue Design System Soft Dark theme (dark_dimmed surfaces/ink/status,

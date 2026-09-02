@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Breaking changes
+- Export artifact downloads now require a same-origin `/exports/*` gateway
+  route. The browser's real artifact GET is frontend-relative — the gateway
+  injects trusted principal/tenant headers and no secret rides the URL —
+  while only the authenticated `?prepare=true` request uses
+  `VITE_API_BASE_URL`. A deployment whose API lives on a separate origin must
+  add that same-origin route before upgrading (see the artifact-download
+  migration steps in `frontend/README.md`); without it, downloads target the
+  SPA origin and fail.
+
 ### Added
 - Frontend crash containment and write-latch recovery: a view that throws now
   degrades to an in-place error card instead of unmounting the whole app; the
@@ -33,6 +43,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Root governance: `README.md`, `SECURITY.md`, `CONTRIBUTING.md`, `CODEOWNERS`, `CODE_OF_CONDUCT.md`, `.gitignore`.
 
 ### Changed
+- The Command, Close, Registry, and Exports views no longer render fabricated
+  summary data: the seven mock summary/control datasets and their panels are
+  deleted, Registry keeps only tiles derived from fetched channel rows, and
+  export artifacts download through the authenticated API client (native
+  browser download, no client-side blob buffering) accepting only safe
+  server-provided filenames.
 - Dependency batch, consolidating Dependabot #140, #153 and #154. Runtime:
   `fastapi` 0.137.1 -> 0.140.3, `uvicorn[standard]` 0.49.0 -> 0.51.0,
   `sqlalchemy` 2.0.50 -> 2.0.51, `alembic` 1.18.4 -> 1.18.5, `redis`
@@ -76,6 +92,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `.created`, `.updated`, and `.unchanged` for source-row classification.
 
 ### Fixed
+- Export artifact downloads now commit their sensitive read/download audit rows
+  before the HTTP artifact response is constructed. If that audit commit fails,
+  XLSX, PDF, PPTX, and analytics CSV GETs fail closed with `503` and no
+  artifact body is sent.
 - Regenerated the stale `uv.lock`. It still resolved `fastapi==0.136.3` and
   `pytest==9.0.3` while `pyproject.toml` declared `0.137.1` and `9.1.0`, so
   container images silently ran the older packages. `uv lock --check` now

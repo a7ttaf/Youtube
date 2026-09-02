@@ -34,9 +34,10 @@ export class ApiError extends Error {
  * An already-absolute http(s) URL is returned untouched. Otherwise the path is
  * prefixed with VITE_API_BASE_URL (trailing slashes stripped); when no base is
  * configured this returns the original relative path unchanged, so same-origin
- * deployments keep byte-identical relative URLs. Exported so non-JSON surfaces
- * (e.g. binary download anchors) can target the same API origin the JSON client
- * uses instead of hard-coding a relative href against the frontend origin.
+ * deployments keep byte-identical relative URLs. Exported so non-JSON callers
+ * (e.g. binary download flows) can target the same API origin as JSON requests
+ * instead of hard-coding a frontend-relative URL. This is URL normalization
+ * only: a cross-origin value does not establish CORS or trusted-gateway auth.
  */
 export const resolveUrl = (path: string): string => {
   if (/^https?:\/\//i.test(path)) return path;
@@ -54,7 +55,8 @@ export const resolveUrl = (path: string): string => {
  * Standards: Typed HeadersInit boundary; no request is issued here and no error
  *   is swallowed. Tenant identity comes from the resolved slug argument only: a
  *   caller-supplied X-UMS-Tenant is overwritten when a slug is resolved and
- *   deleted when it is not — it is never merged through.
+ *   deleted when it is not — it is never merged through. This helper adds the
+ *   tenant header only; trusted-gateway identity is supplied by the gateway.
  * Blast Radius: Authorization / tenancy — this is the single choke point where
  *   every request in this client acquires its tenant scope, so the overwrite-
  *   or-delete rule is what stops the browser bundle forging a tenant, and the empty
@@ -222,7 +224,9 @@ const withJsonBody = (
  * Standards: Typed boundary throughout — request<T> strict-parses success
  *   bodies so raw non-JSON text can never masquerade as a typed `T`, and no
  *   error is swallowed: every non-2xx and every malformed-JSON 2xx throws.
- *   The memo is keyed on tenantSlug so the bound identity cannot go stale.
+ *   The memo is keyed on tenantSlug so the bound tenant scope cannot go stale.
+ *   The browser does not manufacture trusted-gateway identity; deployments
+ *   provide that through the gateway/proxy.
  * Blast Radius: Authorization / tenancy — binding happens here, so a wrong
  *   tenantSlug would mis-scope every request the app makes. The fail-closed
  *   ApiError boundary is what lets callers branch on status (e.g. 403 scope
@@ -233,9 +237,9 @@ const withJsonBody = (
  *   (internals), vite.config.ts (dev-proxy token injection).
  *   - File: frontend/src/contexts/TenantContext.tsx -> useTenant supplies the
  *     slug this client is bound to.
- *   - File: frontend/src/lib/api/client.ts -> buildHeaders injects the
- *     tenant/auth headers; ApiError is the shared failure boundary; getBlob is
- *     the non-JSON download path.
+ *   - File: frontend/src/lib/api/client.ts -> buildHeaders injects the tenant
+ *     header; ApiError is the shared failure boundary; getBlob is the non-JSON
+ *     download path. Trusted-gateway identity remains outside the browser.
  *   - File: frontend/vite.config.ts -> the dev proxy adds the trusted-gateway
  *     token in Node, so the browser bundle never holds the secret.
  */
@@ -287,7 +291,7 @@ export const useApiClient = () => {
 
     /**
      * Purpose: GET a non-JSON (binary/text) response as a Blob, applying the
-     *   SAME tenant/auth header conventions the JSON client uses, and returning
+     *   SAME tenant-scoping header conventions the JSON client uses, and returning
      *   both the blob and the raw Headers so callers can read response headers
      *   (e.g. the audit CSV export's X-Truncated). Kept separate from request<T>
      *   because that path strict-parses JSON and would mangle a CSV body.
@@ -297,16 +301,19 @@ export const useApiClient = () => {
      *   throws before any body reaches the caller. X-UMS-Tenant is injected by
      *   buildHeaders from the resolved tenant slug, never from the caller. No
      *   Accept override is forced, so the server may honor its own content type.
-     * Blast Radius: Authorization — this is the only tenant-scoped download
-     *   path in the client, so the header injection and the non-2xx throw are
-     *   what keep a cross-tenant or unauthorized artifact from being handed
-     *   back. Read-only: no finance math, no mutation.
-     * Connections: AuditLogPanelHeader.tsx (sole caller), buildHeaders +
+     * Blast Radius: Tenant-scoped buffered downloads (currently the bounded
+     *   audit CSV). The tenant header and non-2xx throw preserve the backend
+     *   boundary. Trusted-gateway authentication is supplied by the deployment
+     *   proxy, not this browser helper. Read-only: no finance math.
+     * Connections: AuditLogPanelHeader.tsx (Blob caller), buildHeaders +
      *   ApiError (shared header/failure boundary).
      *   - File: frontend/src/components/srcc/views/AuditLogPanelHeader.tsx ->
-     *     sole caller; saves the CSV blob and reads the truncation header.
+     *     saves the CSV blob and reads the truncation header.
+     *   - File: frontend/src/components/srcc/views/ExportsView.tsx -> uses the
+     *     JSON client for bodyless preparation, then a native same-origin GET;
+     *     it intentionally does not use this buffering helper.
      *   - File: frontend/src/lib/api/client.ts -> buildHeaders supplies the
-     *     tenant/auth headers; ApiError is the shared failure boundary.
+     *     tenant header; ApiError is the shared failure boundary.
      */
     async function getBlob(
       path: string,

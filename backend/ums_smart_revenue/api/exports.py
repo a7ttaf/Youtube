@@ -12,6 +12,8 @@
 #   - File: backend/ums_smart_revenue/reports/artifact_storage.py -> Artifact IO.
 # ============================================================================
 import logging
+import re
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Annotated
 from uuid import UUID
@@ -19,6 +21,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, field_validator
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from ums_smart_revenue.api.authz import raise_missing_permission, require_permission
@@ -139,6 +142,7 @@ router = APIRouter(prefix="/exports", tags=["exports"])
 logger = logging.getLogger(__name__)
 MAX_AUTHORIZED_EXPORT_JOB_SCAN_PAGES = 10
 _ANALYTICS_SUMMARY_CSV_TYPE = "ANALYTICS_SUMMARY_CSV"
+_ARTIFACT_CACHE_CONTROL = "no-store"
 _ANALYTICS_SUMMARY_CSV_REQUIRED_PERMISSIONS = (
     Permission.EXPORT_ANALYTICS_REPORT,
     Permission.VIEW_ANALYTICS,
@@ -550,12 +554,13 @@ def preview_finance_workbook(
 
 
 # ============================================================================
-# Purpose: Download a persisted or freshly-generated ANALYTICS_SUMMARY_CSV
-# artifact for the requesting user after export-owner and scoped read checks.
+# Purpose: Prepare or download a persisted/fresh ANALYTICS_SUMMARY_CSV artifact
+# for the requesting user after export-owner and scoped read checks.
 # Database/ORM: ExportJobORM lookup and audit insert; generation helper reads
 # google_revenue_source_rows/youtube_channels.
 # Standards: Thin route, fail-closed analytics+revenue authorization, typed
-# validation/storage errors, and audit after successful artifact availability.
+# validation/storage errors, bodyless unaudited preparation, and audit only when
+# artifact bytes are returned by the ordinary GET.
 # Blast Radius: Analytics export downloads, finance-visible source amounts,
 # artifact checksums, and audit logs.
 # Connections:
@@ -574,8 +579,12 @@ def download_analytics_summary_csv(
     ],
     session: Annotated[Session, Depends(current_db_session)],
     audit_sink: Annotated[AuditSink, Depends(current_audit_sink)],
+    prepare: Annotated[
+        bool,
+        Query(description="Generate and validate the artifact without returning its bytes"),
+    ] = False,
 ) -> Response:
-    """Generate or serve the cached analytics summary CSV for an analytics export job."""
+    """Prepare, generate, or serve an analytics summary CSV export artifact."""
     if not _has_any_export_permission(user):
         raise_missing_permission(Permission.EXPORT_ANALYTICS_REPORT)
     try:
@@ -619,20 +628,68 @@ def download_analytics_summary_csv(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)
         ) from exc
 
-    _record_analytics_export_artifact_audit(
+    # FIX: A preparation request exercises the complete authenticated generation
+    # path but deliberately returns no artifact bytes and records no download.
+    # The browser follows with a same-origin GET that reauthorizes and emits the
+    # normal read/download audit records while its native downloader streams.
+    # FIX: Preparation runs the full authenticated generation path and reads
+    # sensitive revenue source data, so its READ audit rows are committed
+    # before the 204 — a client that never issues the follow-up GET still
+    # leaves an auditable trail. EXPORT_DOWNLOADED is reserved for the GET
+    # that actually delivers bytes.
+    if prepare:
+        _commit_export_artifact_audit_before_response(
+            audit_sink=audit_sink,
+            record_audit=lambda: _record_analytics_export_artifact_audit(
+                audit_sink=audit_sink,
+                user=user,
+                export_job=artifact.export_job,
+                group_registry=group_registry,
+                artifact_type="analytics_summary_csv",
+                include_download_event=False,
+            ),
+        )
+        return _prepared_artifact_response(
+            repository=repository, filename=artifact.filename
+        )
+
+    # FIX: Ordering here is the audit's truth. The filename is validated
+    # FIRST (an unsafe persisted name must fail closed as a 500 without ever
+    # recording EXPORT_DOWNLOADED, whose truth is "bytes were delivered"),
+    # then the tenant session commits its completion metadata (a failure
+    # here must also not leave a durable EXPORT_DOWNLOADED behind), and only
+    # then is the download audit recorded and committed — immediately before
+    # the bytes themselves. Any failure lands as a 503 with no false trail.
+    _require_safe_artifact_filename(artifact.filename)
+    _commit_tenant_session_before_response(repository=repository)
+    _commit_export_artifact_audit_before_response(
         audit_sink=audit_sink,
-        user=user,
-        export_job=artifact.export_job,
-        group_registry=group_registry,
-        artifact_type="analytics_summary_csv",
+        record_audit=lambda: _record_analytics_export_artifact_audit(
+            audit_sink=audit_sink,
+            user=user,
+            export_job=artifact.export_job,
+            group_registry=group_registry,
+            artifact_type="analytics_summary_csv",
+            include_download_event=True,
+        ),
     )
     return Response(
         content=artifact.content,
         media_type=artifact.content_type,
-        headers={"Content-Disposition": f'attachment; filename="{artifact.filename}"'},
+        headers=_artifact_download_headers(artifact.filename),
     )
 
 
+# ============================================================================
+# Purpose: Prepare or download the persisted/fresh finance workbook artifact.
+# Database/ORM: ExportJobORM plus SQL-backed finance source reads and audit rows.
+# Standards: Existing fail-closed authorization and typed errors apply to both
+# modes; preparation returns 204, while the ordinary GET owns download auditing.
+# Blast Radius: Finance export bytes, persistence metadata, and sensitive audit.
+# Connections:
+#   - File: frontend/src/components/srcc/views/ExportsView.tsx -> Prepare/native GET.
+#   - File: Docs/12_BACKEND_API_SPEC.md -> Artifact handshake contract.
+# ============================================================================
 @router.get("/{export_id}/finance-workbook.xlsx")
 def download_finance_workbook(
     export_id: str,
@@ -646,8 +703,12 @@ def download_finance_workbook(
     session: Annotated[Session, Depends(current_db_session)],
     platform_session: Annotated[Session, Depends(current_platform_db_session)],
     audit_sink: Annotated[AuditSink, Depends(current_audit_sink)],
+    prepare: Annotated[
+        bool,
+        Query(description="Generate and validate the artifact without returning its bytes"),
+    ] = False,
 ) -> Response:
-    """Generate or serve the cached finance workbook XLSX file for a FINANCE_EXCEL export job."""
+    """Prepare, generate, or serve a finance workbook XLSX export artifact."""
     if not _has_any_export_permission(user):
         raise_missing_permission(Permission.EXPORT_ANALYTICS_REPORT)
     try:
@@ -730,23 +791,64 @@ def download_finance_workbook(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)
         ) from exc
 
-    _record_finance_export_artifact_audit(
-        context=_FinanceExportAuditContext(
+    # FIX: Preparation reads sensitive finance source data, so its READ audit
+    # rows are committed before the 204 — EXPORT_DOWNLOADED is reserved for
+    # the delivering GET.
+    if prepare:
+        _commit_export_artifact_audit_before_response(
             audit_sink=audit_sink,
-            user=user,
-            export_job=export_job,
-            group_registry=group_registry,
+            record_audit=lambda: _record_finance_export_artifact_audit(
+                context=_FinanceExportAuditContext(
+                    audit_sink=audit_sink,
+                    user=user,
+                    export_job=export_job,
+                    group_registry=group_registry,
+                ),
+                artifact_type="finance_workbook_xlsx",
+                include_download_event=False,
+            ),
+        )
+        return _prepared_artifact_response(repository=repository, filename=filename)
+
+    # FIX: Ordering here is the audit's truth. The filename is validated
+    # FIRST (an unsafe persisted name must fail closed as a 500 without ever
+    # recording EXPORT_DOWNLOADED, whose truth is "bytes were delivered"),
+    # then the tenant session commits its completion metadata (a failure
+    # here must also not leave a durable EXPORT_DOWNLOADED behind), and only
+    # then is the download audit recorded and committed — immediately before
+    # the bytes themselves. Any failure lands as a 503 with no false trail.
+    _require_safe_artifact_filename(filename)
+    _commit_tenant_session_before_response(repository=repository)
+    _commit_export_artifact_audit_before_response(
+        audit_sink=audit_sink,
+        record_audit=lambda: _record_finance_export_artifact_audit(
+            context=_FinanceExportAuditContext(
+                audit_sink=audit_sink,
+                user=user,
+                export_job=export_job,
+                group_registry=group_registry,
+            ),
+            artifact_type="finance_workbook_xlsx",
+            include_download_event=True,
         ),
-        artifact_type="finance_workbook_xlsx",
-        include_download_event=True,
     )
     return Response(
         content=workbook_bytes,
         media_type=content_type,
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        headers=_artifact_download_headers(filename),
     )
 
 
+# ============================================================================
+# Purpose: Prepare or download the persisted/fresh executive PDF artifact.
+# Database/ORM: ExportJobORM plus SQL-backed finance source reads and audit rows.
+# Standards: Existing fail-closed authorization and typed errors apply to both
+# modes; preparation returns 204, while the ordinary GET owns download auditing.
+# Blast Radius: Finance export bytes, persistence metadata, and sensitive audit.
+# Connections:
+#   - File: frontend/src/components/srcc/views/ExportsView.tsx -> Prepare/native GET.
+#   - File: Docs/12_BACKEND_API_SPEC.md -> Artifact handshake contract.
+# ============================================================================
 @router.get("/{export_id}/executive.pdf")
 def download_executive_pdf(
     export_id: str,
@@ -760,8 +862,12 @@ def download_executive_pdf(
     session: Annotated[Session, Depends(current_db_session)],
     platform_session: Annotated[Session, Depends(current_platform_db_session)],
     audit_sink: Annotated[AuditSink, Depends(current_audit_sink)],
+    prepare: Annotated[
+        bool,
+        Query(description="Generate and validate the artifact without returning its bytes"),
+    ] = False,
 ) -> Response:
-    """Generate or serve the cached executive summary PDF for an EXECUTIVE_PDF export job."""
+    """Prepare, generate, or serve an executive summary PDF export artifact."""
     if not _has_any_export_permission(user):
         raise_missing_permission(Permission.EXPORT_ANALYTICS_REPORT)
     try:
@@ -852,23 +958,64 @@ def download_executive_pdf(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)
         ) from exc
 
-    _record_finance_export_artifact_audit(
-        context=_FinanceExportAuditContext(
+    # FIX: Preparation reads sensitive finance source data, so its READ audit
+    # rows are committed before the 204 — EXPORT_DOWNLOADED is reserved for
+    # the delivering GET.
+    if prepare:
+        _commit_export_artifact_audit_before_response(
             audit_sink=audit_sink,
-            user=user,
-            export_job=export_job,
-            group_registry=group_registry,
+            record_audit=lambda: _record_finance_export_artifact_audit(
+                context=_FinanceExportAuditContext(
+                    audit_sink=audit_sink,
+                    user=user,
+                    export_job=export_job,
+                    group_registry=group_registry,
+                ),
+                artifact_type="executive_pdf",
+                include_download_event=False,
+            ),
+        )
+        return _prepared_artifact_response(repository=repository, filename=filename)
+
+    # FIX: Ordering here is the audit's truth. The filename is validated
+    # FIRST (an unsafe persisted name must fail closed as a 500 without ever
+    # recording EXPORT_DOWNLOADED, whose truth is "bytes were delivered"),
+    # then the tenant session commits its completion metadata (a failure
+    # here must also not leave a durable EXPORT_DOWNLOADED behind), and only
+    # then is the download audit recorded and committed — immediately before
+    # the bytes themselves. Any failure lands as a 503 with no false trail.
+    _require_safe_artifact_filename(filename)
+    _commit_tenant_session_before_response(repository=repository)
+    _commit_export_artifact_audit_before_response(
+        audit_sink=audit_sink,
+        record_audit=lambda: _record_finance_export_artifact_audit(
+            context=_FinanceExportAuditContext(
+                audit_sink=audit_sink,
+                user=user,
+                export_job=export_job,
+                group_registry=group_registry,
+            ),
+            artifact_type="executive_pdf",
+            include_download_event=True,
         ),
-        artifact_type="executive_pdf",
-        include_download_event=True,
     )
     return Response(
         content=pdf_bytes,
         media_type=content_type,
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        headers=_artifact_download_headers(filename),
     )
 
 
+# ============================================================================
+# Purpose: Prepare or download the persisted/fresh branded slide-pack artifact.
+# Database/ORM: ExportJobORM plus SQL-backed finance source reads and audit rows.
+# Standards: Existing fail-closed authorization and typed errors apply to both
+# modes; preparation returns 204, while the ordinary GET owns download auditing.
+# Blast Radius: Finance export bytes, persistence metadata, and sensitive audit.
+# Connections:
+#   - File: frontend/src/components/srcc/views/ExportsView.tsx -> Prepare/native GET.
+#   - File: Docs/12_BACKEND_API_SPEC.md -> Artifact handshake contract.
+# ============================================================================
 @router.get("/{export_id}/branded-slide-pack.pptx")
 def download_branded_slide_pack(
     export_id: str,
@@ -882,8 +1029,12 @@ def download_branded_slide_pack(
     session: Annotated[Session, Depends(current_db_session)],
     platform_session: Annotated[Session, Depends(current_platform_db_session)],
     audit_sink: Annotated[AuditSink, Depends(current_audit_sink)],
+    prepare: Annotated[
+        bool,
+        Query(description="Generate and validate the artifact without returning its bytes"),
+    ] = False,
 ) -> Response:
-    """Generate or serve the cached branded slide pack PPTX for a BRANDED_SLIDE_PACK export job."""
+    """Prepare, generate, or serve a branded slide-pack PPTX export artifact."""
     if not _has_any_export_permission(user):
         raise_missing_permission(Permission.EXPORT_ANALYTICS_REPORT)
     try:
@@ -976,20 +1127,51 @@ def download_branded_slide_pack(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)
         ) from exc
 
-    _record_finance_export_artifact_audit(
-        context=_FinanceExportAuditContext(
+    # FIX: Preparation reads sensitive finance source data, so its READ audit
+    # rows are committed before the 204 — EXPORT_DOWNLOADED is reserved for
+    # the delivering GET.
+    if prepare:
+        _commit_export_artifact_audit_before_response(
             audit_sink=audit_sink,
-            user=user,
-            export_job=export_job,
-            group_registry=group_registry,
+            record_audit=lambda: _record_finance_export_artifact_audit(
+                context=_FinanceExportAuditContext(
+                    audit_sink=audit_sink,
+                    user=user,
+                    export_job=export_job,
+                    group_registry=group_registry,
+                ),
+                artifact_type="branded_slide_pack_pptx",
+                include_download_event=False,
+            ),
+        )
+        return _prepared_artifact_response(repository=repository, filename=filename)
+
+    # FIX: Ordering here is the audit's truth. The filename is validated
+    # FIRST (an unsafe persisted name must fail closed as a 500 without ever
+    # recording EXPORT_DOWNLOADED, whose truth is "bytes were delivered"),
+    # then the tenant session commits its completion metadata (a failure
+    # here must also not leave a durable EXPORT_DOWNLOADED behind), and only
+    # then is the download audit recorded and committed — immediately before
+    # the bytes themselves. Any failure lands as a 503 with no false trail.
+    _require_safe_artifact_filename(filename)
+    _commit_tenant_session_before_response(repository=repository)
+    _commit_export_artifact_audit_before_response(
+        audit_sink=audit_sink,
+        record_audit=lambda: _record_finance_export_artifact_audit(
+            context=_FinanceExportAuditContext(
+                audit_sink=audit_sink,
+                user=user,
+                export_job=export_job,
+                group_registry=group_registry,
+            ),
+            artifact_type="branded_slide_pack_pptx",
+            include_download_event=True,
         ),
-        artifact_type="branded_slide_pack_pptx",
-        include_download_event=True,
     )
     return Response(
         content=pptx_bytes,
         media_type=content_type,
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        headers=_artifact_download_headers(filename),
     )
 
 
@@ -1014,6 +1196,190 @@ def _build_finance_workbook_preview_for_export(
 def _tenant_uuid(user: UserPrincipal) -> UUID:
     """Return the current tenant UUID, falling back to the UMS default tenant."""
     return UUID(user.tenant_id) if user.tenant_id else UUID(UMS_TENANT_ID)
+
+
+# ============================================================================
+# Purpose: Durably commit prepared artifact metadata before constructing the
+# bodyless response that authorizes the browser to start its independent GET.
+# Database/ORM: Commits ExportJobORM completion and artifact metadata writes.
+# Standards: Fail closed with a safe typed response on commit failure; disable
+# caching so every preparation re-enters authentication and authorization.
+# Blast Radius: Export completion durability, retry behavior, and download auth.
+# Connections:
+#   - File: backend/ums_smart_revenue/api/dependencies.py -> Request-scope commit.
+#   - File: frontend/src/components/srcc/views/ExportsView.tsx -> Native GET start.
+# ============================================================================
+def _prepared_artifact_response(
+    *, repository: SqlAlchemyExportJobRepository, filename: str
+) -> Response:
+    """Commit prepared artifact metadata, then return a non-cacheable 204 response."""
+    # The 204 tells the browser a download is ready, so the filename must be
+    # provably safe HERE, not only at the download's header builder: an unsafe
+    # persisted name that passed preparation would fail the download only
+    # after its audit row had already been committed.
+    _require_safe_artifact_filename(filename)
+    _commit_tenant_session_before_response(repository=repository)
+    return Response(
+        status_code=status.HTTP_204_NO_CONTENT,
+        headers={"Cache-Control": _ARTIFACT_CACHE_CONTROL},
+    )
+
+
+# ============================================================================
+# Purpose: Persist every export artifact audit row — the sensitive read events
+#   on a prepare leg, plus EXPORT_DOWNLOADED on an ordinary GET — before the
+#   response that carries the 204 signal or the artifact bytes is built.
+# Database/ORM: Commits the AuditSink SQL unit of work when the sink is SQL
+#   backed; in-memory sinks have no durability boundary.
+# Standards: Batch appends sit in the sink transaction; failures roll back
+#   fail-closed as a safe 503 and no response is constructed until audit
+#   durability succeeds. The rollback is deliberately guarded for EVERY
+#   exception, not only SQLAlchemyError: record_audit_event's own
+#   normalization can raise plain ValueError (a bad reason or a downgraded
+#   sensitive permission_override), and letting a non-SQL exception escape
+#   would skip the sink rollback and surface a raw 500 with the audit sink's
+#   session left dirty until request teardown. The catch translates the
+#   failure — it never swallows it.
+# Blast Radius: Export audit durability, response-start ordering, and the
+#   truthfulness of the EXPORT_DOWNLOADED trail.
+# Connections:
+#   - File: backend/ums_smart_revenue/auth/sql_audit_sink.py -> SQL unit of work.
+#   - File: backend/ums_smart_revenue/auth/audit_service.py -> the record
+#       path whose non-SQL exceptions this boundary contains.
+#   - File: backend/ums_smart_revenue/api/dependencies.py -> Request-scope commit.
+# ============================================================================
+def _commit_export_artifact_audit_before_response(
+    *,
+    audit_sink: AuditSink,
+    record_audit: Callable[[], object],
+) -> None:
+    """Record and durably commit export audit rows before responding."""
+    try:
+        with audit_sink.transaction():
+            record_audit()
+        _commit_audit_sink_unit_of_work(audit_sink)
+    except Exception as exc:
+        _rollback_audit_sink_unit_of_work(audit_sink)
+        logger.exception("Export artifact audit commit failed")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Export artifact audit unavailable",
+        ) from exc
+
+
+# ============================================================================
+# Purpose: Durably commit tenant-backed export metadata before any response
+#   starts. The request-scoped session's teardown commit runs after the
+#   response is sent, so BOTH handshake legs — the prepare 204 and the
+#   byte-bearing GET — commit here first; otherwise a failed teardown commit
+#   would leave served bytes or a ready download over export-job metadata
+#   that never persisted.
+# Database/ORM: Commits the request-scoped tenant Session through
+#   SqlAlchemyExportJobRepository.commit_unit_of_work — the transaction
+#   boundary lives behind the repository, not in this route module.
+# Standards: Fail closed — a commit failure is translated to a typed 503 and
+#   never swallowed, so neither handshake leg can announce or deliver an
+#   artifact over unpersisted metadata.
+#   FIX: The ordinary GET used to commit only the audit sink and let the
+#   yield-dependency teardown commit the tenant session after the artifact
+#   bytes were already on the wire — a failed teardown left a delivered
+#   download over completion metadata that never persisted.
+# Blast Radius: Export completion durability on all four artifact routes plus
+#   the prepare 204; download-audit truthfulness (EXPORT_DOWNLOADED is only
+#   recorded after this commit succeeds).
+# Connections:
+#   - File: backend/ums_smart_revenue/reports/exports.py ->
+#       commit_unit_of_work, the repository transaction boundary used here.
+#   - File: backend/ums_smart_revenue/api/dependencies.py -> the yield
+#       session dependency whose teardown commit this front-runs.
+# ============================================================================
+def _commit_tenant_session_before_response(
+    *, repository: SqlAlchemyExportJobRepository
+) -> None:
+    """Commit tenant export metadata through the repository before responding."""
+    try:
+        repository.commit_unit_of_work()
+    except SQLAlchemyError as exc:
+        logger.exception("Export artifact session commit failed")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Export artifact persistence unavailable",
+        ) from exc
+
+
+def _commit_audit_sink_unit_of_work(audit_sink: AuditSink) -> None:
+    """Commit a SQL-backed audit sink; in-memory sinks need no durability call."""
+    unit_of_work = audit_sink.sql_unit_of_work
+    if unit_of_work is None:
+        return
+    commit = getattr(unit_of_work, "commit", None)
+    if callable(commit):
+        commit()
+
+
+def _rollback_audit_sink_unit_of_work(audit_sink: AuditSink) -> None:
+    """Rollback a failed SQL-backed audit sink before dependency teardown."""
+    unit_of_work = audit_sink.sql_unit_of_work
+    if unit_of_work is None:
+        return
+    rollback = getattr(unit_of_work, "rollback", None)
+    if callable(rollback):
+        rollback()
+    expunge_all = getattr(unit_of_work, "expunge_all", None)
+    if callable(expunge_all):
+        expunge_all()
+
+
+_ARTIFACT_FILENAME_UNSAFE = re.compile(r'[\x00-\x1f\x7f-\x9f"\\/]')
+# The storage boundary already refuses these names for persisted artifacts;
+# the header choke point repeats them so a legacy row written before that
+# boundary can never reach a Content-Disposition header either.
+_ARTIFACT_FILENAME_RESERVED = {".", ".."}
+
+
+# ============================================================================
+# Purpose: Guard the persisted artifact filename at the two boundaries that
+#   consume it — preparation (before the 204 announces a ready download) and
+#   the ordinary GET's Content-Disposition header — so a future artifact
+#   writer cannot inject, split, or reshape the header regardless of what
+#   storage accepts.
+# Database/ORM: None. The filename arrives from ExportJobORM/artifact
+#   persistence; this boundary only validates it.
+# Standards: Fail closed with a typed 500 on any quote, backslash, forward
+#   slash (a path-shaped name must never ride in an attachment header),
+#   control character, blank value, or dot-only name — the same separator and
+#   traversal set the repository's artifact storage boundary rejects. Today's
+#   generators write fixed machine names; this is defense in depth, not a
+#   generator contract.
+# Blast Radius: Every artifact download handshake leg (CSV, XLSX, PDF, PPTX).
+# Connections:
+#   - File: backend/ums_smart_revenue/reports/artifact_storage.py -> the
+#       storage-side separator/traversal rule this mirrors.
+#   - Function: _prepared_artifact_response -> validates before its 204.
+#   - Function: _artifact_download_headers -> validates before the header.
+#   - File: tests/api/test_export_preview_api.py -> the fail-closed
+#       parametrized regressions for both legs.
+# ============================================================================
+def _require_safe_artifact_filename(filename: str) -> None:
+    """Fail closed on a persisted filename that could inject or split the header."""
+    if (
+        _ARTIFACT_FILENAME_UNSAFE.search(filename)
+        or filename in _ARTIFACT_FILENAME_RESERVED
+        or not filename.strip()
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Export artifact filename is unsafe",
+        )
+
+
+def _artifact_download_headers(filename: str) -> dict[str, str]:
+    """Return attachment headers that force every protected GET through the gateway."""
+    _require_safe_artifact_filename(filename)
+    return {
+        "Cache-Control": _ARTIFACT_CACHE_CONTROL,
+        "Content-Disposition": f'attachment; filename="{filename}"',
+    }
 
 
 # ============================================================================
@@ -1551,8 +1917,9 @@ def _record_analytics_export_artifact_audit(
     export_job: ExportJobEntry,
     group_registry: ChannelGroupRegistryStore,
     artifact_type: str,
+    include_download_event: bool,
 ) -> tuple[AuditRecord, ...]:
-    """Emit analytics export revenue-view and download audit events."""
+    """Emit analytics export revenue-view and optional download audit events."""
     revenue_scopes = _audit_revenue_scopes_for_export(
         scope_type=export_job.scope_type,
         scope_id=export_job.scope_id,
@@ -1577,6 +1944,8 @@ def _record_analytics_export_artifact_audit(
         )
         for revenue_scope in revenue_scopes
     )
+    if not include_download_event:
+        return revenue_records
     download_record = record_audit_event(
         sink=audit_sink,
         actor=user,
