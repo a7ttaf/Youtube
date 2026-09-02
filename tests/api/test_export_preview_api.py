@@ -812,7 +812,11 @@ def test_finance_artifact_download_fails_closed_when_audit_commit_fails(
     assert audit_sink.unit_of_work.expunge_attempted is True
     assert {record.event_type for record in audit_sink.records} >= {"EXPORT_DOWNLOADED"}
     assert export_job is not None
-    assert export_job.status == "QUEUED"
+    # The tenant session commits BEFORE the audit boundary, so a failed audit
+    # commit leaves the job durably COMPLETED over its persisted artifact —
+    # a retry serves it and records a real download, and no false
+    # EXPORT_DOWNLOADED exists in the durable audit trail.
+    assert export_job.status == "COMPLETED"
     assert audit_events == []
 
 

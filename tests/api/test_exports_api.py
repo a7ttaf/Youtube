@@ -2011,7 +2011,11 @@ def test_analytics_summary_csv_download_fails_closed_when_audit_commit_fails(
         "REVENUE_VIEWED",
     }
     assert export_job is not None
-    assert export_job.status == "QUEUED"
+    # The tenant session commits BEFORE the audit boundary, so a failed audit
+    # commit leaves the job durably COMPLETED over its persisted artifact —
+    # a retry serves it and records a real download, and the durable audit
+    # trail (empty here) never claims a delivery that did not happen.
+    assert export_job.status == "COMPLETED"
     assert audit_events == []
 
 

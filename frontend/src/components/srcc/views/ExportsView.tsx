@@ -351,18 +351,31 @@ const normalizeDownloadFilename = (value: string): string => {
   return value.replace(/[<>:"|?*]/g, "_").replace(/[. ]+$/g, "");
 };
 
+/** Every reason a persisted-filename value is unsafe for an anchor download:
+ * control codes, empty/dot or path-shaped input, and reserved device names. */
+const isUnsafeDownloadFilename = (value: string): boolean => {
+  return (
+    hasUnsafeFilenameControl(value) ||
+    hasUnsafeFilenameShape(value) ||
+    isWindowsReservedDeviceName(value)
+  );
+};
+
 /** Select a safe local filename or reject unsafe backend and metadata input. */
 const safeDownloadFilename = (
   value: string | null | undefined,
 ): string | null => {
-  if (typeof value !== "string") return null;
-  if (hasUnsafeFilenameControl(value)) return null;
+  if (typeof value !== "string") {
+    return null;
+  }
   const trimmed = value.trim();
-  if (hasUnsafeFilenameShape(trimmed)) return null;
-  if (isWindowsReservedDeviceName(trimmed)) return null;
+  if (isUnsafeDownloadFilename(trimmed)) {
+    return null;
+  }
   const sanitized = normalizeDownloadFilename(trimmed);
-  if (REJECTED_DOWNLOAD_FILENAMES.has(sanitized)) return null;
-  if (isWindowsReservedDeviceName(sanitized)) return null;
+  if (isUnsafeDownloadFilename(sanitized)) {
+    return null;
+  }
   return sanitized;
 };
 

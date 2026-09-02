@@ -653,10 +653,15 @@ def download_analytics_summary_csv(
             session=session, filename=artifact.filename
         )
 
-    # FIX: The filename is validated BEFORE the audit commit — an unsafe
-    # persisted name must fail closed as a 500 without ever recording
-    # EXPORT_DOWNLOADED, whose truth is "bytes were delivered".
+    # FIX: Ordering here is the audit's truth. The filename is validated
+    # FIRST (an unsafe persisted name must fail closed as a 500 without ever
+    # recording EXPORT_DOWNLOADED, whose truth is "bytes were delivered"),
+    # then the tenant session commits its completion metadata (a failure
+    # here must also not leave a durable EXPORT_DOWNLOADED behind), and only
+    # then is the download audit recorded and committed — immediately before
+    # the bytes themselves. Any failure lands as a 503 with no false trail.
     _require_safe_artifact_filename(artifact.filename)
+    _commit_tenant_session_before_response(session=session)
     _commit_export_artifact_audit_before_response(
         audit_sink=audit_sink,
         record_audit=lambda: _record_analytics_export_artifact_audit(
@@ -668,7 +673,6 @@ def download_analytics_summary_csv(
             include_download_event=True,
         ),
     )
-    _commit_tenant_session_before_response(session=session)
     return Response(
         content=artifact.content,
         media_type=artifact.content_type,
@@ -806,10 +810,15 @@ def download_finance_workbook(
         )
         return _prepared_artifact_response(session=session, filename=filename)
 
-    # FIX: The filename is validated BEFORE the audit commit — an unsafe
-    # persisted name must fail closed as a 500 without ever recording
-    # EXPORT_DOWNLOADED, whose truth is "bytes were delivered".
+    # FIX: Ordering here is the audit's truth. The filename is validated
+    # FIRST (an unsafe persisted name must fail closed as a 500 without ever
+    # recording EXPORT_DOWNLOADED, whose truth is "bytes were delivered"),
+    # then the tenant session commits its completion metadata (a failure
+    # here must also not leave a durable EXPORT_DOWNLOADED behind), and only
+    # then is the download audit recorded and committed — immediately before
+    # the bytes themselves. Any failure lands as a 503 with no false trail.
     _require_safe_artifact_filename(filename)
+    _commit_tenant_session_before_response(session=session)
     _commit_export_artifact_audit_before_response(
         audit_sink=audit_sink,
         record_audit=lambda: _record_finance_export_artifact_audit(
@@ -823,7 +832,6 @@ def download_finance_workbook(
             include_download_event=True,
         ),
     )
-    _commit_tenant_session_before_response(session=session)
     return Response(
         content=workbook_bytes,
         media_type=content_type,
@@ -969,10 +977,15 @@ def download_executive_pdf(
         )
         return _prepared_artifact_response(session=session, filename=filename)
 
-    # FIX: The filename is validated BEFORE the audit commit — an unsafe
-    # persisted name must fail closed as a 500 without ever recording
-    # EXPORT_DOWNLOADED, whose truth is "bytes were delivered".
+    # FIX: Ordering here is the audit's truth. The filename is validated
+    # FIRST (an unsafe persisted name must fail closed as a 500 without ever
+    # recording EXPORT_DOWNLOADED, whose truth is "bytes were delivered"),
+    # then the tenant session commits its completion metadata (a failure
+    # here must also not leave a durable EXPORT_DOWNLOADED behind), and only
+    # then is the download audit recorded and committed — immediately before
+    # the bytes themselves. Any failure lands as a 503 with no false trail.
     _require_safe_artifact_filename(filename)
+    _commit_tenant_session_before_response(session=session)
     _commit_export_artifact_audit_before_response(
         audit_sink=audit_sink,
         record_audit=lambda: _record_finance_export_artifact_audit(
@@ -986,7 +999,6 @@ def download_executive_pdf(
             include_download_event=True,
         ),
     )
-    _commit_tenant_session_before_response(session=session)
     return Response(
         content=pdf_bytes,
         media_type=content_type,
@@ -1134,10 +1146,15 @@ def download_branded_slide_pack(
         )
         return _prepared_artifact_response(session=session, filename=filename)
 
-    # FIX: The filename is validated BEFORE the audit commit — an unsafe
-    # persisted name must fail closed as a 500 without ever recording
-    # EXPORT_DOWNLOADED, whose truth is "bytes were delivered".
+    # FIX: Ordering here is the audit's truth. The filename is validated
+    # FIRST (an unsafe persisted name must fail closed as a 500 without ever
+    # recording EXPORT_DOWNLOADED, whose truth is "bytes were delivered"),
+    # then the tenant session commits its completion metadata (a failure
+    # here must also not leave a durable EXPORT_DOWNLOADED behind), and only
+    # then is the download audit recorded and committed — immediately before
+    # the bytes themselves. Any failure lands as a 503 with no false trail.
     _require_safe_artifact_filename(filename)
+    _commit_tenant_session_before_response(session=session)
     _commit_export_artifact_audit_before_response(
         audit_sink=audit_sink,
         record_audit=lambda: _record_finance_export_artifact_audit(
@@ -1151,7 +1168,6 @@ def download_branded_slide_pack(
             include_download_event=True,
         ),
     )
-    _commit_tenant_session_before_response(session=session)
     return Response(
         content=pptx_bytes,
         media_type=content_type,
