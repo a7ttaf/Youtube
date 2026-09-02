@@ -165,7 +165,18 @@ const parseBody = async (
   return parseJsonText(text, options.strictJson);
 };
 
-type RequestOptions = RequestInit & { bodyIsJson?: boolean };
+type RequestOptions = RequestInit & {
+  bodyIsJson?: boolean;
+  /**
+   * Invoked synchronously at the DISPATCH boundary — after URL resolution and
+   * header building, immediately before `fetch` is called. Callers that must
+   * distinguish "the request never left the browser" from "the request is
+   * running" flip their in-flight verdict here, not around the whole call:
+   * every failure before this callback is a definite non-dispatch, and every
+   * failure from it onward may have committed.
+   */
+  onDispatch?: () => void;
+};
 
 /** True when `body` is a binary payload fetch accepts natively (Blob, ArrayBuffer, or a typed-array view). */
 const isBinaryBody = (body: unknown): boolean =>
@@ -241,8 +252,12 @@ export const useApiClient = () => {
       init: RequestOptions = {},
     ): Promise<T> {
       const url = resolveUrl(path);
-      const { bodyIsJson = false, ...requestInit } = init;
+      const { bodyIsJson = false, onDispatch, ...requestInit } = init;
       const headers = buildHeaders(requestInit.headers, tenantSlug, bodyIsJson);
+      // The dispatch boundary lives HERE, not at the caller's first await:
+      // everything above can still throw with the request unsent, so the
+      // callback fires only once `fetch` itself is next.
+      onDispatch?.();
       const res = await fetch(url, { ...requestInit, method, headers });
       if (!res.ok) {
         const body = await parseBody(res);
@@ -310,7 +325,7 @@ export const useApiClient = () => {
       get: <T>(path: string, init?: RequestInit) =>
         request<T>("GET", path, init),
       getBlob,
-      post: <T>(path: string, body?: unknown, init?: RequestInit) =>
+      post: <T>(path: string, body?: unknown, init?: RequestOptions) =>
         request<T>("POST", path, withJsonBody(body, init)),
       put: <T>(path: string, body?: unknown, init?: RequestInit) =>
         request<T>("PUT", path, withJsonBody(body, init)),

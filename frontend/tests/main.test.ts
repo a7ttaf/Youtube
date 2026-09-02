@@ -107,4 +107,40 @@ describe("React root error callbacks", () => {
       }
     },
   );
+
+  it("records and degrades — never rethrows — when the console sink itself fails", async () => {
+    // Rule: a caught exception on the reporting path must be observably
+    // handled, but the sink must never become a second uncaught application
+    // error. So a throwing console.error is RECORDED in the in-memory trail
+    // and degraded to console.warn with a count-only payload — no raw error
+    // data ever reaches the fallback channel either.
+    const { recordedRootReportFailures } = (await import("@/main")) as {
+      recordedRootReportFailures: () => readonly unknown[];
+    };
+    const failuresBefore = recordedRootReportFailures().length;
+    const consoleWarnSpy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const throwingSink = vi.spyOn(console, "error").mockImplementation(() => {
+      throw new Error("console sink is broken");
+    });
+    const secret = "secret finance token 42-amount-999";
+    const error = new TypeError(secret);
+
+    expect(() => rootOptions.onUncaughtError(error, {} as ErrorInfo)).not.toThrow();
+    expect(() => rootOptions.onRecoverableError(error, {} as ErrorInfo)).not.toThrow();
+
+    // Each failed emit was recorded exactly once.
+    expect(recordedRootReportFailures().length).toBe(failuresBefore + 2);
+    // The degraded notice went to the DIFFERENT channel, count-only.
+    expect(consoleWarnSpy).toHaveBeenCalledTimes(2);
+    for (const call of consoleWarnSpy.mock.calls) {
+      expect(JSON.stringify(call)).not.toContain(secret);
+      expect(JSON.stringify(call)).not.toContain("console sink is broken");
+      expect(call[0]).toBe("[ReactRoot] root error report could not be emitted");
+      expect(call[1]).toEqual({
+        recordedFailures: expect.any(Number),
+      });
+    }
+    // And the primary sink was never re-entered after its first failure.
+    expect(throwingSink).toHaveBeenCalledTimes(2);
+  });
 });

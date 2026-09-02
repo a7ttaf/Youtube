@@ -763,6 +763,42 @@ describe("RegistryImportFlow stepper (through RegistryView)", () => {
     }
   });
 
+  it("treats a LATE pre-fetch setup throw after admission as a definite non-dispatch", async () => {
+    // The dispatch verdict belongs to the request, not to a flag flipped
+    // before it: `onDispatched` fires inside the API client immediately
+    // before `fetch`, so a throw from any LATER setup step — here FormData
+    // assembly inside the import hook, after admission already recorded the
+    // pending apply — still counts as "nothing left the browser". Before the
+    // fix the flow marked itself dispatched before calling the hook, so this
+    // exact failure was misclassified as a possibly-committed write and
+    // locked Apply behind the reload-only indeterminate contract.
+    await runDryRunToPreview(cleanImport);
+
+    const appendSpy = vi
+      .spyOn(globalThis.FormData.prototype, "append")
+      .mockImplementation(() => {
+        throw new Error("multipart assembly failed");
+      });
+    try {
+      fireEvent.click(screen.getByRole("button", { name: /^apply$/i }));
+
+      // Definite pre-dispatch treatment: the admission is retired, the
+      // failure surfaces as a retryable error, and every exit recovers.
+      expect(
+        await screen.findByText(/The import request failed\./iu),
+      ).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: /^apply$/i })).toBeEnabled();
+      expect(screen.getByRole("button", { name: /^cancel$/i })).toBeEnabled();
+
+      // And the proof of non-dispatch: fetch saw only the dry run. No apply
+      // POST was ever constructed into a request.
+      expect(importPosts()).toHaveLength(1);
+      expect(importPosts()[0].get("dry_run")).toBe("true");
+    } finally {
+      appendSpy.mockRestore();
+    }
+  });
+
   it("treats a LOST apply response as indeterminate, not as a failure", async () => {
     // The client raises ApiError only once an HTTP response exists, so a
     // rejected fetch means the POST was dispatched and never answered — the

@@ -17,15 +17,21 @@ import { Badge } from "./shared";
 //   no authorization decision or finance calculation is changed here.
 // Connections:
 //   - File: frontend/src/components/srcc/AppShell.tsx -> supplies the active
-//     view reset key and places the workflow rail inside this boundary.
+//     view reset key and mounts the routed view subtree inside this boundary.
 //   - File: frontend/src/components/srcc/shared.tsx -> Badge styling for the
 //     allowlisted error category.
 //   - File: frontend/src/styles.css -> panel, focus, and action-row styles.
 // ============================================================================
 
+/** The category every value the allowlist cannot confirm normalizes to. One
+ * constant, because the allowlist entry and the fallback returns must never
+ * drift apart — a renamed literal in one place and not the others would let
+ * an unknown error name render as a badge the panel never declared. */
+const FALLBACK_ERROR_CATEGORY = "Error";
+
 const ERROR_CATEGORIES = [
   "AggregateError",
-  "Error",
+  FALLBACK_ERROR_CATEGORY,
   "EvalError",
   "RangeError",
   "ReferenceError",
@@ -154,18 +160,18 @@ export const correlationIdOf = (
 export const errorCategoryOf = (error: unknown): ErrorBoundaryCategory => {
   try {
     if (!(error instanceof Error)) {
-      return "Error";
+      return FALLBACK_ERROR_CATEGORY;
     }
     const candidate = error.name;
     if (typeof candidate !== "string") {
-      return "Error";
+      return FALLBACK_ERROR_CATEGORY;
     }
     const normalized = candidate.trim();
     return ERROR_CATEGORY_ALLOWLIST.has(normalized)
       ? (normalized as ErrorBoundaryCategory)
-      : "Error";
+      : FALLBACK_ERROR_CATEGORY;
   } catch {
-    return "Error";
+    return FALLBACK_ERROR_CATEGORY;
   }
 };
 

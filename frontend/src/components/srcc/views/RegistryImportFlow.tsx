@@ -1753,11 +1753,13 @@ export const RegistryImportFlow = ({
     // and this flow's exits disable in ONE commit, leaving no window in which
     // the request is running but navigation is still live.
     navLatch.arm(APPLY_IN_FLIGHT_NOTE);
-    // Flips only as the request call begins. Every step above that flag runs
-    // BEFORE any bytes can leave the browser, so a throw from it is a DEFINITE
-    // non-dispatch — the roster cannot have changed and a retry is safe, which
-    // the catch then treats as a plain failure instead of the indeterminate
-    // contract that owns everything from the request onward.
+    // Flips ONLY inside the request's own dispatch boundary — the
+    // `onDispatched` callback the API client fires immediately before
+    // `fetch`. Until that callback runs, every failure is a DEFINITE
+    // non-dispatch: no bytes left the browser, the roster cannot have
+    // changed, and a retry is safe — the catch then treats it as a plain
+    // failure instead of the indeterminate contract that owns everything
+    // from the actual request onward.
     let dispatched = false;
     try {
       // FIX: id generation lives INSIDE the try whose finally releases the
@@ -1785,7 +1787,6 @@ export const RegistryImportFlow = ({
       // The claim was made under THIS scope; remember it so settlement can
       // reach the record even if the namespace moves under the request.
       admittedScopeRef.current = importScope ?? UNSCOPED_IMPORT_SCOPE;
-      dispatched = true;
       const result = await importChannels({
         file: approved.file,
         contentOwnerId: ownerId,
@@ -1800,6 +1801,17 @@ export const RegistryImportFlow = ({
         // independently by the route. Both tokens come from the SAME approved
         // plan object, so they can never bind to two different previews.
         expectedDisplayDigest: approved.plan.display_digest,
+        // FIX: the dispatch verdict now comes from the request itself, not
+        // from a flag flipped before it. The client fires `onDispatched`
+        // immediately before `fetch`, so EVERY throw before that point —
+        // FormData assembly, URL resolution, header building — keeps
+        // `dispatched` false and lands in handleApplyFailure's definite
+        // pre-dispatch branch (retryable), instead of being misread as a
+        // possibly-committed write that locks Apply until a reload. From the
+        // callback onward the conservative indeterminate contract applies.
+        onDispatched: () => {
+          dispatched = true;
+        },
       });
       // A 2xx settles THIS apply: the write committed and the flow can say so.
       settleThisApply();

@@ -1371,11 +1371,21 @@ export const useChannelImport = (): ((
      * Omitted on the dry run itself, like the fingerprint.
      */
     expectedDisplayDigest?: string;
+    /**
+     * Fired by the API client at the true dispatch boundary — immediately
+     * before `fetch` runs, after this hook's FormData assembly and the
+     * client's URL/header setup are done. The apply flow flips its
+     * "dispatched" verdict here, so a throw from any earlier setup step
+     * stays a definite non-dispatch (retryable) instead of being mistaken
+     * for a possibly-committed write. Omitted on the dry run (nothing to
+     * classify — a dry run writes nothing).
+     */
+    onDispatched?: () => void;
   },
 ) => Promise<ChannelImportResult>) => {
   const client = useApiClient();
   return useCallback(
-    ({ file, contentOwnerId, dryRun, reason, expectedPlanFingerprint, expectedDisplayDigest }) => {
+    ({ file, contentOwnerId, dryRun, reason, expectedPlanFingerprint, expectedDisplayDigest, onDispatched }) => {
       const form = new FormData();
       form.append("file", file);
       form.append(OWNER_FIELD, contentOwnerId);
@@ -1389,7 +1399,9 @@ export const useChannelImport = (): ((
         form.append("expected_display_digest", expectedDisplayDigest);
       }
       return client
-        .post<ChannelImportResult>("/channels/import", form)
+        .post<ChannelImportResult>("/channels/import", form, {
+          onDispatch: onDispatched,
+        })
         .then(async (result) => {
           await assertUsableResult(result, {
             dryRun,
