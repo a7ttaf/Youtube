@@ -51,6 +51,7 @@ _DEFAULT_TENANT_UUID = UUID(UMS_TENANT_ID)
 @dataclass(frozen=True)
 class ExportJobEntry:
     """Immutable snapshot of one export job row as the API layer consumes it."""
+
     id: str
     export_type: str
     scope_type: str
@@ -107,6 +108,7 @@ class ExportJobEntry:
 @dataclass(frozen=True)
 class ExportJobPage:
     """One page of export jobs plus the pagination cursor fields."""
+
     items: list[ExportJobEntry]
     limit: int
     offset: int
@@ -116,6 +118,7 @@ class ExportJobPage:
 @dataclass(frozen=True)
 class ExportJobVisibilityFilter:
     """One allowlist clause describing which export jobs a principal may list."""
+
     export_types: frozenset[str]
     scope_type: str | None = None
     scope_id: str | None = None
@@ -125,6 +128,7 @@ class ExportJobVisibilityFilter:
 @dataclass(frozen=True)
 class ExportTemplateEntry:
     """Immutable snapshot of one reusable export layout template row."""
+
     id: str
     name: str
     export_type: str
@@ -153,6 +157,7 @@ class ExportTemplateEntry:
 @dataclass(frozen=True)
 class ExportTemplatePage:
     """One page of export templates plus the pagination cursor fields."""
+
     items: list[ExportTemplateEntry]
     limit: int
     offset: int
@@ -161,17 +166,14 @@ class ExportTemplatePage:
 
 class ExportJobError(ValueError):
     """Base class for export-job domain failures raised at the repository boundary."""
-    pass
 
 
 class ExportJobNotFoundError(ExportJobError):
     """Raised when an export job id does not exist, or belongs to another actor."""
-    pass
 
 
 class ExportJobValidationError(ExportJobError):
     """Raised when an export job request fails field or state validation."""
-    pass
 
 
 class ExportJobTerminalStateError(ExportJobValidationError):
@@ -180,17 +182,14 @@ class ExportJobTerminalStateError(ExportJobValidationError):
 
 class ExportTemplateError(ValueError):
     """Base class for export-template domain failures raised at the repository boundary."""
-    pass
 
 
 class ExportTemplateNotFoundError(ExportTemplateError):
     """Raised when an export template id does not exist in the requesting tenant."""
-    pass
 
 
 class ExportTemplateValidationError(ExportTemplateError):
     """Raised when an export template request fails field or state validation."""
-    pass
 
 
 class SqlAlchemyExportTemplateRepository:
@@ -201,6 +200,7 @@ class SqlAlchemyExportTemplateRepository:
         self._tenant_id = _resolve_tenant_id(tenant_id)
 
     # ========================================================================
+
     # Purpose: Persist reusable export layout configuration while keeping
     #   finance and analytics source selection controlled by export jobs.
     # Database/ORM: INSERT INTO export_templates.
@@ -395,6 +395,7 @@ class SqlAlchemyExportJobRepository:
         self._tenant_id = _resolve_tenant_id(tenant_id)
 
     # ========================================================================
+
     # Purpose: Commit the request-scoped unit of work that this repository's
     #   writes participate in, so export completion metadata is durable before
     #   an artifact response (the prepare 204 or the byte-bearing GET) starts.
