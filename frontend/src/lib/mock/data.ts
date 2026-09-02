@@ -2,7 +2,6 @@
 // Static snapshot of the March 2026 close. All money values are display-only.
 
 export type Severity = "green" | "amber" | "red" | "blue" | "violet";
-export type WorkflowTone = Severity | "primary";
 export type ViewKey =
   | "command"
   | "registry"
@@ -15,65 +14,14 @@ export type ViewKey =
 
 export type Role = "finance" | "assistant" | "company";
 
-export const VIEW_COPY: Record<ViewKey, { title: string; subtitle: string }> = {
-  command: {
-    title: "Revenue Command Center",
-    subtitle: "March 2026 close, UMS holding scope, USD reporting currency",
-  },
-  registry: {
-    title: "Channel Registry",
-    subtitle: "Ownership, CMS status, company scope, and SQL lineage controls",
-  },
-  groups: {
-    title: "CMS Groups",
-    subtitle: "Content-owner group mirror, ownership stamps, and sync",
-  },
-  close: {
-    title: "Month Close Workbench",
-    subtitle: "Payment reconciliation, allocation review, overrides, and lock controls",
-  },
-  trace: {
-    title: "SQL Trace Explorer",
-    subtitle: "Issue lineage filtered by SQL-backed application permissions",
-  },
-  exports: {
-    title: "Export Center",
-    subtitle: "Permission-controlled finance, executive, brand, and audit packages",
-  },
-  connectors: {
-    title: "Connector Operations",
-    subtitle: "YouTube, Analytics, AdSense, raw files, and restricted job controls",
-  },
-  audit: {
-    title: "Audit Log",
-    subtitle:
-      "Sensitive action trace for revenue, exports, overrides, connectors, and lineage reads",
-  },
-};
-
-export const NAV_GROUPS: Array<{
-  label: string;
-  items: Array<{ key: ViewKey; label: string; count: string; icon: string }>;
-}> = [
-  {
-    label: "Workspace",
-    items: [
-      { key: "command", label: "Command Center", count: "Live", icon: "command" },
-      { key: "registry", label: "Channel Registry", count: "318", icon: "registry" },
-      { key: "groups", label: "CMS Groups", count: "CMS", icon: "groups" },
-      { key: "close", label: "Month Close", count: "5", icon: "close" },
-      { key: "trace", label: "Trace Explorer", count: "SQL", icon: "trace" },
-    ],
-  },
-  {
-    label: "Operations",
-    items: [
-      { key: "exports", label: "Exports", count: "12", icon: "exports" },
-      { key: "connectors", label: "Connectors", count: "2", icon: "connectors" },
-      { key: "audit", label: "Audit Log", count: "AA", icon: "audit" },
-    ],
-  },
-];
+// VIEW_COPY, NAV_GROUPS and WORKFLOW_STEPS removed: the AppShell chrome no
+// longer reads its page copy, navigation map, or close-progress rail from this
+// snapshot. The first two are now honest static configuration owned by the
+// shell itself (see AppShell.tsx), minus the invented nav badge counts; the
+// workflow rail was deleted outright because its six steps and their
+// done/current states described a close no month had. `WorkflowTone` went with
+// them — WORKFLOW_STEPS was its only producer and shared.tsx's workflowDotTone
+// its only consumer.
 
 export const KPIS = [
   { id: "revenue", tone: "is-revenue", label: "Gross revenue", value: "$4.82M", badge: { text: "A Official", tone: "green" as Severity }, note: ["YouTube reports", "318 channels"], finance: true },
@@ -158,15 +106,6 @@ export const CLOSE_STEPS = [
 export const EXPORT_READINESS = [
   { tone: "amber" as Severity, title: "Confidence notes required", sub: "Allocated values must be included", badge: { text: "Open", tone: "amber" as Severity } },
   { tone: "red" as Severity, title: "Raw appendix restricted", sub: "Requires raw file permission", badge: { text: "Blocked", tone: "red" as Severity } },
-];
-
-export const WORKFLOW_STEPS: Array<{ state: string; tone: WorkflowTone; label: string }> = [
-  { state: "is-done", tone: "green", label: "Reports" },
-  { state: "is-done", tone: "green", label: "Normalize" },
-  { state: "is-done", tone: "green", label: "Payments" },
-  { state: "is-current", tone: "primary", label: "Allocate" },
-  { state: "", tone: "amber", label: "Lock" },
-  { state: "", tone: "amber", label: "Export" },
 ];
 
 export const REGISTRY_SUMMARY = [

@@ -86,6 +86,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   paths.
 
 ### Removed
+- Fabricated AppShell chrome: frozen month-close progress and operational cues,
+  invented navigation counts, the misleading raw-files pill, and the inert
+  scope, month, currency, refresh, and create-export controls. Month and scope
+  selection remain in their request-driving views, export creation remains in
+  its permission-gated view, and the application remains single-currency.
 - *(planned)* Neo4j component dropped entirely — `backend/ums_smart_revenue/graph/`, `tests/graph/`, `neo4j==6.2.0` dependency, related auth permissions, retired specs archived to `Docs/_archived/`.
 
 ### Security
