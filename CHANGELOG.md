@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Breaking changes
+- Export artifact downloads now require a same-origin `/exports/*` gateway
+  route. The browser's real artifact GET is frontend-relative — the gateway
+  injects trusted principal/tenant headers and no secret rides the URL —
+  while only the authenticated `?prepare=true` request uses
+  `VITE_API_BASE_URL`. A deployment whose API lives on a separate origin must
+  add that same-origin route before upgrading (see the artifact-download
+  migration steps in `frontend/README.md`); without it, downloads target the
+  SPA origin and fail.
+
 ### Added
 - Channel `content_owner_id` write path: `content_owner_id` is now an optional
   field on `POST /channels`, and a new `PATCH /channels/{youtube_channel_id}/content-owner`

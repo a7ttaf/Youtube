@@ -311,6 +311,41 @@ const hasUnsafeFilenameShape = (value: string): boolean => {
   );
 };
 
+// FIX: Windows reserves device names regardless of extension — "CON.txt" is
+// just as unusable as "CON" — so a persisted artifact_filename equal to one
+// of them must fall back to the deterministic job-id name instead of being
+// handed to the anchor download attribute verbatim.
+const WINDOWS_RESERVED_DEVICE_NAMES = new Set([
+  "CON",
+  "PRN",
+  "AUX",
+  "NUL",
+  "COM1",
+  "COM2",
+  "COM3",
+  "COM4",
+  "COM5",
+  "COM6",
+  "COM7",
+  "COM8",
+  "COM9",
+  "LPT1",
+  "LPT2",
+  "LPT3",
+  "LPT4",
+  "LPT5",
+  "LPT6",
+  "LPT7",
+  "LPT8",
+  "LPT9",
+]) as ReadonlySet<string>;
+
+/** Return whether a filename's extension-stripped base is a reserved device. */
+const isWindowsReservedDeviceName = (value: string): boolean => {
+  const base = value.split(".", 1)[0];
+  return WINDOWS_RESERVED_DEVICE_NAMES.has(base.toUpperCase());
+};
+
 /** Normalize characters that Windows forbids in a local filename. */
 const normalizeDownloadFilename = (value: string): string => {
   return value.replace(/[<>:"|?*]/g, "_").replace(/[. ]+$/g, "");
@@ -324,8 +359,11 @@ const safeDownloadFilename = (
   if (hasUnsafeFilenameControl(value)) return null;
   const trimmed = value.trim();
   if (hasUnsafeFilenameShape(trimmed)) return null;
+  if (isWindowsReservedDeviceName(trimmed)) return null;
   const sanitized = normalizeDownloadFilename(trimmed);
-  return REJECTED_DOWNLOAD_FILENAMES.has(sanitized) ? null : sanitized;
+  if (REJECTED_DOWNLOAD_FILENAMES.has(sanitized)) return null;
+  if (isWindowsReservedDeviceName(sanitized)) return null;
+  return sanitized;
 };
 
 /** Prefer persisted metadata, then a deterministic safe anchor fallback. */
@@ -667,10 +705,20 @@ const ExportJobsTableHead = () => {
   );
 };
 
+// Downloads ride a security boundary: a failed prepare or anchor dispatch
+// must show stable, high-level copy only. The backend's error body and any
+// raw Error.message can carry internal diagnostics, so neither is ever
+// rendered — the failure class (denied vs. failed) is all an operator needs.
+const DOWNLOAD_PREPARE_FORBIDDEN_DETAIL = "Your role cannot download this export.";
+const DOWNLOAD_PREPARE_FAILED_DETAIL =
+  "The export could not be prepared. Try again, or contact an operator if it keeps failing.";
+
 /** Normalize an unknown artifact-download failure into safe UI detail. */
 const exportDownloadErrorDetail = (caught: unknown): string => {
-  const error = caught instanceof Error ? caught : new Error("Download failed");
-  return describeError(error, "Your role cannot download this export.").detail;
+  if (caught instanceof ApiError && caught.status === 403) {
+    return DOWNLOAD_PREPARE_FORBIDDEN_DETAIL;
+  }
+  return DOWNLOAD_PREPARE_FAILED_DETAIL;
 };
 
 // ============================================================================

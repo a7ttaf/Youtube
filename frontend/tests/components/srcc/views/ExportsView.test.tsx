@@ -341,6 +341,9 @@ describe("ExportsView wired to the exports endpoint", () => {
     ["path traversal", "../../unsafe.xlsx"],
     ["C1 lower-bound control", "unsafe\u0080.xlsx"],
     ["C1 upper-bound control", "unsafe\u009f.xlsx"],
+    ["Windows reserved device name", "CON"],
+    ["Windows reserved name with extension", "con.txt"],
+    ["Windows reserved parallel port", "LPT1.xlsx"],
   ])(
     "rejects %s in persisted filename metadata and uses the deterministic fallback",
     async (_caseName, artifactFilename) => {
@@ -593,15 +596,19 @@ describe("ExportsView wired to the exports endpoint", () => {
     expect(anchorClick).not.toHaveBeenCalled();
   });
 
-  it("surfaces a non-403 preparation failure without starting or reloading", async () => {
+  it("surfaces a non-403 preparation failure as generic copy without leaking backend detail", async () => {
     let listCallCount = 0;
     const anchorClick = vi
       .spyOn(HTMLAnchorElement.prototype, "click")
       .mockImplementation(() => undefined);
     fetchMock().mockImplementation((input: unknown) => {
       if (urlOf(input).includes("finance-workbook.xlsx?prepare=true")) {
+        // Internal diagnostics in the backend detail must never reach the UI.
         return Promise.resolve(
-          jsonResponse({ detail: "Artifact is not available" }, 503),
+          jsonResponse(
+            { detail: "Artifact is not available: s3://internal-bucket/secret" },
+            503,
+          ),
         );
       }
       listCallCount += 1;
@@ -611,8 +618,14 @@ describe("ExportsView wired to the exports endpoint", () => {
 
     fireEvent.click(await screen.findByRole("button", { name: /download xlsx/i }));
     await waitFor(() =>
-      expect(screen.getByText("Artifact is not available")).toBeInTheDocument(),
+      expect(
+        screen.getByText(
+          "The export could not be prepared. Try again, or contact an operator if it keeps failing.",
+        ),
+      ).toBeInTheDocument(),
     );
+    // The backend's own detail text stays off the screen entirely.
+    expect(screen.queryByText(/Artifact is not available/i)).not.toBeInTheDocument();
     expect(screen.getByRole("alert")).toBeInTheDocument();
     expect(listCallCount).toBe(1);
     expect(anchorClick).not.toHaveBeenCalled();
@@ -661,9 +674,16 @@ describe("ExportsView wired to the exports endpoint", () => {
     renderExportsView();
 
     fireEvent.click(await screen.findByRole("button", { name: /download xlsx/i }));
+    // The raw exception message (browser-internal diagnostics) is never
+    // rendered — the failure degrades to the stable failed-preparation copy.
     await waitFor(() =>
-      expect(screen.getByText("Browser refused the download")).toBeInTheDocument(),
+      expect(
+        screen.getByText(
+          "The export could not be prepared. Try again, or contact an operator if it keeps failing.",
+        ),
+      ).toBeInTheDocument(),
     );
+    expect(screen.queryByText("Browser refused the download")).not.toBeInTheDocument();
     expect(listCallCount).toBe(1);
   });
 

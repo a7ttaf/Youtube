@@ -310,19 +310,32 @@ the capabilities the SPA hydrates reflect the dev-gateway role
 (`VITE_DEV_GATEWAY_ROLE`) injected server-side. Capabilities are **global-scope**
 only.
 
-Production must route same-origin `/exports/*` requests through that trusted
-gateway, matching the Vite dev proxy contract. Artifact actions first make an
-authenticated `?prepare=true` API request so generation, permission, and
-storage failures remain typed UI errors; the browser then downloads through a
-new ordinary same-origin GET. The gateway injects authoritative principal and
-tenant identity again for the real transfer, and the browser download manager
-consumes the response without materializing the complete file in SPA memory.
-The prepare fetch uses `cache: "no-store"`, and the backend marks both the 204
-and artifact response `Cache-Control: no-store`, so a cached response cannot
-skip fresh authorization or download auditing. The backend also commits
-artifact metadata before exposing the 204 that starts the second request.
-Do not replace this with a raw storage URL or put gateway/bearer secrets in a
-query string.
+**Breaking deployment change (artifact downloads).** The browser's real
+artifact GET is now always same-origin and frontend-relative — deliberately
+NOT resolved through `VITE_API_BASE_URL`. A deployment that points
+`VITE_API_BASE_URL` at a separate API origin and has no same-origin
+`/exports/*` route would send every download to the SPA origin, where no
+backend answers. To migrate:
+
+1. Route same-origin `/exports/*` through the trusted gateway that injects
+   authoritative principal and tenant headers (same contract as the Vite dev
+   proxy below).
+2. Keep `VITE_API_BASE_URL` for the JSON API and the authenticated
+   `?prepare=true` leg; only the binary transfer stays same-origin.
+3. Verify one download end to end: the prepare leg answers 204 from the API
+   origin, and the artifact GET answers 200 from the SPA origin.
+
+Why the transfer is same-origin: the gateway injects trusted identity for the
+real transfer (the anchor GET cannot carry the trusted-gateway headers, and no
+secret or bearer grant may enter the URL), so generation, permission, and
+storage failures stay typed UI errors on the prepare leg while the browser
+download manager streams the response without materializing the complete file
+in SPA memory. The prepare fetch uses `cache: "no-store"`, and the backend
+marks both the 204 and artifact response `Cache-Control: no-store`, so a
+cached response cannot skip fresh authorization or download auditing. The
+backend also commits artifact metadata before exposing the 204 that starts the
+second request. Do not replace this with a raw storage URL or put
+gateway/bearer secrets in a query string.
 
 ## Which screen shows what
 

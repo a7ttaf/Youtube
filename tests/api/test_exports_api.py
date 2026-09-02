@@ -1853,7 +1853,12 @@ def test_finance_admin_downloads_scoped_analytics_summary_csv(tmp_path, monkeypa
     assert prepared.headers["cache-control"] == "no-store"
     assert prepared_job is not None
     assert prepared_job.status == "COMPLETED"
-    assert {event.event_type for event in preparation_audits} == {"EXPORT_CREATED"}
+    # The prepare leg reads the scoped revenue source rows, so it records its
+    # REVENUE_VIEWED read trail (EXPORT_DOWNLOADED waits for the real GET).
+    assert {event.event_type for event in preparation_audits} == {
+        "EXPORT_CREATED",
+        "REVENUE_VIEWED",
+    }
 
     response = client.get(
         route,
@@ -1923,7 +1928,9 @@ def test_finance_admin_downloads_scoped_analytics_summary_csv(tmp_path, monkeypa
         "EXPORT_DOWNLOADED",
     }
     revenue_events = [event for event in audit_events if event.event_type == "REVENUE_VIEWED"]
-    assert len(revenue_events) == 1
+    # One REVENUE_VIEWED from the prepare leg's read trail and one from the
+    # delivering GET — both audited reads of the same scoped revenue rows.
+    assert len(revenue_events) == 2
     revenue_event = revenue_events[0]
     assert revenue_event.scope_type == "channel"
     assert revenue_event.scope_id == "channel-a"
