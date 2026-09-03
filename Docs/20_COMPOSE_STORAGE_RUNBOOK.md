@@ -452,10 +452,12 @@ $dbRun = $dbRuns[0].FullName
 # compose stack builds (container-init is application tooling).
 $appImageId = docker image inspect ums-smart-revenue:dev --format '{{.Id}}'
 if (-not $appImageId) { throw 'application image ums-smart-revenue:dev is not built' }
-$canonicalHostPath = (Resolve-Path $env:UMS_APP_DATA_HOST).Path
 uv run python scripts/compose_storage.py prepare `
   --path $env:UMS_APP_DATA_HOST
 Assert-NativeSuccess 'prepare empty recovery bind'
+# Capture the canonical path AFTER prepare: the fresh recovery bind does not
+# exist before prepare creates it, and Resolve-Path would fail.
+$canonicalHostPath = (Resolve-Path $env:UMS_APP_DATA_HOST).Path
 
 docker compose -p $project up -d --wait --wait-timeout 120 postgres
 Assert-NativeSuccess 'start recovery PostgreSQL'
