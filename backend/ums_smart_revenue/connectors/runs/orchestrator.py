@@ -2899,7 +2899,8 @@ def _validate_csv_headers(
 #            fail closed before parser/dry-run handoff when a completed monthly
 #            channel/content-owner/currency total is negative.
 # Blast Radius: Finance ingestion and dry-run row counts for YouTube Reporting.
-# Connections:
+# Connections: The YouTube Reporting parser that consumes the payload and the
+#              persistence layer that independently re-checks totals.
 #   - File: backend/ums_smart_revenue/connectors/google_source_parsers/youtube_reporting.py
 #     -> converts each rendered monthly total into a ParsedSourceRow.
 #   - File: backend/ums_smart_revenue/connectors/google_source_rows/repository.py
@@ -2982,7 +2983,8 @@ def _parser_payload_from_csv_totals(
 # Blast Radius: Which YouTube Reporting revenue rows can enter a monthly
 #          total at all; a mistake here either blocks legitimate revenue or
 #          reintroduces a run abort / silent underflow.
-# Connections:
+# Connections: The row fold that calls this helper and the completed-total
+#              bounds that complement these per-row bounds.
 #   - Function: _accumulate_csv_row -> sole caller.
 #   - Function: _parser_payload_from_csv_totals -> the completed-total
 #       bounds that complement these per-row bounds.
@@ -3040,7 +3042,8 @@ def _validated_revenue_amount_of(amount: str, *, report_id: str) -> Decimal:
 #            connector errors; signed adjustments are accepted here and the
 #            completed monthly total is validated before parser handoff.
 # Blast Radius: Finance aggregation for YouTube Reporting CSV ingestion.
-# Connections:
+# Connections: The parser that consumes the rendered payload and the
+#              persistence layer enforcing the same non-negative contract.
 #   - File: backend/ums_smart_revenue/connectors/google_source_parsers/youtube_reporting.py
 #     -> consumes the completed monthly parser payload.
 #   - File: backend/ums_smart_revenue/connectors/google_source_rows/repository.py
