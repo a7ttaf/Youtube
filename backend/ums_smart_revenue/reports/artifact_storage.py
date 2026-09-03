@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import stat
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -69,9 +70,10 @@ class FileSystemExportArtifactStore:
 
         Returns:
             Metadata describing the artifact actually on disk: its
-            ``file://`` URI, filename, content type, byte size, and sha256
-            checksum. Under a concurrent second writer, the metadata reflects
-            the first-writer's persisted bytes, not the caller's input.
+            ``file-store://`` URI, filename, content type, byte size, and
+            sha256 checksum. Under a concurrent second writer, the metadata
+            reflects the first-writer's persisted bytes, not the caller's
+            input.
 
         Raises:
             ExportArtifactStorageError: Empty content, a size-cap violation,
@@ -109,17 +111,25 @@ class FileSystemExportArtifactStore:
             # the Compose launcher's storage preflight rejects any such bit
             # inside the bind tree, so umask-derived 0755 intermediates
             # (exports/, the export-id dir) made the launcher reject its own
-            # populated store on the next start. chmod on POSIX only: Windows
-            # maps non-writable modes onto the read-only attribute; the
-            # Windows preflight enforces ACLs, not POSIX mode bits.
+            # populated store on the next start. Resolved-root containment
+            # stops the walk at this store's root; POSIX only, since Windows
+            # maps non-writable modes onto the read-only attribute and the
+            # Windows preflight enforces ACLs instead of mode bits.
             target_path.parent.mkdir(parents=True, exist_ok=True, mode=0o750)
             temp_path.write_bytes(content)
             if os.name != "nt":
+                private_dirs = stat.S_IRWXU | stat.S_IRGRP | stat.S_IXGRP
+                root = self._root_dir.resolve(strict=False)
                 for directory in target_path.parents:
-                    os.chmod(directory, 0o750)
-                    if directory == self._root_dir:
+                    try:
+                        resolved = directory.resolve(strict=False)
+                        resolved.relative_to(root)
+                    except ValueError:
                         break
-                temp_path.chmod(0o640)
+                    os.chmod(directory, private_dirs)
+                    if resolved == root:
+                        break
+                temp_path.chmod(stat.S_IRUSR | stat.S_IWUSR | stat.S_IRGRP)
             try:
                 os.link(temp_path, target_path)
             except FileExistsError:

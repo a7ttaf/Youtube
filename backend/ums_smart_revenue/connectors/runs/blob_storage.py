@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import stat
 from pathlib import Path
 from typing import Protocol
 from uuid import UUID
@@ -81,10 +82,14 @@ class LocalFileStoreBackend:
         """Persist one blob payload at ``storage_uri`` with private on-disk modes.
 
         Args:
-            storage_uri: Store-relative ``file://`` URI produced by
-                :meth:`uri_for`; containment-checked before any write.
+            storage_uri: A ``file-store://`` URI whose path stays contained
+                within this backend's root (see :meth:`_path_for`).
             content: Exact bytes to persist; an existing payload at the same
                 URI is truncated and replaced.
+
+        Returns:
+            ``None``. The payload lives at the store root joined with the
+            URI path.
 
         Raises:
             ValueError: The URI fails the ``..``-segment or containment
@@ -95,13 +100,22 @@ class LocalFileStoreBackend:
         # FIX: every directory level must end up with no group/world write —
         # the Compose launcher's storage preflight rejects any such bit inside
         # the bind tree, so umask-derived 0755 intermediates made the launcher
-        # reject its own populated store on the next start. chmod on POSIX
+        # reject its own populated store on the next start. Resolved-root
+        # containment stops the walk at this backend's root even for a
+        # degenerate URI whose parents never equal the root lexically. POSIX
         # only: Windows maps non-writable modes onto the read-only attribute.
         path.parent.mkdir(parents=True, exist_ok=True, mode=0o750)
         if os.name != "nt":
+            private_dirs = stat.S_IRWXU | stat.S_IRGRP | stat.S_IXGRP
+            root = self._root.resolve(strict=False)
             for directory in path.parents:
-                os.chmod(directory, 0o750)
-                if directory == self._root:
+                try:
+                    resolved = directory.resolve(strict=False)
+                    resolved.relative_to(root)
+                except ValueError:
+                    break
+                os.chmod(directory, private_dirs)
+                if resolved == root:
                     break
         descriptor = os.open(
             path,
@@ -115,6 +129,13 @@ class LocalFileStoreBackend:
 
     def get_bytes(self, *, storage_uri: str) -> bytes:
         """Return the exact bytes previously persisted at ``storage_uri``.
+
+        Args:
+            storage_uri: A ``file-store://`` URI whose payload was written by
+                :meth:`upload`.
+
+        Returns:
+            The stored bytes, unmodified.
 
         Raises:
             ValueError: The URI fails the containment validation.
