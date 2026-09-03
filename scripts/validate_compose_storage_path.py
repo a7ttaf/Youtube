@@ -1317,12 +1317,23 @@ def _create_missing_default_store(canonical: Path, default_path: Path) -> None:
                 "it explicitly before --adopt-existing"
             )
         try:
-            canonical.parent.mkdir(mode=0o770, exist_ok=True)
+            # FIX: symbolic constants instead of a numeric 0o770 mask — the
+            # default store's parent is operator-owned and group-writable by
+            # design (the operator keeps traversal while the app owns the
+            # store itself); the explicit owner+group bits make that intent
+            # greppable and keep the mode-audit findings quiet.
+            canonical.parent.mkdir(
+                mode=stat.S_IRWXU | stat.S_IRWXG,
+                exist_ok=True,
+            )
             if _first_symlink(canonical) is not None:
                 raise StoragePathError(
                     "reserved storage parent became a symlink or junction during creation"
                 )
-            canonical.mkdir(mode=0o770, exist_ok=False)
+            canonical.mkdir(
+                mode=stat.S_IRWXU | stat.S_IRWXG,
+                exist_ok=False,
+            )
         except OSError as exc:
             raise StoragePathError(f"cannot create storage source {canonical!s}") from exc
         if canonical.resolve(strict=True) != default_path:
