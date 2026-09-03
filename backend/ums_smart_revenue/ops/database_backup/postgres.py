@@ -682,8 +682,9 @@ def resolve_container_connection(runner: CommandRunner, container: str) -> Conta
         ``ContainerConnection``.
 
     Raises:
-        BackupToolError: the container is not a stock PostgreSQL image command, lacks required
-            fields, or exposes unsafe database/user values.
+        BackupToolError: the container is not a stock PostgreSQL image command,
+            lacks required environment fields, exposes unsafe database/user
+            values, or has no valid immutable image/container identity.
     """
     inspect = _container_inspect(runner, container)
     _require_stock_postgres_command(inspect)
@@ -1994,8 +1995,9 @@ def apply_sql_file(
         ``None``.
 
     Raises:
-        BackupToolError: the SQL replay fails its quiescence, timeout, or reconciliation fencing
-            (RestoreError family), or the file cannot be read.
+        BackupToolError: the file cannot be read, or the native psql replay
+            exits nonzero, cannot complete, or times out (propagated from the
+            command runner).
     """
     argv = [
         "docker",
@@ -2039,8 +2041,8 @@ def restore_dump(
         ``None``.
 
     Raises:
-        BackupToolError: the pg_restore replay fails its quiescence, timeout, or reconciliation
-            fencing (RestoreError family).
+        BackupToolError: the native pg_restore replay exits nonzero, cannot
+            complete, or times out (propagated from the command runner).
     """
     argv = [
         "docker",

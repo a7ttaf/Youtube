@@ -5,7 +5,7 @@ snapshot-consistent PostgreSQL archive, prove its semantic contents, and restore
 it into a clean database or a throwaway rehearsal container.
 
 It does **not** back up export artifacts or connector blobs. The coordinated
-outer bundle remains owned by `scripts/compose_storage.py` and
+outer bundle remains owned by `scripts/compose.py` and
 `Docs/20_COMPOSE_STORAGE_RUNBOOK.md`. P0-a seals the outer bundle and checks
 that the nested database package is structurally present. P0-b alone parses
 and verifies the database manifest and artifacts semantically.

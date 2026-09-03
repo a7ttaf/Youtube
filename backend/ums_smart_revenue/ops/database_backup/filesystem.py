@@ -613,6 +613,9 @@ def write_manifest(staging: Path, manifest: BackupManifest) -> None:
 
     Returns:
         ``None``.
+    Raises:
+        OSError: propagated when the manifest file cannot be opened, written,
+            flushed, mode-changed, or atomically replaced.
     """
     destination = staging / MANIFEST_NAME
     temporary = staging / f".{MANIFEST_NAME}.{secrets.token_hex(8)}.tmp"

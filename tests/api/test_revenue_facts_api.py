@@ -38,7 +38,7 @@ def auth_headers(role: str, scope_type: str, scope_id: str | None = None) -> dic
 
 
 def build_database_url(tmp_path) -> str:
-    """Return the disposable PostgreSQL URL for these API tests."""
+    """Return the disposable SQLite URL backing these API tests."""
     return f"sqlite+pysqlite:///{(tmp_path / f'{uuid4()}.db').as_posix()}"
 
 
