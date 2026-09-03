@@ -346,6 +346,8 @@ def upload_and_verify(
 
     Raises:
         BlobUploadError: Passed through when ``backend.upload`` fails.
+        BlobDownloadError: Passed through when the verification re-read
+            (``backend.get_bytes``) fails.
         BlobChecksumMismatchError: The re-read bytes hash differently
             (e.g. the backend silently truncated the payload).
     """
