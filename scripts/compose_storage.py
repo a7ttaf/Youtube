@@ -21,27 +21,67 @@ from pathlib import Path, PurePosixPath
 from typing import Any, BinaryIO
 
 LOGGER = logging.getLogger("ums.compose_storage")
+
+
 CONTRACT_NAME = "ums-compose-storage-v1"
+
+
 MANIFEST_NAME = "ums-compose-backup-v1"
+
+
 COMPOSE_RECOVERY_PROFILE = "ums-compose-recovery-v1"
+
+
 GENERIC_BACKUP_PROFILE = "ums-backup-files-v1"
+
+
 MARKER_FILENAME = ".ums-storage-root.json"
+
+
 RESTORE_PENDING_FILENAME = ".ums-restore-pending"
+
+
 RESTORE_JOURNAL_FILENAME = ".ums-restore-journal.json"
+
+
 RESTORE_STAGE_PREFIX = ".ums-restore-stage-"
+
+
 READY_FILENAME = ".ums-storage-ready.json"
+
+
 STORAGE_DIRECTORIES = ("artifacts", "blobs")
+
+
 REQUIRED_RECOVERY_MEMBERS = frozenset(
     {"git-revision.txt", "running-services.txt", "ums-app-data.tgz"}
 )
+
+
 DATABASE_RECOVERY_MEMBERS = frozenset({"database.dump", "roles.sql", "database-manifest.json"})
+
+
 DATABASE_RUN_NAME_RE = re.compile(r"^ums-database-backup-\d{8}T\d{6}Z-[0-9a-f]{8}$")
+
+
 GCS_SNAPSHOT_MEMBER = "gcs-snapshot.json"
+
+
 DEFAULT_GCS_BUCKET = "ums-smart-revenue-raw"
+
+
 CHUNK_SIZE = 1024 * 1024
+
+
 MAX_POSIX_ID = 2_147_483_647
+
+
 HOST_PATH_ENV = "UMS_APP_DATA_HOST_CONTRACT"
+
+
 HOST_CANONICAL_ENV = "UMS_APP_DATA_HOST_CANONICAL_CONTRACT"
+
+
 HOST_CONFIGURED_ENV = "UMS_APP_DATA_HOST_CONFIGURED"
 
 
@@ -278,6 +318,8 @@ def _validate_marker_payload(payload: dict[str, Any], marker_path: Path) -> None
 #   - File: docker-compose.yml -> app-data-init requires this marker.
 #   - File: Docs/20_COMPOSE_STORAGE_RUNBOOK.md -> operator preparation contract.
 # ============================================================================
+
+
 def prepare_storage(
     raw_path: str,
     *,
@@ -358,6 +400,8 @@ def check_host_storage(raw_path: str, *, repository_root: Path | None = None) ->
 #   - File: docker-compose.yml -> app-data-init consumes the canonical receipt.
 #   - File: Docs/20_COMPOSE_STORAGE_RUNBOOK.md -> required lifecycle wrapper.
 # ============================================================================
+
+
 def run_compose_with_preflight(
     raw_path: str,
     compose_args: list[str],
@@ -514,6 +558,8 @@ def _probe_as_identity(roots: tuple[Path, ...], *, uid: int, gid: int) -> None:
 #   - File: docker-compose.yml -> app-data-init gates application startup.
 #   - File: Docs/20_COMPOSE_STORAGE_RUNBOOK.md -> pending-restore contract.
 # ============================================================================
+
+
 def _verify_tree_readable_as_identity(roots: tuple[Path, ...], *, uid: int, gid: int) -> None:
     """Verify every tree entry is readable by the runtime identity."""
     paths: list[Path] = []
@@ -574,8 +620,8 @@ def _runtime_identity(app_user: str) -> tuple[int, int]:
 #   - File: docker-compose.yml -> root one-shot invokes this entry point.
 # ============================================================================
 
+
 def _resolve_restore_markers(
-    mount_root: Path,
     *,
     pending_restore: Path,
     restore_journal: Path,
@@ -596,7 +642,6 @@ def _resolve_restore_markers(
     if ready_matches and not (restore_journal.exists() or pending_restore.exists()):
         _unlink_and_sync(ready_path)
         ready_matches = False
-    del mount_root
     return ready_matches, expected_ready
 
 
@@ -655,7 +700,6 @@ def initialize_container_storage(
     restore_journal = mount_root / RESTORE_JOURNAL_FILENAME
     ready_path = mount_root / READY_FILENAME
     ready_matches, expected_ready = _resolve_restore_markers(
-        mount_root,
         pending_restore=pending_restore,
         restore_journal=restore_journal,
         ready_path=ready_path,
@@ -741,6 +785,8 @@ def _archive_storage_tree(storage: Path, archive: Path) -> Path:
 #   - File: docker-compose.yml -> app and app-dev are the bind writers.
 #   - File: Docs/20_COMPOSE_STORAGE_RUNBOOK.md -> coordinated backup sequence.
 # ============================================================================
+
+
 def create_artifact_archive(
     raw_path: str,
     *,
@@ -766,6 +812,8 @@ def create_artifact_archive(
 #   - File: docker-compose.yml -> app-data-init supplies the mounted bind.
 #   - File: Docs/20_COMPOSE_STORAGE_RUNBOOK.md -> Linux backup command.
 # ============================================================================
+
+
 def create_mounted_artifact_archive(
     mount_root: Path,
     *,
@@ -816,6 +864,7 @@ def _require_member_shape(member: tarfile.TarInfo, seen: set[str]) -> PurePosixP
     if len(path.parts) == 1 and not member.isdir():
         raise StorageContractError(f"archive storage root must be a directory: {member.name}")
     return path
+
 
 def _validated_archive_members(handle: tarfile.TarFile) -> list[tarfile.TarInfo]:
     """Read archive members while refusing unsafe or redirected paths."""
@@ -942,6 +991,7 @@ def _require_gcs_snapshot_record(record: object, names: set[str]) -> None:
     if len(decoded_crc32c) != 4 or base64.b64encode(decoded_crc32c).decode("ascii") != crc32c:
         raise StorageContractError("GCS snapshot CRC32C must encode exactly four bytes")
 
+
 def _required_compose_recovery_members(record_names: set[str]) -> set[str]:
     """Return the fixed outer members plus one structurally complete DB package."""
     database_packages: dict[str, set[str]] = {}
@@ -976,6 +1026,7 @@ def _required_compose_recovery_members(record_names: set[str]) -> set[str]:
 #   - File: Docs/20_COMPOSE_STORAGE_RUNBOOK.md -> backup and recovery gates.
 #   - File: docker-compose.yml -> documents the three coordinated data planes.
 # ============================================================================
+
 
 def _bundle_member_records(
     files: list[Path], manifest: Path, bundle_root: Path
@@ -1197,14 +1248,14 @@ def _manifest_envelope(
     """Validate the profile/backend envelope and return its file records."""
     blob_backend = payload.get("blob_backend")
     if blob_backend not in {"file-store", "gcs"}:
-        raise StorageContractError(f"unknown backup blob backend: {blob_backend}")
+        raise StorageContractError(f"unknown backup blob backend in {manifest}: {blob_backend}")
     if required_blob_backend is not None and blob_backend != required_blob_backend:
         raise StorageContractError(
             f"backup manifest blob backend must be {required_blob_backend}, not {blob_backend}"
         )
     profile = payload.get("profile")
     if profile not in {COMPOSE_RECOVERY_PROFILE, GENERIC_BACKUP_PROFILE}:
-        raise StorageContractError(f"unknown backup manifest profile: {profile}")
+        raise StorageContractError(f"unknown backup manifest profile in {manifest}: {profile}")
     if required_profile is not None and profile != required_profile:
         raise StorageContractError(
             f"backup manifest profile must be {required_profile}, not {profile}"
@@ -1330,6 +1381,7 @@ def _require_complete_verified_members(
             expected_bucket=_configured_gcs_bucket(expected_gcs_bucket),
         )
 
+
 def _ensure_empty_restore_target(storage: Path) -> None:
     """Refuse to initialize restore storage over existing content."""
     pending = storage / RESTORE_PENDING_FILENAME
@@ -1357,6 +1409,8 @@ def _ensure_empty_restore_target(storage: Path) -> None:
 #   - File: Docs/20_COMPOSE_STORAGE_RUNBOOK.md -> operator retry procedure.
 #   - File: docker-compose.yml -> app-data-init consumes the pending marker.
 # ============================================================================
+
+
 def _restore_journal_payload(
     archive_digest: str,
     manifest_digest: str,
@@ -1441,15 +1495,7 @@ def _require_journal_identity(
         or (
             journal_backend == "gcs" and (not isinstance(journal_bucket, str) or not journal_bucket)
         )
-        or any(
-            not isinstance(digest, str)
-            or len(digest) != 64
-            or any(character not in "0123456789abcdef" for character in digest)
-            for digest in (
-                payload.get("archive_sha256"),
-                payload.get("manifest_sha256"),
-            )
-        )
+        or not _journal_digests_well_formed(payload)
     ):
         raise StorageContractError("restore journal recovery identity is malformed")
     if (
@@ -1459,6 +1505,20 @@ def _require_journal_identity(
         or payload.get("gcs_bucket") != gcs_bucket
     ):
         raise StorageContractError("restore journal belongs to a different recovery contract")
+
+
+
+def _journal_digests_well_formed(payload: dict[str, Any]) -> bool:
+    """Return whether both journal recovery digests are lowercase SHA-256."""
+    return not any(
+        not isinstance(digest, str)
+        or len(digest) != 64
+        or any(character not in "0123456789abcdef" for character in digest)
+        for digest in (
+            payload.get("archive_sha256"),
+            payload.get("manifest_sha256"),
+        )
+    )
 
 
 def _require_journal_stage_fields(payload: dict[str, Any]) -> tuple[str, list[str]]:
@@ -1508,6 +1568,7 @@ def _require_journal_stage(
         raise StorageContractError("restore journal stage is missing or redirected")
     return stage
 
+
 def _required_journal_string(journal: dict[str, object], key: str) -> str:
     """Return one required journal string field with its type proven."""
     value = journal.get(key)
@@ -1515,12 +1576,14 @@ def _required_journal_string(journal: dict[str, object], key: str) -> str:
         raise StorageContractError(f"restore journal field {key} is missing or not a string")
     return value
 
+
 def _optional_journal_string(journal: dict[str, object], key: str) -> str | None:
     """Return one optional journal string field with its type proven."""
     value = journal.get(key)
     if value is None or isinstance(value, str):
         return value
     raise StorageContractError(f"restore journal field {key} is not a string")
+
 
 def _pending_restore_payload(
     archive_digest: str,
@@ -1626,6 +1689,8 @@ def _finish_pending_restore_initialization(storage: Path) -> None:
     if journal_path.exists():
         journal = _read_json(journal_path)
         archive_digest = journal.get("archive_sha256")
+        manifest_digest = _required_journal_string(journal, "manifest_sha256")
+        archive_digest = _required_journal_string(journal, "archive_sha256")
         manifest_digest = _required_journal_string(journal, "manifest_sha256")
         blob_backend = _required_journal_string(journal, "blob_backend")
         gcs_bucket = _optional_journal_string(journal, "gcs_bucket")
@@ -1743,6 +1808,8 @@ def _verify_restore_bytes(storage: Path, stage: Path, archive: BinaryIO) -> None
 #   - File: Docs/20_COMPOSE_STORAGE_RUNBOOK.md -> crash retry contract.
 #   - File: tests/scripts/test_compose_storage.py -> interruption counterexamples.
 # ============================================================================
+
+
 def _discard_journaled_stage(stage: Path, storage: Path) -> None:
     """Remove only a redirect-free stage named by the durable restore journal."""
     if not stage.exists():
@@ -1818,6 +1885,8 @@ def _stage_verified_restore(
 #   - File: docker-compose.yml -> app-data-init adopts restored ownership.
 #   - File: Docs/20_COMPOSE_STORAGE_RUNBOOK.md -> coordinated recovery order.
 # ============================================================================
+
+
 def restore_artifact_archive(
     raw_path: str,
     *,
