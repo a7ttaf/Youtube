@@ -103,7 +103,11 @@ class LocalFileStoreBackend:
                 os.chmod(directory, 0o750)
                 if directory == self._root:
                     break
-        descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o640)
+        descriptor = os.open(
+            path,
+            os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_BINARY", 0),
+            0o640,
+        )
         try:
             os.write(descriptor, content)
         finally:
