@@ -2979,6 +2979,73 @@ def _parser_payload_from_csv_totals(
 #   - File: backend/ums_smart_revenue/connectors/google_source_rows/repository.py
 #     -> enforces the final non-negative persisted amount contract.
 # ============================================================================
+# ============================================================================
+# Purpose: Parse and fully validate one CSV revenue amount — Decimal
+#          construction, finiteness, the overflow bound on the ADJUSTED
+#          exponent, and the Numeric(20, 6) persistence-scale bound.
+# Database/ORM: None. Pure validation over the raw CSV cell.
+# Standards: Every rejection is the same typed per-row payload error the rest
+#          of the CSV adapter raises, so dry runs and live runs fail
+#          identically. The overflow guard compares adjusted() (the
+#          most-significant-digit power) and exempts zero, whose huge forms
+#          ("0E+50") cannot overflow anything; the scale guard compares the
+#          tuple exponent against the persistence scale, mirroring
+#          _validate_amount_native line-for-line. Extracted from
+#          _accumulate_csv_row to keep that fold under the analyzer's
+#          complexity threshold.
+# Blast Radius: Which YouTube Reporting revenue rows can enter a monthly
+#          total at all; a mistake here either blocks legitimate revenue or
+#          reintroduces a run abort / silent underflow.
+# Connections:
+#   - Function: _accumulate_csv_row -> sole caller.
+#   - Function: _parser_payload_from_csv_totals -> the completed-total
+#       bounds that complement these per-row bounds.
+# ============================================================================
+def _validated_revenue_amount_of(amount: str, *, report_id: str) -> Decimal:
+    """Return the amount as a validated finite Decimal within the row bounds."""
+    try:
+        amount_decimal = Decimal(amount)
+    except InvalidOperation as exc:
+        raise _parser_payload_error(
+            report_id=report_id,
+            reason=f"csv row revenue {amount!r} not a valid decimal",
+        ) from exc
+    if not amount_decimal.is_finite():
+        raise _parser_payload_error(
+            report_id=report_id,
+            reason=f"csv row revenue {amount!r} not finite",
+        )
+    # is_finite() guarantees an integer exponent slot; NaN/Infinity carry the
+    # string sentinels 'n'/'N'/'F' there, and the isinstance narrow keeps the
+    # type checkers honest about the comparisons below.
+    amount_exponent = amount_decimal.as_tuple().exponent
+    if not isinstance(amount_exponent, int):
+        raise _parser_payload_error(
+            report_id=report_id,
+            reason=f"csv row revenue {amount!r} not finite",
+        )
+    # FIX: The overflow guard compares the ADJUSTED exponent (the
+    # most-significant-digit power that decides whether the accumulation can
+    # trap), not the tuple exponent, which is the fractional-digit count. The
+    # two diverge on trailing zeros ("1.0E+19") and on huge zero forms
+    # ("0E+50"), both of which are harmless and must stay valid.
+    if (
+        not amount_decimal.is_zero()
+        and amount_decimal.adjusted() > _CSV_MAX_AMOUNT_ADJUSTED_EXPONENT
+    ):
+        raise _parser_payload_error(
+            report_id=report_id,
+            reason=f"csv row revenue {amount!r} exponent out of range",
+        )
+    if amount_exponent < -_CSV_REVENUE_AMOUNT_SCALE:
+        raise _parser_payload_error(
+            report_id=report_id,
+            reason=f"csv row revenue {amount!r} exceeds the persisted "
+            f"{_CSV_REVENUE_AMOUNT_SCALE}-digit fractional scale",
+        )
+    return amount_decimal
+
+
 def _accumulate_csv_row(
     *,
     totals: dict[tuple[str, str | None, str], Decimal],
@@ -3030,7 +3097,9 @@ def _accumulate_csv_row(
     # ``estimated_partner_revenue`` / ``estimatedRevenue`` columns only; see the
     # _CSV_REVENUE_COLUMNS contract block for why no other alias is accepted.
     # The aggregate is kept as Decimal and stringified after summation so
-    # precision and trailing scale survive.
+    # precision and trailing scale survive. Validation of the amount itself
+    # (parse, finiteness, overflow and persistence-scale bounds) lives in
+    # _validated_revenue_amount_of, keeping this function a linear fold.
     amount = _first_present(csv_row, *_CSV_REVENUE_COLUMNS)
     if amount is None:
         raise _parser_payload_error(
@@ -3038,52 +3107,7 @@ def _accumulate_csv_row(
             reason="csv row missing revenue column "
             "(expected one of: estimated_partner_revenue, estimatedRevenue)",
         )
-    try:
-        amount_decimal = Decimal(amount)
-    except InvalidOperation as exc:
-        raise _parser_payload_error(
-            report_id=report_id,
-            reason=f"csv row revenue {amount!r} not a valid decimal",
-        ) from exc
-    if not amount_decimal.is_finite():
-        raise _parser_payload_error(
-            report_id=report_id,
-            reason=f"csv row revenue {amount!r} not finite",
-        )
-    # See _CSV_MAX_AMOUNT_ADJUSTED_EXPONENT (overflow) and
-    # _CSV_REVENUE_AMOUNT_SCALE (persistence): reject before the accumulation
-    # traps Overflow and before a total the live repository would refuse, as
-    # typed per-row failures instead of a run abort or a dry-run/live
-    # divergence. The scale check mirrors _validate_amount_native exactly —
-    # including its treatment of zero values with deep exponents.
-    # is_finite() guarantees an integer exponent slot; NaN/Infinity carry the
-    # string sentinels 'n'/'N'/'F' there, and the isinstance narrow keeps the
-    # type checkers honest about the comparisons below.
-    amount_exponent = amount_decimal.as_tuple().exponent
-    if not isinstance(amount_exponent, int):
-        raise _parser_payload_error(
-            report_id=report_id,
-            reason=f"csv row revenue {amount!r} not finite",
-        )
-    # FIX: The overflow guard compares the ADJUSTED exponent (the
-    # most-significant-digit power that decides whether the accumulation can
-    # trap), not the tuple exponent, which is the fractional-digit count. The
-    # two diverge on trailing zeros ("1.0E+19") and on huge zero forms
-    # ("0E+50"), both of which are harmless and must stay valid.
-    if (
-        not amount_decimal.is_zero()
-        and amount_decimal.adjusted() > _CSV_MAX_AMOUNT_ADJUSTED_EXPONENT
-    ):
-        raise _parser_payload_error(
-            report_id=report_id,
-            reason=f"csv row revenue {amount!r} exponent out of range",
-        )
-    if amount_exponent < -_CSV_REVENUE_AMOUNT_SCALE:
-        raise _parser_payload_error(
-            report_id=report_id,
-            reason=f"csv row revenue {amount!r} exceeds the persisted "
-            f"{_CSV_REVENUE_AMOUNT_SCALE}-digit fractional scale",
-        )
+    amount_decimal = _validated_revenue_amount_of(amount, report_id=report_id)
     currency = _first_present(csv_row, *_CSV_CURRENCY_COLUMNS)
     if not currency:
         if _row_has_any_column(csv_row, *_CSV_CURRENCY_COLUMNS):
