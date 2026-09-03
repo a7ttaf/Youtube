@@ -31,10 +31,27 @@ class BlobStorageBackend(Protocol):
     """Storage contract every connector blob backend implements."""
 
     def upload(self, *, storage_uri: str, content: bytes) -> None:
-        """Persist one payload at the backend URI."""
+        """Persist one payload at the backend URI.
+
+        Args:
+            storage_uri: Backend-scheme URI naming the payload location.
+            content: Exact bytes to persist; an existing payload at the same
+                URI is truncated and replaced.
+
+        Returns:
+            ``None``. Persisted bytes are read back via :meth:`get_bytes`.
+        """
 
     def get_bytes(self, *, storage_uri: str) -> bytes:
-        """Return the exact payload stored at the backend URI."""
+        """Return the exact payload stored at the backend URI.
+
+        Args:
+            storage_uri: Backend-scheme URI of a payload written by
+                :meth:`upload`.
+
+        Returns:
+            The stored bytes, unmodified.
+        """
 
 
 _FILE_STORE_PREFIX = "file-store://"
@@ -190,6 +207,14 @@ class GcsBlobStorageBackend:
     def upload(self, *, storage_uri: str, content: bytes) -> None:
         """Upload one payload to the ``gs://`` location.
 
+        Args:
+            storage_uri: ``gs://`` URI naming the target bucket and key.
+            content: Exact bytes to persist; an existing object at the same
+                URI is overwritten.
+
+        Returns:
+            ``None``. Persisted bytes are read back via :meth:`get_bytes`.
+
         Raises:
             BlobUploadError: The Google API call fails.
             ValueError: The URI fails :meth:`_parse_uri` validation.
@@ -203,6 +228,13 @@ class GcsBlobStorageBackend:
 
     def get_bytes(self, *, storage_uri: str) -> bytes:
         """Download and return the payload stored at the ``gs://`` location.
+
+        Args:
+            storage_uri: ``gs://`` URI of an object uploaded by
+                :meth:`upload`.
+
+        Returns:
+            The stored bytes, unmodified.
 
         Raises:
             BlobDownloadError: The Google API call fails.
@@ -245,7 +277,14 @@ def deterministic_blob_path(
 
 
 def compute_checksum(content: bytes) -> str:
-    """Return the SHA-256 hex digest of ``content``."""
+    """Return the SHA-256 hex digest of ``content``.
+
+    Args:
+        content: Exact bytes to hash.
+
+    Returns:
+        The 64-character lowercase SHA-256 hex digest.
+    """
     return hashlib.sha256(content).hexdigest()
 
 

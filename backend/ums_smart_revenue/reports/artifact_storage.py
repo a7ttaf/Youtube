@@ -176,8 +176,17 @@ class FileSystemExportArtifactStore:
     def delete(self, *, file_url: str) -> None:
         """Remove one persisted artifact identified by its ``file-store://`` URL.
 
+        Args:
+            file_url: ``file-store://`` URL previously returned by
+                :meth:`save`.
+
+        Returns:
+            ``None``. A missing artifact is treated as already deleted.
+
         Raises:
-            ExportArtifactStorageError: The cleanup unlink fails on the host.
+            ExportArtifactStorageError: ``file_url`` fails the scheme/escape
+                validation in :meth:`_relative_path_from_file_url`, or the
+                host unlink fails.
         """
         relative_path = _relative_path_from_file_url(file_url)
         target_path = self._root_dir / relative_path
@@ -189,9 +198,17 @@ class FileSystemExportArtifactStore:
     def read(self, *, file_url: str) -> bytes:
         """Return the exact bytes of one persisted artifact.
 
+        Args:
+            file_url: ``file-store://`` URL previously returned by
+                :meth:`save`.
+
+        Returns:
+            The stored bytes, unmodified.
+
         Raises:
-            ExportArtifactStorageError: The artifact is missing or the host
-                read fails.
+            ExportArtifactStorageError: ``file_url`` fails the scheme/escape
+                validation in :meth:`_relative_path_from_file_url`, the
+                artifact is missing, or the host read fails.
         """
         relative_path = _relative_path_from_file_url(file_url)
         target_path = self._root_dir / relative_path
