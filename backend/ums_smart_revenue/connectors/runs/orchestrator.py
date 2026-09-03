@@ -3065,7 +3065,15 @@ def _accumulate_csv_row(
             report_id=report_id,
             reason=f"csv row revenue {amount!r} not finite",
         )
-    if amount_exponent > _CSV_MAX_AMOUNT_ADJUSTED_EXPONENT:
+    # FIX: The overflow guard compares the ADJUSTED exponent (the
+    # most-significant-digit power that decides whether the accumulation can
+    # trap), not the tuple exponent, which is the fractional-digit count. The
+    # two diverge on trailing zeros ("1.0E+19") and on huge zero forms
+    # ("0E+50"), both of which are harmless and must stay valid.
+    if (
+        not amount_decimal.is_zero()
+        and amount_decimal.adjusted() > _CSV_MAX_AMOUNT_ADJUSTED_EXPONENT
+    ):
         raise _parser_payload_error(
             report_id=report_id,
             reason=f"csv row revenue {amount!r} exponent out of range",

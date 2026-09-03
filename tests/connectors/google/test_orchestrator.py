@@ -734,6 +734,39 @@ def test_csv_adapter_rejects_sub_scale_amounts_as_typed_row_errors() -> None:
         )
 
 
+def test_csv_adapter_overflow_guard_uses_adjusted_exponent_and_spares_zero() -> None:
+    """Trailing zeros raise the ADJUSTED exponent; a huge zero form is harmless.
+
+    ``1.0E+19`` carries a tuple exponent of 18 but a most-significant-digit
+    power of 19, so comparing the tuple exponent would let it slip past the
+    overflow bound while rejecting harmless zeros like ``0E+50``. The
+    overflow guard must compare adjusted() and exempt zero values.
+    """
+    with pytest.raises(GoogleApiResponseError, match="exponent out of range"):
+        _csv_to_parser_payload(
+            raw_bytes=(
+                b"date,channel_id,estimated_partner_revenue,currencyCode\n"
+                b"2026-05-01,UC_orch_alpha,1.0E+19,USD\n"
+            ),
+            report_id="r-trailing-zero-overflow",
+            report_type="content_owner_estimated_revenue_a1",
+            month="2026-05",
+        )
+
+    payload = _csv_to_parser_payload(
+        raw_bytes=(
+            b"date,channel_id,estimated_partner_revenue,currencyCode\n"
+            b"2026-05-01,UC_orch_alpha,0E+50,USD\n"
+        ),
+        report_id="r-huge-zero",
+        report_type="content_owner_estimated_revenue_a1",
+        month="2026-05",
+    )
+
+    assert len(payload["rows"]) == 1
+    assert payload["rows"][0]["metrics"]["estimatedRevenue"] in {"0", "0E+50", "0.000000"}
+
+
 def test_csv_adapter_rejects_monthly_total_exceeding_persistence_digits() -> None:
     """A completed total past 14 integer digits fails, matching the live gate.
 
