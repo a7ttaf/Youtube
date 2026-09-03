@@ -13,6 +13,7 @@
 from collections.abc import Iterable
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
+from typing import cast
 from uuid import UUID
 
 from fastapi import Depends, FastAPI, HTTPException
@@ -77,6 +78,7 @@ from ums_smart_revenue.config.settings import (
     AUTHZ_SOURCE_HEADERS,
     GOOGLE_CONNECTOR_SERVICE_ACTOR_PLACEHOLDER_ID,
     AppSettings,
+    is_configured_service_actor_id,
     load_app_settings,
 )
 from ums_smart_revenue.config.version_baseline import STACK_VERSION_BASELINE
@@ -261,11 +263,35 @@ def _wire_connector_background_workers(
                 " -- a scheduler with nothing to submit to is a"
                 " misconfiguration"
             )
-        if settings.google_connector_service_actor_id is None:
+        # FIX: route the boot gate through the shared canonical test
+        # (is_configured_service_actor_id) so the scheduler can never drift
+        # from the API route pre-flight's definition of "configured" -- both
+        # a missing value and the well-known .env.example placeholder count
+        # as unconfigured HERE as well as there. With schedule flags plus the
+        # template UUID the old separate comparisons still passed the boot
+        # gate, the scheduler started with a ConnectorJobActor carrying the
+        # placeholder, every tick failed at principal build -- and
+        # _audit_group_sync_failure attributed those failure rows to the
+        # published template UUID. Failing boot is the same fail-fast
+        # contract for both unconfigured states; non-connector workloads
+        # never reach this gate and keep the lazy-boot contract. The inner
+        # branch only picks the operator diagnostic; the admission decision
+        # is the canonical gate alone.
+        if not is_configured_service_actor_id(settings.google_connector_service_actor_id):
+            if settings.google_connector_service_actor_id is None:
+                raise ValueError(
+                    "UMS_GROUP_SYNC_SCHEDULE_ENABLED requires"
+                    " UMS_GOOGLE_CONNECTOR_SERVICE_ACTOR_ID to be set"
+                    " -- the scheduler has no identity to submit jobs as"
+                )
             raise ValueError(
-                "UMS_GROUP_SYNC_SCHEDULE_ENABLED requires"
-                " UMS_GOOGLE_CONNECTOR_SERVICE_ACTOR_ID to be set"
-                " -- the scheduler has no identity to submit jobs as"
+                "UMS_GROUP_SYNC_SCHEDULE_ENABLED requires a real"
+                " UMS_GOOGLE_CONNECTOR_SERVICE_ACTOR_ID: the configured value"
+                " is the well-known .env.example placeholder"
+                f" ({GOOGLE_CONNECTOR_SERVICE_ACTOR_PLACEHOLDER_ID}), which"
+                " connector audit emitters refuse -- a scheduler submitting"
+                " jobs as a published template UUID would mis-attribute its"
+                " failure audits"
             )
         # FIX: the well-known .env.example placeholder is treated as
         # unconfigured HERE as well, not only by the principal builder.
@@ -292,7 +318,10 @@ def _wire_connector_background_workers(
             session_factory=session_factory,
             executor=fastapi_app.state.connector_job_executor,
             interval_seconds=settings.group_sync_interval_hours * 3600,
-            service_actor_id=settings.google_connector_service_actor_id,
+            # The canonical gate above admits only a real (non-None,
+            # non-placeholder) id, but mypy cannot narrow through the helper;
+            # bind that invariant explicitly for the typed scheduler input.
+            service_actor_id=cast(str, settings.google_connector_service_actor_id),
         )
         scheduler.start()
         fastapi_app.state.group_sync_scheduler = scheduler

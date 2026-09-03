@@ -1159,6 +1159,22 @@ byte size, SHA-256 checksum, and marks the export job `COMPLETED`. If artifact
 storage fails before completion, the job remains non-terminal and retryable, the
 endpoint returns `503`, and does not emit `EXPORT_DOWNLOADED`.
 
+All four artifact routes (`analytics-summary.csv`, `finance-workbook.xlsx`,
+`executive.pdf`, and `branded-slide-pack.pptx`) also accept `prepare=true` for
+the dashboard's bounded-memory download handshake. Preparation executes the
+same trusted-gateway principal load, tenant/owner lookup, per-type permission
+checks, generation, persistence, and storage validation as the ordinary GET,
+durably commits the artifact metadata before returning `204`, includes
+`Cache-Control: no-store`, carries no artifact body, and does not emit
+`EXPORT_DOWNLOADED`. The browser then performs an ordinary same-origin GET;
+that second request is independently authenticated and authorized, returns the
+persisted artifact with its existing `Content-Disposition` plus
+`Cache-Control: no-store`, and emits the normal sensitive-read and download
+audit records. Preventing both responses from being cached is part of the
+authorization/audit contract: neither leg may be reused without re-entering the
+gateway. No tenant, principal, bearer grant, or gateway secret is accepted in
+the URL.
+
 `GET /exports/{export_id}/executive.pdf` supports `EXECUTIVE_PDF` export jobs.
 It uses the same finance export, revenue visibility, finalized-payment, and
 bank-reconciliation checks as the workbook download, then generates an

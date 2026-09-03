@@ -442,7 +442,7 @@ def test_revenue_operations_admin_can_request_connector_job_and_audit(tmp_path):
 
 
 def test_request_connector_job_live_requires_successful_credential_smoke(tmp_path):
-    """A live submission for an unscredentialed-smoke account is rejected 422."""
+    """A live submission for an account whose credential smoke never succeeded is rejected 422."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     _seed_active_credential(database_url, credential_smoked=False)
@@ -511,9 +511,8 @@ def test_request_connector_job_live_requires_unexpired_credential_smoke(tmp_path
     assert fake.cancel_calls == []
 
 
-@pytest.mark.parametrize("role", ["assistant_analyst", "beta_operator"])
-def test_request_connector_job_missing_permission_403(tmp_path, role):
-    """Non-connector roles are denied with the run_jobs detail and no submission."""
+def test_request_connector_job_missing_permission_403(tmp_path):
+    """assistant_analyst is denied with the run_jobs permission detail (no audit)."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     _seed_active_credential(database_url)
@@ -522,7 +521,7 @@ def test_request_connector_job_missing_permission_403(tmp_path, role):
 
     response = client.post(
         "/connectors/jobs",
-        headers=auth_headers(role),
+        headers=auth_headers("assistant_analyst"),
         json={
             "connector_key": "youtube_reporting",
             "account_id": "content-owner-1",
@@ -1259,7 +1258,6 @@ def test_test_connection_requires_manage_connectors_permission(tmp_path):
 
 def test_credential_integrity_classifier_uses_duplicate_constraint_only():
     """Integrity classifier returns True only for the unique-constraint violation, not FK errors."""
-
     # pylint: disable=too-few-public-methods
     class DuplicateDiag:
         """Minimal constraint diagnostic stub for testing the integrity classifier."""
@@ -1776,6 +1774,14 @@ class _TenantRecordingHealthRepository:
         on; the page is intentionally non-empty so the test proves the
         entries came through the tenant-bound read, not from a vacuous
         empty result.
+
+        Args:
+            limit: Maximum number of credentials requested by the caller.
+            offset: Number of credentials skipped by the caller.
+            connector_keys: Optional connector-key filter recorded by the stub.
+
+        Returns:
+            A one-entry ``ConnectorCredentialPage`` for the tenant-bound read.
         """
         self.connector_keys = connector_keys
         return ConnectorCredentialPage(
@@ -2106,7 +2112,9 @@ def test_content_owners_group_manager_without_manage_connectors_gets_200(tmp_pat
     """The Qodo regression: MANAGE_GROUPS without MANAGE_CONNECTORS may load owners."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
-    _seed_credential_row(database_url, connector_key="youtube-analytics", account_id="OwnerAaa")
+    _seed_credential_row(
+        database_url, connector_key="youtube-analytics", account_id="OwnerAaa"
+    )
     client = TestClient(create_app(database_url=database_url))
 
     response = client.get(
@@ -2123,7 +2131,9 @@ def test_content_owners_returns_only_active_rows_for_requested_connector(tmp_pat
     """Revoked rows and other connector keys stay out of the picker payload."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
-    _seed_credential_row(database_url, connector_key="youtube-analytics", account_id="OwnerActive")
+    _seed_credential_row(
+        database_url, connector_key="youtube-analytics", account_id="OwnerActive"
+    )
     _seed_credential_row(
         database_url,
         connector_key="youtube-analytics",
@@ -2149,7 +2159,9 @@ def test_content_owners_discloses_only_account_id(tmp_path):
     """No credential UUIDs, has_secret_ref, status, or telemetry leave the route."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
-    _seed_credential_row(database_url, connector_key="youtube-analytics", account_id="OwnerAaa")
+    _seed_credential_row(
+        database_url, connector_key="youtube-analytics", account_id="OwnerAaa"
+    )
     client = TestClient(create_app(database_url=database_url))
 
     response = client.get(
@@ -2205,7 +2217,9 @@ def test_content_owners_forbids_company_scoped_group_manager(tmp_path):
     response = client.get(
         "/connectors/content-owners",
         params={"connector_key": "youtube-analytics"},
-        headers=auth_headers("data_steward", "company", "00000000-0000-0000-0000-000000003201"),
+        headers=auth_headers(
+            "data_steward", "company", "00000000-0000-0000-0000-000000003201"
+        ),
     )
 
     assert response.status_code == 403

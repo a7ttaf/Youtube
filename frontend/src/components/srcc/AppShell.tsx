@@ -16,13 +16,9 @@ import {
   WriteInFlightProvider,
   useWriteInFlightLatch,
 } from "@/contexts/WriteInFlightContext";
-import {
-  NAV_GROUPS,
-  VIEW_COPY,
-  WORKFLOW_STEPS,
-} from "@/lib/mock/data";
 import type { Role, ViewKey } from "@/lib/mock/data";
-import { BrandIcon, NAV_ICONS, RefreshIcon } from "./icons";
+import ErrorBoundary, { reloadDocumentForRecovery } from "./ErrorBoundary";
+import { BrandIcon, NAV_ICONS } from "./icons";
 import AuditView from "./views/AuditView";
 import CloseView from "./views/CloseView";
 import CommandView from "./views/CommandView";
@@ -32,15 +28,94 @@ import { GroupsView } from "./views/GroupsView";
 import RegistryView from "./views/RegistryView";
 import { importScopeFor } from "@/contexts/UnsettledImportContext";
 import TraceView from "./views/TraceView";
-import { monthKeyLabel } from "@/lib/months";
-import {
-  Badge,
-  DEFAULT_MONTH,
-  Dot,
-  MONTH_OPTIONS,
-  RESTRICTED_FINANCE_VALUE,
-  workflowDotTone,
-} from "./shared";
+import { Badge, Dot } from "./shared";
+
+/* ------------------------------------------------------------------ chrome config */
+
+// ============================================================================
+// Purpose: The shell's OWN chrome configuration: the page copy for every routed
+//   view, and the sidebar navigation map. Replaces the VIEW_COPY / NAV_GROUPS
+//   imports from lib/mock/data, which drove the chrome from a frozen
+//   "March 2026 close" demo snapshot — nav items carried invented badge counts
+//   ("318" channels, "12" exports, "2" connectors, "AA") and the Command copy
+//   named a month, a scope and a reporting currency none of which the shell
+//   reads from anywhere.
+// Database/ORM: None (frontend) — static route metadata. No fetch, no store.
+// Standards: Every entry names a view this shell actually routes to; both maps
+//   are keyed by ViewKey, so the Record is exhaustive by type and adding a view
+//   without copy is a compile error. Copy describes the SURFACE and never a
+//   VALUE — no month, no scope, no currency, no count — because the shell holds
+//   no data to back one and a frozen number rendered in the chrome reads as a
+//   live figure. Nav items carry no count for the same reason: the counts they
+//   used to show were mock constants, and the real ones belong to the views
+//   that fetch them.
+// Blast Radius: Presentation only — the page <h1>, its subtitle, and the nav
+//   labels. No authorization, no money, no request.
+// Connections:
+//   - File: frontend/src/components/srcc/AppShell.tsx -> Topbar reads VIEW_COPY;
+//     Sidebar/NavSection read NAV_GROUPS.
+//   - File: frontend/src/lib/mock/data.ts -> ViewKey, the key set both maps use.
+//   - File: frontend/src/components/srcc/icons.tsx -> NAV_ICONS, keyed by `icon`.
+// ============================================================================
+
+const VIEW_COPY: Record<ViewKey, { title: string; subtitle: string }> = {
+  command: {
+    title: "Revenue Command Center",
+    subtitle: "Net revenue, payment reconciliation, and open issues for the selected month",
+  },
+  registry: {
+    title: "Channel Registry",
+    subtitle: "Channel ownership, CMS status, company scope, and roster import",
+  },
+  groups: {
+    title: "CMS Groups",
+    subtitle: "Content-owner group mirror, ownership stamps, and sync",
+  },
+  close: {
+    title: "Month Close Workbench",
+    subtitle: "Close readiness, lock and unlock controls, and the audited reason trail",
+  },
+  trace: {
+    title: "SQL Trace Explorer",
+    subtitle: "Per-channel number explanation, filtered by your read permissions",
+  },
+  exports: {
+    title: "Export Center",
+    subtitle: "Permission-gated export requests and the artifacts they generate",
+  },
+  connectors: {
+    title: "Connector Operations",
+    subtitle: "Credentials, run history, and permission-gated job controls",
+  },
+  audit: {
+    title: "Audit Log",
+    subtitle:
+      "Sensitive action trace for revenue, exports, overrides, connectors, and lineage reads",
+  },
+};
+
+type NavItem = { key: ViewKey; label: string; icon: string };
+
+const NAV_GROUPS: ReadonlyArray<{ label: string; items: readonly NavItem[] }> = [
+  {
+    label: "Workspace",
+    items: [
+      { key: "command", label: "Command Center", icon: "command" },
+      { key: "registry", label: "Channel Registry", icon: "registry" },
+      { key: "groups", label: "CMS Groups", icon: "groups" },
+      { key: "close", label: "Month Close", icon: "close" },
+      { key: "trace", label: "Trace Explorer", icon: "trace" },
+    ],
+  },
+  {
+    label: "Operations",
+    items: [
+      { key: "exports", label: "Exports", icon: "exports" },
+      { key: "connectors", label: "Connectors", icon: "connectors" },
+      { key: "audit", label: "Audit Log", icon: "audit" },
+    ],
+  },
+];
 
 /* ------------------------------------------------------------------ shared */
 
@@ -182,7 +257,8 @@ const capabilitiesToPermissions = (
 
 /**
  * Report whether the viewer may create any export variant (global, scoped, or
- * raw), used to enable the header Create Export action.
+ * raw), used to gate ExportsView's request form. It no longer feeds a header
+ * button: the topbar's Create Export control had no onClick and was deleted.
  */
 const canCreateAnyExport = (permissions: AccessPermissions) => {
   return (
@@ -449,7 +525,6 @@ const NavSection = ({
           >
             {NAV_ICONS[item.icon]}
             <span>{item.label}</span>
-            <span className="nav-count">{item.count}</span>
           </button>
         );
       })}
@@ -473,7 +548,14 @@ const RolePreviewHint = () => {
   );
 };
 
-/** Role selector (preview) plus the finance-visibility permission indicators. */
+/**
+ * Role selector (preview) plus the finance-visibility permission indicator.
+ *
+ * One indicator, and it is derived from the session: the "Raw files gated"
+ * pill that used to sit beside it was a fixed amber claim, contradicting
+ * itself for any principal actually holding the raw-export grant
+ * (permissions.canRequestRawExports).
+ */
 const RoleCard = ({
   previewRole,
   onSelectPreviewRole,
@@ -510,10 +592,6 @@ const RoleCard = ({
         <span className={`role-state${canViewFinance ? "" : " is-restricted"}`}>
           <Dot tone={canViewFinance ? "green" : "red"} />
           <span>{canViewFinance ? "Money visible" : "Money withheld"}</span>
-        </span>
-        <span className="role-state">
-          <Dot tone="amber" />
-          <span>Raw files gated</span>
         </span>
       </div>
     </div>
@@ -572,42 +650,8 @@ const Sidebar = ({
 
 /* ------------------------------------------------------------------ topbar */
 
-/**
- * Operational status cues for the top bar (source, bank gap, export blockers,
- * trace). Extracted so the Topbar JSX tree stays shallow; the bank-gap value is
- * gated behind canViewFinance so non-finance roles see the restricted sentinel.
- */
-const OperationalCues = ({ canViewFinance }: { canViewFinance: boolean }) => {
-  return (
-    <div className="operational-cues" aria-label="Operational status">
-      <span className="cue green">
-        Source <strong>A Official</strong>
-      </span>
-      <span className="cue amber">
-        Bank gap <strong>{canViewFinance ? "$31.4K" : RESTRICTED_FINANCE_VALUE}</strong>
-      </span>
-      <span className="cue red">
-        Export blockers <strong>2</strong>
-      </span>
-      <span className="cue violet">
-        Trace <strong>SQL scoped</strong>
-      </span>
-    </div>
-  );
-};
-
-/** Page header: title, operational cues, and the report filter / export controls. */
-const Topbar = ({
-  title,
-  subtitle,
-  canViewFinance,
-  canCreateExport,
-}: {
-  title: string;
-  subtitle: string;
-  canViewFinance: boolean;
-  canCreateExport: boolean;
-}) => {
+/** Page header: the routed view's title and subtitle only. */
+const Topbar = ({ title, subtitle }: { title: string; subtitle: string }) => {
   return (
     <header className="topbar">
       <div className="page-title">
@@ -615,31 +659,6 @@ const Topbar = ({
           <h1>{title}</h1>
         </div>
         <p>{subtitle}</p>
-        <OperationalCues canViewFinance={canViewFinance} />
-      </div>
-      <div className="control-row" aria-label="Report filters">
-        <select className="control" aria-label="Month" defaultValue={monthKeyLabel(DEFAULT_MONTH)}>
-          {MONTH_OPTIONS.map((monthValue) => (
-            <option key={monthValue}>{monthKeyLabel(monthValue)}</option>
-          ))}
-        </select>
-        <select className="control" aria-label="Scope" defaultValue="UMS Holding">
-          <option>UMS Holding</option>
-          <option>TV Sector</option>
-          <option>News Sector</option>
-          <option>Company A</option>
-        </select>
-        <select className="control" aria-label="Currency" defaultValue="USD">
-          <option>USD</option>
-          <option>EGP</option>
-          <option>AED</option>
-        </select>
-        <button className="icon-button" aria-label="Refresh reports" title="Refresh reports">
-          <RefreshIcon />
-        </button>
-        <button className="primary-button" disabled={!canCreateExport}>
-          Create Export
-        </button>
       </div>
     </header>
   );
@@ -742,25 +761,13 @@ const ViewRouter = ({
 // CommandView is the first REAL-data view; it lives in ./views/CommandView.tsx
 // and is wired to GET /revenue/months/{month}/net-revenue via useNetRevenue.
 
-/** Month-close workflow rail shown beneath the Command view. */
-const WorkflowRail = () => {
-  return (
-    <footer className="workflow" aria-label="Month close workflow">
-      <div className="workflow-label">
-        Monthly close<span>2 blockers before export</span>
-      </div>
-      <div className="steps" role="list">
-        {WORKFLOW_STEPS.map((s) => (
-          <span key={s.label} className={`step ${s.state}`} role="listitem">
-            <Dot tone={workflowDotTone(s.tone)} />
-            {s.label}
-          </span>
-        ))}
-      </div>
-      <button className="primary-button">Open Close</button>
-    </footer>
-  );
-};
+// The month-close WorkflowRail that used to render beneath the Command view is
+// GONE, not relocated. Its six steps and their done/current/pending states were
+// WORKFLOW_STEPS — a mock constant frozen at "Allocate", under a label claiming
+// "2 blockers before export" — so the rail reported a close progress no month
+// had, for every month. Its "Open Close" button had no onClick. Real close
+// readiness is the wired CloseView (GET /finance-close/{month}/readiness),
+// reachable from the Month Close nav item.
 
 /* ------------------------------------------------------------------ registry */
 
@@ -1048,43 +1055,54 @@ const AppShell = () => {
   const importScopeSettled = isImportScopeSettled(sessionBootstrap.session, tenantSettled);
   const copy = VIEW_COPY[view];
 
+  // ============================================================================
+  // Purpose: Keep every view-owned render, including the command workflow rail,
+  //   inside one stable error boundary while the shell chrome remains mounted.
+  // Database/ORM: None (frontend composition only).
+  // Standards: Navigation changes reset the boundary through resetKey; recovery
+  //   reloads the document so server state is reconciled before another write.
+  // Blast Radius: View availability and recovery; session/auth gating above is
+  //   unchanged and remains fail-closed.
+  // Connections:
+  //   - File: frontend/src/components/srcc/ErrorBoundary.tsx -> safe fallback,
+  //     redacted report, focus target, and reload action.
+  //   - File: frontend/src/contexts/WriteInFlightContext.tsx -> existing import
+  //     navigation latch remains outside the guarded view state and stays armed
+  //     until a pending request settles even if the boundary unmounts its flow.
+  // ============================================================================
 
   return (
     <WriteInFlightProvider value={writeInFlight}>
-    <div className="app">
-      {import.meta.env.DEV && <TenantProofTag label={proofLabel} />}
-      <Sidebar
-        view={view}
-        onSelectView={handleViewChange}
-        previewRole={previewRole}
-        onSelectPreviewRole={setPreviewRole}
-        displayedRole={displayedRole}
-        canViewFinance={canViewFinance}
-        blockedReason={navBlockedReason}
-      />
-      <main className="main">
-        <Topbar
-          title={copy.title}
-          subtitle={copy.subtitle}
-          canViewFinance={canViewFinance}
-          canCreateExport={canCreateAnyExport(permissions)}
-        />
-        <ViewRouter
+      <div className="app">
+        {import.meta.env.DEV && <TenantProofTag label={proofLabel} />}
+        <Sidebar
           view={view}
-          permissions={permissions}
-          canViewFinance={canViewFinance}
+          onSelectView={handleViewChange}
+          previewRole={previewRole}
+          onSelectPreviewRole={setPreviewRole}
           displayedRole={displayedRole}
-          traceChannelId={traceChannelId}
-          importScope={importScope}
-          importScopeSettled={importScopeSettled}
-          onOpenTrace={(channelId) => {
-            setTraceChannelId(channelId);
-            setView("trace");
-          }}
+          canViewFinance={canViewFinance}
+          blockedReason={navBlockedReason}
         />
-        {view === "command" && <WorkflowRail />}
-      </main>
-    </div>
+        <main className="main">
+          <Topbar title={copy.title} subtitle={copy.subtitle} />
+          <ErrorBoundary resetKey={view} onReload={reloadDocumentForRecovery}>
+            <ViewRouter
+              view={view}
+              permissions={permissions}
+              canViewFinance={canViewFinance}
+              displayedRole={displayedRole}
+              traceChannelId={traceChannelId}
+              importScope={importScope}
+              importScopeSettled={importScopeSettled}
+              onOpenTrace={(channelId) => {
+                setTraceChannelId(channelId);
+                setView("trace");
+              }}
+            />
+          </ErrorBoundary>
+        </main>
+      </div>
     </WriteInFlightProvider>
   );
 };
