@@ -384,7 +384,6 @@ def resolve_rehearsal_image(
     return image_id
 
 
-
 def _inspected_single_image(runner: CommandRunner, operator_reference: str) -> dict[str, object]:
     """Inspect one local image and return its single decoded metadata object."""
     raw = runner.text(["docker", "image", "inspect", operator_reference], exit_code=3)

@@ -371,7 +371,6 @@ def _require_existing_dedicated_root(resolved: Path) -> None:
         require_owner_only_directory(resolved)
 
 
-
 def _require_only_database_run_children(children: list[Path]) -> None:
     """Refuse foreign entries and prior partial runs inside a dedicated root."""
     foreign = sorted(
