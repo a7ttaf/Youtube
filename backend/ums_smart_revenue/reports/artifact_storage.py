@@ -121,14 +121,17 @@ class FileSystemExportArtifactStore:
                 private_dirs = stat.S_IRWXU | stat.S_IRGRP | stat.S_IXGRP
                 root = self._root_dir.resolve(strict=False)
                 for directory in target_path.parents:
+                    resolved = directory.resolve(strict=False)
                     try:
-                        resolved = directory.resolve(strict=False)
                         resolved.relative_to(root)
                     except ValueError:
                         break
-                    os.chmod(directory, private_dirs)
                     if resolved == root:
+                        # The configured root's own mode belongs to the
+                        # operator and the provisioning policy, not to this
+                        # write.
                         break
+                    os.chmod(resolved, private_dirs)
                 temp_path.chmod(stat.S_IRUSR | stat.S_IWUSR | stat.S_IRGRP)
             try:
                 os.link(temp_path, target_path)

@@ -109,14 +109,16 @@ class LocalFileStoreBackend:
             private_dirs = stat.S_IRWXU | stat.S_IRGRP | stat.S_IXGRP
             root = self._root.resolve(strict=False)
             for directory in path.parents:
+                resolved = directory.resolve(strict=False)
                 try:
-                    resolved = directory.resolve(strict=False)
                     resolved.relative_to(root)
                 except ValueError:
                     break
-                os.chmod(directory, private_dirs)
                 if resolved == root:
+                    # The configured root's own mode belongs to the operator
+                    # and the provisioning policy, not to this write.
                     break
+                os.chmod(resolved, private_dirs)
         descriptor = os.open(
             path,
             os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_BINARY", 0),
