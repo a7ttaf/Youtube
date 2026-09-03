@@ -1258,6 +1258,19 @@ def validate_storage_path(
         return canonical
     if not canonical.is_dir():
         raise StoragePathError(f"storage source is not a directory: {canonical!s}")
+    return _validate_existing_storage(
+        canonical,
+        require_attestation=require_attestation,
+    )
+
+
+def _validate_existing_storage(canonical: Path, *, require_attestation: bool) -> Path:
+    """Run the full on-disk policy over an existing storage directory.
+
+    Extracted from ``validate_storage_path`` so that function stays a thin
+    dispatch over the parse/resolve/provision stages; this helper owns the
+    per-entry inspection pipeline in its reviewed order.
+    """
     _reject_unexpected_entries(canonical)
     _reject_storage_submounts(canonical)
     _reject_nested_reparse_points(canonical)
