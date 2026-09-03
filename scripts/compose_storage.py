@@ -1688,8 +1688,6 @@ def _finish_pending_restore_initialization(storage: Path) -> None:
     journal_path = storage / RESTORE_JOURNAL_FILENAME
     if journal_path.exists():
         journal = _read_json(journal_path)
-        archive_digest = journal.get("archive_sha256")
-        manifest_digest = _required_journal_string(journal, "manifest_sha256")
         archive_digest = _required_journal_string(journal, "archive_sha256")
         manifest_digest = _required_journal_string(journal, "manifest_sha256")
         blob_backend = _required_journal_string(journal, "blob_backend")
