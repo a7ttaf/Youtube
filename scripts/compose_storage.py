@@ -1507,7 +1507,6 @@ def _require_journal_identity(
         raise StorageContractError("restore journal belongs to a different recovery contract")
 
 
-
 def _journal_digests_well_formed(payload: dict[str, Any]) -> bool:
     """Return whether both journal recovery digests are lowercase SHA-256."""
     return not any(
