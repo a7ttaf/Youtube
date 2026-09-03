@@ -754,7 +754,6 @@ def _assert_sensitive_output(path: Path, *, repository_root: Path) -> Path:
     return output
 
 
-
 def _require_unlinked_entry(entry: Path) -> None:
     """Refuse hardlinked archive members: they can alias host files.
 
@@ -764,6 +763,7 @@ def _require_unlinked_entry(entry: Path) -> None:
     """
     if entry.is_file() and entry.stat().st_nlink != 1:
         raise StorageContractError(f"archive member has multiple hardlinks: {entry}")
+
 
 def _archive_storage_tree(storage: Path, archive: Path) -> Path:
     """Write the storage tree into a deterministic tar archive."""
