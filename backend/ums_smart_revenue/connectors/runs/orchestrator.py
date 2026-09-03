@@ -144,6 +144,10 @@ from ums_smart_revenue.connectors.google_source_rows import (
     ParsedSourceRow,
     SqlAlchemyGoogleRevenueSourceRowRepository,
 )
+from ums_smart_revenue.connectors.google_source_rows.repository import (
+    AMOUNT_NATIVE_INTEGER_DIGITS,
+    AMOUNT_NATIVE_SCALE,
+)
 from ums_smart_revenue.connectors.keys import (
     credential_key_candidates,
     source_system_for_connector,
@@ -234,9 +238,12 @@ _CSV_CURRENCY_COLUMNS = ("currency_code", "currencyCode")
 # (_validate_amount_native) rejects any amount with more than six fractional
 # digits. Accepting sub-scale CSV amounts would let a dry run count rows the
 # live run then fails at persistence — the same divergence, just later.
+# The two persistence limits are IMPORTED, not copied: they belong to the
+# repository gate this adapter must stay aligned with, so a schema change
+# updates one boundary and both halves move together.
 _CSV_MAX_AMOUNT_ADJUSTED_EXPONENT = 18
-_CSV_REVENUE_AMOUNT_SCALE = 6
-_CSV_REVENUE_MAX_INTEGER_DIGITS = 14
+_CSV_REVENUE_AMOUNT_SCALE = AMOUNT_NATIVE_SCALE
+_CSV_REVENUE_MAX_INTEGER_DIGITS = AMOUNT_NATIVE_INTEGER_DIGITS
 _CSV_DEFAULT_CURRENCY_BY_REPORT_TYPE = {
     # Google's documented YouTube Reporting estimated-revenue bulk schema has
     # no currency field; this project ingests those Reporting amounts as USD
@@ -3049,12 +3056,21 @@ def _accumulate_csv_row(
     # typed per-row failures instead of a run abort or a dry-run/live
     # divergence. The scale check mirrors _validate_amount_native exactly —
     # including its treatment of zero values with deep exponents.
-    if amount_decimal.adjusted() > _CSV_MAX_AMOUNT_ADJUSTED_EXPONENT:
+    # is_finite() guarantees an integer exponent slot; NaN/Infinity carry the
+    # string sentinels 'n'/'N'/'F' there, and the isinstance narrow keeps the
+    # type checkers honest about the comparisons below.
+    amount_exponent = amount_decimal.as_tuple().exponent
+    if not isinstance(amount_exponent, int):
+        raise _parser_payload_error(
+            report_id=report_id,
+            reason=f"csv row revenue {amount!r} not finite",
+        )
+    if amount_exponent > _CSV_MAX_AMOUNT_ADJUSTED_EXPONENT:
         raise _parser_payload_error(
             report_id=report_id,
             reason=f"csv row revenue {amount!r} exponent out of range",
         )
-    if amount_decimal.as_tuple().exponent < -_CSV_REVENUE_AMOUNT_SCALE:
+    if amount_exponent < -_CSV_REVENUE_AMOUNT_SCALE:
         raise _parser_payload_error(
             report_id=report_id,
             reason=f"csv row revenue {amount!r} exceeds the persisted "
