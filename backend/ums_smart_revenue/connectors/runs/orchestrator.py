@@ -2966,20 +2966,6 @@ def _parser_payload_from_csv_totals(
 
 
 # ============================================================================
-# Purpose: Validate one YouTube Reporting CSV component row and add its signed
-#          Decimal revenue amount to the matching monthly aggregate.
-# Database/ORM: None. This builds an in-memory parser payload only.
-# Standards: Date, identity, finite-decimal, and currency failures use typed
-#            connector errors; signed adjustments are accepted here and the
-#            completed monthly total is validated before parser handoff.
-# Blast Radius: Finance aggregation for YouTube Reporting CSV ingestion.
-# Connections:
-#   - File: backend/ums_smart_revenue/connectors/google_source_parsers/youtube_reporting.py
-#     -> consumes the completed monthly parser payload.
-#   - File: backend/ums_smart_revenue/connectors/google_source_rows/repository.py
-#     -> enforces the final non-negative persisted amount contract.
-# ============================================================================
-# ============================================================================
 # Purpose: Parse and fully validate one CSV revenue amount — Decimal
 #          construction, finiteness, the overflow bound on the ADJUSTED
 #          exponent, and the Numeric(20, 6) persistence-scale bound.
@@ -3046,6 +3032,20 @@ def _validated_revenue_amount_of(amount: str, *, report_id: str) -> Decimal:
     return amount_decimal
 
 
+# ============================================================================
+# Purpose: Validate one YouTube Reporting CSV component row and add its signed
+#          Decimal revenue amount to the matching monthly aggregate.
+# Database/ORM: None. This builds an in-memory parser payload only.
+# Standards: Date, identity, finite-decimal, and currency failures use typed
+#            connector errors; signed adjustments are accepted here and the
+#            completed monthly total is validated before parser handoff.
+# Blast Radius: Finance aggregation for YouTube Reporting CSV ingestion.
+# Connections:
+#   - File: backend/ums_smart_revenue/connectors/google_source_parsers/youtube_reporting.py
+#     -> consumes the completed monthly parser payload.
+#   - File: backend/ums_smart_revenue/connectors/google_source_rows/repository.py
+#     -> enforces the final non-negative persisted amount contract.
+# ============================================================================
 def _accumulate_csv_row(
     *,
     totals: dict[tuple[str, str | None, str], Decimal],

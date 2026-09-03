@@ -705,8 +705,6 @@ def test_csv_adapter_accepts_boundary_scale_amounts() -> None:
         month="2026-05",
     )
 
-    from decimal import Decimal
-
     assert len(payload["rows"]) == 1
     assert Decimal(payload["rows"][0]["metrics"]["estimatedRevenue"]) == Decimal("1E-6")
     assert payload["rows"][0]["metrics"]["currencyCode"] == "USD"
