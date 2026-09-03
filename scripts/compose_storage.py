@@ -649,7 +649,9 @@ def _pending_restore_payload_from_marker(
     pending_restore: Path,
 ) -> dict[str, Any] | None:
     """Return the validated pending-restore payload, if the marker exists."""
-    if not pending_restore.exists():
+    # FIX: Path.exists() is False for a dangling symlink, which previously
+    # made a planted redirect look like an absent marker; lexists() sees it.
+    if not os.path.lexists(pending_restore):
         return None
     if _is_redirect(pending_restore) or not pending_restore.is_file():
         raise StorageContractError("restore-pending marker is not a regular file")
@@ -752,6 +754,17 @@ def _assert_sensitive_output(path: Path, *, repository_root: Path) -> Path:
     return output
 
 
+
+def _require_unlinked_entry(entry: Path) -> None:
+    """Refuse hardlinked archive members: they can alias host files.
+
+    A regular file with more than one directory link inside the tree can be
+    a hardlink an attacker planted to make the backup archive a host file's
+    bytes; the store only ever creates single-link files.
+    """
+    if entry.is_file() and entry.stat().st_nlink != 1:
+        raise StorageContractError(f"archive member has multiple hardlinks: {entry}")
+
 def _archive_storage_tree(storage: Path, archive: Path) -> Path:
     """Write the storage tree into a deterministic tar archive."""
     roots = tuple(storage / name for name in STORAGE_DIRECTORIES)
@@ -759,7 +772,9 @@ def _archive_storage_tree(storage: Path, archive: Path) -> Path:
         raise StorageContractError("artifact and blob directories must exist before backup")
     entries: list[Path] = []
     for root in roots:
-        entries.extend(_walk_without_redirects(root))
+        for entry in _walk_without_redirects(root):
+            _require_unlinked_entry(entry)
+            entries.append(entry)
 
     temporary = archive.with_name(f".{archive.name}.tmp-{os.getpid()}")
     try:
@@ -1124,7 +1139,25 @@ def create_bundle_manifest(
     expected_gcs_bucket: str | None = None,
     repository_root: Path | None = None,
 ) -> Path:
-    """Write a SHA-256 manifest for all members of one external backup bundle."""
+    """Write a SHA-256 manifest for all members of one external backup bundle.
+
+    Args:
+        output: Manifest path inside the sensitive output directory.
+        files: Bundle members to digest; they must live beside the manifest.
+        profile: Manifest profile (coordinated recovery or generic backup).
+        blob_backend: Blob backend the bundle records (file-store or gcs).
+        expected_gcs_bucket: Required bucket when the backend is gcs.
+        repository_root: Checkout root the output must live outside of.
+
+    Returns:
+        The manifest path that was written.
+
+    Raises:
+        StorageContractError: the profile or backend is unknown, the output
+            path is inside the repository, a member is redirected, missing,
+            outside the bundle, or duplicated, or the coordinated recovery
+            member set is incomplete or hollow.
+    """
     if profile not in {COMPOSE_RECOVERY_PROFILE, GENERIC_BACKUP_PROFILE}:
         raise StorageContractError(f"unknown backup manifest profile: {profile}")
     if blob_backend not in {"file-store", "gcs"}:
@@ -1893,7 +1926,25 @@ def restore_artifact_archive(
     expected_gcs_bucket: str | None = None,
     repository_root: Path | None = None,
 ) -> None:
-    """Restore one verified archive without overwriting existing storage bytes."""
+    """Restore one verified archive without overwriting existing storage bytes.
+
+    Args:
+        raw_path: Host storage path the bundle is restored into.
+        archive: Verified artifact archive member of the bundle.
+        manifest: Coordinated recovery bundle manifest to verify against.
+        blob_backend: Blob backend the backup recorded (file-store or gcs).
+        expected_gcs_bucket: Required bucket when the backend is gcs.
+        repository_root: Checkout root for the tracked storage contract.
+
+    Returns:
+        ``None``.
+
+    Raises:
+        StorageContractError: the backend or bucket is invalid, storage fails
+            its host contract, the manifest or archive is missing/redirected,
+            or any verification, staging, publication, or rollback gate
+            refuses the restore.
+    """
     if blob_backend not in {"file-store", "gcs"}:
         raise StorageContractError(f"unknown backup blob backend: {blob_backend}")
     if blob_backend == "gcs" and expected_gcs_bucket is None:

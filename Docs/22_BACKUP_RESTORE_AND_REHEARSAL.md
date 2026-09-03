@@ -240,6 +240,10 @@ this checks that endpoint only and is not a claim about untested HBA paths.
 Then:
 
 ```powershell
+# Set $run to the completed backup run directory being recovered; it is the
+# same directory the rehearsal example used, but this procedure must stand
+# alone, so define it explicitly here.
+$run = 'D:\UMS-Backups\ums-database-backup-YYYYMMDDTHHMMSSZ-hex8'
 uv run python scripts/restore_database.py `
   --backup-dir $run `
   --target-container ums-clean-recovery-postgres `

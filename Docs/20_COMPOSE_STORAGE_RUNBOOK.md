@@ -282,12 +282,22 @@ test -n "$database_runs"
 test "$(printf '%s\n' "$database_runs" | wc -l)" -eq 1
 database_run="$database_runs"
 
+# The root archive step below runs the exact image the database backup
+# recorded, so the archive and the database capture share one image identity.
+image_id="$(python -c "import json,sys; print(json.load(open(sys.argv[1]))['source']['image_id'])"   "$database_run/database-manifest.json")"
+test -n "$image_id"
+
 host_uid="$(id -u)"
 host_gid="$(id -g)"
-uv run python scripts/compose_storage.py compose \
-  --path "$UMS_APP_DATA_HOST" -- run --rm --no-deps --user 0:0 \
-  --volume "$bundle:/backup" \
-  app-data-init \
+# The merged Compose model intentionally defines NO root-capable storage
+# service, so this root-operator step runs one explicit, operator-owned
+# docker container instead of a compose service. $image_id comes from the
+# database manifest captured above (`.source.image_id`).
+test -n "$image_id"
+docker run --rm --user 0:0 \
+  --volume "$UMS_APP_DATA_HOST":/var/lib/ums \
+  --volume "$bundle":/backup \
+  "$image_id" \
   python /srv/app/scripts/compose_storage.py archive-mounted \
     --path /var/lib/ums \
     --output /backup/ums-app-data.tgz \
@@ -435,6 +445,11 @@ if ($dbRuns.Count -ne 1) {
   throw "Expected exactly one database package, found $($dbRuns.Count)"
 }
 $dbRun = $dbRuns[0].FullName
+
+# The root ownership-adoption step below runs the exact image the backup
+# recorded; keep the archive and the database capture on one identity.
+$imageId = (Get-Content (Join-Path $dbRun 'database-manifest.json') | ConvertFrom-Json).source.image_id
+if (-not $imageId) { throw 'recovery manifest has no source image id' }
 uv run python scripts/compose_storage.py prepare `
   --path $env:UMS_APP_DATA_HOST
 Assert-NativeSuccess 'prepare empty recovery bind'
@@ -463,9 +478,14 @@ if ($env:UMS_BLOB_BACKEND -eq 'gcs') {
     throw 'GCS recovery proof was not acknowledged; refusing to start the application'
   }
 }
-uv run python scripts/compose_storage.py compose `
-  --path $env:UMS_APP_DATA_HOST -- `
-  -p $project run --rm --no-deps app-data-init
+# The merged Compose model has no root storage service; adopt restored
+# ownership with one explicit, operator-owned container. $imageId comes from
+# the recovery manifest read above.
+docker run --rm --user 0:0 `
+  --volume ${env:UMS_APP_DATA_HOST}:/var/lib/ums `
+  $imageId `
+  python /srv/app/scripts/compose_storage.py container-init `
+    --path /var/lib/ums --app-user app
 Assert-NativeSuccess 'adopt restored storage ownership'
 uv run python scripts/compose_storage.py compose `
   --path $env:UMS_APP_DATA_HOST -- `
@@ -495,6 +515,11 @@ test -n "$database_runs"
 test "$(printf '%s\n' "$database_runs" | wc -l)" -eq 1
 database_run="$database_runs"
 
+# The root ownership-adoption step below runs the exact image the backup
+# recorded; keep the archive and the database capture on one identity.
+image_id="$(python -c "import json,sys; print(json.load(open(sys.argv[1]))['source']['image_id'])"   "$database_run/database-manifest.json")"
+test -n "$image_id"
+
 docker compose -p "$project" up -d --wait --wait-timeout 120 postgres
 recovery_db_container="$(docker compose -p "$project" ps -q postgres)"
 test -n "$recovery_db_container"
@@ -518,9 +543,15 @@ if [ "$UMS_BLOB_BACKEND" = "gcs" ]; then
     exit 1
   fi
 fi
-uv run python scripts/compose_storage.py compose \
-  --path "$UMS_APP_DATA_HOST" -- \
-  -p "$project" run --rm --no-deps app-data-init
+# The merged Compose model has no root storage service; adopt restored
+# ownership with one explicit, operator-owned container. $image_id comes from
+# the recovery manifest read above.
+test -n "$image_id"
+docker run --rm --user 0:0 \
+  --volume "$UMS_APP_DATA_HOST":/var/lib/ums \
+  "$image_id" \
+  python /srv/app/scripts/compose_storage.py container-init \
+    --path /var/lib/ums --app-user app
 uv run python scripts/compose_storage.py compose \
   --path "$UMS_APP_DATA_HOST" -- \
   -p "$project" up -d --wait --wait-timeout 180 app
