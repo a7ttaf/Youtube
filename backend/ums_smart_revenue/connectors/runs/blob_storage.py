@@ -228,7 +228,9 @@ def deterministic_blob_path(
 ) -> str:
     """Build the deterministic blob URI for a raw report.
 
-    Path shape: {scheme}://{bucket}/{tenant_id}/{connector_key}/{report_type}/{month}/{checksum}.{ext}
+    Path shape:
+        {scheme}://{bucket}/{tenant_id}/{connector_key}/
+        {report_type}/{month}/{checksum}.{ext}
 
     Scheme MUST match the backend the orchestrator built (file-store for
     LocalFileStoreBackend, gs for GcsBlobStorageBackend); each backend
