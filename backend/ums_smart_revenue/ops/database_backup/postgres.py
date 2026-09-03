@@ -564,7 +564,7 @@ def _connect(source: ContainerConnection) -> Connection[tuple[object, ...]]:
 # ============================================================================
 def require_password_authentication(source: ContainerConnection) -> None:
     """Prove the loopback target rejects a fresh deliberately wrong password."""
-    wrong_password = "ums-wrong-password-" + secrets.token_hex(32)
+    wrong_password = "ums-auth-rejection-proof-" + secrets.token_hex(32)
     unexpected: Connection[tuple[object, ...]] | None = None
     try:
         unexpected = psycopg.connect(

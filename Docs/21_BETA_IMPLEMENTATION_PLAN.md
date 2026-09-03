@@ -132,7 +132,7 @@ the product through its second-most-restricted role.
   `manual-upload` connector grant; other connector job requests remain denied
 - [ ] Bootstrap emits the created user UUID; gateway UUID/email match that row and a
   subsequent write audit records the non-null actor
-- [ ] Manual import (`POST /revenue/facts`, `connector_key=manual-upload`) succeeds (201)
+- [ ] Manual import via `POST /revenue/facts` with the connector key `manual-upload` succeeds (201)
 - [ ] Import rejects any source not independently proven already USD; no EGP value is
   submitted to a `*_usd` field and no local FX is performed
 - [ ] Resumable/idempotent loop finishes with expected revenue-required channels exactly
