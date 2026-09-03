@@ -228,11 +228,15 @@ _CSV_CURRENCY_COLUMNS = ("currency_code", "currencyCode")
 # total traps ``decimal.Overflow`` and aborts the whole run. Row-level bound on
 # the adjusted exponent (most-significant-digit power): bounding the UPPER side
 # keeps every monthly total far below the default context's Emax, so the
-# accumulation can no longer trap. There is deliberately NO lower bound: tiny
-# finite amounts (``1E-19`` and smaller) cannot overflow anything and were
-# always valid CSV input, so rejecting them would silently zero legitimate
-# revenue without a documented contract change.
+# accumulation can no longer trap.
+# The FRACTIONAL side is bounded to the persistence scale, not to arithmetic:
+# monthly totals persist into Numeric(20, 6) source rows whose repository gate
+# (_validate_amount_native) rejects any amount with more than six fractional
+# digits. Accepting sub-scale CSV amounts would let a dry run count rows the
+# live run then fails at persistence — the same divergence, just later.
 _CSV_MAX_AMOUNT_ADJUSTED_EXPONENT = 18
+_CSV_REVENUE_AMOUNT_SCALE = 6
+_CSV_REVENUE_MAX_INTEGER_DIGITS = 14
 _CSV_DEFAULT_CURRENCY_BY_REPORT_TYPE = {
     # Google's documented YouTube Reporting estimated-revenue bulk schema has
     # no currency field; this project ingests those Reporting amounts as USD
@@ -2917,6 +2921,16 @@ def _parser_payload_from_csv_totals(
                 report_id=report_id,
                 reason=f"csv aggregated revenue total {total!r} must be non-negative",
             )
+        # FIX: Mirror the live persistence gate for the COMPLETED total: a
+        # non-zero monthly total must still fit Numeric(20, 6)'s integer
+        # digits, or a dry run would count rows the live run fails at
+        # persistence (per-row bounds alone cannot see summed magnitudes).
+        if not total.is_zero() and total.adjusted() >= _CSV_REVENUE_MAX_INTEGER_DIGITS:
+            raise _parser_payload_error(
+                report_id=report_id,
+                reason=f"csv aggregated revenue total {total!r} exceeds "
+                f"{_CSV_REVENUE_MAX_INTEGER_DIGITS} integer digits (column is Numeric(20, 6))",
+            )
         dimensions: dict[str, object] = {"channel": channel}
         if content_owner:
             dimensions["content_owner"] = content_owner
@@ -3029,13 +3043,22 @@ def _accumulate_csv_row(
             report_id=report_id,
             reason=f"csv row revenue {amount!r} not finite",
         )
-    # See _CSV_MAX_AMOUNT_ADJUSTED_EXPONENT: reject before the accumulation
-    # traps Overflow, as a typed per-row failure instead of a run abort. Only
-    # the upper side is bounded — tiny amounts are safe addends and stay valid.
+    # See _CSV_MAX_AMOUNT_ADJUSTED_EXPONENT (overflow) and
+    # _CSV_REVENUE_AMOUNT_SCALE (persistence): reject before the accumulation
+    # traps Overflow and before a total the live repository would refuse, as
+    # typed per-row failures instead of a run abort or a dry-run/live
+    # divergence. The scale check mirrors _validate_amount_native exactly —
+    # including its treatment of zero values with deep exponents.
     if amount_decimal.adjusted() > _CSV_MAX_AMOUNT_ADJUSTED_EXPONENT:
         raise _parser_payload_error(
             report_id=report_id,
             reason=f"csv row revenue {amount!r} exponent out of range",
+        )
+    if amount_decimal.as_tuple().exponent < -_CSV_REVENUE_AMOUNT_SCALE:
+        raise _parser_payload_error(
+            report_id=report_id,
+            reason=f"csv row revenue {amount!r} exceeds the persisted "
+            f"{_CSV_REVENUE_AMOUNT_SCALE}-digit fractional scale",
         )
     currency = _first_present(csv_row, *_CSV_CURRENCY_COLUMNS)
     if not currency:

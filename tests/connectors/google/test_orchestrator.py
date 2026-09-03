@@ -688,34 +688,71 @@ def test_csv_adapter_rejects_out_of_context_exponent_as_typed_row_error() -> Non
         )
 
 
-def test_csv_adapter_accepts_tiny_exponent_amounts() -> None:
-    """Tiny finite amounts (sub-cent exponents) remain valid CSV revenue.
+def test_csv_adapter_accepts_boundary_scale_amounts() -> None:
+    """An amount at exactly the persisted six-fractional-digit scale is valid.
 
-    The overflow guard bounds only the UPPER adjusted exponent — a tiny
-    addend cannot trap ``decimal.Overflow`` and was always accepted, so a
-    lower bound would have silently zeroed legitimate revenue without a
-    documented contract change (review: tiny valid revenue is rejected).
+    The scale bound mirrors the live ``_validate_amount_native`` gate
+    (Numeric(20, 6)): values INSIDE the scale stay valid CSV revenue -- only
+    sub-scale amounts that the live repository would reject are refused.
     """
     payload = _csv_to_parser_payload(
         raw_bytes=(
             b"date,channel_id,estimated_partner_revenue,currencyCode\n"
-            b"2026-05-01,UC_orch_alpha,1E-19,USD\n"
-            b"2026-05-02,UC_orch_alpha,1E-300,USD\n"
+            b"2026-05-01,UC_orch_alpha,0.000001,USD\n"
         ),
-        report_id="r-tiny-exponent",
+        report_id="r-boundary-scale",
         report_type="content_owner_estimated_revenue_a1",
         month="2026-05",
     )
 
-    # Both daily rows aggregate into ONE monthly total per (channel, owner,
-    # currency) key; the tinier addend is absorbed by the larger one.
     from decimal import Decimal
 
-    assert len(payload["rows"]) == 1, "tiny-exponent rows must be counted, not dropped"
-    assert Decimal(payload["rows"][0]["metrics"]["estimatedRevenue"]) == (
-        Decimal("1E-19") + Decimal("1E-300")
-    )
+    assert len(payload["rows"]) == 1
+    assert Decimal(payload["rows"][0]["metrics"]["estimatedRevenue"]) == Decimal("1E-6")
     assert payload["rows"][0]["metrics"]["currencyCode"] == "USD"
+
+
+def test_csv_adapter_rejects_sub_scale_amounts_as_typed_row_errors() -> None:
+    """Sub-scale amounts fail as typed row errors, never silently as zero.
+
+    A sub-scale addend (``1E-19``) survives ``adjusted()`` validation and
+    then UNDERFLOWS to zero during aggregation -- its revenue disappears
+    from the persisted monthly total without an error. The scale bound
+    rejects the row up front, exactly mirroring the live
+    ``_validate_amount_native`` gate, so a dry run cannot count rows the
+    live run fails at persistence.
+    """
+    with pytest.raises(GoogleApiResponseError, match="fractional scale"):
+        _csv_to_parser_payload(
+            raw_bytes=(
+                b"date,channel_id,estimated_partner_revenue,currencyCode\n"
+                b"2026-05-01,UC_orch_alpha,1E-19,USD\n"
+            ),
+            report_id="r-sub-scale",
+            report_type="content_owner_estimated_revenue_a1",
+            month="2026-05",
+        )
+
+
+def test_csv_adapter_rejects_monthly_total_exceeding_persistence_digits() -> None:
+    """A completed total past 14 integer digits fails, matching the live gate.
+
+    Per-row bounds cannot see summed magnitudes: two in-range rows can sum
+    to a total that ``_validate_amount_native`` would reject on the live
+    run. Rejecting the total here keeps the dry run truthful about what
+    the live persistence step accepts.
+    """
+    with pytest.raises(GoogleApiResponseError, match="14 integer digits"):
+        _csv_to_parser_payload(
+            raw_bytes=(
+                b"date,channel_id,estimated_partner_revenue,currencyCode\n"
+                b"2026-05-01,UC_orch_alpha,5E+16,USD\n"
+                b"2026-05-02,UC_orch_alpha,5E+16,USD\n"
+            ),
+            report_id="r-total-overflow",
+            report_type="content_owner_estimated_revenue_a1",
+            month="2026-05",
+        )
 
 
 def test_csv_adapter_preserves_camel_case_revenue_payload_shape() -> None:
