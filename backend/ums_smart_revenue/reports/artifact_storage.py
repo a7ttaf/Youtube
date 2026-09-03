@@ -83,8 +83,18 @@ class FileSystemExportArtifactStore:
         # ================================================================
         first_writer_wins = True
         try:
-            target_path.parent.mkdir(parents=True, exist_ok=True)
+            # FIX: explicit private modes (dirs 0750, temp file 0640 before it
+            # is linked into place). The Compose launcher's storage preflight
+            # rejects any group/world permission bit inside the bind tree, so
+            # umask-defaulted 0755/0644 writes made the launcher reject its
+            # own populated store on the next start.
+            target_path.parent.mkdir(parents=True, exist_ok=True, mode=0o750)
             temp_path.write_bytes(content)
+            if os.name != "nt":
+                # Windows maps a no-write mode onto the read-only attribute,
+                # which would block the temp-file unlink below; the Windows
+                # preflight enforces ACLs, not POSIX mode bits.
+                temp_path.chmod(0o640)
             try:
                 os.link(temp_path, target_path)
             except FileExistsError:

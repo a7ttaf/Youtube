@@ -11,6 +11,7 @@ not supported in a single orchestrator invocation.
 from __future__ import annotations
 
 import hashlib
+import os
 from pathlib import Path
 from typing import Protocol
 from uuid import UUID
@@ -78,8 +79,16 @@ class LocalFileStoreBackend:
 
     def upload(self, *, storage_uri: str, content: bytes) -> None:
         path = self._path_for(storage_uri)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(content)
+        # FIX: explicit private modes (dirs 0750, files 0640). The Compose
+        # launcher's storage preflight rejects any group/world permission bit
+        # inside the bind tree, so umask-defaulted 0755/0644 writes made the
+        # launcher reject its own populated store on the next start.
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o750)
+        descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o640)
+        try:
+            os.write(descriptor, content)
+        finally:
+            os.close(descriptor)
 
     def get_bytes(self, *, storage_uri: str) -> bytes:
         return self._path_for(storage_uri).read_bytes()

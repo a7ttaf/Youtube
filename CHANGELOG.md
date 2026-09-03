@@ -13,10 +13,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   must be owned by the application identity `10001:10001` and carry no
   group/world write bits. The launcher creates them automatically only when
   it can establish that ownership (running as the app identity or as root);
-  a plain non-root operator gets a fail-fast error naming the exact
-  `sudo install -d -o 10001 -g 10001 -m 750 ...` command per missing child
-  instead of silently mis-owned data directories. System/shared paths and
-  linked or submounted trees are refused before any host write.
+  a plain non-root operator gets a fail-fast error naming the exact root
+  commands — `sudo install -d -o 10001 -g 10001 -m 750 <child>` plus
+  `sudo usermod -aG 10001 $USER` (the operator needs group-10001 traversal
+  for the preflight's access proof) — instead of silently mis-owned data
+  directories. The app writes blobs and export artifacts with private
+  0750/0640 modes so populated stores keep passing the boundary scan.
+  System/shared paths and linked or submounted trees are refused before any
+  host write.
 - Enabling scheduled group sync (`UMS_GROUP_SYNC_SCHEDULE_ENABLED=true`) now
   fails application startup when `UMS_GOOGLE_CONNECTOR_SERVICE_ACTOR_ID` is
   unset **or** still holds the well-known `.env.example` placeholder UUID

@@ -539,19 +539,18 @@ def _run_checked(
     capture: bool = False,
 ) -> subprocess.CompletedProcess[str]:
     """Run Docker without shell interpolation and optionally retain output."""
-    try:
-        return subprocess.run(
-            command,
-            cwd=cwd,
-            env=env,
-            check=False,
-            capture_output=capture,
-            text=capture,
-        )
-    except OSError as exc:
-        raise StoragePathError(
-            f"could not execute the required Docker command ({command[0]!r})"
-        ) from exc
+    # FIX: OSError from a missing/unexecutable Docker binary is deliberately
+    # NOT translated into StoragePathError -- main() maps OSError to the
+    # documented exit status 127 so automation can distinguish "Docker not
+    # runnable" from a storage-preflight rejection (status 2).
+    return subprocess.run(
+        command,
+        cwd=cwd,
+        env=env,
+        check=False,
+        capture_output=capture,
+        text=capture,
+    )
 
 
 def _local_endpoint(endpoint: object) -> bool:

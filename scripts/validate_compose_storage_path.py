@@ -1371,7 +1371,9 @@ def _create_storage_children(canonical: Path, root_identity: tuple[int, int]) ->
                     f"identity ({APP_UID}:{APP_GID}) as uid/gid "
                     f"{current_identity[0]}:{current_identity[1]}; create it explicitly "
                     f"as root with: sudo install -d -o {APP_UID} -g {APP_GID} -m 750 "
-                    f"{child}"
+                    f"{child} -- and join the app group so the next preflight can "
+                    f"traverse it: sudo usermod -aG {APP_GID} $USER (re-login applies "
+                    "the group change)"
                 )
             try:
                 child.mkdir(mode=0o750, exist_ok=False)
@@ -1474,6 +1476,7 @@ def prepare_storage_path(
     if _real_directory_identity(canonical) != root_identity:
         raise StoragePathError("storage root identity changed during preparation")
     return validate_storage_path(canonical, project_root=root, require_exists=True)
+
 
 def _build_parser() -> argparse.ArgumentParser:
     """Return the validator CLI parser for the reviewed invocation options."""
