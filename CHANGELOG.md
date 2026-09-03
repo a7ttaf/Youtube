@@ -90,6 +90,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `SourceRowUpsertResult` instead of a bare list of rows. Callers that need the
   persisted rows should read `.entries`; connector-run accounting should use
   `.created`, `.updated`, and `.unchanged` for source-row classification.
+- YouTube Reporting CSV ingestion now accepts only the shipped
+  `estimated_partner_revenue` / `estimatedRevenue` revenue schemas; the
+  unsupported `ad_revenue` shorthand was removed. Header validation also
+  rejects duplicate normalized fields and conflicting aliases. Signed daily or
+  breakdown adjustments remain valid, while each completed monthly
+  channel/content-owner/currency total must be non-negative before parser or
+  dry-run handoff.
 
 ### Fixed
 - Export artifact downloads now commit their sensitive read/download audit rows

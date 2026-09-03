@@ -110,23 +110,27 @@ _SERVICE_ACTOR_ID = "ddddeeee-ffff-0000-1111-222222222222"
 def _next_produced_report(
     produced_iter: Iterator[ProducedReport],
 ) -> ProducedReport:
+    """Return the first produced report, failing when the iterator is empty."""
     for produced in produced_iter:
         return produced
     raise AssertionError("expected one aggregated YouTube report")
 
 
 def _assert_produced_reports_exhausted(produced_iter: Iterator[ProducedReport]) -> None:
+    """Assert that the produced-report iterator has no additional reports."""
     for extra_report in produced_iter:
         raise AssertionError(f"expected produced reports to be exhausted, got {extra_report!r}")
 
 
 def _close_produced_reports(produced_iter: Iterator[ProducedReport]) -> None:
+    """Close a produced-report iterator when it exposes a close method."""
     close = getattr(produced_iter, "close", None)
     if callable(close):
         close()
 
 
 def _runner_credentials() -> Credentials:
+    """Return deterministic credentials for tests that do not call Google."""
     return Credentials(token="test-token")
 
 
@@ -399,6 +403,412 @@ def test_csv_adapter_rejects_empty_or_headerless_csv(raw_bytes: bytes) -> None:
             report_type="content_owner_estimated_revenue_a1",
             month="2026-05",
         )
+
+
+# ============================================================================
+# Purpose: Prove the CSV adapter no longer accepts the ``ad_revenue`` column as
+#          a revenue source, and that the rejection is caused by the alias
+#          itself rather than by anything else in the fixture.
+# Database/ORM: None -- pure adapter call, no session.
+# Standards: Asserts the exact existing failure mode (header validation raising
+#            GoogleApiResponseError "csv missing revenue column") instead of a
+#            generic exception type.
+# Blast Radius: Finance -- guards which CSV columns may become revenue amounts.
+# Connections:
+#   - Constant: orchestrator._CSV_REVENUE_COLUMNS -> the alias table under test.
+#   - File: backend/ums_smart_revenue/connectors/google/report_type_whitelist.py
+#     -> the raw ad-revenue report type this alias would have pre-authorised.
+# ============================================================================
+def test_csv_adapter_rejects_ad_revenue_as_a_revenue_column() -> None:
+    """``ad_revenue`` is not a supported revenue column and must not be ingested.
+
+    The alias used to sit in ``_CSV_REVENUE_COLUMNS`` even though no parser was
+    reviewed against the raw ad-revenue schema that
+    ``report_type_whitelist.SUPPORTED_REPORT_TYPES`` holds out. A CSV whose only
+    revenue-like column is ``ad_revenue`` must therefore fail header validation.
+
+    The second half of the test is the control: the byte-identical CSV with the
+    canonical ``estimated_partner_revenue`` header parses to a real revenue row,
+    which proves the rejection above is attributable to the column name alone
+    and not to the date, channel, currency, or month of the fixture.
+    """
+    ad_revenue_csv = (
+        b"date,channel_id,content_owner,ad_revenue,currencyCode\n"
+        b"2026-05-01,UC_orch_alpha,cms-orch-1,1.10,USD\n"
+    )
+    with pytest.raises(GoogleApiResponseError, match="csv missing revenue column"):
+        _csv_to_parser_payload(
+            raw_bytes=ad_revenue_csv,
+            report_id="r-ad-revenue-alias",
+            report_type="content_owner_estimated_revenue_a1",
+            month="2026-05",
+        )
+
+    canonical_csv = ad_revenue_csv.replace(b"ad_revenue", b"estimated_partner_revenue")
+    payload = _csv_to_parser_payload(
+        raw_bytes=canonical_csv,
+        report_id="r-ad-revenue-alias",
+        report_type="content_owner_estimated_revenue_a1",
+        month="2026-05",
+    )
+    assert payload["rows"] == [
+        {
+            "line_index": 0,
+            "date_range": {"start": "2026-05-01", "end": "2026-05-31"},
+            "dimensions": {
+                "channel": "UC_orch_alpha",
+                "content_owner": "cms-orch-1",
+            },
+            "metrics": {
+                "estimatedRevenue": "1.10",
+                "currencyCode": "USD",
+            },
+        }
+    ]
+
+
+# ============================================================================
+# Purpose: Prove malformed CSV headers fail closed while supported aliases and
+#          whitespace-normalized rows preserve the downstream finance shape.
+# Database/ORM: None -- these are pure adapter boundary tests.
+# Standards: Reject duplicate/conflicting aliases before DictReader can silently
+#            select a value; retain exact parser payload assertions for canonical
+#            and legacy supported headers.
+# Blast Radius: Finance -- protects revenue-column selection and parser export
+#               shape before source-row normalization.
+# Connections:
+#   - Function: orchestrator._normalize_csv_fieldnames -> duplicate contract.
+#   - Function: orchestrator._validate_csv_headers -> revenue alias contract.
+#   - File: backend/ums_smart_revenue/connectors/google_source_parsers/youtube_reporting.py
+#     -> consumes the asserted ``estimatedRevenue`` payload metric.
+# ============================================================================
+def test_csv_adapter_rejects_duplicate_normalized_revenue_headers() -> None:
+    """Headers that differ only by case/whitespace must not be last-value-wins."""
+    with pytest.raises(GoogleApiResponseError, match="duplicate header"):
+        _csv_to_parser_payload(
+            raw_bytes=(
+                b"date,channel_id,estimatedRevenue, estimatedRevenue ,currencyCode\n"
+                b"2026-05-01,UC_orch_alpha,1.10,99.00,USD\n"
+            ),
+            report_id="r-duplicate-revenue-header",
+            report_type="content_owner_estimated_revenue_a1",
+            month="2026-05",
+        )
+
+
+def test_csv_adapter_rejects_conflicting_revenue_alias_headers() -> None:
+    """Distinct supported revenue aliases must not silently choose one amount."""
+    with pytest.raises(GoogleApiResponseError, match="conflicting revenue columns"):
+        _csv_to_parser_payload(
+            raw_bytes=(
+                b"date,channel_id,estimated_partner_revenue,estimatedRevenue,currencyCode\n"
+                b"2026-05-01,UC_orch_alpha,1.10,99.00,USD\n"
+            ),
+            report_id="r-conflicting-revenue-headers",
+            report_type="content_owner_estimated_revenue_a1",
+            month="2026-05",
+        )
+
+
+@pytest.mark.parametrize(
+    ("raw_bytes", "error_message"),
+    [
+        (
+            (
+                b"date,day,channel_id,estimated_partner_revenue,currencyCode\n"
+                b"2026-05-01,2026-05-01,UC_orch_alpha,1.10,USD\n"
+            ),
+            "conflicting date columns",
+        ),
+        (
+            (
+                b"date,channel,channel_id,estimated_partner_revenue,currencyCode\n"
+                b"2026-05-01,UC_orch_alpha,UC_orch_alpha,1.10,USD\n"
+            ),
+            "conflicting channel columns",
+        ),
+        (
+            (
+                b"date,channel_id,estimated_partner_revenue,currency_code,currencyCode\n"
+                b"2026-05-01,UC_orch_alpha,1.10,USD,USD\n"
+            ),
+            "conflicting currency columns",
+        ),
+    ],
+)
+def test_csv_adapter_rejects_conflicting_non_revenue_alias_headers(
+    raw_bytes: bytes, error_message: str
+) -> None:
+    """Even equal alias values are ambiguous schema evidence and must fail."""
+    with pytest.raises(GoogleApiResponseError, match=error_message):
+        _csv_to_parser_payload(
+            raw_bytes=raw_bytes,
+            report_id="r-conflicting-non-revenue-headers",
+            report_type="content_owner_estimated_revenue_a1",
+            month="2026-05",
+        )
+
+
+def test_csv_adapter_rejects_malformed_revenue_decimal() -> None:
+    """A non-decimal revenue cell must fail before any finance row is emitted."""
+    with pytest.raises(GoogleApiResponseError, match="not a valid decimal"):
+        _csv_to_parser_payload(
+            raw_bytes=(
+                b"date,channel_id,estimated_partner_revenue,currencyCode\n"
+                b"2026-05-01,UC_orch_alpha,not-a-number,USD\n"
+            ),
+            report_id="r-malformed-revenue",
+            report_type="content_owner_estimated_revenue_a1",
+            month="2026-05",
+        )
+
+
+def test_csv_adapter_normalizes_whitespace_before_row_lookup() -> None:
+    """Whitespace around headers and values must preserve the canonical row shape."""
+    payload = _csv_to_parser_payload(
+        raw_bytes=(
+            b" date , channel_id , content_owner , estimated_partner_revenue , currencyCode \n"
+            b" 2026-05-01 , UC_orch_alpha , cms-orch-1 , 1.10 , USD \n"
+        ),
+        report_id="r-whitespace-normalized",
+        report_type="content_owner_estimated_revenue_a1",
+        month="2026-05",
+    )
+
+    assert payload["rows"] == [
+        {
+            "line_index": 0,
+            "date_range": {"start": "2026-05-01", "end": "2026-05-31"},
+            "dimensions": {
+                "channel": "UC_orch_alpha",
+                "content_owner": "cms-orch-1",
+            },
+            "metrics": {
+                "estimatedRevenue": "1.10",
+                "currencyCode": "USD",
+            },
+        }
+    ]
+
+
+@pytest.mark.parametrize(
+    ("raw_bytes", "error_message"),
+    [
+        (
+            (
+                b"date,channel_id,estimated_partner_revenue,currencyCode\n"
+                b"2026-04-30,UC_orch_alpha,1.10,USD\n"
+            ),
+            "outside requested report_month",
+        ),
+        (
+            (b"date,channel_id,estimated_partner_revenue,currencyCode\n2026-05-01,,1.10,USD\n"),
+            "missing channel/channel_id",
+        ),
+        (
+            (
+                b"date,channel_id,estimated_partner_revenue,currencyCode\n"
+                b"2026-05-01,UC_orch_alpha,1.10, \n"
+            ),
+            "blank currency",
+        ),
+    ],
+)
+def test_csv_adapter_rejects_wrong_month_channel_or_currency(
+    raw_bytes: bytes, error_message: str
+) -> None:
+    """Rows outside the requested month or missing identity/currency fail closed."""
+    with pytest.raises(GoogleApiResponseError, match=error_message):
+        _csv_to_parser_payload(
+            raw_bytes=raw_bytes,
+            report_id="r-invalid-row-boundary",
+            report_type="content_owner_estimated_revenue_a1",
+            month="2026-05",
+        )
+
+
+def test_csv_adapter_accepts_negative_adjustment_when_monthly_total_is_non_negative() -> None:
+    """Signed source adjustments remain valid when their completed total is non-negative."""
+    payload = _csv_to_parser_payload(
+        raw_bytes=(
+            b"date,channel_id,estimated_partner_revenue,currencyCode\n"
+            b"2026-05-01,UC_orch_alpha,10.00,USD\n"
+            b"2026-05-02,UC_orch_alpha,-1.00,USD\n"
+        ),
+        report_id="r-negative-adjustment",
+        report_type="content_owner_estimated_revenue_a1",
+        month="2026-05",
+    )
+
+    assert payload["rows"] == [
+        {
+            "line_index": 0,
+            "date_range": {"start": "2026-05-01", "end": "2026-05-31"},
+            "dimensions": {"channel": "UC_orch_alpha"},
+            "metrics": {
+                "estimatedRevenue": "9.00",
+                "currencyCode": "USD",
+            },
+        }
+    ]
+
+
+def test_csv_adapter_rejects_negative_completed_monthly_total() -> None:
+    """A negative completed monthly total must not reach the source-row parser."""
+    with pytest.raises(GoogleApiResponseError, match="must be non-negative"):
+        _csv_to_parser_payload(
+            raw_bytes=(
+                b"date,channel_id,estimated_partner_revenue,currencyCode\n"
+                b"2026-05-01,UC_orch_alpha,1.10,USD\n"
+                b"2026-05-02,UC_orch_alpha,-2.20,USD\n"
+            ),
+            report_id="r-negative-revenue",
+            report_type="content_owner_estimated_revenue_a1",
+            month="2026-05",
+        )
+
+
+def test_csv_adapter_rejects_out_of_context_exponent_as_typed_row_error() -> None:
+    """A finite but astronomically-exponented amount is a row failure, not a run abort.
+
+    ``Decimal("1E+999999999")`` constructs and passes ``is_finite()``, but adding
+    it to the running monthly total traps ``decimal.Overflow`` and would abort
+    the whole run. The adjusted-exponent bound must reject the row with the
+    same typed connector error as every other malformed CSV value.
+    """
+    with pytest.raises(GoogleApiResponseError, match="exponent out of range"):
+        _csv_to_parser_payload(
+            raw_bytes=(
+                b"date,channel_id,estimated_partner_revenue,currencyCode\n"
+                b"2026-05-01,UC_orch_alpha,1E+999999999,USD\n"
+            ),
+            report_id="r-huge-exponent",
+            report_type="content_owner_estimated_revenue_a1",
+            month="2026-05",
+        )
+
+
+def test_csv_adapter_accepts_boundary_scale_amounts() -> None:
+    """An amount at exactly the persisted six-fractional-digit scale is valid.
+
+    The scale bound mirrors the live ``_validate_amount_native`` gate
+    (Numeric(20, 6)): values INSIDE the scale stay valid CSV revenue -- only
+    sub-scale amounts that the live repository would reject are refused.
+    """
+    payload = _csv_to_parser_payload(
+        raw_bytes=(
+            b"date,channel_id,estimated_partner_revenue,currencyCode\n"
+            b"2026-05-01,UC_orch_alpha,0.000001,USD\n"
+        ),
+        report_id="r-boundary-scale",
+        report_type="content_owner_estimated_revenue_a1",
+        month="2026-05",
+    )
+
+    assert len(payload["rows"]) == 1
+    assert Decimal(payload["rows"][0]["metrics"]["estimatedRevenue"]) == Decimal("1E-6")
+    assert payload["rows"][0]["metrics"]["currencyCode"] == "USD"
+
+
+def test_csv_adapter_rejects_sub_scale_amounts_as_typed_row_errors() -> None:
+    """Sub-scale amounts fail as typed row errors, never silently as zero.
+
+    A sub-scale addend (``1E-19``) survives ``adjusted()`` validation and
+    then UNDERFLOWS to zero during aggregation -- its revenue disappears
+    from the persisted monthly total without an error. The scale bound
+    rejects the row up front, exactly mirroring the live
+    ``_validate_amount_native`` gate, so a dry run cannot count rows the
+    live run fails at persistence.
+    """
+    with pytest.raises(GoogleApiResponseError, match="fractional scale"):
+        _csv_to_parser_payload(
+            raw_bytes=(
+                b"date,channel_id,estimated_partner_revenue,currencyCode\n"
+                b"2026-05-01,UC_orch_alpha,1E-19,USD\n"
+            ),
+            report_id="r-sub-scale",
+            report_type="content_owner_estimated_revenue_a1",
+            month="2026-05",
+        )
+
+
+def test_csv_adapter_overflow_guard_uses_adjusted_exponent_and_spares_zero() -> None:
+    """Trailing zeros raise the ADJUSTED exponent; a huge zero form is harmless.
+
+    ``1.0E+19`` carries a tuple exponent of 18 but a most-significant-digit
+    power of 19, so comparing the tuple exponent would let it slip past the
+    overflow bound while rejecting harmless zeros like ``0E+50``. The
+    overflow guard must compare adjusted() and exempt zero values.
+    """
+    with pytest.raises(GoogleApiResponseError, match="exponent out of range"):
+        _csv_to_parser_payload(
+            raw_bytes=(
+                b"date,channel_id,estimated_partner_revenue,currencyCode\n"
+                b"2026-05-01,UC_orch_alpha,1.0E+19,USD\n"
+            ),
+            report_id="r-trailing-zero-overflow",
+            report_type="content_owner_estimated_revenue_a1",
+            month="2026-05",
+        )
+
+    payload = _csv_to_parser_payload(
+        raw_bytes=(
+            b"date,channel_id,estimated_partner_revenue,currencyCode\n"
+            b"2026-05-01,UC_orch_alpha,0E+50,USD\n"
+        ),
+        report_id="r-huge-zero",
+        report_type="content_owner_estimated_revenue_a1",
+        month="2026-05",
+    )
+
+    assert len(payload["rows"]) == 1
+    assert payload["rows"][0]["metrics"]["estimatedRevenue"] in {"0", "0E+50", "0.000000"}
+
+
+def test_csv_adapter_rejects_monthly_total_exceeding_persistence_digits() -> None:
+    """A completed total past 14 integer digits fails, matching the live gate.
+
+    Per-row bounds cannot see summed magnitudes: two in-range rows can sum
+    to a total that ``_validate_amount_native`` would reject on the live
+    run. Rejecting the total here keeps the dry run truthful about what
+    the live persistence step accepts.
+    """
+    with pytest.raises(GoogleApiResponseError, match="14 integer digits"):
+        _csv_to_parser_payload(
+            raw_bytes=(
+                b"date,channel_id,estimated_partner_revenue,currencyCode\n"
+                b"2026-05-01,UC_orch_alpha,5E+16,USD\n"
+                b"2026-05-02,UC_orch_alpha,5E+16,USD\n"
+            ),
+            report_id="r-total-overflow",
+            report_type="content_owner_estimated_revenue_a1",
+            month="2026-05",
+        )
+
+
+def test_csv_adapter_preserves_camel_case_revenue_payload_shape() -> None:
+    """The existing ``estimatedRevenue`` alias remains a valid finance input."""
+    payload = _csv_to_parser_payload(
+        raw_bytes=_csv_for_one_row(),
+        report_id="r-existing-estimated-revenue",
+        report_type="content_owner_estimated_revenue_a1",
+        month="2026-05",
+    )
+
+    assert payload["rows"] == [
+        {
+            "line_index": 0,
+            "date_range": {"start": "2026-05-01", "end": "2026-05-31"},
+            "dimensions": {
+                "channel": "UC_orch_alpha",
+                "content_owner": "cms-orch-1",
+            },
+            "metrics": {
+                "estimatedRevenue": "12.345600",
+                "currencyCode": "USD",
+            },
+        }
+    ]
 
 
 def test_youtube_reporting_runner_aggregates_daily_reports_before_parser_handoff(
@@ -799,8 +1209,9 @@ def test_run_one_reuses_raw_file_inserted_by_racing_worker(
     calls = {"n": 0}
 
     def racing_find(db_session, *, tenant_id, source, report_type, report_month, checksum):
-        """Race the duplicate-row lookup with a sibling insert
-        to exercise the IntegrityError fallback."""
+        """Race the duplicate-row lookup with a sibling insert to
+        exercise the IntegrityError fallback.
+        """
         calls["n"] += 1
         if calls["n"] == 1:
             db_session.add(
@@ -1938,8 +2349,9 @@ def test_bucket_b_parser_error_on_second_report_marks_raw_file_failed_and_status
     call_state = {"n": 0}
 
     class FlakyParser:
-        """Parser that fails the first call and succeeds on retry;
-        exercises parser retry semantics."""
+        """Parser that fails the first call and succeeds on retry; exercises
+        parser retry semantics.
+        """
 
         @staticmethod
         def parse(payload, *, tenant_id):
@@ -2540,6 +2952,91 @@ def test_dry_run_writes_nothing_returns_outcome_with_run_none(
         .filter(ConnectorRunRawFileORM.tenant_id == TENANT_ID)
         .count()
         == 0
+    )
+    assert (
+        session.query(GoogleRevenueSourceRowORM)
+        .filter(GoogleRevenueSourceRowORM.tenant_id == TENANT_ID)
+        .count()
+        == 0
+    )
+
+
+# ============================================================================
+# Purpose: Prove dry-run rejects a negative completed monthly total before reporting a
+#          successful report or a would-upsert finance row count.
+# Database/ORM: SQLite session is inspected after the dry-run SAVEPOINT rolls
+#               back; no connector, raw-file, or source-row write is allowed.
+# Standards: Exercise the real runner and parser boundary with mocked Google
+#            transport/blob dependencies; assert typed failure and zero rows.
+# Blast Radius: Finance dry-run validation and operator-facing report counts.
+# Connections:
+#   - Function: orchestrator._parser_payload_from_csv_totals -> rejects a
+#     negative completed total after signed component aggregation.
+#   - Function: orchestrator._run_dry_run -> counts the produced failure.
+# ============================================================================
+def test_dry_run_rejects_negative_revenue_before_counting_rows(
+    session: Session, _stub_secret_resolver
+) -> None:
+    """A negative revenue CSV must produce a failed, zero-row dry-run outcome."""
+    _make_credential_row(
+        session,
+        tenant_id=TENANT_ID,
+        connector_key=CONNECTOR_KEY,
+        account_id=ACCOUNT_ID,
+    )
+    negative_csv = (
+        b"date,channel,content_owner,estimatedRevenue,currencyCode\n"
+        b"2026-05-01,UC_dry_negative,cms-orch-1,-1.230000,USD\n"
+    )
+
+    with (
+        patch(
+            "ums_smart_revenue.connectors.runs.orchestrator.YouTubeReportingClient"
+        ) as yt_client_cls,
+        patch("ums_smart_revenue.connectors.runs.orchestrator.LocalFileStoreBackend") as local_cls,
+        patch("ums_smart_revenue.connectors.runs.orchestrator.refresh_credentials") as refresh,
+        patch("ums_smart_revenue.connectors.runs.orchestrator.GoogleHttpClient") as http_cls,
+    ):
+        http_cls.return_value.close.return_value = None
+        refresh.return_value = None
+
+        client = yt_client_cls.return_value
+        client.list_supported_jobs.return_value = [
+            {"id": "job-negative", "reportTypeId": CONNECTOR_KEY}
+        ]
+        client.list_reports_for_month.return_value = [
+            {"id": "r-negative", "downloadUrl": "https://yt/r-negative"}
+        ]
+        client.fetch_report.return_value = negative_csv
+
+        backend = local_cls.return_value
+        backend.upload.side_effect = AssertionError("blob upload must not be called in dry-run")
+        backend.get_bytes.side_effect = AssertionError(
+            "blob get_bytes must not be called in dry-run"
+        )
+
+        outcome = run_one(
+            session,
+            tenant_id=TENANT_ID,
+            connector_key=CONNECTOR_KEY,
+            account_id=ACCOUNT_ID,
+            report_month="2026-05",
+            dry_run=True,
+        )
+
+    assert outcome.run is None
+    assert outcome.counts["reports_attempted"] == 1
+    assert outcome.counts["reports_succeeded"] == 0
+    assert outcome.counts["reports_failed"] == 1
+    assert outcome.counts["rows_upserted_total"] == 0
+    assert outcome.per_report_failures == [
+        (CONNECTOR_KEY, "GoogleApiResponseError"),
+    ]
+    assert (
+        session.query(ConnectorRunORM).filter(ConnectorRunORM.tenant_id == TENANT_ID).count() == 0
+    )
+    assert (
+        session.query(RawReportFileORM).filter(RawReportFileORM.tenant_id == TENANT_ID).count() == 0
     )
     assert (
         session.query(GoogleRevenueSourceRowORM)
