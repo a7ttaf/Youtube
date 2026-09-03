@@ -1366,14 +1366,18 @@ def _create_storage_children(canonical: Path, root_identity: tuple[int, int]) ->
                 and current_identity != (APP_UID, APP_GID)
                 and os.geteuid() != 0
             ):
+                # FIX: the remediation must satisfy every condition the next
+                # preflight enforces — the child's app ownership AND the
+                # operator's group-traversal proof. The host group with this
+                # GID may not exist yet, so create it conditionally first.
                 raise StoragePathError(
                     f"cannot provision storage child {child!s} with the required app "
                     f"identity ({APP_UID}:{APP_GID}) as uid/gid "
-                    f"{current_identity[0]}:{current_identity[1]}; create it explicitly "
-                    f"as root with: sudo install -d -o {APP_UID} -g {APP_GID} -m 750 "
-                    f"{child} -- and join the app group so the next preflight can "
-                    f"traverse it: sudo usermod -aG {APP_GID} $USER (re-login applies "
-                    "the group change)"
+                    f"{current_identity[0]}:{current_identity[1]}; run: "
+                    f"sudo groupadd -g {APP_GID} ums-app 2>/dev/null; "
+                    f"sudo install -d -o {APP_UID} -g {APP_GID} -m 750 {child}; "
+                    f"sudo usermod -aG {APP_GID} $USER; then log out and back in "
+                    "so the preflight's group-access proof succeeds"
                 )
             try:
                 child.mkdir(mode=0o750, exist_ok=False)

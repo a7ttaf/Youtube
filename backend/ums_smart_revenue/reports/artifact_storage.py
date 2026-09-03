@@ -57,6 +57,28 @@ class FileSystemExportArtifactStore:
         content_type: str,
         content: bytes,
     ) -> ExportArtifactMetadata:
+        """Persist one export artifact atomically and return its metadata.
+
+        Args:
+            export_id: Owning export job id (validated, becomes one path
+                segment under ``exports/``).
+            filename: Operator-visible artifact filename (validated, becomes
+                the final path segment).
+            content_type: Declared MIME type recorded in the metadata.
+            content: Non-empty artifact bytes within the configured size cap.
+
+        Returns:
+            Metadata describing the artifact actually on disk: its
+            ``file://`` URI, filename, content type, byte size, and sha256
+            checksum. Under a concurrent second writer, the metadata reflects
+            the first-writer's persisted bytes, not the caller's input.
+
+        Raises:
+            ExportArtifactStorageError: Empty content, a size-cap violation,
+                or any filesystem failure; a partial artifact is never left
+                at the target path (first-writer-wins persistence via
+                ``os.link`` from a private temp file).
+        """
         normalized_export_id = _normalize_export_id(export_id)
         normalized_filename = _normalize_filename(filename)
         normalized_content_type = _normalize_content_type(content_type)
@@ -83,17 +105,20 @@ class FileSystemExportArtifactStore:
         # ================================================================
         first_writer_wins = True
         try:
-            # FIX: explicit private modes (dirs 0750, temp file 0640 before it
-            # is linked into place). The Compose launcher's storage preflight
-            # rejects any group/world permission bit inside the bind tree, so
-            # umask-defaulted 0755/0644 writes made the launcher reject its
-            # own populated store on the next start.
+            # FIX: every directory level must end up with no group/world write —
+            # the Compose launcher's storage preflight rejects any such bit
+            # inside the bind tree, so umask-derived 0755 intermediates
+            # (exports/, the export-id dir) made the launcher reject its own
+            # populated store on the next start. chmod on POSIX only: Windows
+            # maps non-writable modes onto the read-only attribute; the
+            # Windows preflight enforces ACLs, not POSIX mode bits.
             target_path.parent.mkdir(parents=True, exist_ok=True, mode=0o750)
             temp_path.write_bytes(content)
             if os.name != "nt":
-                # Windows maps a no-write mode onto the read-only attribute,
-                # which would block the temp-file unlink below; the Windows
-                # preflight enforces ACLs, not POSIX mode bits.
+                for directory in target_path.parents:
+                    os.chmod(directory, 0o750)
+                    if directory == self._root_dir:
+                        break
                 temp_path.chmod(0o640)
             try:
                 os.link(temp_path, target_path)

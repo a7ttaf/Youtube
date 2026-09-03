@@ -78,12 +78,31 @@ class LocalFileStoreBackend:
         return candidate
 
     def upload(self, *, storage_uri: str, content: bytes) -> None:
+        """Persist one blob payload at ``storage_uri`` with private on-disk modes.
+
+        Args:
+            storage_uri: Store-relative ``file://`` URI produced by
+                :meth:`uri_for`; containment-checked before any write.
+            content: Exact bytes to persist; an existing payload at the same
+                URI is truncated and replaced.
+
+        Raises:
+            ValueError: The URI fails the ``..``-segment or containment
+                validation in :meth:`_path_for`.
+            OSError: Directory creation or the file write fails.
+        """
         path = self._path_for(storage_uri)
-        # FIX: explicit private modes (dirs 0750, files 0640). The Compose
-        # launcher's storage preflight rejects any group/world permission bit
-        # inside the bind tree, so umask-defaulted 0755/0644 writes made the
-        # launcher reject its own populated store on the next start.
+        # FIX: every directory level must end up with no group/world write —
+        # the Compose launcher's storage preflight rejects any such bit inside
+        # the bind tree, so umask-derived 0755 intermediates made the launcher
+        # reject its own populated store on the next start. chmod on POSIX
+        # only: Windows maps non-writable modes onto the read-only attribute.
         path.parent.mkdir(parents=True, exist_ok=True, mode=0o750)
+        if os.name != "nt":
+            for directory in path.parents:
+                os.chmod(directory, 0o750)
+                if directory == self._root:
+                    break
         descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o640)
         try:
             os.write(descriptor, content)
@@ -91,6 +110,12 @@ class LocalFileStoreBackend:
             os.close(descriptor)
 
     def get_bytes(self, *, storage_uri: str) -> bytes:
+        """Return the exact bytes previously persisted at ``storage_uri``.
+
+        Raises:
+            ValueError: The URI fails the containment validation.
+            OSError: The payload is missing or unreadable.
+        """
         return self._path_for(storage_uri).read_bytes()
 
 
