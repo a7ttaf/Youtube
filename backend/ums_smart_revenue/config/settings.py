@@ -26,6 +26,51 @@ DATABASE_URL_ENV = "UMS_DATABASE_URL"
 TRUSTED_GATEWAY_TOKEN_ENV = "UMS_TRUSTED_GATEWAY_TOKEN"
 AUTHZ_SOURCE_ENV = "UMS_AUTHZ_SOURCE"
 GOOGLE_CONNECTOR_SERVICE_ACTOR_ID_ENV = "UMS_GOOGLE_CONNECTOR_SERVICE_ACTOR_ID"
+# Well-known placeholder shipped UNCOMMENTED in the tracked .env.example.
+# Parsed here only so every consumer imports one canonical spelling;
+# connectors/google/audit.py::build_connector_service_principal rejects it
+# at use time — a `cp .env.example .env` deployment must fail closed with a
+# named placeholder rather than attribute connector audit rows to a UUID
+# published in a public template.
+GOOGLE_CONNECTOR_SERVICE_ACTOR_PLACEHOLDER_ID = "00000000-0000-0000-0000-0000000000bb"
+
+
+# ============================================================================
+# Purpose: Canonical "service actor is configured" test shared by every
+#          admission gate (API route pre-flight, scheduler boot wiring):
+#          both a missing value and the well-known .env.example template
+#          placeholder count as NOT configured, so a copied-template
+#          deployment is refused early and synchronously.
+# Database/ORM: None. The value gates audit-actor construction in
+#               connectors/google/audit.py, which feeds record_audit_event.
+# Standards: Fail-closed admission; single spelling of the placeholder via
+#            GOOGLE_CONNECTOR_SERVICE_ACTOR_PLACEHOLDER_ID so consumers
+#            cannot drift. Refusing at pre-flight/boot avoids the
+#            202-then-fail and restart-loop-after-misattribution modes.
+# Blast Radius: Connector job admission + scheduler startup; audit actor
+#               identity for connector runs. No finance-number impact.
+# Connections:
+#   - File: backend/ums_smart_revenue/api/connectors.py -> route pre-flight.
+#   - File: backend/ums_smart_revenue/app.py -> scheduler boot gate.
+#   - File: backend/ums_smart_revenue/connectors/google/audit.py ->
+#     build_connector_service_principal (use-time rejection).
+# ============================================================================
+def is_configured_service_actor_id(actor_id: str | None) -> bool:
+    """Return whether the actor id is a real configured value.
+
+    Args:
+        actor_id: The parsed ``UMS_GOOGLE_CONNECTOR_SERVICE_ACTOR_ID``
+            value — ``None`` when unset, the canonical UUID string
+            otherwise.
+
+    Returns:
+        True only when the value is present AND is not the well-known
+        ``.env.example`` template placeholder — the two states every
+        admission gate must treat as unconfigured.
+    """
+    return actor_id is not None and actor_id != GOOGLE_CONNECTOR_SERVICE_ACTOR_PLACEHOLDER_ID
+
+
 CONNECTOR_JOB_EXECUTOR_ENABLED_ENV = "UMS_CONNECTOR_JOB_EXECUTOR_ENABLED"
 CONNECTOR_JOB_MAX_WORKERS_ENV = "UMS_CONNECTOR_JOB_MAX_WORKERS"
 CONNECTOR_JOB_STALE_RUNNING_HOURS_ENV = "UMS_CONNECTOR_JOB_STALE_RUNNING_HOURS"

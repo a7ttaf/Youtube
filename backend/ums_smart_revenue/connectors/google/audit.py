@@ -1,3 +1,22 @@
+# ============================================================================
+# Purpose: Connector audit emitters and the tenant-pinned service principal
+#   that owns every connector-emitted audit row across one run's lifecycle
+#   edges (started/finished, raw-file downloaded/parsed/failed).
+# Database/ORM: None directly. Emitters write through the injected AuditSink
+#   (SqlAlchemyAuditSink persists AuditLogORM rows); no queries live here.
+# Standards: Fail closed -- build_connector_service_principal raises the typed
+#   ConnectorServicePrincipalUnavailableError for an unset or placeholder
+#   actor; every emitter takes the actor explicitly and never fabricates one.
+# Blast Radius: Audit actor identity and audit-row emission for connector
+#   runs; no finance totals, authorization checks, or graph projection.
+# Connections:
+#   - File: backend/ums_smart_revenue/config/settings.py -> supplies the
+#     configured UMS_GOOGLE_CONNECTOR_SERVICE_ACTOR_ID.
+#   - File: backend/ums_smart_revenue/connectors/google/errors.py -> the typed
+#     principal-unavailable failure family.
+#   - File: backend/ums_smart_revenue/connectors/runs/orchestrator.py ->
+#     calls these emitters at the reviewed lifecycle edges.
+# ============================================================================
 """Connector audit emitters and the service principal that owns them.
 
 The B2.6 orchestrator (wired in T37) calls these emitters at well-defined
@@ -38,7 +57,11 @@ from ums_smart_revenue.auth.permissions import Permission
 from ums_smart_revenue.auth.scopes import AccessScope
 from ums_smart_revenue.config.settings import (
     GOOGLE_CONNECTOR_SERVICE_ACTOR_ID_ENV,
+    GOOGLE_CONNECTOR_SERVICE_ACTOR_PLACEHOLDER_ID,
     load_app_settings,
+)
+from ums_smart_revenue.connectors.google.errors import (
+    ConnectorServicePrincipalUnavailableError,
 )
 
 __all__ = [
@@ -62,8 +85,13 @@ _SERVICE_ACCOUNT_EMAIL = "google-connectors@service.ums.local"
 #               through ``SqlAlchemyAuditSink``; the actor id is NOT required
 #               to be a real ``users.id`` -- the sink stashes unknown actor
 #               UUIDs in ``details["actor_user_id"]`` and proceeds.
-# Standards: Fail closed -- missing env raises ValueError so the orchestrator
-#            cannot run with an anonymized service principal. Note:
+# Standards: Fail closed -- missing env OR the well-known .env.example
+#            placeholder raises the typed
+#            ConnectorServicePrincipalUnavailableError (a GoogleConnectorError
+#            subclass) so the orchestrator cannot run with an anonymized or
+#            template-published service principal and every caller gets the
+#            Bucket-A failure family without a ValueError translation layer.
+#            Note:
 #            ``AppSettings.google_connector_service_actor_id`` is lazy (None
 #            when env unset, see config/settings.py); the fail-closed
 #            boundary lives here at first emit, not at app boot, so
@@ -82,15 +110,49 @@ _SERVICE_ACCOUNT_EMAIL = "google-connectors@service.ums.local"
 def build_connector_service_principal(*, tenant_id: UUID) -> UserPrincipal:
     """Return the service ``UserPrincipal`` for one connector run's audit emissions.
 
+    Args:
+        tenant_id: The tenant the run operates on; the principal is pinned to
+            it so audit consumers can scope every connector-emitted row.
+
+    Returns:
+        A frozen, tenant-pinned service-account ``UserPrincipal`` carrying
+        ``RUN_CONNECTOR_JOBS@global``, whose ``user_id`` is the configured
+        actor UUID.
+
     Raises:
-        ValueError: ``UMS_GOOGLE_CONNECTOR_SERVICE_ACTOR_ID`` is unset.
+        ConnectorServicePrincipalUnavailableError: ``UMS_GOOGLE_CONNECTOR_SERVICE_ACTOR_ID``
+            is unset, or is set to the well-known ``.env.example`` placeholder
+            — both fail closed here rather than mis-attributing audit rows.
+            Subclasses ``GoogleConnectorError`` so orchestrator and executor
+            failure catches classify it as a pre-start failure.
     """
     settings = load_app_settings()
     actor_id = settings.google_connector_service_actor_id
     if actor_id is None:
-        raise ValueError(
-            f"{GOOGLE_CONNECTOR_SERVICE_ACTOR_ID_ENV} must be set to a UUID "
-            "before connector audit emitters can build a service principal"
+        raise ConnectorServicePrincipalUnavailableError(
+            env_var=GOOGLE_CONNECTOR_SERVICE_ACTOR_ID_ENV,
+            detail=(
+                f"{GOOGLE_CONNECTOR_SERVICE_ACTOR_ID_ENV} must be set to a UUID "
+                "before connector audit emitters can build a service principal"
+            ),
+        )
+    # FIX: the well-known placeholder UUID ships UNCOMMENTED in the tracked
+    # .env.example, so a `cp .env.example .env` deployment reaches here with
+    # that exact value. Accepting it attributed real audit rows to a UUID
+    # published in a public template — worse than no connector runs at all.
+    # Rejected here (use time) with the same typed Bucket-A exception as the
+    # unset case, not at settings load, so non-connector workloads keep the
+    # documented lazy-boot contract.
+    if actor_id == GOOGLE_CONNECTOR_SERVICE_ACTOR_PLACEHOLDER_ID:
+        raise ConnectorServicePrincipalUnavailableError(
+            env_var=GOOGLE_CONNECTOR_SERVICE_ACTOR_ID_ENV,
+            detail=(
+                f"{GOOGLE_CONNECTOR_SERVICE_ACTOR_ID_ENV} is set to the well-known "
+                ".env.example placeholder "
+                f"{GOOGLE_CONNECTOR_SERVICE_ACTOR_PLACEHOLDER_ID}; provision a real "
+                "service actor UUID before connector audit emitters can build a "
+                "service principal"
+            ),
         )
     return UserPrincipal(
         user_id=actor_id,

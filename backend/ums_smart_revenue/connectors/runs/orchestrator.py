@@ -87,9 +87,6 @@ from sqlalchemy.orm import Session
 from ums_smart_revenue.auth.audit_service import AuditSink
 from ums_smart_revenue.auth.models import UserPrincipal
 from ums_smart_revenue.auth.sql_audit_sink import SqlAlchemyAuditSink
-from ums_smart_revenue.config.settings import (
-    GOOGLE_CONNECTOR_SERVICE_ACTOR_ID_ENV,
-)
 from ums_smart_revenue.connectors.google.adsense_management_client import (
     AdSenseManagementClient,
 )
@@ -103,7 +100,6 @@ from ums_smart_revenue.connectors.google.audit import (
 )
 from ums_smart_revenue.connectors.google.errors import (
     BlobStorageConfigurationError,
-    ConnectorServicePrincipalUnavailableError,
     CredentialNotFoundError,
     GoogleApiResponseError,
     GoogleConnectorError,
@@ -612,7 +608,7 @@ def _normalize_ingested_source_rows(
             triggered_by_user_id=actor_user_id, tenant_id=tenant_id
         )
     else:
-        audit_actor = _build_connector_service_principal_or_raise(tenant_id=tenant_id)
+        audit_actor = build_connector_service_principal(tenant_id=tenant_id)
         actor_user_id = audit_actor.user_id
 
     SqlAlchemyIngestedSourceRowNormalizationAdapter(
@@ -644,45 +640,6 @@ def _principal_for_triggered_user(*, triggered_by_user_id: str, tenant_id: UUID)
         disabled=False,
         tenant_id=str(tenant_id),
     )
-
-
-# ============================================================================
-# Purpose: Wrap ``build_connector_service_principal`` so a missing
-#          ``UMS_GOOGLE_CONNECTOR_SERVICE_ACTOR_ID`` surfaces as the typed
-#          ``ConnectorServicePrincipalUnavailableError`` (Bucket-A pre-start
-#          family) instead of an untyped ``ValueError``. The executor's
-#          ``except GoogleConnectorError`` branch then writes a
-#          ``job_failed_before_start`` audit row; without this wrap, the
-#          ValueError would land in the catch-all log-only branch and
-#          operators would see a 202 with no run row, no failure audit,
-#          and no reason the job never started.
-# Database/ORM: None.
-# Standards: Fail-closed in Bucket A. The env var name is carried on the
-#            exception so the canned audit message is self-describing.
-# Blast Radius: Audit log only; no finance, scope, or graph projection change.
-# Connections:
-#   - File: backend/ums_smart_revenue/connectors/google/audit.py ->
-#     build_connector_service_principal raises ValueError on missing env.
-#   - File: backend/ums_smart_revenue/connectors/google/errors.py ->
-#     ConnectorServicePrincipalUnavailableError.
-#   - File: backend/ums_smart_revenue/connectors/runs/executor.py::_run_job
-#     -> catches GoogleConnectorError and audits as Bucket-A failure.
-# ============================================================================
-def _build_connector_service_principal_or_raise(*, tenant_id: UUID) -> UserPrincipal:
-    """Build the service principal or raise a typed Bucket-A exception.
-
-    Raises:
-        ConnectorServicePrincipalUnavailableError: When
-            ``UMS_GOOGLE_CONNECTOR_SERVICE_ACTOR_ID`` is unset. Subclasses
-            ``GoogleConnectorError`` so the executor's existing Bucket-A
-            catch handles it.
-    """
-    try:
-        return build_connector_service_principal(tenant_id=tenant_id)
-    except ValueError as exc:
-        raise ConnectorServicePrincipalUnavailableError(
-            env_var=GOOGLE_CONNECTOR_SERVICE_ACTOR_ID_ENV,
-        ) from exc
 
 
 # ============================================================================
@@ -925,15 +882,16 @@ def _run_live(
     #          edge per spec §8.4.
     # Database/ORM: None for the principal; ``SqlAlchemyAuditSink`` writes to
     #               ``AuditLogORM`` via the session below.
-    # Standards: Fail-closed in Bucket A on missing env (typed
-    #            ConnectorServicePrincipalUnavailableError bubbles to the
-    #            caller before any connector_runs row is created; the executor
-    #            catches it as a GoogleConnectorError and writes a
+    # Standards: Fail-closed in Bucket A on missing env or the .env.example
+    #            placeholder (the builder itself raises the typed
+    #            ConnectorServicePrincipalUnavailableError, which bubbles to
+    #            the caller before any connector_runs row is created; the
+    #            executor catches it as a GoogleConnectorError and writes a
     #            job_failed_before_start audit row -- see
     #            connectors/runs/executor.py::_run_job).
     # Blast Radius: Audit log only.
     # ============================================================================
-    audit_actor = _build_connector_service_principal_or_raise(tenant_id=tenant_id)
+    audit_actor = build_connector_service_principal(tenant_id=tenant_id)
 
     audit_sink: AuditSink = SqlAlchemyAuditSink(session, tenant_id=tenant_id)
     # FIX: the STARTED edge writes audit_logs (TENANT_PLATFORM_ONLY_WRITE), so

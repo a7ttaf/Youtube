@@ -35,12 +35,14 @@ class GoogleConnectorError(Exception):
 class ConnectorServicePrincipalUnavailableError(GoogleConnectorError):
     """Raised when the connector service actor is required but not provisioned.
 
-    The ``build_connector_service_principal`` call inside the live run path
-    fails closed with ``ValueError`` if ``UMS_GOOGLE_CONNECTOR_SERVICE_ACTOR_ID``
-    is unset; the orchestrator converts that to this typed exception so the
-    executor's ``except GoogleConnectorError`` branch treats it as a Bucket-A
-    pre-start failure and writes a ``job_failed_before_start`` audit row
-    (otherwise the ValueError would be swallowed by the catch-all log-only
+    ``build_connector_service_principal`` raises this typed exception
+    directly for both unconfigured states — ``UMS_GOOGLE_CONNECTOR_SERVICE_ACTOR_ID``
+    unset, or set to the well-known ``.env.example`` placeholder — so every
+    caller (orchestrator, group-sync executor, normalization) gets a
+    ``GoogleConnectorError`` without needing a ValueError translation layer.
+    The executor's ``except GoogleConnectorError`` branch treats it as a
+    Bucket-A pre-start failure and writes a ``job_failed_before_start`` audit
+    row (otherwise the failure would be swallowed by the catch-all log-only
     branch and operators would see a 202 with no run row, no failure audit,
     and no reason the job never started).
 
@@ -50,13 +52,23 @@ class ConnectorServicePrincipalUnavailableError(GoogleConnectorError):
     the parent class) continue to handle this path.
     """
 
-    def __init__(self, *, env_var: str) -> None:
-        """Carry the offending ``env_var`` for downstream diagnostics."""
-        super().__init__(
-            f"connector service principal is unavailable; set {env_var} "
-            "to a UUID before running connector jobs"
-        )
+    def __init__(self, *, env_var: str, detail: str | None = None) -> None:
+        """Carry the offending ``env_var`` and an optional specific ``detail``.
+
+        ``detail`` lets raisers preserve a state-specific diagnostic (e.g. the
+        placeholder rejection naming the template UUID) while the default
+        message covers the plain unset case.
+        """
+        if detail is None:
+            message = (
+                f"connector service principal is unavailable; set {env_var} "
+                "to a UUID before running connector jobs"
+            )
+        else:
+            message = detail
+        super().__init__(message)
         self.env_var = env_var
+        self.detail = detail
 
 
 class UnsupportedSecretSchemeError(GoogleConnectorError):
