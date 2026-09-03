@@ -310,6 +310,33 @@ the capabilities the SPA hydrates reflect the dev-gateway role
 (`VITE_DEV_GATEWAY_ROLE`) injected server-side. Capabilities are **global-scope**
 only.
 
+**Breaking deployment change (artifact downloads).** The browser's real
+artifact GET is now always same-origin and frontend-relative — deliberately
+NOT resolved through `VITE_API_BASE_URL`. A deployment that points
+`VITE_API_BASE_URL` at a separate API origin and has no same-origin
+`/exports/*` route would send every download to the SPA origin, where no
+backend answers. To migrate:
+
+1. Route same-origin `/exports/*` through the trusted gateway that injects
+   authoritative principal and tenant headers (same contract as the Vite dev
+   proxy below).
+2. Keep `VITE_API_BASE_URL` for the JSON API and the authenticated
+   `?prepare=true` leg; only the binary transfer stays same-origin.
+3. Verify one download end to end: the prepare leg answers 204 from the API
+   origin, and the artifact GET answers 200 from the SPA origin.
+
+Why the transfer is same-origin: the gateway injects trusted identity for the
+real transfer (the anchor GET cannot carry the trusted-gateway headers, and no
+secret or bearer grant may enter the URL), so generation, permission, and
+storage failures stay typed UI errors on the prepare leg while the browser
+download manager streams the response without materializing the complete file
+in SPA memory. The prepare fetch uses `cache: "no-store"`, and the backend
+marks both the 204 and artifact response `Cache-Control: no-store`, so a
+cached response cannot skip fresh authorization or download auditing. The
+backend also commits artifact metadata before exposing the 204 that starts the
+second request. Do not replace this with a raw storage URL or put
+gateway/bearer secrets in a query string.
+
 ## Which screen shows what
 
 | Screen (nav)        | Backend endpoint(s)                                              |
@@ -317,7 +344,7 @@ only.
 | Command Center      | `GET /revenue/months/{m}/net-revenue` (status strip, channel table, explain rail) + `GET /revenue/months/{m}/smart-alerts` (problem panel) |
 | Month Close         | `GET /finance-close/{m}` + `GET /finance-close/{m}/readiness`; `POST /finance-close/{m}/lock` and `/unlock` (inline **Reason (required, audited)** input + arm/confirm two-step — no browser prompts) |
 | Trace / Explain     | `POST /revenue/channels/{ch}/months/{m}/explain?metric=...` (channel list reused from net-revenue) |
-| Exports             | `GET /exports` (job list) + `POST /exports` (request); QUEUED jobs show a **Generate** link that triggers on-demand generation via the `GET` download route, COMPLETED jobs re-serve the persisted artifact over that same route. `ANALYTICS_SUMMARY_CSV` has no binary route (computed inline, no Generate/download link) |
+| Exports             | `GET /exports` (job list) + `POST /exports` (request); QUEUED jobs show **Generate** and COMPLETED jobs show **Download** for XLSX, PDF, PPTX, and analytics CSV artifacts. The action authenticates `GET <artifact-route>?prepare=true`, then starts a same-origin native GET of the persisted artifact. |
 | Connectors          | `GET /connectors/credentials` + `GET /adsense/payments`; `POST /connectors/jobs` and `POST /adsense/sync-payments`. The job-sync and AdSense-sync controls render **disabled for every preview role** (hint: "Requires a connector-operations role.") and use an inline reason field — no browser prompts |
 | Audit               | `GET /audit/events` (cursor-paginated timeline; server-driven sensitive-payload redaction; fail-closed — a non-audit viewer sees a restricted placeholder and fires no fetch). **First page only** (no Load More via `next_cursor` yet). Summary tiles, coverage panel, and the severity-filter / Download controls stay static/disabled placeholders |
 | Registry            | Mock data only (not wired to the API yet — clearly labelled in-app) |

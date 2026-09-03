@@ -144,6 +144,10 @@ from ums_smart_revenue.connectors.google_source_rows import (
     ParsedSourceRow,
     SqlAlchemyGoogleRevenueSourceRowRepository,
 )
+from ums_smart_revenue.connectors.google_source_rows.repository import (
+    AMOUNT_NATIVE_INTEGER_DIGITS,
+    AMOUNT_NATIVE_SCALE,
+)
 from ums_smart_revenue.connectors.keys import (
     credential_key_candidates,
     source_system_for_connector,
@@ -188,20 +192,58 @@ __all__ = [
     "run_one",
 ]
 
-# CSV adapter column aliases. YouTube Reporting estimated-revenue reports are
-# daily and may include extra breakdown dimensions / metric columns (video,
-# country, ad_impressions, CPM fields, etc.). The C1 normalizer consumes
-# monthly channel totals, so the adapter consumes only the identity + money
-# columns it needs and aggregates every breakdown row into that monthly shape.
+# ============================================================================
+# Purpose: Column-alias tables the YouTube Reporting CSV adapter matches against
+#          a downloaded report's header row. Reporting estimated-revenue exports
+#          are daily and may carry extra breakdown dimensions / metric columns
+#          (video, country, ad_impressions, CPM fields); the C1 normalizer
+#          consumes monthly channel totals, so the adapter reads only the
+#          identity + money columns and aggregates the rest into that shape.
+# Database/ORM: None -- these feed parser payload construction, not a query.
+# Standards: Revenue aliases stay restricted to schemas a shipped parser
+#            actually consumes. The test-fixture shorthand ``ad_revenue`` was
+#            removed here: nothing shipped it and no test asserted it, but it
+#            pre-authorised the raw ad-revenue CSV schema that
+#            report_type_whitelist.SUPPORTED_REPORT_TYPES deliberately holds
+#            out, so widening that whitelist would have silently armed a
+#            revenue column no parser was reviewed against. A CSV whose only
+#            revenue-like column is ``ad_revenue`` now fails header validation
+#            with "csv missing revenue column".
+# Blast Radius: Finance -- decides which downloaded CSV columns become revenue
+#               amounts. No graph projection impact detected.
+# Connections:
+#   - Function: _validate_csv_headers -> rejects headers missing every alias.
+#   - Function: _accumulate_csv_row -> reads the row value through these aliases.
+#   - File: backend/ums_smart_revenue/connectors/google/report_type_whitelist.py
+#     -> holds the matching report_type_id allowlist these schemas belong to.
+# ============================================================================
 _CSV_DATE_COLUMNS = ("date", "day")
 _CSV_CHANNEL_COLUMNS = ("channel", "channel_id")
+# FIX: Removed the unsupported ``ad_revenue`` shorthand; only revenue aliases
+# backed by the shipped YouTube Reporting parser may reach finance ingestion.
 _CSV_REVENUE_COLUMNS = (
     "estimated_partner_revenue",
     "estimatedRevenue",
     "estimatedrevenue",
-    "ad_revenue",
 )
 _CSV_CURRENCY_COLUMNS = ("currency_code", "currencyCode")
+# FIX: A finite Decimal can still carry an out-of-context exponent (``1E+999999999``):
+# construction and ``is_finite()`` both succeed, but adding it to the running
+# total traps ``decimal.Overflow`` and aborts the whole run. Row-level bound on
+# the adjusted exponent (most-significant-digit power): bounding the UPPER side
+# keeps every monthly total far below the default context's Emax, so the
+# accumulation can no longer trap.
+# The FRACTIONAL side is bounded to the persistence scale, not to arithmetic:
+# monthly totals persist into Numeric(20, 6) source rows whose repository gate
+# (_validate_amount_native) rejects any amount with more than six fractional
+# digits. Accepting sub-scale CSV amounts would let a dry run count rows the
+# live run then fails at persistence — the same divergence, just later.
+# The two persistence limits are IMPORTED, not copied: they belong to the
+# repository gate this adapter must stay aligned with, so a schema change
+# updates one boundary and both halves move together.
+_CSV_MAX_AMOUNT_ADJUSTED_EXPONENT = 18
+_CSV_REVENUE_AMOUNT_SCALE = AMOUNT_NATIVE_SCALE
+_CSV_REVENUE_MAX_INTEGER_DIGITS = AMOUNT_NATIVE_INTEGER_DIGITS
 _CSV_DEFAULT_CURRENCY_BY_REPORT_TYPE = {
     # Google's documented YouTube Reporting estimated-revenue bulk schema has
     # no currency field; this project ingests those Reporting amounts as USD
@@ -1935,6 +1977,8 @@ def _delete_stale_source_rows(
 
 @dataclass(frozen=True)
 class _RawReportDescriptor:
+    """Identify the connector scope and month owning one raw report."""
+
     connector_key: str
     source_system: str
     report_type: str
@@ -1943,6 +1987,8 @@ class _RawReportDescriptor:
 
 @dataclass(frozen=True)
 class _RawReportStorageContext:
+    """Carry blob-storage settings and the triggering actor for raw evidence."""
+
     backend: BlobStorageBackend
     scheme: str
     bucket: str
@@ -1951,12 +1997,16 @@ class _RawReportStorageContext:
 
 @dataclass(frozen=True)
 class _RawReportAuditContext:
+    """Carry the audit sink and principal used for raw-report lifecycle events."""
+
     sink: AuditSink
     actor: UserPrincipal
 
 
 @dataclass(frozen=True)
 class _RawReportLinkContext:
+    """Carry transaction state needed to link raw evidence to a connector run."""
+
     session: Session
     tenant_id: UUID
     run_entry: ConnectorRunEntry
@@ -2676,8 +2726,9 @@ def _csv_reports_to_parser_payload(
 # Purpose: Decode one Google CSV report, validate its header, and fold each
 #          row into monthly parser totals.
 # Database/ORM: None.
-# Standards: UTF-8 and CSV-shape failures are typed as GoogleApiResponseError
-#            so live runs persist downloaded evidence before marking failure.
+# Standards: UTF-8 and CSV-shape failures are typed as GoogleApiResponseError;
+#            normalized fieldnames keep header and row contracts identical so
+#            live runs persist evidence before marking malformed input failed.
 # Blast Radius: Parser payload construction for YouTube Reporting revenue rows.
 #               No graph projection impact detected.
 # Connections:
@@ -2704,8 +2755,13 @@ def _accumulate_csv_report_bytes(
     except UnicodeDecodeError as exc:
         raise _parser_payload_error(report_id=report_id, reason="csv is not valid utf-8") from exc
     reader = csv.DictReader(io.StringIO(text))
+    normalized_fieldnames = _normalize_csv_fieldnames(reader.fieldnames, report_id=report_id)
+    # DictReader uses its fieldnames as the row-dictionary keys. Replace the
+    # raw names with the validated normalized names so header validation and
+    # row lookup apply the same whitespace/case contract.
+    reader.fieldnames = list(normalized_fieldnames)
     default_currency = _validate_csv_headers(
-        reader.fieldnames, report_id=report_id, report_type=report_type
+        normalized_fieldnames, report_id=report_id, report_type=report_type
     )
     for csv_row in reader:
         _accumulate_csv_row(
@@ -2719,39 +2775,112 @@ def _accumulate_csv_report_bytes(
 
 
 # ============================================================================
-# Purpose: Validate that a downloaded CSV has the columns required to build
-#          parser rows.
+# Purpose: Normalize downloaded CSV fieldnames before DictReader exposes row
+#          dictionaries, rejecting malformed or duplicate normalized headers.
 # Database/ORM: None.
-# Standards: Empty/headerless/missing-column payloads become typed upstream
-#            response errors instead of parser KeyError/None drift.
+# Standards: Header names are trimmed/lower-cased once; blank and duplicate
+#            normalized names become typed upstream response errors instead of
+#            allowing DictReader's last-value-wins behavior.
 # Blast Radius: YouTube Reporting CSV acceptance only. No graph projection
 #               impact detected.
 # Connections:
-#   - Function: _accumulate_csv_report_bytes -> calls this before row parsing.
+#   - Function: _accumulate_csv_report_bytes -> installs normalized names.
+#   - Function: _validate_csv_headers -> checks required normalized aliases.
 # ============================================================================
-def _validate_csv_headers(
-    fieldnames: Sequence[str] | None, *, report_id: str, report_type: str
-) -> str | None:
-    """Confirm the CSV header set contains the metric column expected for ``report_type``."""
+def _normalize_csv_fieldnames(
+    fieldnames: Sequence[str] | None, *, report_id: str
+) -> tuple[str, ...]:
+    """Return unique normalized CSV headers or raise a typed shape error."""
     if not fieldnames:
         raise _parser_payload_error(
             report_id=report_id,
             reason="csv missing header row",
         )
-    headers = {
-        field.strip().lower() for field in fieldnames if isinstance(field, str) and field.strip()
-    }
+
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for index, raw_field in enumerate(fieldnames):
+        if not isinstance(raw_field, str) or not raw_field.strip():
+            raise _parser_payload_error(
+                report_id=report_id,
+                reason=f"csv invalid header column at index {index}",
+            )
+        normalized_field = raw_field.strip().lower()
+        if normalized_field in seen:
+            raise _parser_payload_error(
+                report_id=report_id,
+                reason=f"csv duplicate header column {normalized_field!r}",
+            )
+        seen.add(normalized_field)
+        normalized.append(normalized_field)
+    return tuple(normalized)
+
+
+# ============================================================================
+# Purpose: Identify which normalized aliases from one CSV schema group are
+#          present in a validated header set.
+# Database/ORM: None.
+# Standards: Preserve alias declaration order while collapsing equivalent
+#            spellings, so callers can reject ambiguous schemas deterministically.
+# Blast Radius: YouTube Reporting CSV header validation only.
+#               No graph projection impact detected.
+# Connections:
+#   - Function: _validate_csv_headers -> enforces one alias per schema group.
+#   - Constants: _CSV_DATE_COLUMNS, _CSV_CHANNEL_COLUMNS, and metric aliases.
+# ============================================================================
+def _matching_csv_aliases(headers: set[str], aliases: Sequence[str]) -> tuple[str, ...]:
+    """Return distinct normalized aliases from ``aliases`` that appear in ``headers``."""
+    normalized_aliases = dict.fromkeys(alias.strip().lower() for alias in aliases)
+    return tuple(alias for alias in normalized_aliases if alias in headers)
+
+
+# ============================================================================
+# Purpose: Validate that a downloaded CSV has the columns required to build
+#          parser rows and exactly one alias for every supplied schema group.
+# Database/ORM: None.
+# Standards: Empty/headerless/missing-column/conflicting-alias payloads become
+#            typed upstream response errors instead of parser KeyError, silent
+#            last-value-wins behavior, or ambiguous finance totals.
+# Blast Radius: YouTube Reporting CSV acceptance only. No graph projection
+#               impact detected.
+# Connections:
+#   - Function: _accumulate_csv_report_bytes -> calls this before row parsing.
+#   - Function: _normalize_csv_fieldnames -> establishes the header contract.
+# ============================================================================
+def _validate_csv_headers(
+    fieldnames: Sequence[str] | None, *, report_id: str, report_type: str
+) -> str | None:
+    """Confirm the CSV header set contains the metric column expected for ``report_type``."""
+    headers = set(_normalize_csv_fieldnames(fieldnames, report_id=report_id))
     for group_name, aliases in (
         ("date", _CSV_DATE_COLUMNS),
         ("channel", _CSV_CHANNEL_COLUMNS),
         ("revenue", _CSV_REVENUE_COLUMNS),
     ):
-        if not any(alias.lower() in headers for alias in aliases):
+        matching_aliases = _matching_csv_aliases(headers, aliases)
+        if not matching_aliases:
             raise _parser_payload_error(
                 report_id=report_id,
                 reason=f"csv missing {group_name} column",
             )
-    if any(alias.lower() in headers for alias in _CSV_CURRENCY_COLUMNS):
+        if len(matching_aliases) > 1:
+            raise _parser_payload_error(
+                report_id=report_id,
+                reason=(
+                    f"csv conflicting {group_name} columns "
+                    f"(expected exactly one of: {', '.join(aliases)})"
+                ),
+            )
+    currency_aliases = _matching_csv_aliases(headers, _CSV_CURRENCY_COLUMNS)
+    if len(currency_aliases) > 1:
+        raise _parser_payload_error(
+            report_id=report_id,
+            reason=(
+                "csv conflicting currency columns "
+                "(expected exactly one of: currency_code, currencyCode)"
+            ),
+        )
+    if currency_aliases:
         return None
     default_currency = _CSV_DEFAULT_CURRENCY_BY_REPORT_TYPE.get(report_type)
     if default_currency is not None:
@@ -2762,6 +2891,21 @@ def _validate_csv_headers(
     )
 
 
+# ============================================================================
+# Purpose: Validate completed monthly CSV revenue totals and render the parser
+#          payload consumed by the YouTube Reporting source-row parser.
+# Database/ORM: None. The downstream repository persists the rendered totals.
+# Standards: Preserve Decimal precision and allow signed component adjustments;
+#            fail closed before parser/dry-run handoff when a completed monthly
+#            channel/content-owner/currency total is negative.
+# Blast Radius: Finance ingestion and dry-run row counts for YouTube Reporting.
+# Connections: The YouTube Reporting parser that consumes the payload and the
+#              persistence layer that independently re-checks totals.
+#   - File: backend/ums_smart_revenue/connectors/google_source_parsers/youtube_reporting.py
+#     -> converts each rendered monthly total into a ParsedSourceRow.
+#   - File: backend/ums_smart_revenue/connectors/google_source_rows/repository.py
+#     -> independently enforces non-negative persisted source-row amounts.
+# ============================================================================
 def _parser_payload_from_csv_totals(
     *,
     totals: dict[tuple[str, str | None, str], Decimal],
@@ -2777,6 +2921,24 @@ def _parser_payload_from_csv_totals(
     for line_index, ((channel, content_owner, currency), total) in enumerate(
         sorted(totals.items(), key=lambda item: (item[0][0], item[0][1] or "", item[0][2]))
     ):
+        # FIX: Validate the completed monthly total, not each signed CSV
+        # component. Google may emit legitimate negative daily or breakdown
+        # adjustments when the final source-row amount remains non-negative.
+        if total < 0:
+            raise _parser_payload_error(
+                report_id=report_id,
+                reason=f"csv aggregated revenue total {total!r} must be non-negative",
+            )
+        # FIX: Mirror the live persistence gate for the COMPLETED total: a
+        # non-zero monthly total must still fit Numeric(20, 6)'s integer
+        # digits, or a dry run would count rows the live run fails at
+        # persistence (per-row bounds alone cannot see summed magnitudes).
+        if not total.is_zero() and total.adjusted() >= _CSV_REVENUE_MAX_INTEGER_DIGITS:
+            raise _parser_payload_error(
+                report_id=report_id,
+                reason=f"csv aggregated revenue total {total!r} exceeds "
+                f"{_CSV_REVENUE_MAX_INTEGER_DIGITS} integer digits (column is Numeric(20, 6))",
+            )
         dimensions: dict[str, object] = {"channel": channel}
         if content_owner:
             dimensions["content_owner"] = content_owner
@@ -2804,6 +2966,89 @@ def _parser_payload_from_csv_totals(
     }
 
 
+# ============================================================================
+# Purpose: Parse and fully validate one CSV revenue amount — Decimal
+#          construction, finiteness, the overflow bound on the ADJUSTED
+#          exponent, and the Numeric(20, 6) persistence-scale bound.
+# Database/ORM: None. Pure validation over the raw CSV cell.
+# Standards: Every rejection is the same typed per-row payload error the rest
+#          of the CSV adapter raises, so dry runs and live runs fail
+#          identically. The overflow guard compares adjusted() (the
+#          most-significant-digit power) and exempts zero, whose huge forms
+#          ("0E+50") cannot overflow anything; the scale guard compares the
+#          tuple exponent against the persistence scale, mirroring
+#          _validate_amount_native line-for-line. Extracted from
+#          _accumulate_csv_row to keep that fold under the analyzer's
+#          complexity threshold.
+# Blast Radius: Which YouTube Reporting revenue rows can enter a monthly
+#          total at all; a mistake here either blocks legitimate revenue or
+#          reintroduces a run abort / silent underflow.
+# Connections: The row fold that calls this helper and the completed-total
+#              bounds that complement these per-row bounds.
+#   - Function: _accumulate_csv_row -> sole caller.
+#   - Function: _parser_payload_from_csv_totals -> the completed-total
+#       bounds that complement these per-row bounds.
+# ============================================================================
+def _validated_revenue_amount_of(amount: str, *, report_id: str) -> Decimal:
+    """Return the amount as a validated finite Decimal within the row bounds."""
+    try:
+        amount_decimal = Decimal(amount)
+    except InvalidOperation as exc:
+        raise _parser_payload_error(
+            report_id=report_id,
+            reason=f"csv row revenue {amount!r} not a valid decimal",
+        ) from exc
+    if not amount_decimal.is_finite():
+        raise _parser_payload_error(
+            report_id=report_id,
+            reason=f"csv row revenue {amount!r} not finite",
+        )
+    # is_finite() guarantees an integer exponent slot; NaN/Infinity carry the
+    # string sentinels 'n'/'N'/'F' there, and the isinstance narrow keeps the
+    # type checkers honest about the comparisons below.
+    amount_exponent = amount_decimal.as_tuple().exponent
+    if not isinstance(amount_exponent, int):
+        raise _parser_payload_error(
+            report_id=report_id,
+            reason=f"csv row revenue {amount!r} not finite",
+        )
+    # FIX: The overflow guard compares the ADJUSTED exponent (the
+    # most-significant-digit power that decides whether the accumulation can
+    # trap), not the tuple exponent, which is the fractional-digit count. The
+    # two diverge on trailing zeros ("1.0E+19") and on huge zero forms
+    # ("0E+50"), both of which are harmless and must stay valid.
+    if (
+        not amount_decimal.is_zero()
+        and amount_decimal.adjusted() > _CSV_MAX_AMOUNT_ADJUSTED_EXPONENT
+    ):
+        raise _parser_payload_error(
+            report_id=report_id,
+            reason=f"csv row revenue {amount!r} exponent out of range",
+        )
+    if amount_exponent < -_CSV_REVENUE_AMOUNT_SCALE:
+        raise _parser_payload_error(
+            report_id=report_id,
+            reason=f"csv row revenue {amount!r} exceeds the persisted "
+            f"{_CSV_REVENUE_AMOUNT_SCALE}-digit fractional scale",
+        )
+    return amount_decimal
+
+
+# ============================================================================
+# Purpose: Validate one YouTube Reporting CSV component row and add its signed
+#          Decimal revenue amount to the matching monthly aggregate.
+# Database/ORM: None. This builds an in-memory parser payload only.
+# Standards: Date, identity, finite-decimal, and currency failures use typed
+#            connector errors; signed adjustments are accepted here and the
+#            completed monthly total is validated before parser handoff.
+# Blast Radius: Finance aggregation for YouTube Reporting CSV ingestion.
+# Connections: The parser that consumes the rendered payload and the
+#              persistence layer enforcing the same non-negative contract.
+#   - File: backend/ums_smart_revenue/connectors/google_source_parsers/youtube_reporting.py
+#     -> consumes the completed monthly parser payload.
+#   - File: backend/ums_smart_revenue/connectors/google_source_rows/repository.py
+#     -> enforces the final non-negative persisted amount contract.
+# ============================================================================
 def _accumulate_csv_row(
     *,
     totals: dict[tuple[str, str | None, str], Decimal],
@@ -2813,10 +3058,7 @@ def _accumulate_csv_row(
     default_content_owner: str | None,
     default_currency: str | None,
 ) -> None:
-    """
-    Fold one CSV row's metric into the running ``totals`` map (validates
-    non-negative decimals).
-    """
+    """Fold one finite signed CSV metric into the running monthly ``totals`` map."""
     # Normalize the date column. YouTube Reporting CSV uses ``date`` or
     # ``day``. The row is daily, but the parser payload is monthly, so this
     # date is used only to ensure the row belongs to report_month.
@@ -2854,31 +3096,21 @@ def _accumulate_csv_row(
         )
     content_owner = _first_present(csv_row, "content_owner") or default_content_owner
 
-    # Pull the estimated revenue amount. Accept either Google's documented
-    # ``estimated_partner_revenue`` / ``estimatedRevenue`` columns or the
-    # test-fixture shorthand ``ad_revenue``. The aggregate is kept as Decimal
-    # and stringified after summation so precision and trailing scale survive.
+    # Pull the estimated revenue amount from Google's documented
+    # ``estimated_partner_revenue`` / ``estimatedRevenue`` columns only; see the
+    # _CSV_REVENUE_COLUMNS contract block for why no other alias is accepted.
+    # The aggregate is kept as Decimal and stringified after summation so
+    # precision and trailing scale survive. Validation of the amount itself
+    # (parse, finiteness, overflow and persistence-scale bounds) lives in
+    # _validated_revenue_amount_of, keeping this function a linear fold.
     amount = _first_present(csv_row, *_CSV_REVENUE_COLUMNS)
     if amount is None:
         raise _parser_payload_error(
             report_id=report_id,
             reason="csv row missing revenue column "
-            "(expected one of: estimated_partner_revenue, "
-            "estimatedRevenue, ad_revenue)",
+            "(expected one of: estimated_partner_revenue, estimatedRevenue)",
         )
-    try:
-        amount_decimal = Decimal(amount)
-    except InvalidOperation as exc:
-        raise _parser_payload_error(
-            report_id=report_id,
-            reason=f"csv row revenue {amount!r} not a valid decimal",
-        ) from exc
-    if not amount_decimal.is_finite():
-        raise _parser_payload_error(
-            report_id=report_id,
-            reason=f"csv row revenue {amount!r} not finite",
-        )
-
+    amount_decimal = _validated_revenue_amount_of(amount, report_id=report_id)
     currency = _first_present(csv_row, *_CSV_CURRENCY_COLUMNS)
     if not currency:
         if _row_has_any_column(csv_row, *_CSV_CURRENCY_COLUMNS):
@@ -2959,13 +3191,25 @@ def _month_bounds(*, report_month: str, report_id: str) -> tuple[date_cls, date_
     return month_start, month_end
 
 
+# ============================================================================
+# Purpose: Resolve one non-blank CSV value through normalized, case-insensitive
+#          row keys shared by date, identity, revenue, and currency parsing.
+# Database/ORM: None.
+# Standards: Trim header keys and values consistently; return None for absent
+#            or blank values so callers apply typed fail-closed validation.
+# Blast Radius: YouTube Reporting CSV row parsing and finance amount selection.
+#               No graph projection impact detected.
+# Connections:
+#   - Function: _accumulate_csv_row -> selects each required/optional field.
+#   - Function: _row_has_any_column -> checks whether currency was supplied.
+# ============================================================================
 def _first_present(row: dict[str, str | None], *keys: str) -> str | None:
     """Return the first non-blank string value among the given column keys.
 
-    csv.DictReader keys preserve the header's case, so this helper checks
-    each candidate case-insensitively against the row's actual keys.
+    csv.DictReader keys preserve the header's case and whitespace, so this
+    helper checks each candidate after normalizing the row's actual keys.
     """
-    lower_map = {k.lower(): k for k in row if isinstance(k, str)}
+    lower_map = {k.strip().lower(): k for k in row if isinstance(k, str)}
     for key in keys:
         actual = lower_map.get(key.lower())
         if actual is None:
@@ -2976,9 +3220,21 @@ def _first_present(row: dict[str, str | None], *keys: str) -> str | None:
     return None
 
 
+# ============================================================================
+# Purpose: Detect whether a CSV row includes any candidate column after the
+#          same whitespace/case normalization used for value lookup.
+# Database/ORM: None.
+# Standards: Keep blank-value detection aligned with header normalization and
+#            preserve the caller's typed fail-closed handling.
+# Blast Radius: YouTube Reporting CSV currency validation only.
+#               No graph projection impact detected.
+# Connections:
+#   - Function: _accumulate_csv_row -> distinguishes absent from blank currency.
+#   - Function: _first_present -> shares normalized row-key semantics.
+# ============================================================================
 def _row_has_any_column(row: dict[str, str | None], *keys: str) -> bool:
     """True iff the CSV row carries any of the supplied column names (case-insensitive)."""
-    lower_keys = {k.lower() for k in row if isinstance(k, str)}
+    lower_keys = {k.strip().lower() for k in row if isinstance(k, str)}
     return any(key.lower() in lower_keys for key in keys)
 
 

@@ -91,6 +91,17 @@ branch now also carry their merged PR number. PRs #136–#148, #150, #151, #153
 and #154 are absent from this doc on purpose — they are Dependabot PRs that were
 closed unmerged and superseded by the consolidated batch in #156.
 
+**Connector-risk note (2026-08-27, branch `fix/p1-remove-ad-revenue-alias`):** the
+test-fixture shorthand `ad_revenue` was removed from the YouTube Reporting CSV
+revenue-column aliases in `connectors/runs/orchestrator.py`. Nothing shipped it, but it
+pre-authorised the raw ad-revenue schema `report_type_whitelist` deliberately holds out;
+a CSV whose only revenue-like column is `ad_revenue` now fails header validation.
+Row-level revenue amounts are also bounded to the persisted `Numeric(20, 6)` scale:
+sub-scale amounts (e.g. `1E-19`) and monthly totals beyond 14 integer digits now fail
+as typed per-row/payload errors instead of failing later at persistence (or silently
+underflowing to zero), mirroring the existing `_validate_amount_native` gate so dry
+runs cannot count rows the live run would refuse.
+
 ## P0 — Must build first
 
 - ⏳ Dynamic org hierarchy — remaining: ORG models (PR #25); hierarchy
@@ -338,6 +349,11 @@ closed unmerged and superseded by the consolidated batch in #156.
   score (PR #69) and CommandView now renders human confidence badges
   (`confidenceDisplay` helper, raw code in title/aria — Track C,
   `feat/audit-track-c`). Remaining: finance adoption/validation of the labels.
+  Branch `fix/p1-confidence-cap`: the explain confidence cap was a no-op — a
+  warned fact clamped to exactly `0.9000` and the `>= 0.9000` label rule still
+  called it HIGH, so a warned high-score fact could retain the HIGH badge. The
+  label rule is now warnings-aware (`warnings => label != HIGH`); the score
+  clamp is unchanged, and warning presence remains explicit in `warnings`.
 - ✅ Explain-number API — shipped: POST
   /revenue/channels/{channel_id}/months/{month}/explain
   (build_channel_month_revenue_explanation; per-metric source/formula/
@@ -619,9 +635,17 @@ closed unmerged and superseded by the consolidated batch in #156.
   The summary tiles are now wired to the live `GET /audit/summary` aggregate-count
   route (see the audit summary endpoint entry below); the Retention tile stays a
   static policy constant.
-- ⏳ Rolling month window (item P1.2, branch `feat/p1-rolling-months`) — the
-  frozen `DEFAULT_MONTH = "2026-03"` / `MONTH_OPTIONS` literals and the AppShell
-  topbar month `<select>` now all derive from `frontend/src/lib/months.ts`:
+- ⏳ View error boundary (branch `feat/p1-error-boundary`, unmerged) —
+  `frontend/src/components/srcc/ErrorBoundary.tsx` wraps `<ViewRouter/>` in
+  AppShell. A render-time crash now degrades to
+  one themed panel with an allowlisted error category and correlation ID;
+  recovery performs a full document reload/re-fetch and warns that a write may
+  already have committed. Remaining: provider/root, Sidebar, and Topbar
+  renders are still outside this boundary; a registry import's shell latch now
+  stays armed through a view crash until the pending request settles.
+- ✅ Rolling month window (PR #211, item P1.2) — the frozen
+  `DEFAULT_MONTH = "2026-03"` / `MONTH_OPTIONS` literals and the view-owned
+  month selectors now all derive from `frontend/src/lib/months.ts`:
   current calendar month + the 3 before it, from LOCAL date components with an
   injectable `now`. Integration follow-ups on the same branch, from the audit of
   what the new current-month default exposed: (a) Month Close reads the
@@ -636,7 +660,8 @@ closed unmerged and superseded by the consolidated batch in #156.
   (c) `scripts/seed_demo_month.py` and `scripts/smoke_mvp.py` compute their
   default `--month` at run time (local civil date) instead of the frozen
   `"2026-03"`, and `frontend/README.md` documents seeding the current month with
-  both a bash and a PowerShell form. Converts to `✅ PR #N` on merge.
+  both a bash and a PowerShell form. Month selection is exclusively view-owned;
+  PR #212 removes the shell-level selector whose value never drove a request.
 
 ## P2 — Advanced features
 
@@ -1814,6 +1839,15 @@ single P-tier above.
   viewers narrowed to their granted connector ids (no foreign-credential leak);
   offset-paginated (`limit` ≤ `100`). Token-health frontend wired into
   ConnectorsView. Read-only: no audit write, no migration.
+- ⏳ PR #212 (open, branch `feat/p1-demock-chrome`) — remaining: merge the
+  completed AppShell chrome de-mocking (item P1.3). `NAV_GROUPS`/`VIEW_COPY`
+  become honest static config owned by the shell
+  (no invented nav counts, no month/scope/currency in the page copy);
+  `WORKFLOW_STEPS` + its rail, the operational-cue strip, the "Raw files gated"
+  pill, and the five handler-less header controls (Scope, Month, **Currency**,
+  Refresh, Create Export) are DELETED, not wired — the currency selector
+  permanently, per the single-currency decision; month and scope selection stay
+  inside the views whose state drives the corresponding requests.
 - ✅ Import stepper UI — PR-B of the import/sync UI arc (2026-08-09, branch
   `feat/import-stepper-ui`) — closes the arc PR-A opened: the Registry
   header's disabled Bulk Import placeholder becomes a live **Import CSV**
@@ -2032,6 +2066,20 @@ single P-tier above.
   mock). All display fields derived client-side (avatar, CMS badge, source
   label, state per Option A, trace key). Extracted to `views/RegistryView.tsx`;
   16 new Vitest tests. All six dashboard pages off mock data.
+- ⏳ Summary-dataset de-mock (P1.4) — branch `feat/p1-demock-views` (unmerged):
+  Command Center drops the fabricated Issue Queue, Month Close Controls, and
+  Export Readiness panels while retaining its live revenue, alert, explanation,
+  and reconciliation reads; Month Close drops the mock Reconciliation Equation
+  and keeps the API readiness/blocker workflow; Registry drops Registry Controls
+  plus the unsourced revenue/change tiles and keeps two counts derived from
+  `GET /channels`; Exports drops Export Guardrails and uses the live job/create
+  APIs for all four artifact types. Its bounded-memory download handshake now
+  authenticates and generates with `?prepare=true`, surfaces typed failures,
+  durably commits artifact metadata before its non-cacheable 204, then starts
+  an independently authorized, non-cacheable same-origin native GET and
+  refreshes persisted completion metadata. Seven fabricated datasets are
+  removed from `lib/mock/data.ts`; no missing API source is replaced with
+  invented data.
 - ✅ Soft Dark design system — PR #79, on `feat/design-system-softdark` (stacked
   on Registry Phase 2): `frontend/src/styles.css` token values converted to the
   UMS Revenue Design System Soft Dark theme (dark_dimmed surfaces/ink/status,
