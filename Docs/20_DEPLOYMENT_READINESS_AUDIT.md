@@ -181,7 +181,7 @@ NOLOGIN role SQL, identity-bound atomic publication, clean-target restore, and a
 throwaway rehearsal in `scripts/backup_database.py`,
 `scripts/restore_database.py`, and
 `Docs/22_BACKUP_RESTORE_AND_REHEARSAL.md`. P0-a's
-`scripts/compose.py` remains the owner of the coordinated artifact/blob
+`scripts/compose_storage.py` remains the owner of the coordinated artifact/blob
 bundle and its outer checksum manifest.
 
 This finding is not closed merely because the files exist on a branch. Before

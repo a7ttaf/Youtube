@@ -1203,7 +1203,7 @@ and the reconciled-net content (Phase 4 allocation/tax) feeding report bodies.
   (PR #98, active+revenue_required channels with no monthly fact); broader
   quality checks not built.
 - ⏳ Backup/export retention — P0-a/P0-b implementation now exists on the
-  corrected integration stack: `scripts/compose.py` owns the coordinated
+  corrected integration stack: `scripts/compose_storage.py` owns the coordinated
   artifact/blob bundle, while `scripts/backup_database.py` and
   `scripts/restore_database.py` own an atomic semantic PostgreSQL package and
   clean-target rehearsal (`Docs/20_COMPOSE_STORAGE_RUNBOOK.md`,

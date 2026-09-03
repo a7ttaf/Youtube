@@ -61,7 +61,7 @@ were deliberately rejected.
     count/sequence/head verification.
 - `scripts/backup_database.py` and `scripts/restore_database.py`
   - thin typed CLI boundaries and stable safe exit codes.
-- `scripts/compose.py` (was compose_storage.py before the #221 launcher merge)
+- `scripts/compose_storage.py`
   - coordinated recovery profile now requires exactly one structurally complete
     nested database package alongside artifact/blob, service-state, Git, and
     optional GCS receipts; P0-b retains semantic-manifest ownership.

@@ -2,7 +2,7 @@
 """Create one snapshot-consistent, database-only PostgreSQL backup.
 
 This entrypoint deliberately does not archive export artifacts or connector
-blobs. ``scripts/compose.py`` owns the coordinated outer bundle.
+blobs. ``scripts/compose_storage.py`` owns the coordinated outer bundle.
 """
 
 from __future__ import annotations
