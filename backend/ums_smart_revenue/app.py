@@ -77,6 +77,7 @@ from ums_smart_revenue.config.settings import (
     AUTHZ_SOURCE_HEADERS,
     GOOGLE_CONNECTOR_SERVICE_ACTOR_PLACEHOLDER_ID,
     AppSettings,
+    is_configured_service_actor_id,
     load_app_settings,
 )
 from ums_smart_revenue.config.version_baseline import STACK_VERSION_BASELINE
@@ -261,24 +262,27 @@ def _wire_connector_background_workers(
                 " -- a scheduler with nothing to submit to is a"
                 " misconfiguration"
             )
-        if settings.google_connector_service_actor_id is None:
-            raise ValueError(
-                "UMS_GROUP_SYNC_SCHEDULE_ENABLED requires"
-                " UMS_GOOGLE_CONNECTOR_SERVICE_ACTOR_ID to be set"
-                " -- the scheduler has no identity to submit jobs as"
-            )
-        # FIX: the well-known .env.example placeholder is treated as
-        # unconfigured HERE as well, not only by the principal builder.
-        # With schedule flags plus the template UUID the boot gate above
-        # passed, the scheduler started with a ConnectorJobActor carrying
-        # the placeholder, every tick failed at principal build -- and
+        # FIX: route the boot gate through the shared canonical test
+        # (is_configured_service_actor_id) so the scheduler can never drift
+        # from the API route pre-flight's definition of "configured" -- both
+        # a missing value and the well-known .env.example placeholder count
+        # as unconfigured HERE as well as there. With schedule flags plus the
+        # template UUID the old separate comparisons still passed the boot
+        # gate, the scheduler started with a ConnectorJobActor carrying the
+        # placeholder, every tick failed at principal build -- and
         # _audit_group_sync_failure attributed those failure rows to the
-        # published template UUID. Failing boot with a named placeholder is
-        # the same fail-fast contract as the None case; non-connector
-        # workloads never reach this gate and keep the lazy-boot contract.
-        if settings.google_connector_service_actor_id == (
-            GOOGLE_CONNECTOR_SERVICE_ACTOR_PLACEHOLDER_ID
-        ):
+        # published template UUID. Failing boot is the same fail-fast
+        # contract for both unconfigured states; non-connector workloads
+        # never reach this gate and keep the lazy-boot contract. The inner
+        # branch only picks the operator diagnostic; the admission decision
+        # is the canonical gate alone.
+        if not is_configured_service_actor_id(settings.google_connector_service_actor_id):
+            if settings.google_connector_service_actor_id is None:
+                raise ValueError(
+                    "UMS_GROUP_SYNC_SCHEDULE_ENABLED requires"
+                    " UMS_GOOGLE_CONNECTOR_SERVICE_ACTOR_ID to be set"
+                    " -- the scheduler has no identity to submit jobs as"
+                )
             raise ValueError(
                 "UMS_GROUP_SYNC_SCHEDULE_ENABLED requires a real"
                 " UMS_GOOGLE_CONNECTOR_SERVICE_ACTOR_ID: the configured value"

@@ -163,11 +163,12 @@ x-app-env: &app-env
   #
   # That fail-open hole is now closed at the source:
   # connectors/google/audit.py::build_connector_service_principal rejects the
-  # placeholder value itself, with a ValueError naming it. This covers compose
-  # AND `docker run --env-file`, a bare uvicorn, and any future template —
-  # anywhere the placeholder reaches the builder, the run fails closed as a
-  # typed ConnectorServicePrincipalUnavailableError (a job_failed_before_start
-  # audit row, never a mis-attributed one).
+  # placeholder value itself, raising the typed
+  # ConnectorServicePrincipalUnavailableError (a GoogleConnectorError). This
+  # covers compose AND `docker run --env-file`, a bare uvicorn, and any future
+  # template — anywhere the placeholder reaches the builder, the run fails
+  # closed with that typed error (a job_failed_before_start audit row, never
+  # a mis-attributed one).
   #
   # Consequence for the operator, in both directions:
   # * Scheduling ENABLED + placeholder in `.env`: create_app fails at boot
@@ -225,13 +226,18 @@ x-app-env: &app-env
   #
   #     Fix the value in `.env`, then `python scripts/compose.py up -d app`.
   #
-  #     A BLANK value is safe and is NOT what this warns about: `_load_int`
-  #     returns its default on an empty string, and `""` is in settings.py's
+  #     A BLANK value is safe for the int/bool pass-throughs (five of the six
+  #     below) and is NOT what this warns about: `_load_int` returns its
+  #     default on an empty string, and `""` is in settings.py's
   #     `_FALSY_TOKENS` while both bool defaults are False. Verified —
   #     `UMS_CONNECTOR_JOB_MAX_WORKERS=` yields max_workers=1, and blank
   #     executor/interval yield False/24, i.e. exactly the defaults. So `VAR=`
-  #     behaves identically to leaving the line out. Only a non-empty
-  #     malformed value is dangerous.
+  #     behaves identically to leaving the line out for those five. The
+  #     service actor id is the exception: a blank
+  #     `UMS_GOOGLE_CONNECTOR_SERVICE_ACTOR_ID=` parses as UNSET (None), and
+  #     with `UMS_GROUP_SYNC_SCHEDULE_ENABLED=true` the API then fails boot —
+  #     the same restart loop a malformed value causes. Blank is only safe
+  #     for the actor id while scheduling stays disabled.
   #
   #     One asymmetry worth knowing while triaging: `migrate` inherits this
   #     whole block but never calls `load_app_settings` (its env.py reaches

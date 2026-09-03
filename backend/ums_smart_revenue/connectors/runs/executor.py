@@ -38,10 +38,8 @@ from ums_smart_revenue.auth.models import PermissionGrant, UserPrincipal
 from ums_smart_revenue.auth.permissions import Permission
 from ums_smart_revenue.auth.scopes import AccessScope
 from ums_smart_revenue.auth.sql_audit_sink import PlatformLaneAuditSink, SqlAlchemyAuditSink
-from ums_smart_revenue.config.settings import GOOGLE_CONNECTOR_SERVICE_ACTOR_ID_ENV
 from ums_smart_revenue.connectors.google.audit import build_connector_service_principal
 from ums_smart_revenue.connectors.google.errors import (
-    ConnectorServicePrincipalUnavailableError,
     GoogleConnectorError,
 )
 from ums_smart_revenue.connectors.runs.group_sync import (
@@ -785,18 +783,13 @@ class ConnectorJobExecutor:
         exercises (the executor's fabricate-with-the-relevant-grant precedent,
         ``_build_audit_actor``).
 
-        A missing service-actor env raises the typed
+        A missing or placeholder service-actor env raises the typed
         ``ConnectorServicePrincipalUnavailableError`` (a ``GoogleConnectorError``)
-        rather than a bare ``ValueError`` -- the same conversion the orchestrator
-        does for pulls -- so the worker's failure catch audits it as a pre-start
-        failure instead of the catch-all swallowing it.
+        straight from ``build_connector_service_principal`` -- no ValueError
+        translation needed -- so the worker's failure catch audits it as a
+        pre-start failure instead of the catch-all swallowing it.
         """
-        try:
-            base = build_connector_service_principal(tenant_id=tenant_id)
-        except ValueError as exc:
-            raise ConnectorServicePrincipalUnavailableError(
-                env_var=GOOGLE_CONNECTOR_SERVICE_ACTOR_ID_ENV,
-            ) from exc
+        base = build_connector_service_principal(tenant_id=tenant_id)
         return UserPrincipal(
             user_id=base.user_id,
             email=base.email,
