@@ -1,3 +1,8 @@
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FutureTimeoutError
+from threading import Event
+
+import pytest
 import sqlalchemy as sa
 from alembic import command
 from alembic.config import Config
@@ -8,6 +13,7 @@ from ums_smart_revenue.db.session import (
     _apply_tenant_isolation,
     build_platform_session_factory,
     build_session_factory,
+    session_dependency,
 )
 from ums_smart_revenue.tenancy.context import TENANT_CTX
 from ums_smart_revenue.tenancy.models import Tenant, TenantStatus
@@ -56,30 +62,113 @@ def test_sqlite_session_issues_no_set_statements():
         TENANT_CTX.reset(token)
 
 
-def test_sqlite_engine_uses_static_pool_for_shared_connection():
-    """Verify the SQLite engine shares one DBAPI connection via StaticPool.
+def test_sqlite_engine_uses_one_slot_queue_pool():
+    """Verify SQLite retains one connection without overlapping checkouts.
 
     Codex P2 review on PR #88 confirmed that
     ``join_transaction_mode="create_savepoint"`` does not actually open a
-    SAVEPOINT for engine-bound sessions on a StaticPool engine, so the
+    SAVEPOINT for engine-bound sessions, so the
     production app must NOT rely on SAVEPOINT-based session isolation for
     SQLite. The codebase instead wires
     ``_sqlite_platform_session_from_request`` so the platform lane reuses
     the request session (no concurrent Session contention). This test
-    pins the StaticPool choice so any future refactor that drops it gets
-    caught before it can reintroduce the original "database is locked"
-    contention.
+    pins the one-slot QueuePool so a future refactor cannot reintroduce
+    multiple writers or StaticPool's overlapping-transaction rollback race.
     """
-    from sqlalchemy.pool import StaticPool
+    from sqlalchemy.pool import QueuePool
 
     factory = build_session_factory("sqlite+pysqlite:///:memory:")
     # The sessionmaker keeps a reference to its bound engine, which is
     # the same one build_engine() returns for the URL.
     bound_engine = factory.kw["bind"]
-    assert isinstance(bound_engine.pool, StaticPool), (
-        "SQLite must use StaticPool so the request session and any "
-        "co-tenanted use share one DBAPI connection."
+    assert isinstance(bound_engine.pool, QueuePool), (
+        "SQLite must use QueuePool so one connection cannot be checked out "
+        "by overlapping request Sessions."
     )
+    assert bound_engine.pool.size() == 1
+
+
+def test_sqlite_request_rollback_undoes_released_repository_savepoint(tmp_path):
+    """Keep nested repository writes subordinate to request rollback on SQLite."""
+    database_url = f"sqlite+pysqlite:///{(tmp_path / 'request-rollback.db').as_posix()}"
+    factory = build_session_factory(database_url)
+    engine = factory.kw["bind"]
+    with engine.begin() as connection:
+        connection.exec_driver_sql("CREATE TABLE request_rollback_probe (id INTEGER PRIMARY KEY)")
+
+    request_session = session_dependency(factory)()
+    session = next(request_session, None)
+    assert session is not None, "dependency generator yielded no session"
+    with session.begin_nested():
+        session.execute(sa.text("INSERT INTO request_rollback_probe (id) VALUES (1)"))
+
+    with pytest.raises(RuntimeError, match="audit write failed"):
+        request_session.throw(RuntimeError("audit write failed"))
+
+    with engine.connect() as connection:
+        persisted_rows = connection.execute(
+            sa.text("SELECT count(*) FROM request_rollback_probe")
+        ).scalar()
+    assert persisted_rows == 0
+
+
+@pytest.mark.parametrize("database_kind", ["file", "memory"])
+def test_sqlite_concurrent_request_rollback_cannot_erase_committed_owner(
+    tmp_path,
+    database_kind,
+):
+    """Serialize request checkouts so one rollback cannot erase another write."""
+    database_url = (
+        f"sqlite+pysqlite:///{(tmp_path / 'concurrent-requests.db').as_posix()}"
+        if database_kind == "file"
+        else "sqlite+pysqlite:///file:pr223_concurrent?mode=memory&cache=shared&uri=true"
+    )
+    factory = build_session_factory(database_url)
+    engine = factory.kw["bind"]
+    with engine.begin() as connection:
+        connection.exec_driver_sql("CREATE TABLE concurrent_probe (id INTEGER PRIMARY KEY)")
+
+    first_request = session_dependency(factory)()
+    first_session = next(first_request, None)
+    assert first_session is not None, "dependency generator yielded no session"
+    with first_session.begin_nested():
+        first_session.execute(sa.text("INSERT INTO concurrent_probe (id) VALUES (1)"))
+
+    second_attempting = Event()
+    second_acquired = Event()
+
+    def fail_second_request_after_write() -> None:
+        """Acquire after request one, write, then exercise dependency rollback."""
+        second_request = session_dependency(factory)()
+        second_attempting.set()
+        second_session = next(second_request, None)
+        assert second_session is not None, "dependency generator yielded no session"
+        second_acquired.set()
+        with second_session.begin_nested():
+            second_session.execute(sa.text("INSERT INTO concurrent_probe (id) VALUES (2)"))
+        with pytest.raises(RuntimeError, match="second request failed"):
+            second_request.throw(RuntimeError("second request failed"))
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        second_result = executor.submit(fail_second_request_after_write)
+        assert second_attempting.wait(timeout=5)
+        # The old StaticPool implementation completed immediately with
+        # ``cannot start a transaction within a transaction`` and rolled back
+        # request one's shared DBAPI transaction. QueuePool must keep request
+        # two waiting until request one returns the sole checkout.
+        assert not second_acquired.wait(timeout=0.25)
+        with pytest.raises(FutureTimeoutError):
+            second_result.result(timeout=0)
+        with pytest.raises(StopIteration):
+            next(first_request)
+        second_result.result(timeout=5)
+
+    with engine.connect() as connection:
+        persisted_ids = connection.execute(
+            sa.text("SELECT id FROM concurrent_probe ORDER BY id")
+        ).scalars()
+        assert list(persisted_ids) == [1]
+    engine.dispose()
 
 
 def test_postgres_tenant_lane_sets_role_and_trusted_tenant_context():
@@ -113,19 +202,25 @@ def test_no_context_clears_stale_context_when_clear_helper_is_absent():
     """Missing clear helper must not leave a stale tenant row on pooled backends."""
 
     class _Result:
+        """Awaitable result stub for one session event."""
+
         def __init__(self, value=None):
             self._value = value
 
         def scalar(self):
+            """Return one scalar from the recorded result."""
             return self._value
 
     class _Connection:
+        """Connection stub recording session checkout events."""
+
         dialect = type("Dialect", (), {"name": "postgresql"})()
 
         def __init__(self):
             self.calls = []
 
         def exec_driver_sql(self, sql, parameters=None):
+            """Record one driver-level SQL statement."""
             self.calls.append((sql, parameters))
             if sql == "SELECT to_regprocedure(%s) IS NOT NULL":
                 return _Result(False)

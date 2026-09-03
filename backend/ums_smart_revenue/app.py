@@ -293,6 +293,27 @@ def _wire_connector_background_workers(
                 " jobs as a published template UUID would mis-attribute its"
                 " failure audits"
             )
+        # FIX: the well-known .env.example placeholder is treated as
+        # unconfigured HERE as well, not only by the principal builder.
+        # With schedule flags plus the template UUID the boot gate above
+        # passed, the scheduler started with a ConnectorJobActor carrying
+        # the placeholder, every tick failed at principal build -- and
+        # _audit_group_sync_failure attributed those failure rows to the
+        # published template UUID. Failing boot with a named placeholder is
+        # the same fail-fast contract as the None case; non-connector
+        # workloads never reach this gate and keep the lazy-boot contract.
+        if settings.google_connector_service_actor_id == (
+            GOOGLE_CONNECTOR_SERVICE_ACTOR_PLACEHOLDER_ID
+        ):
+            raise ValueError(
+                "UMS_GROUP_SYNC_SCHEDULE_ENABLED requires a real"
+                " UMS_GOOGLE_CONNECTOR_SERVICE_ACTOR_ID: the configured value"
+                " is the well-known .env.example placeholder"
+                f" ({GOOGLE_CONNECTOR_SERVICE_ACTOR_PLACEHOLDER_ID}), which"
+                " connector audit emitters refuse -- a scheduler submitting"
+                " jobs as a published template UUID would mis-attribute its"
+                " failure audits"
+            )
         scheduler = GroupSyncScheduler(
             session_factory=session_factory,
             executor=fastapi_app.state.connector_job_executor,

@@ -1,6 +1,7 @@
 from decimal import Decimal
 from uuid import UUID, uuid4
 
+import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
@@ -23,6 +24,7 @@ USER_ID = UUID("00000000-0000-0000-0000-000000006401")
 
 
 def auth_headers(role: str, scope_type: str, scope_id: str | None = None) -> dict[str, str]:
+    """Return trusted-gateway headers for one actor and tenant."""
     headers = {
         "x-user-id": str(USER_ID),
         "x-user-email": "revenue-facts@example.com",
@@ -36,10 +38,12 @@ def auth_headers(role: str, scope_type: str, scope_id: str | None = None) -> dic
 
 
 def build_database_url(tmp_path) -> str:
+    """Return the disposable SQLite URL backing these API tests."""
     return f"sqlite+pysqlite:///{(tmp_path / f'{uuid4()}.db').as_posix()}"
 
 
 def seed_database(database_url: str, *, locked_month: bool = False) -> None:
+    """Seed one disposable database for the scenario under test."""
     engine = create_engine(database_url)
     OrgBase.metadata.create_all(engine)
     SecurityBase.metadata.create_all(engine)
@@ -93,6 +97,7 @@ def seed_database(database_url: str, *, locked_month: bool = False) -> None:
 
 
 def test_system_integration_user_imports_monthly_revenue_fact_with_audit(tmp_path):
+    """System integration user imports monthly revenue fact with audit."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -142,7 +147,107 @@ def test_system_integration_user_imports_monthly_revenue_fact_with_audit(tmp_pat
     assert audit_log.sensitive is True
 
 
+@pytest.mark.parametrize("manual_connector_key", ["manual-upload", "manual_upload"])
+def test_beta_operator_imports_only_manual_revenue_without_connector_power(
+    tmp_path,
+    manual_connector_key,
+):
+    """The beta workflow writes MANUAL_UPLOAD facts under its narrow audit permission."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    client = TestClient(create_app(database_url=database_url))
+
+    response = client.post(
+        "/revenue/facts",
+        headers=auth_headers("beta_operator", "global"),
+        json={
+            "month": "2026-03",
+            "youtube_channel_id": "channel-tv-a",
+            "source_kind": "MANUAL_UPLOAD",
+            "connector_key": manual_connector_key,
+            "source_report_id": "operator-upload-2026-03",
+            "gross_revenue_usd": "1234.56",
+            "views": 250000,
+            "confidence_score": "0.95",
+            "reason": "Google-free beta revenue upload",
+        },
+    )
+
+    engine = create_engine(database_url)
+    with Session(engine) as session:
+        fact = session.scalars(select(MonthlyChannelRevenueFactORM)).one()
+        audit_log = session.scalars(select(AuditLogORM)).one()
+
+    assert response.status_code == 201, response.text
+    assert fact.source_kind == "MANUAL_UPLOAD"
+    assert audit_log.details["permission"] == "finance.import_manual_revenue"
+    assert audit_log.details["connector_key"] == manual_connector_key
+    assert audit_log.scope_type == "connector"
+    assert audit_log.scope_id == manual_connector_key
+
+
+@pytest.mark.parametrize("manual_connector_key", ["manual-upload", "manual_upload"])
+def test_beta_operator_manual_alias_with_non_manual_source_fails_closed(
+    tmp_path,
+    manual_connector_key,
+):
+    """Both aliases require MANUAL_UPLOAD; neither grants generic connector power."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    client = TestClient(create_app(database_url=database_url))
+
+    response = client.post(
+        "/revenue/facts",
+        headers=auth_headers("beta_operator", "global"),
+        json={
+            "month": "2026-03",
+            "youtube_channel_id": "channel-tv-a",
+            "source_kind": "YOUTUBE_CMS",
+            "connector_key": manual_connector_key,
+            "gross_revenue_usd": "1234.56",
+            "reason": "Attempt non-manual import through manual alias",
+        },
+    )
+
+    engine = create_engine(database_url)
+    with Session(engine) as session:
+        assert session.scalars(select(MonthlyChannelRevenueFactORM)).all() == []
+        assert session.scalars(select(AuditLogORM)).all() == []
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Missing permission: connectors.run_jobs"
+
+
+def test_beta_operator_cannot_import_connector_sourced_revenue(tmp_path):
+    """The narrow grant is not an alternate connector-ingestion boundary."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    client = TestClient(create_app(database_url=database_url))
+
+    response = client.post(
+        "/revenue/facts",
+        headers=auth_headers("beta_operator", "global"),
+        json={
+            "month": "2026-03",
+            "youtube_channel_id": "channel-tv-a",
+            "source_kind": "YOUTUBE_CMS",
+            "connector_key": "youtube-cms",
+            "gross_revenue_usd": "1234.56",
+            "reason": "Attempt connector-backed import",
+        },
+    )
+
+    engine = create_engine(database_url)
+    with Session(engine) as session:
+        assert session.scalars(select(MonthlyChannelRevenueFactORM)).all() == []
+        assert session.scalars(select(AuditLogORM)).all() == []
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Missing permission: connectors.run_jobs"
+
+
 def test_import_rejects_connector_source_kind_mismatch(tmp_path):
+    """Import rejects connector source kind mismatch."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -168,6 +273,7 @@ def test_import_rejects_connector_source_kind_mismatch(tmp_path):
 
 
 def test_finance_viewer_reads_channel_month_facts_with_revenue_audit(tmp_path):
+    """Finance viewer reads channel month facts with revenue audit."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     engine = create_engine(database_url)
@@ -209,6 +315,7 @@ def test_finance_viewer_reads_channel_month_facts_with_revenue_audit(tmp_path):
 
 
 def test_import_rejects_revenue_breakdown_above_gross(tmp_path):
+    """Import rejects revenue breakdown above gross."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -245,6 +352,7 @@ def test_import_rejects_revenue_breakdown_above_gross(tmp_path):
 
 
 def test_company_manager_cannot_read_revenue_facts(tmp_path):
+    """Company manager cannot read revenue facts."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -259,6 +367,7 @@ def test_company_manager_cannot_read_revenue_facts(tmp_path):
 
 
 def test_finance_viewer_reads_reconciliation_preview(tmp_path):
+    """Finance viewer reads reconciliation preview."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     engine = create_engine(database_url)
@@ -308,6 +417,7 @@ def test_finance_viewer_reads_reconciliation_preview(tmp_path):
 
 
 def test_company_manager_cannot_read_reconciliation_preview(tmp_path):
+    """Company manager cannot read reconciliation preview."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -324,6 +434,7 @@ def test_company_manager_cannot_read_reconciliation_preview(tmp_path):
 def test_finance_viewer_reads_month_reconciliation_issue_queue_for_allowed_company(
     tmp_path,
 ):
+    """Finance viewer reads month reconciliation issue queue for allowed company."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     engine = create_engine(database_url)
@@ -402,6 +513,7 @@ def test_finance_viewer_reads_month_reconciliation_issue_queue_for_allowed_compa
 
 
 def test_finance_viewer_pages_month_reconciliation_issue_queue_by_channel(tmp_path):
+    """Finance viewer pages month reconciliation issue queue by channel."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     engine = create_engine(database_url)
@@ -485,6 +597,7 @@ def test_finance_viewer_pages_month_reconciliation_issue_queue_by_channel(tmp_pa
 
 
 def test_company_manager_cannot_read_month_reconciliation_issue_queue(tmp_path):
+    """Company manager cannot read month reconciliation issue queue."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -499,6 +612,7 @@ def test_company_manager_cannot_read_month_reconciliation_issue_queue(tmp_path):
 
 
 def test_import_rejects_locked_finance_month(tmp_path):
+    """Import rejects locked finance month."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url, locked_month=True)
     client = TestClient(create_app(database_url=database_url))
@@ -527,6 +641,7 @@ def test_import_rejects_locked_finance_month(tmp_path):
 
 
 def test_import_rejects_missing_channel(tmp_path):
+    """Import rejects missing channel."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -550,6 +665,7 @@ def test_import_rejects_missing_channel(tmp_path):
 
 
 def test_import_rejects_invalid_source_kind(tmp_path):
+    """Import rejects invalid source kind."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -578,6 +694,7 @@ def test_import_accepts_gateway_subject_actor_id(tmp_path):
     # used to reject these with 422; per the shared actor_identity_uuid
     # helper the subject is now mapped to a deterministic uuid5 and the
     # write succeeds with that value persisted to imported_by.
+    """Import accepts gateway subject actor id."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
