@@ -91,6 +91,15 @@ _SERVICE_ACCOUNT_EMAIL = "google-connectors@service.ums.local"
 def build_connector_service_principal(*, tenant_id: UUID) -> UserPrincipal:
     """Return the service ``UserPrincipal`` for one connector run's audit emissions.
 
+    Args:
+        tenant_id: The tenant the run operates on; the principal is pinned to
+            it so audit consumers can scope every connector-emitted row.
+
+    Returns:
+        A frozen, tenant-pinned service-account ``UserPrincipal`` carrying
+        ``RUN_CONNECTOR_JOBS@global``, whose ``user_id`` is the configured
+        actor UUID.
+
     Raises:
         ConnectorServicePrincipalUnavailableError: ``UMS_GOOGLE_CONNECTOR_SERVICE_ACTOR_ID``
             is unset, or is set to the well-known ``.env.example`` placeholder

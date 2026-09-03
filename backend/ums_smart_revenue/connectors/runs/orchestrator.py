@@ -642,10 +642,6 @@ def _principal_for_triggered_user(*, triggered_by_user_id: str, tenant_id: UUID)
     )
 
 
-
-
-
-
 # ============================================================================
 # Purpose: Dispatch a credential-resolved connector run to the dry-run or live
 #          path while keeping the public run_one entrypoint branch-free.
