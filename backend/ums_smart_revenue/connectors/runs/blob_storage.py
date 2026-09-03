@@ -61,11 +61,27 @@ class LocalFileStoreBackend:
     """Filesystem blob backend serving ``file-store://`` URIs under one root."""
 
     def __init__(self, *, root: Path) -> None:
-        """Bind the backend to one storage ``root`` directory."""
+        """Bind the backend to one storage ``root`` directory.
+
+        Args:
+            root: Directory every ``file-store://`` path resolves under.
+
+        Returns:
+            ``None``. The root is stored unresolved; containment checks
+            compare resolved forms.
+        """
         self._root = Path(root)
 
     def _path_for(self, storage_uri: str) -> Path:
         """Resolve one ``file-store://`` URI to a contained on-disk path.
+
+        Args:
+            storage_uri: ``file-store://`` URI whose path is joined onto this
+                backend's root.
+
+        Returns:
+            The unresolved on-disk candidate path (no symlink following);
+            containment is proven on the resolved form before returning.
 
         Raises:
             ValueError: The URI uses a foreign scheme, a backslash or NUL
@@ -184,12 +200,26 @@ class GcsBlobStorageBackend:
     """Google Cloud Storage blob backend serving ``gs://`` URIs."""
 
     def __init__(self, *, client: GcsClient) -> None:
-        """Bind the backend to one authenticated GCS ``client``."""
+        """Bind the backend to one authenticated GCS ``client``.
+
+        Args:
+            client: Authenticated ``google.cloud.storage.Client`` used for
+                every bucket/blob call.
+
+        Returns:
+            ``None``. The client is retained for the backend's lifetime.
+        """
         self._client = client
 
     @staticmethod
     def _parse_uri(storage_uri: str) -> tuple[str, str]:
         """Split one ``gs://`` URI into its ``(bucket, key)`` parts.
+
+        Args:
+            storage_uri: ``gs://`` URI naming one bucket object.
+
+        Returns:
+            The ``(bucket, key)`` pair addressed by the URI.
 
         Raises:
             ValueError: The URI uses a foreign scheme or lacks a bucket/key.
@@ -264,11 +294,21 @@ def deterministic_blob_path(
         {scheme}://{bucket}/{tenant_id}/{connector_key}/
         {report_type}/{month}/{checksum}.{ext}
 
-    Scheme MUST match the backend the orchestrator built (file-store for
-    LocalFileStoreBackend, gs for GcsBlobStorageBackend); each backend
-    validates its own prefix and raises ValueError on mismatch. Same bytes
-    always map to the same path, so idempotent re-uploads on retry overwrite
-    or hit the existing object.
+    Args:
+        scheme: Backend scheme (``file-store`` or ``gs``); MUST match the
+            backend the orchestrator built.
+        bucket: Backend bucket name (the store root for file-store).
+        tenant_id: Tenant that owns the report run.
+        connector_key: Connector identifier (e.g. ``youtube_reporting``).
+        report_type: Report type id the payload belongs to.
+        month: ``YYYY-MM`` report month.
+        checksum: SHA-256 hex digest of the payload bytes.
+        ext: Filename extension (e.g. ``csv``).
+
+    Returns:
+        The deterministic URI; the same inputs always map to the same
+        path, so idempotent re-uploads on retry overwrite or hit the
+        existing object.
 
     Note: account_id is intentionally NOT in the path - run context lives on
     connector_runs.
@@ -296,9 +336,18 @@ def upload_and_verify(
 ) -> str:
     """Upload, re-read, verify SHA-256, return the computed checksum.
 
-    Raises BlobUploadError if backend.upload fails (passed through).
-    Raises BlobChecksumMismatchError if re-read bytes hash differently
-    (e.g., backend silently truncated).
+    Args:
+        backend: Storage backend that owns the URI namespace.
+        storage_uri: Destination URI within ``backend``'s scheme.
+        content: Exact bytes to persist and verify.
+
+    Returns:
+        The SHA-256 hex digest of the verified payload.
+
+    Raises:
+        BlobUploadError: Passed through when ``backend.upload`` fails.
+        BlobChecksumMismatchError: The re-read bytes hash differently
+            (e.g. the backend silently truncated the payload).
     """
     computed = compute_checksum(content)
     backend.upload(storage_uri=storage_uri, content=content)

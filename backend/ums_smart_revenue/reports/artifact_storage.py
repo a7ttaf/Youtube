@@ -42,6 +42,14 @@ class FileSystemExportArtifactStore:
     ):
         """Bind the store to ``root_dir`` (or the default) and a size cap.
 
+        Args:
+            root_dir: Root directory for artifact persistence; defaults to
+                the platform default root when ``None``.
+            max_artifact_size_bytes: Upper bound accepted for one artifact.
+
+        Returns:
+            ``None``. Instance attributes are bound directly.
+
         Raises:
             ExportArtifactStorageError: ``max_artifact_size_bytes`` is not
                 positive.
@@ -53,7 +61,12 @@ class FileSystemExportArtifactStore:
 
     @classmethod
     def from_environment(cls) -> FileSystemExportArtifactStore:
-        """Build a store rooted at ``UMS_EXPORT_ARTIFACT_DIR`` or the default."""
+        """Build a store rooted at ``UMS_EXPORT_ARTIFACT_DIR`` or the default.
+
+        Returns:
+            A :class:`FileSystemExportArtifactStore` rooted at the trimmed
+            environment value, or at the default root when unset/blank.
+        """
         configured_root = os.environ.get(EXPORT_ARTIFACT_DIR_ENV)
         if configured_root and configured_root.strip():
             return cls(configured_root.strip())
@@ -221,12 +234,22 @@ class FileSystemExportArtifactStore:
 
 
 def _default_root_dir() -> Path:
-    """Return the default on-disk artifact root directory."""
+    """Return the default on-disk artifact root directory.
+
+    Returns:
+        The platform default root directory for persisted artifacts.
+    """
     return DEFAULT_EXPORT_ARTIFACT_DIR
 
 
 def _normalize_export_id(value: str) -> str:
     """Normalize ``value`` into a canonical UUID string.
+
+    Args:
+        value: Caller-supplied export id in any UUID form.
+
+    Returns:
+        The canonical lowercase UUID string.
 
     Raises:
         ExportArtifactStorageError: ``value`` is not a valid UUID.
@@ -239,6 +262,12 @@ def _normalize_export_id(value: str) -> str:
 
 def _normalize_filename(value: str) -> str:
     """Validate and return one safe artifact filename segment.
+
+    Args:
+        value: Caller-supplied filename candidate.
+
+    Returns:
+        The trimmed, validated filename (single path segment).
 
     Raises:
         ExportArtifactStorageError: The name is blank, a dot segment, or
@@ -253,6 +282,12 @@ def _normalize_filename(value: str) -> str:
 def _normalize_content_type(value: str) -> str:
     """Validate and return one non-blank artifact content type.
 
+    Args:
+        value: Caller-supplied MIME type candidate.
+
+    Returns:
+        The trimmed, non-empty content type string.
+
     Raises:
         ExportArtifactStorageError: The content type is blank.
     """
@@ -264,6 +299,12 @@ def _normalize_content_type(value: str) -> str:
 
 def _relative_path_from_file_url(value: str) -> Path:
     """Map one ``file-store://`` URL to its contained store-relative path.
+
+    Args:
+        value: ``file-store://`` URL previously produced by :meth:`save`.
+
+    Returns:
+        The store-relative path beginning under ``exports/``.
 
     Raises:
         ExportArtifactStorageError: The URL uses a foreign scheme, escapes
@@ -284,7 +325,15 @@ def _relative_path_from_file_url(value: str) -> Path:
 
 
 def _discard_temp_file(path: Path) -> None:
-    """Best-effort unlink of one temp file; cleanup failures are ignored."""
+    """Best-effort unlink of one temp file; cleanup failures are ignored.
+
+    Args:
+        path: Temporary file to remove; a missing file is success.
+
+    Returns:
+        ``None``. Any OSError during removal is deliberately swallowed so
+        cleanup never masks the original save failure.
+    """
     try:
         path.unlink(missing_ok=True)
     except OSError:
