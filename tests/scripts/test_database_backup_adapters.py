@@ -19,6 +19,14 @@ from ums_smart_revenue.ops.database_backup.semantic import (
 )
 
 
+def _exactly_one(items):
+    """Return the one expected item; a dry iterator fails the test."""
+    try:
+        return next(items)
+    except StopIteration as exc:
+        raise AssertionError("expected one more canned item; got none") from exc
+
+
 class _TextRunner:
     """Command runner stub returning canned text output."""
 
@@ -224,7 +232,8 @@ def test_restore_target_must_reject_a_deliberately_wrong_password(
     class _UnexpectedConnection:
         """Connection stub that fails the test if it is ever used."""
 
-        def close(self) -> None:
+        @staticmethod
+        def close() -> None:
             """Mark the unexpected connection as closed."""
             return None
 
@@ -244,11 +253,11 @@ class _Rows:
     """Cursor result stub returning canned rows."""
 
     def __init__(self, rows: list[tuple[object, ...]]) -> None:
-        self._rows = rows
+        self._canned_rows = rows
 
     def fetchall(self) -> list[tuple[object, ...]]:
         """Return the canned rows."""
-        return self._rows
+        return self._canned_rows
 
 
 class _AuthorizationConnection:
@@ -485,11 +494,11 @@ def test_dedicated_cluster_accepts_only_stock_pg18_memberships(
         """Cursor result stub returning canned rows."""
 
         def __init__(self, rows: list[tuple[object, ...]]) -> None:
-            self._rows = rows
+            self._canned_rows = rows
 
         def fetchall(self) -> list[tuple[object, ...]]:
             """Return the canned rows."""
-            return self._rows
+            return self._canned_rows
 
     class _Connection:
         """Connection stub serving canned catalog rows."""
@@ -507,9 +516,10 @@ def test_dedicated_cluster_accepts_only_stock_pg18_memberships(
 
         def execute(self, _query: str) -> _Rows:
             """Return the canned rows for any query."""
-            return _Rows(next(self.replies))
+            return _Rows(_exactly_one(self.replies))
 
-        def close(self) -> None:
+        @staticmethod
+        def close() -> None:
             """Mark the connection closed."""
             return None
 

@@ -74,6 +74,7 @@ if set(PERMISSION_SCOPE_TYPES) != set(Permission):
 @dataclass(frozen=True)
 class UserPermissionGrantEntry:
     """One tenant-scoped direct permission grant record."""
+
     id: str
     user_id: str
     permission_key: str
@@ -107,26 +108,23 @@ class UserPermissionGrantEntry:
 
 class UserPermissionGrantError(ValueError):
     """Base typed error for direct permission grant mutations."""
-    pass
 
 
 class UserPermissionGrantConflictError(UserPermissionGrantError):
     """The grant already exists (or conflicts with a pending savepoint write)."""
-    pass
 
 
 class UserPermissionGrantNotFoundError(UserPermissionGrantError):
     """No grant matches the requested tenant/user/permission/scope."""
-    pass
 
 
 class UserPermissionGrantValidationError(UserPermissionGrantError):
     """A grant field failed normalization or scope validation."""
-    pass
 
 
 class SqlAlchemyUserPermissionGrantRepository:
     """PostgreSQL repository for tenant-scoped direct permission grants."""
+
     def __init__(self, session: Session, *, tenant_id: UUID | str | None = None):
         """Bind direct permission grants to an explicit or request tenant."""
         self._session = session

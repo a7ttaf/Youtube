@@ -119,7 +119,7 @@ def _content_floor(table_counts: dict[str, int]) -> dict[str, int]:
 #   archive. No retention or artifact/blob backup is claimed by this function.
 # Connections:
 #   - File: scripts/compose_restore_roles.sql -> only accepted cluster role SQL.
-#   - File: scripts/compose_storage.py -> owns the coordinated outer bundle.
+#   - File: scripts/compose.py -> owns the coordinated outer bundle.
 #   - File: Docs/22_BACKUP_RESTORE_AND_REHEARSAL.md -> operator contract.
 # ============================================================================
 def run_backup(

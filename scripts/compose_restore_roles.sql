@@ -4,7 +4,8 @@
 -- Standards: Idempotent creation and fail-closed privilege drift validation.
 -- Blast Radius: Authorization; creates roles but grants no login or membership.
 -- Connections:
---   - File: backend/ums_smart_revenue/db/alembic/versions/20260608_0001_tenant_rls_enforcement.py -> Canonical role contract.
+--   - File: backend/ums_smart_revenue/db/alembic/versions/
+--     20260608_0001_tenant_rls_enforcement.py -> Canonical role contract.
 --   - File: Docs/20_COMPOSE_STORAGE_RUNBOOK.md -> Recovery ordering and checks.
 -- ============================================================================
 DO $ums_roles$
@@ -28,7 +29,8 @@ BEGIN
               AND (rolcanlogin OR rolsuper OR rolcreatedb OR rolcreaterole
                    OR rolbypassrls OR rolreplication)
         ) THEN
-            RAISE EXCEPTION 'unsafe privilege drift on required role %', role_name;
+            RAISE EXCEPTION 'unsafe privilege drift on required role %',
+                role_name;
         END IF;
     END LOOP;
 END

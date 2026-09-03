@@ -319,9 +319,11 @@ class DatabaseLocale:
         }
         _require_exact_keys(body, expected, "source.locale")
         values = {key: body[key] if isinstance(body[key], str) else None for key in expected}
-        if any(value is None for value in values.values()):
+        # FIX: the redundant assert was stripped under `python -O`, silently
+        # skipping locale validation; one typed isinstance check covers both
+        # the None and non-string cases unconditionally.
+        if any(not isinstance(value, str) for value in values.values()):
             raise BackupToolError("source.locale fields must be strings", exit_code=8)
-        assert all(isinstance(value, str) for value in values.values())
         if not values["encoding"]:
             raise BackupToolError("source.locale.encoding must not be empty", exit_code=8)
         return cls(**values)  # type: ignore[arg-type]
@@ -742,9 +744,17 @@ class BackupManifest:
                 path.read_text(encoding="utf-8"),
                 object_pairs_hook=_reject_duplicate_json_keys,
             )
-        except BackupToolError:
-            raise
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError, RecursionError) as exc:
+        except (
+            BackupToolError,
+            OSError,
+            UnicodeDecodeError,
+            json.JSONDecodeError,
+            RecursionError,
+        ) as exc:
+            # BackupToolError is a typed rejection from the duplicate-key hook:
+            # pass it through unwrapped; everything else is a read/parse failure.
+            if isinstance(exc, BackupToolError):
+                raise
             raise BackupToolError(f"cannot read {path.name}: {exc}", exit_code=8) from exc
         return cls.from_json(raw)
 
@@ -844,9 +854,9 @@ def open_verified_artifacts(
                 stream = stack.enter_context(path.open("rb"))
                 opened = os.fstat(stream.fileno())
                 after = path.lstat()
-            except BackupToolError:
-                raise
-            except OSError as exc:
+            except (BackupToolError, OSError) as exc:
+                if isinstance(exc, BackupToolError):
+                    raise
                 raise BackupToolError(
                     f"backup artifact {record.name} could not be pinned",
                     exit_code=8,

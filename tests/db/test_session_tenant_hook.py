@@ -199,19 +199,23 @@ def test_no_context_clears_stale_context_when_clear_helper_is_absent():
     """Missing clear helper must not leave a stale tenant row on pooled backends."""
 
     class _Result:
+        """Awaitable result stub for one session event."""
         def __init__(self, value=None):
             self._value = value
 
         def scalar(self):
+            """Return one scalar from the recorded result."""
             return self._value
 
     class _Connection:
+        """Connection stub recording session checkout events."""
         dialect = type("Dialect", (), {"name": "postgresql"})()
 
         def __init__(self):
             self.calls = []
 
         def exec_driver_sql(self, sql, parameters=None):
+            """Record one driver-level SQL statement."""
             self.calls.append((sql, parameters))
             if sql == "SELECT to_regprocedure(%s) IS NOT NULL":
                 return _Result(False)

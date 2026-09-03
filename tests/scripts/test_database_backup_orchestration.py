@@ -41,6 +41,14 @@ from ums_smart_revenue.ops.database_backup.semantic import (
 )
 
 
+def _exactly_one(items):
+    """Return the one expected item; a dry iterator fails the test."""
+    try:
+        return next(items)
+    except StopIteration as exc:
+        raise AssertionError("expected one more canned item; got none") from exc
+
+
 @pytest.fixture(autouse=True)
 def _unit_restore_packages_are_private(monkeypatch: pytest.MonkeyPatch) -> None:
     """Keep unit fixtures platform-neutral; integration tests own repository gates."""
@@ -256,7 +264,7 @@ def test_backup_refuses_sequence_state_change_during_dump(
     current = _sequences()[0]
     changed = replace(current, last_value=current.last_value + 1)
     observed = iter((_sequences(), (changed,)))
-    monkeypatch.setattr(backup, "snapshot_sequences", lambda *_: next(observed))
+    monkeypatch.setattr(backup, "snapshot_sequences", lambda *_: _exactly_one(observed))
     with pytest.raises(BackupToolError, match="sequence state changed"):
         backup.run_backup(
             repository_root=repository,

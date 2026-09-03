@@ -27,6 +27,7 @@ def require_postgres_url() -> str:
     # FIX: treat blank/whitespace-only values as missing. `if not url` let a
     # value like "   " through, which then fails later with an opaque DB
     # connection error instead of this fail-fast setup contract.
+    """Return the required PostgreSQL test URL or fail fast with setup guidance."""
     url = os.environ.get("UMS_TEST_DATABASE_URL")
     if url is None or not url.strip():
         # FIX: State the database-name rule exactly as the shared destructive

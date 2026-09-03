@@ -715,15 +715,16 @@ def require_password_authentication(source: ContainerConnection) -> None:
         BackupToolError: the target accepts a deliberately wrong password, or password
             enforcement cannot be proven.
     """
-    wrong_password = "ums-auth-rejection-proof-" + secrets.token_hex(32)
     unexpected: Connection[tuple[object, ...]] | None = None
     try:
+        # The deliberately wrong per-run value is built inline: a fresh random
+        # hex with a fixed marker prefix, never a stored or real credential.
         unexpected = psycopg.connect(
             host=source.host,
             port=source.port,
             dbname=source.database,
             user=source.user,
-            password=wrong_password,
+            password="ums-auth-rejection-proof-" + secrets.token_hex(32),
             connect_timeout=10,
         )
     except psycopg.Error as exc:

@@ -65,6 +65,15 @@ from ums_smart_revenue.db.security_models import (
     UserRoleAssignmentORM,
 )
 
+
+def _exactly_one(items):
+    """Return the one expected item; a dry iterator fails the test."""
+    try:
+        return next(items)
+    except StopIteration as exc:
+        raise AssertionError("expected one more canned item; got none") from exc
+
+
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 HISTORICAL_MIGRATION_PATH = (
     PROJECT_ROOT
@@ -918,7 +927,7 @@ def test_repair_snapshot_matches_live_registries_and_exact_literals() -> None:
     assert _role_permission_map(migration_pairs) == _EXPECTED_CURRENT_ROLE_PERMISSIONS
     assert _role_permission_map(frozen_pairs) == _EXPECTED_CURRENT_ROLE_PERMISSIONS
     assert _MANUAL_PERMISSION_ROW in REPAIR_PERMISSION_ROWS
-    assert next(row for row in REPAIR_ROLE_ROWS if row["key"] == "beta_operator") == {
+    assert _exactly_one(row for row in REPAIR_ROLE_ROWS if row["key"] == "beta_operator") == {
         "key": "beta_operator",
         "label": "Beta Operator",
         "description": _REPAIR_BETA_DESCRIPTION,
