@@ -351,6 +351,112 @@ def _reachable_upgrade_functions(
     return reachable
 
 
+
+def _bulk_insert_targets(
+    node: ast.Call,
+    *,
+    label: str,
+    tables: dict[str, set[str]],
+    strings: dict[str, set[str]],
+) -> set[str]:
+    """Resolve the single table one op.bulk_insert call seeds."""
+    table_argument = _primary_call_argument(node, keywords={"table"})
+    targets = (
+        _qualified_table_name(table_argument, tables, strings)
+        if table_argument is not None
+        else set()
+    )
+    if len(targets) != 1:
+        raise AssertionError(f"{label}: unresolved bulk_insert table")
+    return targets
+
+
+def _execute_seed_targets(
+    node: ast.Call,
+    *,
+    label: str,
+    tables: dict[str, set[str]],
+    strings: dict[str, set[str]],
+) -> set[str]:
+    """Resolve every table one bind.execute statement seeds."""
+    statement = _primary_call_argument(node, keywords={"sqltext", "statement"})
+    if statement is None:
+        raise AssertionError(f"{label}: unresolved execute statement argument")
+    is_insert, target = _insert_target(statement)
+    if is_insert:
+        return _single_insert_target(target, label, tables=tables, strings=strings)
+    nested_insert_targets = [
+        nested_target
+        for child in ast.walk(statement)
+        if isinstance(child, ast.Call)
+        for nested_is_insert, nested_target in [_insert_target(child)]
+        if nested_is_insert
+    ]
+    collected: set[str] = set()
+    if nested_insert_targets:
+        for nested_target in nested_insert_targets:
+            collected.update(
+                _single_insert_target(
+                    nested_target, label, tables=tables, strings=strings
+                )
+            )
+        return collected
+    return collected | _sql_literal_seed_targets(
+        statement, label, tables=tables, strings=strings
+    )
+
+
+def _single_insert_target(
+    target: ast.AST | None,
+    label: str,
+    *,
+    tables: dict[str, set[str]],
+    strings: dict[str, set[str]],
+) -> set[str]:
+    """Resolve one SQLAlchemy insert's table or fail the scan."""
+    targets = (
+        _qualified_table_name(target, tables, strings) if target is not None else set()
+    )
+    if len(targets) != 1:
+        raise AssertionError(f"{label}: unresolved SQLAlchemy insert table")
+    return targets
+
+
+def _sql_literal_seed_targets(
+    statement: ast.AST,
+    label: str,
+    *,
+    tables: dict[str, set[str]],
+    strings: dict[str, set[str]],
+) -> set[str]:
+    """Resolve the tables seeded by one statement's SQL string literals."""
+    sql_strings = _sql_strings(statement, strings)
+    if not sql_strings and _has_unresolved_insert_literal(statement):
+        if _is_single_non_executing_stored_body(_sql_expression_skeleton(statement)):
+            return set()
+        raise AssertionError(f"{label}: unresolved literal INSERT statement")
+    if not sql_strings and isinstance(statement, (ast.Name, ast.Attribute, ast.Subscript)):
+        raise AssertionError(f"{label}: unresolved execute statement")
+    collected: set[str] = set()
+    for sql in sql_strings:
+        statement_sql = _statement_after_leading_trivia(sql)
+        if _INSERT_ANYWHERE_RE.search(sql) and re.match(
+            r"(?:WITH|DO)\b", statement_sql, re.IGNORECASE
+        ):
+            raise AssertionError(f"{label}: unresolved compound INSERT statement")
+        targets = _tables_from_sql(sql)
+        if _INSERT_STATEMENT_RE.search(sql) and not targets:
+            raise AssertionError(f"{label}: unresolved literal INSERT table")
+        if (
+            _INSERT_ANYWHERE_RE.search(sql)
+            and not targets
+            and not _is_single_non_executing_stored_body(sql)
+        ):
+            raise AssertionError(f"{label}: unresolved embedded INSERT statement")
+        collected.update(targets)
+    return collected
+
+
 def _migration_seed_tables(source: str, *, source_name: str) -> set[str]:
     """Extract the tables an Alembic upgrade seeds."""
     tree = ast.parse(source, filename=source_name)
@@ -378,91 +484,18 @@ def _migration_seed_tables(source: str, *, source_name: str) -> set[str]:
             module_tables=module_tables,
             module_strings=module_strings,
         )
+        label = f"{source_name}:{function_name}"
         for node in nodes:
             if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
                 continue
             if node.func.attr == "bulk_insert":
-                table_argument = _primary_call_argument(node, keywords={"table"})
-                targets = (
-                    _qualified_table_name(table_argument, tables, strings)
-                    if table_argument is not None
-                    else set()
+                result.update(
+                    _bulk_insert_targets(node, label=label, tables=tables, strings=strings)
                 )
-                if len(targets) != 1:
-                    raise AssertionError(
-                        f"{source_name}:{function_name}: unresolved bulk_insert table"
-                    )
-                result.update(targets)
-                continue
-            if node.func.attr != "execute":
-                continue
-            statement = _primary_call_argument(node, keywords={"sqltext", "statement"})
-            if statement is None:
-                raise AssertionError(
-                    f"{source_name}:{function_name}: unresolved execute statement argument"
+            elif node.func.attr == "execute":
+                result.update(
+                    _execute_seed_targets(node, label=label, tables=tables, strings=strings)
                 )
-            is_insert, target = _insert_target(statement)
-            if is_insert:
-                targets = (
-                    _qualified_table_name(target, tables, strings) if target is not None else set()
-                )
-                if len(targets) != 1:
-                    raise AssertionError(
-                        f"{source_name}:{function_name}: unresolved SQLAlchemy insert table"
-                    )
-                result.update(targets)
-                continue
-            nested_insert_targets = [
-                nested_target
-                for child in ast.walk(statement)
-                if isinstance(child, ast.Call)
-                for nested_is_insert, nested_target in [_insert_target(child)]
-                if nested_is_insert
-            ]
-            if nested_insert_targets:
-                for nested_target in nested_insert_targets:
-                    targets = (
-                        _qualified_table_name(nested_target, tables, strings)
-                        if nested_target is not None
-                        else set()
-                    )
-                    if len(targets) != 1:
-                        raise AssertionError(
-                            f"{source_name}:{function_name}: unresolved nested insert table"
-                        )
-                    result.update(targets)
-                continue
-            sql_strings = _sql_strings(statement, strings)
-            if not sql_strings and _has_unresolved_insert_literal(statement):
-                if _is_single_non_executing_stored_body(_sql_expression_skeleton(statement)):
-                    continue
-                raise AssertionError(
-                    f"{source_name}:{function_name}: unresolved literal INSERT statement"
-                )
-            if not sql_strings and isinstance(statement, (ast.Name, ast.Attribute, ast.Subscript)):
-                raise AssertionError(f"{source_name}:{function_name}: unresolved execute statement")
-            for sql in sql_strings:
-                statement_sql = _statement_after_leading_trivia(sql)
-                if _INSERT_ANYWHERE_RE.search(sql) and re.match(
-                    r"(?:WITH|DO)\b", statement_sql, re.IGNORECASE
-                ):
-                    raise AssertionError(
-                        f"{source_name}:{function_name}: unresolved compound INSERT statement"
-                    )
-                targets = _tables_from_sql(sql)
-                if _INSERT_STATEMENT_RE.search(sql) and not targets:
-                    raise AssertionError(
-                        f"{source_name}:{function_name}: unresolved literal INSERT table"
-                    )
-                if (
-                    _INSERT_ANYWHERE_RE.search(sql)
-                    and not targets
-                    and not _is_single_non_executing_stored_body(sql)
-                ):
-                    raise AssertionError(
-                        f"{source_name}:{function_name}: unresolved embedded INSERT statement"
-                    )
-                result.update(targets)
     return result
 
 

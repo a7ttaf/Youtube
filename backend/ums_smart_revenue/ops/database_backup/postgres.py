@@ -372,6 +372,21 @@ def resolve_rehearsal_image(
     """
     if not operator_reference or any(character in operator_reference for character in "\r\n\x00"):
         raise BackupToolError("--rehearse-image must be a local image reference", exit_code=2)
+    image = _inspected_single_image(runner, operator_reference)
+    image_id = image.get("Id")
+    if image_id != expected_image_id:
+        raise BackupToolError(
+            "operator-selected rehearsal image does not match the backup source image id",
+            exit_code=2,
+        )
+    _require_postgres_image_family(image)
+    assert isinstance(image_id, str)
+    return image_id
+
+
+
+def _inspected_single_image(runner: CommandRunner, operator_reference: str) -> dict[str, object]:
+    """Inspect one local image and return its single decoded metadata object."""
     raw = runner.text(["docker", "image", "inspect", operator_reference], exit_code=3)
     try:
         body = json.loads(raw)
@@ -379,13 +394,11 @@ def resolve_rehearsal_image(
         raise BackupToolError("docker image inspect returned malformed JSON", exit_code=3) from exc
     if not isinstance(body, list) or len(body) != 1 or not isinstance(body[0], dict):
         raise BackupToolError("rehearsal image did not resolve exactly once", exit_code=3)
-    image = body[0]
-    image_id = image.get("Id")
-    if image_id != expected_image_id:
-        raise BackupToolError(
-            "operator-selected rehearsal image does not match the backup source image id",
-            exit_code=2,
-        )
+    return body[0]
+
+
+def _require_postgres_image_family(image: dict[str, object]) -> None:
+    """Refuse an operator-selected image that is not a stock PostgreSQL image."""
     config = image.get("Config")
     if not isinstance(config, dict):
         raise BackupToolError("rehearsal image has no readable config", exit_code=3)
@@ -407,8 +420,6 @@ def resolve_rehearsal_image(
         raise BackupToolError(
             "operator-selected rehearsal image is not a PostgreSQL image", exit_code=2
         )
-    assert isinstance(image_id, str)
-    return image_id
 
 
 def create_rehearsal_container(
@@ -613,6 +624,54 @@ _PG18_PREDEFINED_MEMBERSHIPS = (
 #   - File: docker-compose.yml -> postgres environment and loopback port contract.
 #   - File: backend/ums_smart_revenue/ops/database_backup/backup.py -> snapshot.
 # ============================================================================
+
+def _require_stock_postgres_command(inspect: dict[str, object]) -> None:
+    """Refuse a container whose command differs from the official image default."""
+    if inspect.get("Path") != "docker-entrypoint.sh" or inspect.get("Args") != ["postgres"]:
+        raise BackupToolError(
+            "PostgreSQL container command differs from the official image default",
+            exit_code=3,
+        )
+
+
+def _required_database_identity(environment: dict[str, str]) -> tuple[str, str]:
+    """Return the required POSTGRES_DB/POSTGRES_USER identity fields."""
+    missing = [
+        key
+        for key in ("POSTGRES_DB", "POSTGRES_USER", "POSTGRES_PASSWORD")
+        if not environment.get(key)
+    ]
+    if missing:
+        raise BackupToolError(
+            f"container is missing required PostgreSQL fields: {', '.join(missing)}",
+            exit_code=3,
+        )
+    database = environment["POSTGRES_DB"]
+    user = environment["POSTGRES_USER"]
+    if not _IDENTIFIER_RE.fullmatch(database) or not _IDENTIFIER_RE.fullmatch(user):
+        raise BackupToolError("database/user contains unsupported characters", exit_code=3)
+    return database, user
+
+
+def _container_identity(inspect: dict[str, object]) -> tuple[str, str, str]:
+    """Validate and return the container's immutable image/container identities."""
+    image_id = inspect.get("Image")
+    container_id = inspect.get("Id")
+    config = inspect.get("Config")
+    image_reference = config.get("Image") if isinstance(config, dict) else None
+    if not isinstance(image_id, str) or not _IMAGE_ID_RE.fullmatch(image_id):
+        raise BackupToolError("container image is not identified by SHA-256", exit_code=3)
+    if (
+        not isinstance(container_id, str)
+        or len(container_id) != 64
+        or any(character not in "0123456789abcdef" for character in container_id)
+    ):
+        raise BackupToolError("container immutable id is unavailable", exit_code=3)
+    if not isinstance(image_reference, str) or not image_reference:
+        raise BackupToolError("container image reference is unavailable", exit_code=3)
+    return image_id, container_id, image_reference
+
+
 def resolve_container_connection(runner: CommandRunner, container: str) -> ContainerConnection:
     """Resolve a container reference into a loopback connection contract.
 
@@ -628,40 +687,10 @@ def resolve_container_connection(runner: CommandRunner, container: str) -> Conta
             fields, or exposes unsafe database/user values.
     """
     inspect = _container_inspect(runner, container)
-    if inspect.get("Path") != "docker-entrypoint.sh" or inspect.get("Args") != ["postgres"]:
-        raise BackupToolError(
-            "PostgreSQL container command differs from the official image default",
-            exit_code=3,
-        )
+    _require_stock_postgres_command(inspect)
     environment = _container_environment(inspect)
-    missing = [
-        key
-        for key in ("POSTGRES_DB", "POSTGRES_USER", "POSTGRES_PASSWORD")
-        if not environment.get(key)
-    ]
-    if missing:
-        raise BackupToolError(
-            f"container is missing required PostgreSQL fields: {', '.join(missing)}",
-            exit_code=3,
-        )
-    database = environment["POSTGRES_DB"]
-    user = environment["POSTGRES_USER"]
-    if not _IDENTIFIER_RE.fullmatch(database) or not _IDENTIFIER_RE.fullmatch(user):
-        raise BackupToolError("database/user contains unsupported characters", exit_code=3)
-    image_id = inspect.get("Image")
-    container_id = inspect.get("Id")
-    config = inspect.get("Config")
-    image_reference = config.get("Image") if isinstance(config, dict) else None
-    if not isinstance(image_id, str) or not _IMAGE_ID_RE.fullmatch(image_id):
-        raise BackupToolError("container image is not identified by SHA-256", exit_code=3)
-    if (
-        not isinstance(container_id, str)
-        or len(container_id) != 64
-        or any(character not in "0123456789abcdef" for character in container_id)
-    ):
-        raise BackupToolError("container immutable id is unavailable", exit_code=3)
-    if not isinstance(image_reference, str) or not image_reference:
-        raise BackupToolError("container image reference is unavailable", exit_code=3)
+    database, user = _required_database_identity(environment)
+    image_id, container_id, image_reference = _container_identity(inspect)
     host, port = _published_postgres_endpoint(inspect)
     return ContainerConnection(
         container=container_id,

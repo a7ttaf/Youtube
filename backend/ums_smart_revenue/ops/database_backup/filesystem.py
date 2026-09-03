@@ -320,7 +320,6 @@ def require_trusted_directory_identity(path: Path, expected: DirectoryIdentity) 
         raise BackupToolError("backup directory identity changed", exit_code=2)
 
 
-
 def _require_dedicated_location(resolved: Path, repository: Path) -> None:
     """Refuse filesystem roots, the repository, the home directory, and repo children."""
     filesystem_root = Path(resolved.anchor).resolve(strict=False)
@@ -367,6 +366,14 @@ def _require_existing_dedicated_root(resolved: Path) -> None:
             "existing backup output lacks the database-backup root marker",
             exit_code=2,
         )
+    _require_only_database_run_children(children)
+    if children:
+        require_owner_only_directory(resolved)
+
+
+
+def _require_only_database_run_children(children: list[Path]) -> None:
+    """Refuse foreign entries and prior partial runs inside a dedicated root."""
     foreign = sorted(
         child.name
         for child in children
@@ -389,8 +396,6 @@ def _require_existing_dedicated_root(resolved: Path) -> None:
             "backup output contains a prior partial run; inspect it before retrying",
             exit_code=2,
         )
-    if children:
-        require_owner_only_directory(resolved)
 
 
 def resolve_output_directory(

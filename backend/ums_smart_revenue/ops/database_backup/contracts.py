@@ -588,7 +588,6 @@ class SequenceRecord:
         }
 
 
-
 def _require_restorable_envelope(body: dict[str, object]) -> None:
     """Refuse a manifest whose schema/status pair is not restorable."""
     if body["schema"] != BACKUP_SCHEMA or body["status"] != "complete":
