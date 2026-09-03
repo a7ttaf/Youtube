@@ -1482,7 +1482,11 @@ def test_restore_retry_rejects_truncated_journaled_stage(tmp_path, monkeypatch):
             manifest=manifest,
             repository_root=repository,
         )
-    stage = next(target.glob(f"{storage.RESTORE_STAGE_PREFIX}*"))
+    stage = next(
+        target.glob(f"{storage.RESTORE_STAGE_PREFIX}*"),
+        None,
+    )
+    assert stage is not None, "expected exactly one restore stage"
     (stage / "artifacts" / "finance.xlsx").write_bytes(b"truncated")
 
     monkeypatch.setattr(storage, "_durable_replace", real_replace)
@@ -1535,7 +1539,11 @@ def test_restore_retry_rejects_directory_replaced_by_regular_file(tmp_path, monk
             manifest=manifest,
             repository_root=repository,
         )
-    stage = next(target.glob(f"{storage.RESTORE_STAGE_PREFIX}*"))
+    stage = next(
+        target.glob(f"{storage.RESTORE_STAGE_PREFIX}*"),
+        None,
+    )
+    assert stage is not None, "expected exactly one restore stage"
     empty_directory = stage / "artifacts" / "empty-dir"
     empty_directory.rmdir()
     empty_directory.write_bytes(b"not-a-directory")
