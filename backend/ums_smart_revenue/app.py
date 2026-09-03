@@ -13,6 +13,7 @@
 from collections.abc import Iterable
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
+from typing import cast
 from uuid import UUID
 
 from fastapi import Depends, FastAPI, HTTPException
@@ -296,7 +297,10 @@ def _wire_connector_background_workers(
             session_factory=session_factory,
             executor=fastapi_app.state.connector_job_executor,
             interval_seconds=settings.group_sync_interval_hours * 3600,
-            service_actor_id=settings.google_connector_service_actor_id,
+            # The canonical gate above admits only a real (non-None,
+            # non-placeholder) id, but mypy cannot narrow through the helper;
+            # bind that invariant explicitly for the typed scheduler input.
+            service_actor_id=cast(str, settings.google_connector_service_actor_id),
         )
         scheduler.start()
         fastapi_app.state.group_sync_scheduler = scheduler
