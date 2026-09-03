@@ -6,7 +6,7 @@ import hashlib
 import json
 import os
 import stat
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -588,6 +588,83 @@ class SequenceRecord:
         }
 
 
+
+def _require_restorable_envelope(body: dict[str, object]) -> None:
+    """Refuse a manifest whose schema/status pair is not restorable."""
+    if body["schema"] != BACKUP_SCHEMA or body["status"] != "complete":
+        raise BackupToolError("database manifest schema/status is not restorable", exit_code=8)
+
+
+def _sorted_unique_records[RecordT: (TableRecord, SequenceRecord)](
+    raw: object,
+    *,
+    list_label: str,
+    sorted_label: str,
+    parse: Callable[..., RecordT],
+) -> tuple[RecordT, ...]:
+    """Parse one manifest list into sorted, unique records."""
+    if not isinstance(raw, list) or not raw:
+        raise BackupToolError(f"{list_label} must be a non-empty list", exit_code=8)
+    records = tuple(parse(row, index=index) for index, row in enumerate(raw))
+    names = [record.qualified_name for record in records]
+    if names != sorted(names) or len(set(names)) != len(names):
+        raise BackupToolError(f"{sorted_label} must be sorted and unique", exit_code=8)
+    return records
+
+
+def _require_authorization_digest(body: dict[str, object]) -> str:
+    """Return the manifest's lowercase SHA-256 authorization digest."""
+    digest = _require_string(body["authorization_catalog_sha256"], "authorization_catalog_sha256")
+    if len(digest) != 64 or any(character not in "0123456789abcdef" for character in digest):
+        raise BackupToolError("authorization_catalog_sha256 is not lowercase SHA-256", exit_code=8)
+    return digest
+
+
+def _require_seed_floor(
+    body: dict[str, object], tables: tuple[TableRecord, ...]
+) -> dict[str, int]:
+    """Validate the dynamic seed floor against the snapshot table counts."""
+    raw_floor = body["seed_floor"]
+    if not isinstance(raw_floor, dict) or not raw_floor:
+        raise BackupToolError("seed_floor must be a non-empty object", exit_code=8)
+    if any(not isinstance(key, str) or "." not in key or not key for key in raw_floor):
+        raise BackupToolError("seed_floor keys must be qualified table names", exit_code=8)
+    seed_floor = {
+        key: _require_integer(value, f"seed_floor.{key}", minimum=1)
+        for key, value in raw_floor.items()
+    }
+    missing_security_floor = sorted(SEED_TABLES - set(seed_floor))
+    extra_security_floor = sorted(set(seed_floor) - SEED_TABLES)
+    if missing_security_floor or extra_security_floor:
+        raise BackupToolError(
+            "seed_floor table identities do not match the required security floor "
+            f"(missing={missing_security_floor}, extra={extra_security_floor})",
+            exit_code=8,
+        )
+    observed = {record.qualified_name: record.rows for record in tables}
+    if any(observed.get(key) != value for key, value in seed_floor.items()):
+        raise BackupToolError("seed_floor does not match the snapshot table counts", exit_code=8)
+    return seed_floor
+
+
+def _require_dump_artifacts(body: dict[str, object]) -> tuple[ArtifactRecord, ...]:
+    """Parse the artifact list, requiring exactly dump then roles members."""
+    raw_artifacts = body["artifacts"]
+    if not isinstance(raw_artifacts, list):
+        raise BackupToolError("artifacts must be a list", exit_code=8)
+    artifacts = tuple(
+        ArtifactRecord.from_json(record, label=f"artifacts[{index}]")
+        for index, record in enumerate(raw_artifacts)
+    )
+    names = [record.name for record in artifacts]
+    if names != [DUMP_NAME, ROLES_NAME]:
+        raise BackupToolError(
+            f"artifacts must be exactly [{DUMP_NAME!r}, {ROLES_NAME!r}]",
+            exit_code=8,
+        )
+    return artifacts
+
+
 @dataclass(frozen=True)
 class BackupManifest:
     """Complete, validated semantic description of one database dump."""
@@ -639,77 +716,22 @@ class BackupManifest:
             "dump_toc_entries",
         }
         _require_exact_keys(body, expected, "database manifest")
-        if body["schema"] != BACKUP_SCHEMA or body["status"] != "complete":
-            raise BackupToolError("database manifest schema/status is not restorable", exit_code=8)
-
-        raw_tables = body["tables"]
-        if not isinstance(raw_tables, list) or not raw_tables:
-            raise BackupToolError("tables must be a non-empty list", exit_code=8)
-        tables = tuple(
-            TableRecord.from_json(row, index=index) for index, row in enumerate(raw_tables)
+        _require_restorable_envelope(body)
+        tables = _sorted_unique_records(
+            body["tables"],
+            list_label="tables",
+            sorted_label="tables",
+            parse=TableRecord.from_json,
         )
-        table_names = [record.qualified_name for record in tables]
-        if table_names != sorted(table_names) or len(set(table_names)) != len(table_names):
-            raise BackupToolError("tables must be sorted and unique", exit_code=8)
-
-        raw_sequences = body["sequences"]
-        if not isinstance(raw_sequences, list):
-            raise BackupToolError("sequences must be a list", exit_code=8)
-        sequences = tuple(
-            SequenceRecord.from_json(row, index=index) for index, row in enumerate(raw_sequences)
+        sequences = _sorted_unique_records(
+            body["sequences"],
+            list_label="sequences",
+            sorted_label="sequences",
+            parse=SequenceRecord.from_json,
         )
-        sequence_names = [record.qualified_name for record in sequences]
-        if sequence_names != sorted(sequence_names) or len(set(sequence_names)) != len(
-            sequence_names
-        ):
-            raise BackupToolError("sequences must be sorted and unique", exit_code=8)
-
-        authorization_digest = _require_string(
-            body["authorization_catalog_sha256"], "authorization_catalog_sha256"
-        )
-        if len(authorization_digest) != 64 or any(
-            character not in "0123456789abcdef" for character in authorization_digest
-        ):
-            raise BackupToolError(
-                "authorization_catalog_sha256 is not lowercase SHA-256", exit_code=8
-            )
-
-        raw_floor = body["seed_floor"]
-        if not isinstance(raw_floor, dict) or not raw_floor:
-            raise BackupToolError("seed_floor must be a non-empty object", exit_code=8)
-        if any(not isinstance(key, str) or "." not in key or not key for key in raw_floor):
-            raise BackupToolError("seed_floor keys must be qualified table names", exit_code=8)
-        seed_floor = {
-            key: _require_integer(value, f"seed_floor.{key}", minimum=1)
-            for key, value in raw_floor.items()
-        }
-        missing_security_floor = sorted(SEED_TABLES - set(seed_floor))
-        extra_security_floor = sorted(set(seed_floor) - SEED_TABLES)
-        if missing_security_floor or extra_security_floor:
-            raise BackupToolError(
-                "seed_floor table identities do not match the required security floor "
-                f"(missing={missing_security_floor}, extra={extra_security_floor})",
-                exit_code=8,
-            )
-        observed = {record.qualified_name: record.rows for record in tables}
-        if any(observed.get(key) != value for key, value in seed_floor.items()):
-            raise BackupToolError(
-                "seed_floor does not match the snapshot table counts", exit_code=8
-            )
-
-        raw_artifacts = body["artifacts"]
-        if not isinstance(raw_artifacts, list):
-            raise BackupToolError("artifacts must be a list", exit_code=8)
-        artifacts = tuple(
-            ArtifactRecord.from_json(record, label=f"artifacts[{index}]")
-            for index, record in enumerate(raw_artifacts)
-        )
-        names = [record.name for record in artifacts]
-        if names != [DUMP_NAME, ROLES_NAME]:
-            raise BackupToolError(
-                f"artifacts must be exactly [{DUMP_NAME!r}, {ROLES_NAME!r}]",
-                exit_code=8,
-            )
+        authorization_digest = _require_authorization_digest(body)
+        seed_floor = _require_seed_floor(body, tables)
+        artifacts = _require_dump_artifacts(body)
         return cls(
             created_at=_require_string(body["created_at"], "created_at"),
             source=SourceRecord.from_json(body["source"]),

@@ -97,7 +97,8 @@ def test_sqlite_request_rollback_undoes_released_repository_savepoint(tmp_path):
         connection.exec_driver_sql("CREATE TABLE request_rollback_probe (id INTEGER PRIMARY KEY)")
 
     request_session = session_dependency(factory)()
-    session = next(request_session)
+    session = next(request_session, None)
+    assert session is not None, "dependency generator yielded no session"
     with session.begin_nested():
         session.execute(sa.text("INSERT INTO request_rollback_probe (id) VALUES (1)"))
 
@@ -128,7 +129,8 @@ def test_sqlite_concurrent_request_rollback_cannot_erase_committed_owner(
         connection.exec_driver_sql("CREATE TABLE concurrent_probe (id INTEGER PRIMARY KEY)")
 
     first_request = session_dependency(factory)()
-    first_session = next(first_request)
+    first_session = next(first_request, None)
+    assert first_session is not None, "dependency generator yielded no session"
     with first_session.begin_nested():
         first_session.execute(sa.text("INSERT INTO concurrent_probe (id) VALUES (1)"))
 
@@ -139,7 +141,8 @@ def test_sqlite_concurrent_request_rollback_cannot_erase_committed_owner(
         """Acquire after request one, write, then exercise dependency rollback."""
         second_request = session_dependency(factory)()
         second_attempting.set()
-        second_session = next(second_request)
+        second_session = next(second_request, None)
+        assert second_session is not None, "dependency generator yielded no session"
         second_acquired.set()
         with second_session.begin_nested():
             second_session.execute(sa.text("INSERT INTO concurrent_probe (id) VALUES (2)"))
@@ -200,6 +203,7 @@ def test_no_context_clears_stale_context_when_clear_helper_is_absent():
 
     class _Result:
         """Awaitable result stub for one session event."""
+
         def __init__(self, value=None):
             self._value = value
 
@@ -209,6 +213,7 @@ def test_no_context_clears_stale_context_when_clear_helper_is_absent():
 
     class _Connection:
         """Connection stub recording session checkout events."""
+
         dialect = type("Dialect", (), {"name": "postgresql"})()
 
         def __init__(self):

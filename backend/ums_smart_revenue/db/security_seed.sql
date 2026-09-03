@@ -36,11 +36,11 @@ DO UPDATE SET label = excluded.label;
 
 DELETE FROM user_role_assignments
 WHERE scope_id IN
-(SELECT id FROM access_scopes WHERE scope_type = 'graph-read');
+    (SELECT id FROM access_scopes WHERE scope_type = 'graph-read');
 
 DELETE FROM user_permission_grants
 WHERE scope_id IN (SELECT id FROM access_scopes WHERE scope_type = 'graph-read')
-        OR permission_key IN ('graph.view', 'graph.view_finance');
+    OR permission_key IN ('graph.view', 'graph.view_finance');
 
 DELETE FROM role_permission_assignments
 WHERE permission_key IN ('graph.view', 'graph.view_finance');
@@ -54,73 +54,73 @@ WHERE scope_type = 'graph-read';
 INSERT INTO roles (key, label, description, service_only)
 VALUES
 ('super_owner',
-'Super Owner',
-'Global break-glass owner with every platform and finance permission.',
-FALSE),
+    'Super Owner',
+    'Global break-glass owner with every platform and finance permission.',
+    FALSE),
 ('corporate_admin',
-'Corporate Admin',
-'Global platform administrator without default finance visibility.',
-FALSE),
+    'Corporate Admin',
+    'Global platform administrator without default finance visibility.',
+    FALSE),
 ('revenue_operations_admin',
-'Revenue Operations Admin',
-'Global operational admin for ingestion, registry quality, and analytics.',
-FALSE),
+    'Revenue Operations Admin',
+    'Global operational admin for ingestion, registry quality, and analytics.',
+    FALSE),
 ('finance_admin',
-'Finance Admin',
-'Finance owner for revenue, reconciliation, overrides, and month close.',
-FALSE),
+    'Finance Admin',
+    'Finance owner for revenue, reconciliation, overrides, and month close.',
+    FALSE),
 ('beta_operator',
-'Beta Operator',
-'First-beta finance operator with manual revenue-upload access.',
-FALSE),
+    'Beta Operator',
+    'First-beta finance operator with manual revenue-upload access.',
+    FALSE),
 ('finance_approver',
-'Finance Approver',
-'Second-control approver for finance overrides and month unlocks.',
-FALSE),
+    'Finance Approver',
+    'Second-control approver for finance overrides and month unlocks.',
+    FALSE),
 ('finance_viewer',
-'Finance Viewer',
-'Read-only finance role for granted organization scopes.',
-FALSE),
+    'Finance Viewer',
+    'Read-only finance role for granted organization scopes.',
+    FALSE),
 ('tv_sector_manager',
-'TV Sector Manager',
-'Sector-scoped management role for TV analytics and report operations.',
-FALSE),
+    'TV Sector Manager',
+    'Sector-scoped management role for TV analytics and report operations.',
+    FALSE),
 ('news_sector_manager',
-'News Sector Manager',
-'Sector-scoped management role for News analytics and report operations.',
-FALSE),
+    'News Sector Manager',
+    'Sector-scoped management role for News analytics and report operations.',
+    FALSE),
 ('company_manager',
-'Company Manager',
-'Company-scoped manager for assigned company analytics.',
-FALSE),
+    'Company Manager',
+    'Company-scoped manager for assigned company analytics.',
+    FALSE),
 ('channel_manager',
-'Channel Manager',
-'Channel-scoped manager for assigned channel analytics.',
-FALSE),
+    'Channel Manager',
+    'Channel-scoped manager for assigned channel analytics.',
+    FALSE),
 ('assistant_analyst',
-'Assistant Analyst',
-'Assigned-scope analyst for analytics without default finance access.',
-FALSE),
+    'Assistant Analyst',
+    'Assigned-scope analyst for analytics without default finance access.',
+    FALSE),
 ('export_operator',
-'Export Operator',
-'Scoped export operator for approved analytics or finance exports.',
-FALSE),
+    'Export Operator',
+    'Scoped export operator for approved analytics or finance exports.',
+    FALSE),
 ('audit_viewer',
-'Audit Viewer',
-'Read-only audit and compliance reviewer.',
-FALSE),
+    'Audit Viewer',
+    'Read-only audit and compliance reviewer.',
+    FALSE),
 ('system_integration_user',
-'System Integration User',
-'Non-human role for scheduled connector jobs and backend service flows.',
-TRUE),
+    'System Integration User',
+    'Non-human role for scheduled connector jobs and backend service flows.',
+    TRUE),
 ('connector_admin',
-'Connector Admin',
-'Technical owner for Google/API connector credential configuration.',
-FALSE),
+    'Connector Admin',
+    'Technical owner for Google/API connector credential configuration.',
+    FALSE),
 ('data_steward',
-'Data Steward',
-'Scoped owner for channel registry, groups, and organization mapping.',
-FALSE)
+    'Data Steward',
+    'Scoped owner for channel registry, groups, and organization mapping.',
+    FALSE)
 ON CONFLICT (key) DO UPDATE
 SET label = excluded.label,
 description = excluded.description,
@@ -130,16 +130,16 @@ INSERT INTO permissions (key, label, sensitive, audit_on_use)
 VALUES
 ('analytics.view', 'View performance analytics', FALSE, FALSE),
 ('analytics.view_confidence',
-'View confidence labels and issue flags',
-FALSE,
-FALSE),
+    'View confidence labels and issue flags',
+    FALSE,
+    FALSE),
 ('finance.view_revenue', 'View revenue values', TRUE, TRUE),
 ('finance.view_finalized_payments', 'View finalized payments', TRUE, TRUE),
 ('finance.view_bank_reconciliation', 'View bank reconciliation', TRUE, TRUE),
 ('finance.manage_bank_reconciliation',
-'Manage bank reconciliation',
-TRUE,
-TRUE),
+    'Manage bank reconciliation',
+    TRUE,
+    TRUE),
 ('finance.create_manual_override', 'Create manual override', TRUE, TRUE),
 ('finance.approve_manual_override', 'Approve manual override', TRUE, TRUE),
 ('finance.lock_month', 'Lock finance month', TRUE, TRUE),
@@ -171,12 +171,12 @@ audit_on_use = excluded.audit_on_use;
 -- Remove that exact unsafe draft edge so a manually re-run seed converges.
 DELETE FROM role_permission_assignments
 WHERE role_key = 'beta_operator'
-  AND permission_key = 'connectors.run_jobs';
+    AND permission_key = 'connectors.run_jobs';
 
 INSERT INTO role_permission_assignments (role_key, permission_key)
 SELECT
-'super_owner' AS role_key,
-key AS permission_key
+    'super_owner' AS role_key,
+    key AS permission_key
 FROM permissions
 ON CONFLICT DO NOTHING;
 

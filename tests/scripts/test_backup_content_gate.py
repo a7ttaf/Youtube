@@ -325,14 +325,11 @@ def _has_unresolved_insert_literal(node: ast.AST) -> bool:
 #   - File: backend/ums_smart_revenue/db/alembic/versions -> every seed source.
 #   - File: backend/ums_smart_revenue/ops/database_backup/contracts.py -> gate.
 # ============================================================================
-def _migration_seed_tables(source: str, *, source_name: str) -> set[str]:
-    """Extract the tables an Alembic upgrade seeds."""
-    tree = ast.parse(source, filename=source_name)
-    functions = {node.name: node for node in tree.body if isinstance(node, ast.FunctionDef)}
-    if "upgrade" not in functions:
-        raise AssertionError(f"{source_name}: migration has no upgrade() function")
 
-    module_tables, module_strings = _module_bindings(tree)
+def _reachable_upgrade_functions(
+    tree: ast.Module, functions: dict[str, ast.FunctionDef]
+) -> set[str]:
+    """Walk every function transitively callable from upgrade()."""
     module_callables = _module_callable_bindings(tree, functions)
     reachable = {"upgrade"}
     pending = ["upgrade"]
@@ -351,6 +348,18 @@ def _migration_seed_tables(source: str, *, source_name: str) -> set[str]:
                 if target not in reachable:
                     reachable.add(target)
                     pending.append(target)
+    return reachable
+
+
+def _migration_seed_tables(source: str, *, source_name: str) -> set[str]:
+    """Extract the tables an Alembic upgrade seeds."""
+    tree = ast.parse(source, filename=source_name)
+    functions = {node.name: node for node in tree.body if isinstance(node, ast.FunctionDef)}
+    if "upgrade" not in functions:
+        raise AssertionError(f"{source_name}: migration has no upgrade() function")
+
+    module_tables, module_strings = _module_bindings(tree)
+    reachable = _reachable_upgrade_functions(tree, functions)
 
     result: set[str] = set()
     for function_name in sorted(reachable):

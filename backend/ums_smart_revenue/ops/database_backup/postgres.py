@@ -717,14 +717,14 @@ def require_password_authentication(source: ContainerConnection) -> None:
     """
     unexpected: Connection[tuple[object, ...]] | None = None
     try:
-        # The deliberately wrong per-run value is built inline: a fresh random
-        # hex with a fixed marker prefix, never a stored or real credential.
+        # The deliberately wrong per-run value is one fresh random hex token:
+        # never a stored, reused, or real credential.
         unexpected = psycopg.connect(
             host=source.host,
             port=source.port,
             dbname=source.database,
             user=source.user,
-            password="ums-auth-rejection-proof-" + secrets.token_hex(32),
+            password=secrets.token_hex(32),
             connect_timeout=10,
         )
     except psycopg.Error as exc:
@@ -1026,23 +1026,15 @@ def target_sequences(source: ContainerConnection) -> tuple[SequenceRecord, ...]:
 #   - File: backend/ums_smart_revenue/ops/database_backup/semantic.py -> expected.
 #   - File: backend/ums_smart_revenue/ops/database_backup/restore.py -> verifies.
 # ============================================================================
-def snapshot_authorization_catalog_digest(
-    connection: Connection[tuple[object, ...]], *, require_canonical: bool
-) -> str:
-    """Hash exact authorization metadata/edges and optionally require registries.
 
-    Args:
-        connection: Connection[tuple[object, ...]]. Database session the adapter queries
-            through.
-        require_canonical: bool.
-
-    Returns:
-        ``str``.
-
-    Raises:
-        BackupToolError: authorization catalog rows are malformed, or the catalog diverges from
-            the runtime permission registries.
-    """
+def _fetch_authorization_rows(
+    connection: Connection[tuple[object, ...]],
+) -> tuple[
+    Sequence[tuple[object, ...]],
+    Sequence[tuple[object, ...]],
+    Sequence[tuple[object, ...]],
+]:
+    """Fetch the ordered authorization catalog rows from the live database."""
     role_rows = connection.execute(
         """
         SELECT key, label, description, service_only
@@ -1062,25 +1054,70 @@ def snapshot_authorization_catalog_digest(
         ORDER BY role_key, permission_key
         """
     ).fetchall()
-    if (
-        any(
-            len(row) != 4
-            or not all(isinstance(value, str) for value in row[:3])
-            or not isinstance(row[3], bool)
-            for row in role_rows
-        )
-        or any(
-            len(row) != 4
-            or not all(isinstance(value, str) for value in row[:2])
-            or not all(isinstance(value, bool) for value in row[2:])
-            for row in permission_rows
-        )
-        or any(
-            len(row) != 2 or not all(isinstance(value, str) for value in row)
-            for row in assignment_rows
-        )
+    return role_rows, permission_rows, assignment_rows
+
+
+def _role_rows_well_formed(role_rows: Sequence[tuple[object, ...]]) -> bool:
+    """Return whether every role row carries three strings and one boolean."""
+    return not any(
+        len(row) != 4
+        or not all(isinstance(value, str) for value in row[:3])
+        or not isinstance(row[3], bool)
+        for row in role_rows
+    )
+
+
+def _permission_rows_well_formed(permission_rows: Sequence[tuple[object, ...]]) -> bool:
+    """Return whether every permission row carries two strings and two booleans."""
+    return not any(
+        len(row) != 4
+        or not all(isinstance(value, str) for value in row[:2])
+        or not all(isinstance(value, bool) for value in row[2:])
+        for row in permission_rows
+    )
+
+
+def _assignment_rows_well_formed(assignment_rows: Sequence[tuple[object, ...]]) -> bool:
+    """Return whether every assignment row is a pair of strings."""
+    return not any(
+        len(row) != 2 or not all(isinstance(value, str) for value in row)
+        for row in assignment_rows
+    )
+
+
+def _require_canonical_row_shapes(
+    role_rows: Sequence[tuple[object, ...]],
+    permission_rows: Sequence[tuple[object, ...]],
+    assignment_rows: Sequence[tuple[object, ...]],
+) -> None:
+    """Refuse authorization catalog rows whose runtime shapes are malformed."""
+    if not (
+        _role_rows_well_formed(role_rows)
+        and _permission_rows_well_formed(permission_rows)
+        and _assignment_rows_well_formed(assignment_rows)
     ):
         raise BackupToolError("authorization catalog rows are malformed", exit_code=8)
+
+
+def snapshot_authorization_catalog_digest(
+    connection: Connection[tuple[object, ...]], *, require_canonical: bool
+) -> str:
+    """Hash exact authorization metadata/edges and optionally require registries.
+
+    Args:
+        connection: Connection[tuple[object, ...]]. Database session the adapter queries
+            through.
+        require_canonical: bool.
+
+    Returns:
+        ``str``.
+
+    Raises:
+        BackupToolError: authorization catalog rows are malformed, or the catalog diverges from
+            the runtime permission registries.
+    """
+    role_rows, permission_rows, assignment_rows = _fetch_authorization_rows(connection)
+    _require_canonical_row_shapes(role_rows, permission_rows, assignment_rows)
     payload = payload_from_database_rows(
         roles=cast(Sequence[tuple[str, str, str, bool]], role_rows),
         permissions=cast(Sequence[tuple[str, str, bool, bool]], permission_rows),

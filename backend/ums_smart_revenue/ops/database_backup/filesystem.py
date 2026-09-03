@@ -320,6 +320,79 @@ def require_trusted_directory_identity(path: Path, expected: DirectoryIdentity) 
         raise BackupToolError("backup directory identity changed", exit_code=2)
 
 
+
+def _require_dedicated_location(resolved: Path, repository: Path) -> None:
+    """Refuse filesystem roots, the repository, the home directory, and repo children."""
+    filesystem_root = Path(resolved.anchor).resolve(strict=False)
+    home = Path.home().resolve(strict=False)
+    if resolved in {filesystem_root, repository, home} or resolved.is_relative_to(repository):
+        raise BackupToolError(
+            "backup output must be a dedicated host directory outside the repository",
+            exit_code=2,
+        )
+
+
+def _require_empty_bundle_directory(resolved: Path) -> Path:
+    """Validate one coordinated-bundle directory: owner-only and run-free."""
+    require_owner_only_directory(resolved)
+    existing_runs = sorted(
+        child.name
+        for child in resolved.iterdir()
+        if RUN_NAME_RE.fullmatch(child.name) or PARTIAL_RUN_NAME_RE.fullmatch(child.name)
+    )
+    if existing_runs:
+        raise BackupToolError(
+            "coordinated bundle already contains a database run or partial run",
+            exit_code=2,
+        )
+    return resolved
+
+
+def _require_existing_dedicated_root(resolved: Path) -> None:
+    """Validate an existing dedicated root: marker, no foreign entries, no partials."""
+    children = list(resolved.iterdir())
+    marker = resolved / ROOT_MARKER_NAME
+    marker_body: str | None = None
+    if children:
+        try:
+            if marker.is_file() and not _is_redirect(marker):
+                marker_body = marker.read_text(encoding="ascii")
+        except (OSError, UnicodeDecodeError) as exc:
+            raise BackupToolError(
+                "existing backup output root marker is unreadable",
+                exit_code=2,
+            ) from exc
+    if children and marker_body != ROOT_MARKER_BODY:
+        raise BackupToolError(
+            "existing backup output lacks the database-backup root marker",
+            exit_code=2,
+        )
+    foreign = sorted(
+        child.name
+        for child in children
+        if child.name != LOCK_NAME
+        and child.name != ROOT_MARKER_NAME
+        and not RUN_NAME_RE.fullmatch(child.name)
+        and not PARTIAL_RUN_NAME_RE.fullmatch(child.name)
+    )
+    if foreign:
+        raise BackupToolError(
+            "backup output is not dedicated to database runs; foreign entries: "
+            + ", ".join(foreign[:8]),
+            exit_code=2,
+        )
+    partials = sorted(
+        child.name for child in children if PARTIAL_RUN_NAME_RE.fullmatch(child.name)
+    )
+    if partials:
+        raise BackupToolError(
+            "backup output contains a prior partial run; inspect it before retrying",
+            exit_code=2,
+        )
+    if children:
+        require_owner_only_directory(resolved)
+
+
 def resolve_output_directory(
     raw: Path, *, repository_root: Path, coordinated_bundle: bool = False
 ) -> Path:
@@ -345,13 +418,7 @@ def resolve_output_directory(
         raise BackupToolError("backup output directory may not be a link", exit_code=2)
     resolved = unresolved.resolve(strict=False)
     repository = repository_root.resolve(strict=True)
-    filesystem_root = Path(resolved.anchor).resolve(strict=False)
-    home = Path.home().resolve(strict=False)
-    if resolved in {filesystem_root, repository, home} or resolved.is_relative_to(repository):
-        raise BackupToolError(
-            "backup output must be a dedicated host directory outside the repository",
-            exit_code=2,
-        )
+    _require_dedicated_location(resolved, repository)
     existed = resolved.exists()
     if coordinated_bundle and not existed:
         raise BackupToolError(
@@ -362,60 +429,9 @@ def resolve_output_directory(
     if not resolved.is_dir() or _is_redirect(resolved):
         raise BackupToolError("backup output is not a real directory", exit_code=2)
     if coordinated_bundle:
-        require_owner_only_directory(resolved)
-        existing_runs = sorted(
-            child.name
-            for child in resolved.iterdir()
-            if RUN_NAME_RE.fullmatch(child.name) or PARTIAL_RUN_NAME_RE.fullmatch(child.name)
-        )
-        if existing_runs:
-            raise BackupToolError(
-                "coordinated bundle already contains a database run or partial run",
-                exit_code=2,
-            )
-        return resolved
+        return _require_empty_bundle_directory(resolved)
     if existed:
-        children = list(resolved.iterdir())
-        marker = resolved / ROOT_MARKER_NAME
-        marker_body: str | None = None
-        if children:
-            try:
-                if marker.is_file() and not _is_redirect(marker):
-                    marker_body = marker.read_text(encoding="ascii")
-            except (OSError, UnicodeDecodeError) as exc:
-                raise BackupToolError(
-                    "existing backup output root marker is unreadable",
-                    exit_code=2,
-                ) from exc
-        if children and marker_body != ROOT_MARKER_BODY:
-            raise BackupToolError(
-                "existing backup output lacks the database-backup root marker",
-                exit_code=2,
-            )
-        foreign = sorted(
-            child.name
-            for child in children
-            if child.name != LOCK_NAME
-            and child.name != ROOT_MARKER_NAME
-            and not RUN_NAME_RE.fullmatch(child.name)
-            and not PARTIAL_RUN_NAME_RE.fullmatch(child.name)
-        )
-        if foreign:
-            raise BackupToolError(
-                "backup output is not dedicated to database runs; foreign entries: "
-                + ", ".join(foreign[:8]),
-                exit_code=2,
-            )
-        partials = sorted(
-            child.name for child in children if PARTIAL_RUN_NAME_RE.fullmatch(child.name)
-        )
-        if partials:
-            raise BackupToolError(
-                "backup output contains a prior partial run; inspect it before retrying",
-                exit_code=2,
-            )
-        if children:
-            require_owner_only_directory(resolved)
+        _require_existing_dedicated_root(resolved)
     if os.name == "nt":
         _restrict_windows_owner_acl(resolved)
     else:
