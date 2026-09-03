@@ -131,7 +131,25 @@ def run_backup(
     writers_quiesced: bool,
     now: datetime | None = None,
 ) -> BackupResult:
-    """Create and atomically publish one verified database-only backup."""
+    """Create and atomically publish one verified database-only backup.
+
+    Args:
+        repository_root: Path. Checkout root used to locate tracked SQL and Alembic state.
+        output_directory: Path. Dedicated host directory that holds the backup runs.
+        container: str. Docker container name or id hosting PostgreSQL.
+        timeout_seconds: int. Bounded lifetime for every native command invocation.
+        writers_quiesced: bool. Operator confirmation that all source writers are stopped.
+        now: datetime | None. Optional injected clock used for the run timestamp.
+
+    Returns:
+        The published run's ``BackupResult``.
+
+    Raises:
+        BackupToolError: any gate refuses the run (for example a missing writer-quiescence
+            confirmation, foreign tables, or a non-quiescent source), the capture fails (empty
+            pg_dump output, sequence drift mid-dump), or staging and publication cannot complete
+            safely.
+    """
     if not writers_quiesced:
         raise BackupToolError(
             "backup requires explicit confirmation that all source writers are stopped",

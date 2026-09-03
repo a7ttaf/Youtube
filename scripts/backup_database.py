@@ -84,7 +84,16 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
 #   - File: Docs/22_BACKUP_RESTORE_AND_REHEARSAL.md -> operator commands.
 # ============================================================================
 def main(argv: list[str] | None = None) -> int:
-    """Run the backup command and return its documented process code."""
+    """Run the backup command and return its documented process code.
+
+    Args:
+        argv: CLI argument vector; ``None`` reads ``sys.argv``.
+
+    Returns:
+        The process exit status: ``0`` on success, or the failing gate's
+        documented code (``BackupToolError`` detail is printed, never
+        tracebacked).
+    """
     try:
         args = _parse_args(argv)
         if not args.confirm_writers_quiesced:

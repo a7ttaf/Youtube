@@ -97,6 +97,17 @@ class CommandRunner:
     """Bounded native-command runner with stable, secret-safe failures."""
 
     def __init__(self, *, timeout_seconds: int = 300) -> None:
+        """Bound every native command this runner executes.
+
+        Args:
+            timeout_seconds: Maximum seconds one native command may run.
+
+        Returns:
+            ``None``.
+
+        Raises:
+            BackupToolError: the timeout bound is below one second.
+        """
         if timeout_seconds < 1:
             raise BackupToolError("command timeout must be at least one second", exit_code=2)
         self.timeout_seconds = timeout_seconds
@@ -109,7 +120,22 @@ class CommandRunner:
         environment: Mapping[str, str] | None = None,
         exit_code: int = 5,
     ) -> str:
-        """Run a command and return its decoded standard output."""
+        """Run a command and return its decoded standard output.
+
+        Args:
+            argv: Sequence[str]. Native argv executed through the command runner.
+            stdin: str | None.
+            environment: Mapping[str, str] | None. Extra environment layered over the current
+                process.
+            exit_code: int. BackupToolError exit code used when the command fails.
+
+        Returns:
+            The command's captured standard output.
+
+        Raises:
+            BackupToolError: the native command exits nonzero or cannot complete (wrapped
+                OSError/TimeoutExpired).
+        """
         command_environment = None
         if environment is not None:
             command_environment = os.environ.copy()
@@ -144,7 +170,22 @@ class CommandRunner:
         environment: Mapping[str, str] | None = None,
         exit_code: int = 5,
     ) -> None:
-        """Run a command writing binary output straight to a file."""
+        """Run a command writing binary output straight to a file.
+
+        Args:
+            argv: Sequence[str]. Native argv executed through the command runner.
+            destination: Path. Staging file path the command writes to.
+            environment: Mapping[str, str] | None. Extra environment layered over the current
+                process.
+            exit_code: int. BackupToolError exit code used when the command fails.
+
+        Returns:
+            ``None``.
+
+        Raises:
+            BackupToolError: the native dump command exits nonzero or cannot complete, or the
+                staging destination already exists.
+        """
         command_environment = None
         if environment is not None:
             command_environment = os.environ.copy()
@@ -183,7 +224,22 @@ class CommandRunner:
         environment: Mapping[str, str] | None = None,
         exit_code: int = 6,
     ) -> str:
-        """Run a command reading binary input from a file."""
+        """Run a command reading binary input from a file.
+
+        Args:
+            argv: Sequence[str]. Native argv executed through the command runner.
+            source: Path. Connection to the backup source database.
+            environment: Mapping[str, str] | None. Extra environment layered over the current
+                process.
+            exit_code: int. BackupToolError exit code used when the command fails.
+
+        Returns:
+            The command's captured standard output.
+
+        Raises:
+            BackupToolError: the archive file cannot be opened, or the native command exits nonzero
+                or cannot complete.
+        """
         try:
             with source.open("rb") as stream:
                 return self.stream_to_text(
@@ -206,7 +262,22 @@ class CommandRunner:
         environment: Mapping[str, str] | None = None,
         exit_code: int = 6,
     ) -> str:
-        """Run a command from one already-verified and pinned binary stream."""
+        """Run a command from one already-verified and pinned binary stream.
+
+        Args:
+            argv: Sequence[str]. Native argv executed through the command runner.
+            source: BinaryIO. Connection to the backup source database.
+            environment: Mapping[str, str] | None. Extra environment layered over the current
+                process.
+            exit_code: int. BackupToolError exit code used when the command fails.
+
+        Returns:
+            The command's captured standard output.
+
+        Raises:
+            BackupToolError: the native archive command exits nonzero, cannot complete, or times out
+                (TimeoutExpired is wrapped).
+        """
         command_environment = None
         if environment is not None:
             command_environment = os.environ.copy()
@@ -241,7 +312,22 @@ class CommandRunner:
         environment: Mapping[str, str] | None = None,
         exit_code: int = 6,
     ) -> str:
-        """Run a command feeding a file as binary standard input."""
+        """Run a command feeding a file as binary standard input.
+
+        Args:
+            argv: Sequence[str]. Native argv executed through the command runner.
+            source: Path. Connection to the backup source database.
+            environment: Mapping[str, str] | None. Extra environment layered over the current
+                process.
+            exit_code: int. BackupToolError exit code used when the command fails.
+
+        Returns:
+            The command's captured standard output.
+
+        Raises:
+            BackupToolError: propagated from :meth:`file_to_text` when the native command fails or
+                cannot complete.
+        """
         return self.file_to_text(
             argv,
             source,
@@ -270,7 +356,20 @@ def resolve_rehearsal_image(
     operator_reference: str,
     expected_image_id: str,
 ) -> str:
-    """Resolve an operator-selected local PostgreSQL image to the manifest id."""
+    """Resolve an operator-selected local PostgreSQL image to the manifest id.
+
+    Args:
+        runner: CommandRunner. Command runner every native invocation goes through.
+        operator_reference: str. Operator-selected local image reference.
+        expected_image_id: str. Image id the manifest recorded at backup time.
+
+    Returns:
+        ``str``.
+
+    Raises:
+        BackupToolError: the reference is malformed, does not resolve to exactly one local
+            image, or its image ID differs from the manifest's source image.
+    """
     if not operator_reference or any(character in operator_reference for character in "\r\n\x00"):
         raise BackupToolError("--rehearse-image must be a local image reference", exit_code=2)
     raw = runner.text(["docker", "image", "inspect", operator_reference], exit_code=3)
@@ -321,7 +420,23 @@ def create_rehearsal_container(
     name: str,
     ownership_token: str,
 ) -> None:
-    """Create a password-protected target with an ephemeral loopback port."""
+    """Create a password-protected target with an ephemeral loopback port.
+
+    Args:
+        runner: CommandRunner. Command runner every native invocation goes through.
+        image_id: str.
+        database: str.
+        user: str.
+        name: str.
+        ownership_token: str. Random token proving this process owns the container.
+
+    Returns:
+        ``None``.
+
+    Raises:
+        BackupToolError: the manifest identity, container name, or ownership token is unsafe, or
+            Docker refuses the container.
+    """
     if not all(_IDENTIFIER_RE.fullmatch(value) for value in (database, user)):
         raise BackupToolError("manifest database/user is unsafe for rehearsal", exit_code=2)
     if not _SAFE_CONTAINER_RE.fullmatch(name):
@@ -356,7 +471,20 @@ def create_rehearsal_container(
 
 
 def remove_rehearsal_container(runner: CommandRunner, name: str, *, ownership_token: str) -> None:
-    """Remove exactly the uniquely named container created by this rehearsal."""
+    """Remove exactly the uniquely named container created by this rehearsal.
+
+    Args:
+        runner: CommandRunner. Command runner every native invocation goes through.
+        name: str.
+        ownership_token: str. Random token proving this process owns the container.
+
+    Returns:
+        ``None``.
+
+    Raises:
+        BackupToolError: the container name is unrecognized, the ownership token is invalid, or
+            ownership and name do not match.
+    """
     if not name.startswith("ums-db-restore-rehearsal-") or not _SAFE_CONTAINER_RE.fullmatch(name):
         raise BackupToolError("refusing to remove an unrecognized container name", exit_code=7)
     if not re.fullmatch(r"[0-9a-f]{32}", ownership_token):
@@ -486,7 +614,19 @@ _PG18_PREDEFINED_MEMBERSHIPS = (
 #   - File: backend/ums_smart_revenue/ops/database_backup/backup.py -> snapshot.
 # ============================================================================
 def resolve_container_connection(runner: CommandRunner, container: str) -> ContainerConnection:
-    """Resolve a container reference into a loopback connection contract."""
+    """Resolve a container reference into a loopback connection contract.
+
+    Args:
+        runner: CommandRunner. Command runner every native invocation goes through.
+        container: str. Docker container name or id hosting PostgreSQL.
+
+    Returns:
+        ``ContainerConnection``.
+
+    Raises:
+        BackupToolError: the container is not a stock PostgreSQL image command, lacks required
+            fields, or exposes unsafe database/user values.
+    """
     inspect = _container_inspect(runner, container)
     if inspect.get("Path") != "docker-entrypoint.sh" or inspect.get("Args") != ["postgres"]:
         raise BackupToolError(
@@ -563,7 +703,18 @@ def _connect(source: ContainerConnection) -> Connection[tuple[object, ...]]:
 #   - File: Docs/22_BACKUP_RESTORE_AND_REHEARSAL.md -> endpoint contract.
 # ============================================================================
 def require_password_authentication(source: ContainerConnection) -> None:
-    """Prove the loopback target rejects a fresh deliberately wrong password."""
+    """Prove the loopback target rejects a fresh deliberately wrong password.
+
+    Args:
+        source: ContainerConnection. Connection to the backup source database.
+
+    Returns:
+        ``None``.
+
+    Raises:
+        BackupToolError: the target accepts a deliberately wrong password, or password
+            enforcement cannot be proven.
+    """
     wrong_password = "ums-auth-rejection-proof-" + secrets.token_hex(32)
     unexpected: Connection[tuple[object, ...]] | None = None
     try:
@@ -660,7 +811,19 @@ def _table_names(connection: Connection[tuple[object, ...]]) -> list[tuple[str, 
 #   - File: Docs/22_BACKUP_RESTORE_AND_REHEARSAL.md -> supported source scope.
 # ============================================================================
 def require_no_foreign_tables(connection: Connection[tuple[object, ...]]) -> None:
-    """Refuse foreign tables because pg_dump cannot capture their external rows."""
+    """Refuse foreign tables because pg_dump cannot capture their external rows.
+
+    Args:
+        connection: Connection[tuple[object, ...]]. Database session the adapter queries
+            through.
+
+    Returns:
+        ``None``.
+
+    Raises:
+        BackupToolError: foreign-table inspection fails, or the source contains foreign tables
+            whose external rows cannot be backed up.
+    """
     row = connection.execute(
         """
         SELECT count(*)
@@ -693,7 +856,19 @@ def require_no_foreign_tables(connection: Connection[tuple[object, ...]]) -> Non
 #   - File: backend/ums_smart_revenue/ops/database_backup/backup.py -> post-dump.
 # ============================================================================
 def require_source_quiescent(connection: Connection[tuple[object, ...]]) -> None:
-    """Refuse a source with another database session during the writer-stop window."""
+    """Refuse a source with another database session during the writer-stop window.
+
+    Args:
+        connection: Connection[tuple[object, ...]]. Database session the adapter queries
+            through.
+
+    Returns:
+        ``None``.
+
+    Raises:
+        BackupToolError: another database session is present in the writer-stop window, or
+            quiescence cannot be proven.
+    """
     row = connection.execute(
         """
         SELECT count(*)
@@ -753,7 +928,18 @@ def _lock_export_relations(connection: Connection[tuple[object, ...]]) -> None:
 def snapshot_sequences(
     connection: Connection[tuple[object, ...]],
 ) -> tuple[SequenceRecord, ...]:
-    """Capture the ordered sequence state of the connected database."""
+    """Capture the ordered sequence state of the connected database.
+
+    Args:
+        connection: Connection[tuple[object, ...]]. Database session the adapter queries
+            through.
+
+    Returns:
+        ``tuple[SequenceRecord, ...]``.
+
+    Raises:
+        BackupToolError: sequence metadata is malformed or a sequence's state cannot be read.
+    """
     rows = connection.execute(
         """
         SELECT n.nspname, c.relname, format_type(s.seqtypid, NULL),
@@ -809,7 +995,17 @@ def snapshot_sequences(
 
 
 def target_sequences(source: ContainerConnection) -> tuple[SequenceRecord, ...]:
-    """Read restored sequence parameters/state for exact manifest verification."""
+    """Read restored sequence parameters/state for exact manifest verification.
+
+    Args:
+        source: ContainerConnection. Connection to the backup source database.
+
+    Returns:
+        ``tuple[SequenceRecord, ...]``.
+
+    Raises:
+        BackupToolError: restored sequence state cannot be read or is malformed.
+    """
     connection = _connect(source)
     try:
         return snapshot_sequences(connection)
@@ -832,7 +1028,20 @@ def target_sequences(source: ContainerConnection) -> tuple[SequenceRecord, ...]:
 def snapshot_authorization_catalog_digest(
     connection: Connection[tuple[object, ...]], *, require_canonical: bool
 ) -> str:
-    """Hash exact authorization metadata/edges and optionally require registries."""
+    """Hash exact authorization metadata/edges and optionally require registries.
+
+    Args:
+        connection: Connection[tuple[object, ...]]. Database session the adapter queries
+            through.
+        require_canonical: bool.
+
+    Returns:
+        ``str``.
+
+    Raises:
+        BackupToolError: authorization catalog rows are malformed, or the catalog diverges from
+            the runtime permission registries.
+    """
     role_rows = connection.execute(
         """
         SELECT key, label, description, service_only
@@ -885,7 +1094,17 @@ def snapshot_authorization_catalog_digest(
 
 
 def target_authorization_catalog_digest(source: ContainerConnection) -> str:
-    """Read restored authorization semantics without assuming current timestamps."""
+    """Read restored authorization semantics without assuming current timestamps.
+
+    Args:
+        source: ContainerConnection. Connection to the backup source database.
+
+    Returns:
+        ``str``.
+
+    Raises:
+        BackupToolError: the restored authorization catalog cannot be read.
+    """
     connection = _connect(source)
     try:
         return snapshot_authorization_catalog_digest(connection, require_canonical=False)
@@ -900,7 +1119,18 @@ def target_authorization_catalog_digest(source: ContainerConnection) -> str:
 def snapshot_table_counts(
     connection: Connection[tuple[object, ...]],
 ) -> tuple[TableRecord, ...]:
-    """Count every user table through the same exported snapshot as pg_dump."""
+    """Count every user table through the same exported snapshot as pg_dump.
+
+    Args:
+        connection: Connection[tuple[object, ...]]. Database session the adapter queries
+            through.
+
+    Returns:
+        ``tuple[TableRecord, ...]``.
+
+    Raises:
+        BackupToolError: a table's row count cannot be read.
+    """
     records: list[TableRecord] = []
     for schema, name in _table_names(connection):
         query = sql.SQL("SELECT count(*) FROM {}.{}").format(
@@ -914,7 +1144,17 @@ def snapshot_table_counts(
 
 
 def target_table_counts(source: ContainerConnection) -> tuple[TableRecord, ...]:
-    """Read committed row counts from a restored target for exact verification."""
+    """Read committed row counts from a restored target for exact verification.
+
+    Args:
+        source: ContainerConnection. Connection to the backup source database.
+
+    Returns:
+        ``tuple[TableRecord, ...]``.
+
+    Raises:
+        BackupToolError: a restored table's row count cannot be read.
+    """
     connection = _connect(source)
     try:
         return snapshot_table_counts(connection)
@@ -925,7 +1165,18 @@ def target_table_counts(source: ContainerConnection) -> tuple[TableRecord, ...]:
 
 
 def target_contract(source: ContainerConnection) -> TargetContract:
-    """Read target version/database/locale without requiring application tables."""
+    """Read target version/database/locale without requiring application tables.
+
+    Args:
+        source: ContainerConnection. Connection to the backup source database.
+
+    Returns:
+        ``TargetContract``.
+
+    Raises:
+        BackupToolError: the target database's version/locale/collation properties cannot be
+            read, or violate the manifest's contract.
+    """
     connection = _connect(source)
     try:
         row = connection.execute(
@@ -1151,7 +1402,18 @@ SELECT (
 
 
 def require_clean_target(source: ContainerConnection) -> None:
-    """Fail closed if target-local catalogs differ from fresh PostgreSQL 18."""
+    """Fail closed if target-local catalogs differ from fresh PostgreSQL 18.
+
+    Args:
+        source: ContainerConnection. Connection to the backup source database.
+
+    Returns:
+        ``None``.
+
+    Raises:
+        BackupToolError: the target has dirty catalog conditions or its cleanliness cannot be
+            proven; the refusal has no override.
+    """
     connection = _connect(source)
     try:
         row = connection.execute(_USER_OBJECT_COUNT_SQL).fetchone()
@@ -1183,7 +1445,18 @@ def require_clean_target(source: ContainerConnection) -> None:
 #   - File: scripts/compose_restore_roles.sql -> later creates two NOLOGIN roles.
 # ============================================================================
 def require_dedicated_cluster(source: ContainerConnection) -> None:
-    """Refuse anything except the exact fresh PostgreSQL 18 cluster shape."""
+    """Refuse anything except the exact fresh PostgreSQL 18 cluster shape.
+
+    Args:
+        source: ContainerConnection. Connection to the backup source database.
+
+    Returns:
+        ``None``.
+
+    Raises:
+        BackupToolError: the cluster's catalog fingerprints, predefined roles, or bootstrap role
+            differ from a fresh PostgreSQL 18 container.
+    """
     connection = _connect(source)
     try:
         databases = connection.execute(
@@ -1406,7 +1679,17 @@ def require_dedicated_cluster(source: ContainerConnection) -> None:
 
 
 def target_migration_heads(source: ContainerConnection) -> tuple[str, ...]:
-    """Read the restored Alembic heads after archive replay."""
+    """Read the restored Alembic heads after archive replay.
+
+    Args:
+        source: ContainerConnection. Connection to the backup source database.
+
+    Returns:
+        ``tuple[str, ...]``.
+
+    Raises:
+        BackupToolError: restored Alembic heads are malformed or cannot be read.
+    """
     connection = _connect(source)
     try:
         rows = connection.execute(
@@ -1426,7 +1709,20 @@ def snapshot_source_record(
     connection: Connection[tuple[object, ...]],
     source: ContainerConnection,
 ) -> SourceRecord:
-    """Read source provenance inside the held repeatable-read transaction."""
+    """Read source provenance inside the held repeatable-read transaction.
+
+    Args:
+        connection: Connection[tuple[object, ...]]. Database session the adapter queries
+            through.
+        source: ContainerConnection. Connection to the backup source database.
+
+    Returns:
+        ``SourceRecord``.
+
+    Raises:
+        BackupToolError: the source database identity or Alembic head cannot be read, or the
+            source has multiple heads.
+    """
     row = connection.execute(
         """
         SELECT
@@ -1471,7 +1767,18 @@ def snapshot_source_record(
 def exported_snapshot(
     source: ContainerConnection,
 ) -> Iterator[tuple[Connection[tuple[object, ...]], str]]:
-    """Hold a quiescent, non-mutating locked snapshot through pg_dump."""
+    """Hold a quiescent, non-mutating locked snapshot through pg_dump.
+
+    Args:
+        source: ContainerConnection. Connection to the backup source database.
+
+    Returns:
+        ``Iterator[tuple[Connection[tuple[object, ...]], str]]``.
+
+    Raises:
+        BackupToolError: PostgreSQL did not export a usable snapshot inside the capture
+            transaction.
+    """
     connection = _connect(source)
     try:
         connection.execute("BEGIN ISOLATION LEVEL REPEATABLE READ")
@@ -1499,7 +1806,21 @@ def dump_snapshot(
     snapshot_id: str,
     destination: Path,
 ) -> None:
-    """Stream a custom-format pg_dump for the exported snapshot to the host."""
+    """Stream a custom-format pg_dump for the exported snapshot to the host.
+
+    Args:
+        runner: CommandRunner. Command runner every native invocation goes through.
+        source: ContainerConnection. Connection to the backup source database.
+        snapshot_id: str.
+        destination: Path. Staging file path the command writes to.
+
+    Returns:
+        ``None``.
+
+    Raises:
+        BackupToolError: the pg_dump invocation fails or cannot complete (propagated from the
+            command runner).
+    """
     runner.binary_to_file(
         [
             "docker",
@@ -1519,7 +1840,19 @@ def dump_snapshot(
 
 
 def dump_toc_entries(runner: CommandRunner, container: str, dump_source: Path | BinaryIO) -> int:
-    """Prove the archive is readable and return its non-comment TOC size."""
+    """Prove the archive is readable and return its non-comment TOC size.
+
+    Args:
+        runner: CommandRunner. Command runner every native invocation goes through.
+        container: str. Docker container name or id hosting PostgreSQL.
+        dump_source: Path | BinaryIO.
+
+    Returns:
+        ``int``.
+
+    Raises:
+        BackupToolError: pg_restore lists no archive entries.
+    """
     argv = ["docker", "exec", "-i", container, "pg_restore", "--list"]
     if isinstance(dump_source, Path):
         listing = runner.file_to_text(argv, dump_source, exit_code=6)
@@ -1537,7 +1870,19 @@ def wait_for_postgres(
     source: ContainerConnection,
     wait_seconds: int,
 ) -> None:
-    """Wait for both in-container readiness and the published host endpoint."""
+    """Wait for both in-container readiness and the published host endpoint.
+
+    Args:
+        runner: CommandRunner. Command runner every native invocation goes through.
+        source: ContainerConnection. Connection to the backup source database.
+        wait_seconds: int.
+
+    Returns:
+        ``None``.
+
+    Raises:
+        BackupToolError: the target PostgreSQL never becomes ready.
+    """
     deadline = time.monotonic() + max(1, wait_seconds)
     while True:
         try:
@@ -1570,7 +1915,22 @@ def apply_sql_file(
     database: str,
     source: Path | BinaryIO,
 ) -> None:
-    """Apply one prevalidated SQL path or pinned stream through psql stdin."""
+    """Apply one prevalidated SQL path or pinned stream through psql stdin.
+
+    Args:
+        runner: CommandRunner. Command runner every native invocation goes through.
+        container: str. Docker container name or id hosting PostgreSQL.
+        user: str.
+        database: str.
+        source: Path | BinaryIO. Connection to the backup source database.
+
+    Returns:
+        ``None``.
+
+    Raises:
+        BackupToolError: the SQL replay fails its quiescence, timeout, or reconciliation fencing
+            (RestoreError family), or the file cannot be read.
+    """
     argv = [
         "docker",
         "exec",
@@ -1600,7 +1960,22 @@ def restore_dump(
     database: str,
     source: Path | BinaryIO,
 ) -> None:
-    """Restore one archive atomically into an already-proven clean database."""
+    """Restore one archive atomically into an already-proven clean database.
+
+    Args:
+        runner: CommandRunner. Command runner every native invocation goes through.
+        container: str. Docker container name or id hosting PostgreSQL.
+        user: str.
+        database: str.
+        source: Path | BinaryIO. Connection to the backup source database.
+
+    Returns:
+        ``None``.
+
+    Raises:
+        BackupToolError: the pg_restore replay fails its quiescence, timeout, or reconciliation
+            fencing (RestoreError family).
+    """
     argv = [
         "docker",
         "exec",
@@ -1621,6 +1996,16 @@ def restore_dump(
 
 
 def fsync_file(path: Path) -> None:
-    """Flush one artifact's bytes before its directory can be published."""
+    """Flush one artifact's bytes before its directory can be published.
+
+    Args:
+        path: Path. Filesystem path the operation reads or writes.
+
+    Returns:
+        ``None``.
+
+    Raises:
+        OSError: the file cannot be opened or flushed to stable storage.
+    """
     with path.open("rb") as stream:
         os.fsync(stream.fileno())

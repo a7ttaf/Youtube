@@ -26,7 +26,11 @@ AuthorizationPayload = dict[str, list[dict[str, str | bool]]]
 #   - File: backend/ums_smart_revenue/auth/seed.py -> exact grant edges.
 # ============================================================================
 def canonical_authorization_payload() -> AuthorizationPayload:
-    """Return the exact runtime authorization catalog in database column shape."""
+    """Return the exact runtime authorization catalog in database column shape.
+
+    Returns:
+        ``AuthorizationPayload``.
+    """
     roles: list[dict[str, str | bool]] = [
         {
             "key": role.value,
@@ -62,7 +66,14 @@ def canonical_authorization_payload() -> AuthorizationPayload:
 
 
 def authorization_catalog_digest(payload: AuthorizationPayload) -> str:
-    """Hash one normalized catalog without timestamps or database-generated ids."""
+    """Hash one normalized catalog without timestamps or database-generated ids.
+
+    Args:
+        payload: AuthorizationPayload. Canonical authorization catalog payload bytes.
+
+    Returns:
+        ``str``.
+    """
     encoded = json.dumps(
         payload,
         ensure_ascii=True,
@@ -78,7 +89,16 @@ def payload_from_database_rows(
     permissions: Sequence[tuple[str, str, bool, bool]],
     assignments: Sequence[tuple[str, str]],
 ) -> AuthorizationPayload:
-    """Normalize validated PostgreSQL scalar rows for exact registry comparison."""
+    """Normalize validated PostgreSQL scalar rows for exact registry comparison.
+
+    Args:
+        roles: Sequence[tuple[str, str, str, bool]].
+        permissions: Sequence[tuple[str, str, bool, bool]].
+        assignments: Sequence[tuple[str, str]].
+
+    Returns:
+        ``AuthorizationPayload``.
+    """
     return {
         "roles": [
             {

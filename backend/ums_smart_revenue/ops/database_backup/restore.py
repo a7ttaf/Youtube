@@ -85,7 +85,20 @@ class OpenBackup:
 # ============================================================================
 @contextmanager
 def open_backup(directory: Path, *, repository_root: Path) -> Iterator[OpenBackup]:
-    """Yield one completed run without reopening its verified artifacts."""
+    """Yield one completed run without reopening its verified artifacts.
+
+    Args:
+        directory: Path. Host directory the operation validates or writes.
+        repository_root: Path. Checkout root used to locate tracked SQL and Alembic state.
+
+    Returns:
+        The verified ``OpenBackup`` bundle.
+
+    Raises:
+        BackupToolError: the directory is not exactly one completed backup run, its
+            authorization catalog is incompatible with the runtime registries, or the canonical role
+            SQL is missing or redirected.
+    """
     unresolved = directory.expanduser()
     require_no_redirect_components(unresolved, label="backup directory")
     resolved = unresolved.resolve(strict=True)
@@ -232,7 +245,24 @@ def restore_clean_target(
     wait_seconds: int,
     clean_target_confirmed: bool,
 ) -> RestoreResult:
-    """Restore into one explicit clean target container and verify exactly."""
+    """Restore into one explicit clean target container and verify exactly.
+
+    Args:
+        repository_root: Path. Checkout root used to locate tracked SQL and Alembic state.
+        backup_directory: Path.
+        target_container: str.
+        timeout_seconds: int. Bounded lifetime for every native command invocation.
+        wait_seconds: int.
+        clean_target_confirmed: bool.
+
+    Returns:
+        ``RestoreResult`` summarizing the restored tables.
+
+    Raises:
+        BackupToolError: the clean-target confirmation is missing, the archive TOC does not
+            match the manifest, or any clean-target/version/locale/role/content gate refuses the
+            restore.
+    """
     if not clean_target_confirmed:
         raise BackupToolError(
             "direct restore requires --confirm-clean-target after provisioning a new target",
@@ -297,7 +327,22 @@ def rehearse_restore(
     timeout_seconds: int,
     wait_seconds: int,
 ) -> RestoreResult:
-    """Restore and verify inside one new throwaway PostgreSQL container."""
+    """Restore and verify inside one new throwaway PostgreSQL container.
+
+    Args:
+        repository_root: Path. Checkout root used to locate tracked SQL and Alembic state.
+        backup_directory: Path.
+        rehearsal_image: str.
+        timeout_seconds: int. Bounded lifetime for every native command invocation.
+        wait_seconds: int.
+
+    Returns:
+        ``RestoreResult`` summarizing the rehearsal target.
+
+    Raises:
+        BackupToolError: the archive TOC does not match the manifest, the rehearsal fails, or
+            owned-container cleanup cannot be verified.
+    """
     with open_backup(backup_directory, repository_root=repository_root) as backup:
         manifest = backup.manifest
         runner = CommandRunner(timeout_seconds=timeout_seconds)

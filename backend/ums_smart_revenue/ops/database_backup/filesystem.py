@@ -51,7 +51,19 @@ def _is_redirect(path: Path) -> bool:
 
 
 def require_no_redirect_components(path: Path, *, label: str) -> None:
-    """Reject any existing symlink/reparse component without resolving through it."""
+    """Reject any existing symlink/reparse component without resolving through it.
+
+    Args:
+        path: Path. Filesystem path the operation reads or writes.
+        label: str. Manifest field label used in validation errors.
+
+    Returns:
+        ``None``.
+
+    Raises:
+        BackupToolError: the path contains a symlink or other redirected component, or its
+            identity cannot be read.
+    """
     absolute = path if path.is_absolute() else Path.cwd() / path
     cursor = Path(absolute.anchor)
     for part in absolute.parts[1:]:
@@ -216,7 +228,18 @@ if ($ruleSid -ne $sid.Value -or
 
 
 def require_owner_only_directory(path: Path) -> None:
-    """Require the restore package to remain inside its private trust boundary."""
+    """Require the restore package to remain inside its private trust boundary.
+
+    Args:
+        path: Path. Filesystem path the operation reads or writes.
+
+    Returns:
+        ``None``.
+
+    Raises:
+        BackupToolError: the directory is not a real directory, is not owned by the current
+            user, or is not mode 0700.
+    """
     if not path.is_dir() or _is_redirect(path):
         raise BackupToolError("backup directory is not a real directory", exit_code=2)
     if os.name == "nt":
@@ -255,7 +278,18 @@ def _real_directory_identity(path: Path) -> DirectoryIdentity:
 #   - File: backend/ums_smart_revenue/ops/database_backup/restore.py -> restore boundary.
 # ============================================================================
 def capture_trusted_directory_identity(path: Path) -> DirectoryIdentity:
-    """Capture one owner-only directory identity without accepting a validation swap."""
+    """Capture one owner-only directory identity without accepting a validation swap.
+
+    Args:
+        path: Path. Filesystem path the operation reads or writes.
+
+    Returns:
+        ``DirectoryIdentity``.
+
+    Raises:
+        BackupToolError: the directory identity changed while the trust boundary was being
+            validated.
+    """
     require_no_redirect_components(path, label="backup directory")
     before = _real_directory_identity(path)
     require_owner_only_directory(path)
@@ -269,7 +303,18 @@ def capture_trusted_directory_identity(path: Path) -> DirectoryIdentity:
 
 
 def require_trusted_directory_identity(path: Path, expected: DirectoryIdentity) -> None:
-    """Refuse a replacement directory or a weakened owner-only trust boundary."""
+    """Refuse a replacement directory or a weakened owner-only trust boundary.
+
+    Args:
+        path: Path. Filesystem path the operation reads or writes.
+        expected: DirectoryIdentity.
+
+    Returns:
+        ``None``.
+
+    Raises:
+        BackupToolError: the directory identity no longer matches the captured trusted identity.
+    """
     observed = capture_trusted_directory_identity(path)
     if observed != expected:
         raise BackupToolError("backup directory identity changed", exit_code=2)
@@ -278,7 +323,20 @@ def require_trusted_directory_identity(path: Path, expected: DirectoryIdentity) 
 def resolve_output_directory(
     raw: Path, *, repository_root: Path, coordinated_bundle: bool = False
 ) -> Path:
-    """Resolve a dedicated host backup directory outside the working tree."""
+    """Resolve a dedicated host backup directory outside the working tree.
+
+    Args:
+        raw: Path.
+        repository_root: Path. Checkout root used to locate tracked SQL and Alembic state.
+        coordinated_bundle: bool.
+
+    Returns:
+        ``Path``.
+
+    Raises:
+        BackupToolError: the output path is a link, is not a dedicated host directory outside
+            the repository, or (bundle mode) does not already exist with owner-only protection.
+    """
     unresolved = raw.expanduser()
     if not unresolved.is_absolute():
         unresolved = Path.cwd() / unresolved
@@ -414,7 +472,18 @@ def _durable_move(source: Path, destination: Path) -> None:
 
 @contextmanager
 def exclusive_output_lock(output: Path) -> Iterator[None]:
-    """Refuse overlapping writers; stale locks require explicit operator review."""
+    """Refuse overlapping writers; stale locks require explicit operator review.
+
+    Args:
+        output: Path.
+
+    Returns:
+        ``Iterator[None]``.
+
+    Raises:
+        BackupToolError: a prior run's lock already exists, or lock ownership cannot be proven
+            before any lock removal.
+    """
     lock = output / LOCK_NAME
     owner = lock / LOCK_OWNER_NAME
     token = secrets.token_hex(32)
@@ -493,7 +562,18 @@ def exclusive_output_lock(output: Path) -> Iterator[None]:
 
 
 def new_staging_directory(output: Path, *, run_name: str) -> Path:
-    """Create an owner-only partial directory that restore will never accept."""
+    """Create an owner-only partial directory that restore will never accept.
+
+    Args:
+        output: Path.
+        run_name: str. Deterministic run directory name for this backup.
+
+    Returns:
+        ``Path``.
+
+    Raises:
+        BackupToolError: the staging directory already exists.
+    """
     staging = output / f".{run_name}.partial"
     if staging.exists():
         raise BackupToolError(f"staging directory already exists: {staging.name}", exit_code=2)
@@ -505,7 +585,15 @@ def new_staging_directory(output: Path, *, run_name: str) -> Path:
 
 
 def write_manifest(staging: Path, manifest: BackupManifest) -> None:
-    """Write and flush the final manifest only after both artifacts are complete."""
+    """Write and flush the final manifest only after both artifacts are complete.
+
+    Args:
+        staging: Path.
+        manifest: BackupManifest. Parsed backup manifest validated or written by this call.
+
+    Returns:
+        ``None``.
+    """
     destination = staging / MANIFEST_NAME
     temporary = staging / f".{MANIFEST_NAME}.{secrets.token_hex(8)}.tmp"
     body = json.dumps(manifest.to_json(), indent=2, sort_keys=True) + "\n"
@@ -521,7 +609,20 @@ def write_manifest(staging: Path, manifest: BackupManifest) -> None:
 
 
 def publish(staging: Path, destination: Path, *, manifest: BackupManifest) -> None:
-    """Reverify and atomically expose exactly one complete backup directory."""
+    """Reverify and atomically expose exactly one complete backup directory.
+
+    Args:
+        staging: Path.
+        destination: Path. Staging file path the command writes to.
+        manifest: BackupManifest. Parsed backup manifest validated or written by this call.
+
+    Returns:
+        ``None``.
+
+    Raises:
+        BackupToolError: staging does not hold exactly the required members, the staging
+            manifest changed before publication, or a non-regular entry is present.
+    """
     expected = {DUMP_NAME, ROLES_NAME, MANIFEST_NAME}
     observed = {child.name for child in staging.iterdir()}
     if observed != expected:
@@ -553,7 +654,19 @@ def publish(staging: Path, destination: Path, *, manifest: BackupManifest) -> No
 #   - File: backend/ums_smart_revenue/ops/database_backup/contracts.py -> identity.
 # ============================================================================
 def require_matching_backup_history(output: Path, identity: DatabaseIdentity) -> None:
-    """Refuse an output directory holding history for another database."""
+    """Refuse an output directory holding history for another database.
+
+    Args:
+        output: Path.
+        identity: DatabaseIdentity. Previously captured directory identity to re-verify.
+
+    Returns:
+        ``None``.
+
+    Raises:
+        BackupToolError: the backup directory is already bound to a different database identity,
+            contains multiple identities, or holds a corrupt completed run.
+    """
     observed: set[DatabaseIdentity] = set()
     for child in sorted(output.iterdir(), key=lambda path: path.name):
         if not RUN_NAME_RE.fullmatch(child.name):

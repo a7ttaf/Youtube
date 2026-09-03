@@ -42,18 +42,48 @@ class BackupToolError(RuntimeError):
     """Typed, operator-safe backup or restore failure."""
 
     def __init__(self, message: str, *, exit_code: int = 1) -> None:
+        """Bind one operator-safe message to its process exit code.
+
+        Args:
+            message: Safe, operator-facing failure description; never
+                includes secrets, SQL values, or infrastructure detail.
+            exit_code: Process status the CLI reports for this failure.
+
+        Returns:
+            ``None``.
+        """
         super().__init__(message)
         self.exit_code = exit_code
 
 
 def sha256_file(path: Path) -> str:
-    """Return the lowercase SHA-256 digest of one regular file."""
+    """Return the lowercase SHA-256 digest of one regular file.
+
+    Args:
+        path: Path. Filesystem path the operation reads or writes.
+
+    Returns:
+        Lowercase SHA-256 hex digest of the file.
+
+    Raises:
+        OSError: propagated when the file cannot be opened, read, or hashed.
+    """
     with path.open("rb") as stream:
         return sha256_stream(stream)
 
 
 def sha256_stream(stream: BinaryIO) -> str:
-    """Hash one pinned binary stream and rewind it for its next consumer."""
+    """Hash one pinned binary stream and rewind it for its next consumer.
+
+    Args:
+        stream: BinaryIO. Pinned binary stream consumed as input.
+
+    Returns:
+        Lowercase SHA-256 hex digest of the stream.
+
+    Raises:
+        OSError: propagated when the stream cannot be read or hashed.
+    """
     digest = hashlib.sha256()
     stream.seek(0)
     for chunk in iter(lambda: stream.read(1024 * 1024), b""):
@@ -120,7 +150,19 @@ def _reject_duplicate_json_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
 def require_migration_security_floor(
     repository_root: Path, migration_heads: tuple[str, ...]
 ) -> None:
-    """Refuse a schema whose Alembic lineage does not include the security floor."""
+    """Refuse a schema whose Alembic lineage does not include the security floor.
+
+    Args:
+        repository_root: Path. Checkout root used to locate tracked SQL and Alembic state.
+        migration_heads: tuple[str, ...].
+
+    Returns:
+        ``None``.
+
+    Raises:
+        BackupToolError: the manifest does not carry exactly one Alembic head, or that head is
+            below the required security floor.
+    """
     if len(migration_heads) != 1:
         raise BackupToolError("backup must contain exactly one Alembic head", exit_code=8)
     config_path = repository_root / "alembic.ini"
@@ -157,7 +199,19 @@ class ArtifactRecord:
 
     @classmethod
     def from_json(cls, body: object, *, label: str) -> ArtifactRecord:
-        """Parse and validate an artifact record from a manifest payload."""
+        """Parse and validate an artifact record from a manifest payload.
+
+        Args:
+            body: object.
+            label: str. Manifest field label used in validation errors.
+
+        Returns:
+            ``ArtifactRecord``.
+
+        Raises:
+            BackupToolError: the node violates the strict ``ums-database-backup/v2`` shape (wrong
+                types, missing or unexpected keys, non-canonical values).
+        """
         if not isinstance(body, dict):
             raise BackupToolError(f"{label} must be an object", exit_code=8)
         _require_exact_keys(body, {"name", "bytes", "sha256"}, label)
@@ -169,7 +223,11 @@ class ArtifactRecord:
         return cls(name=name, bytes=size, sha256=digest)
 
     def to_json(self) -> dict[str, object]:
-        """Return the lossless JSON representation of this artifact."""
+        """Return the lossless JSON representation of this artifact.
+
+        Returns:
+            ``dict[str, object]``.
+        """
         return {"name": self.name, "bytes": self.bytes, "sha256": self.sha256}
 
 
@@ -182,7 +240,18 @@ class DatabaseIdentity:
 
     @classmethod
     def from_json(cls, body: object) -> DatabaseIdentity:
-        """Parse and validate the database identity from a manifest payload."""
+        """Parse and validate the database identity from a manifest payload.
+
+        Args:
+            body: object.
+
+        Returns:
+            ``DatabaseIdentity``.
+
+        Raises:
+            BackupToolError: the node violates the strict ``ums-database-backup/v2`` shape (wrong
+                types, missing or unexpected keys, non-canonical values).
+        """
         if not isinstance(body, dict):
             raise BackupToolError("source.identity must be an object", exit_code=8)
         _require_exact_keys(body, {"system_identifier", "database"}, "source.identity")
@@ -200,7 +269,11 @@ class DatabaseIdentity:
         )
 
     def to_json(self) -> dict[str, str]:
-        """Return the lossless JSON representation of this cluster identity."""
+        """Return the lossless JSON representation of this cluster identity.
+
+        Returns:
+            ``dict[str, str]``.
+        """
         return {
             "system_identifier": self.system_identifier,
             "database": self.database,
@@ -221,7 +294,18 @@ class DatabaseLocale:
 
     @classmethod
     def from_json(cls, body: object) -> DatabaseLocale:
-        """Parse and validate the cluster locale from a manifest payload."""
+        """Parse and validate the cluster locale from a manifest payload.
+
+        Args:
+            body: object.
+
+        Returns:
+            ``DatabaseLocale``.
+
+        Raises:
+            BackupToolError: the node violates the strict ``ums-database-backup/v2`` shape (wrong
+                types, missing or unexpected keys, non-canonical values).
+        """
         if not isinstance(body, dict):
             raise BackupToolError("source.locale must be an object", exit_code=8)
         expected = {
@@ -243,7 +327,11 @@ class DatabaseLocale:
         return cls(**values)  # type: ignore[arg-type]
 
     def to_json(self) -> dict[str, str]:
-        """Return the lossless JSON representation of this locale."""
+        """Return the lossless JSON representation of this locale.
+
+        Returns:
+            ``dict[str, str]``.
+        """
         return {
             "encoding": self.encoding,
             "collate": self.collate,
@@ -269,7 +357,18 @@ class SourceRecord:
 
     @classmethod
     def from_json(cls, body: object) -> SourceRecord:
-        """Parse and validate the full source description from a payload."""
+        """Parse and validate the full source description from a payload.
+
+        Args:
+            body: object.
+
+        Returns:
+            ``SourceRecord``.
+
+        Raises:
+            BackupToolError: the node violates the strict ``ums-database-backup/v2`` shape (wrong
+                types, missing or unexpected keys, non-canonical values).
+        """
         if not isinstance(body, dict):
             raise BackupToolError("source must be an object", exit_code=8)
         expected = {
@@ -311,7 +410,11 @@ class SourceRecord:
         )
 
     def to_json(self) -> dict[str, object]:
-        """Return the lossless JSON representation of this source."""
+        """Return the lossless JSON representation of this source.
+
+        Returns:
+            ``dict[str, object]``.
+        """
         return {
             "identity": self.identity.to_json(),
             "server_version_num": self.server_version_num,
@@ -333,11 +436,24 @@ class TableRecord:
 
     @property
     def qualified_name(self) -> str:
+        """Return the ``schema.name`` form used in verification errors."""
         return f"{self.schema}.{self.name}"
 
     @classmethod
     def from_json(cls, body: object, *, index: int) -> TableRecord:
-        """Parse and validate one table record from the manifest payload."""
+        """Parse and validate one table record from the manifest payload.
+
+        Args:
+            body: object.
+            index: int.
+
+        Returns:
+            ``TableRecord``.
+
+        Raises:
+            BackupToolError: the node violates the strict ``ums-database-backup/v2`` shape (wrong
+                types, missing or unexpected keys, non-canonical values).
+        """
         label = f"tables[{index}]"
         if not isinstance(body, dict):
             raise BackupToolError(f"{label} must be an object", exit_code=8)
@@ -349,7 +465,11 @@ class TableRecord:
         )
 
     def to_json(self) -> dict[str, object]:
-        """Return the lossless JSON representation of this table record."""
+        """Return the lossless JSON representation of this table record.
+
+        Returns:
+            ``dict[str, object]``.
+        """
         return {"schema": self.schema, "name": self.name, "rows": self.rows}
 
 
@@ -371,11 +491,24 @@ class SequenceRecord:
 
     @property
     def qualified_name(self) -> str:
+        """Return the ``schema.name`` form used in verification errors."""
         return f"{self.schema}.{self.name}"
 
     @classmethod
     def from_json(cls, body: object, *, index: int) -> SequenceRecord:
-        """Parse and validate one sequence record from the manifest payload."""
+        """Parse and validate one sequence record from the manifest payload.
+
+        Args:
+            body: object.
+            index: int.
+
+        Returns:
+            ``SequenceRecord``.
+
+        Raises:
+            BackupToolError: the node violates the strict ``ums-database-backup/v2`` shape (wrong
+                types, missing or unexpected keys, non-canonical values).
+        """
         label = f"sequences[{index}]"
         if not isinstance(body, dict):
             raise BackupToolError(f"{label} must be an object", exit_code=8)
@@ -397,7 +530,18 @@ class SequenceRecord:
             raise BackupToolError(f"{label} boolean fields must be booleans", exit_code=8)
 
         def integer(field: str, *, minimum: int | None = None) -> int:
-            """Read a strict integer field from the payload being validated."""
+            """Read a strict integer field from the payload being validated.
+
+            Args:
+                field: str. Manifest field name used in validation errors.
+                minimum: int | None. Smallest value the integer field may hold.
+
+            Returns:
+                The validated integer value.
+
+            Raises:
+                BackupToolError: the field is not an integer or is below its required minimum.
+            """
             value = body[field]
             if isinstance(value, bool) or not isinstance(value, int):
                 raise BackupToolError(f"{label}.{field} must be an integer", exit_code=8)
@@ -422,7 +566,11 @@ class SequenceRecord:
         )
 
     def to_json(self) -> dict[str, object]:
-        """Return the lossless JSON representation of this manifest."""
+        """Return the lossless JSON representation of this manifest.
+
+        Returns:
+            ``dict[str, object]``.
+        """
         return {
             "schema": self.schema,
             "name": self.name,
@@ -462,7 +610,18 @@ class BackupManifest:
     # ============================================================================
     @classmethod
     def from_json(cls, body: object) -> BackupManifest:
-        """Parse and strictly validate a complete backup manifest payload."""
+        """Parse and strictly validate a complete backup manifest payload.
+
+        Args:
+            body: object.
+
+        Returns:
+            ``BackupManifest``.
+
+        Raises:
+            BackupToolError: the node violates the strict ``ums-database-backup/v2`` shape (wrong
+                types, missing or unexpected keys, non-canonical values).
+        """
         if not isinstance(body, dict):
             raise BackupToolError("database manifest must be an object", exit_code=8)
         expected = {
@@ -564,7 +723,18 @@ class BackupManifest:
 
     @classmethod
     def load(cls, path: Path) -> BackupManifest:
-        """Load a manifest from disk, refusing duplicate JSON keys."""
+        """Load a manifest from disk, refusing duplicate JSON keys.
+
+        Args:
+            path: Path. Filesystem path the operation reads or writes.
+
+        Returns:
+            ``BackupManifest``.
+
+        Raises:
+            BackupToolError: the manifest exceeds its size limit, cannot be read, or is not a strict
+                ``ums-database-backup/v2`` document.
+        """
         try:
             if path.stat().st_size > MAX_MANIFEST_BYTES:
                 raise BackupToolError(f"{path.name} exceeds the manifest size limit", exit_code=8)
@@ -579,7 +749,11 @@ class BackupManifest:
         return cls.from_json(raw)
 
     def to_json(self) -> dict[str, object]:
-        """Return the lossless JSON representation of this manifest."""
+        """Return the lossless JSON representation of this manifest.
+
+        Returns:
+            ``dict[str, object]``.
+        """
         return {
             "schema": BACKUP_SCHEMA,
             "status": "complete",
@@ -595,7 +769,19 @@ class BackupManifest:
 
 
 def verify_artifacts(directory: Path, manifest: BackupManifest) -> None:
-    """Verify both required artifacts before any restore-side database write."""
+    """Verify both required artifacts before any restore-side database write.
+
+    Args:
+        directory: Path. Host directory the operation validates or writes.
+        manifest: BackupManifest. Parsed backup manifest validated or written by this call.
+
+    Returns:
+        ``None``.
+
+    Raises:
+        BackupToolError: a manifest artifact is missing, is not a regular file, or fails its
+            recorded size/SHA-256 validation.
+    """
     for record in manifest.artifacts:
         path = directory / record.name
         if not path.is_file() or path.is_symlink():
@@ -631,7 +817,19 @@ def _is_redirect_status(status: os.stat_result) -> bool:
 def open_verified_artifacts(
     directory: Path, manifest: BackupManifest
 ) -> Iterator[dict[str, BinaryIO]]:
-    """Yield pinned, rewound artifact streams after strict integrity proof."""
+    """Yield pinned, rewound artifact streams after strict integrity proof.
+
+    Args:
+        directory: Path. Host directory the operation validates or writes.
+        manifest: BackupManifest. Parsed backup manifest validated or written by this call.
+
+    Returns:
+        ``Iterator[dict[str, BinaryIO]]``.
+
+    Raises:
+        BackupToolError: a manifest artifact is missing, is not a regular file, fails its
+            size/SHA-256 validation, or changed between open and verification.
+    """
     streams: dict[str, BinaryIO] = {}
     with ExitStack() as stack:
         for record in manifest.artifacts:
