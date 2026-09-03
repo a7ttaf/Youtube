@@ -29,10 +29,12 @@ CHANNEL_ROW_ID = UUID("00000000-0000-0000-0000-000000007002")
 
 
 def build_engine():
+    """Create the in-memory finance database with foreign keys enforced."""
     engine = create_engine("sqlite+pysqlite:///:memory:")
 
     @event.listens_for(engine, "connect")
     def _enable_foreign_keys(dbapi_connection, _connection_record) -> None:
+        """Enable SQLite foreign-key enforcement for each test connection."""
         dbapi_connection.execute("PRAGMA foreign_keys=ON")
 
     FinanceBase.metadata.create_all(engine)
@@ -40,6 +42,7 @@ def build_engine():
 
 
 def test_monthly_channel_revenue_fact_model_persists_canonical_values():
+    """Persist and reload the canonical monthly revenue fact fields."""
     engine = build_engine()
 
     with Session(engine) as session:
@@ -88,6 +91,7 @@ def test_monthly_channel_revenue_fact_model_persists_canonical_values():
 
 
 def test_monthly_channel_revenue_fact_model_declares_channel_foreign_key():
+    """Declare the restrictive tenant-channel foreign-key contract."""
     foreign_key = next(
         (
             constraint
@@ -107,3 +111,23 @@ def test_monthly_channel_revenue_fact_model_declares_channel_foreign_key():
         "youtube_channel_id",
     ]
     assert foreign_key.ondelete == "RESTRICT"
+
+
+def test_monthly_channel_revenue_fact_model_declares_source_uniqueness_constraint():
+    """One source fact is allowed per tenant, month, channel, and source kind."""
+    unique_constraint = next(
+        (
+            constraint
+            for constraint in MonthlyChannelRevenueFactORM.__table__.constraints
+            if constraint.name == "uq_monthly_channel_revenue_source"
+        ),
+        None,
+    )
+
+    assert unique_constraint is not None, "uq_monthly_channel_revenue_source missing"
+    assert [column.name for column in unique_constraint.columns] == [
+        "tenant_id",
+        "month",
+        "youtube_channel_id",
+        "source_kind",
+    ]

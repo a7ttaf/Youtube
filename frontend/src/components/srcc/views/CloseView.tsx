@@ -13,7 +13,6 @@ import {
   useMonthCloseReadiness,
 } from "@/lib/api/useMonthClose";
 import type { Severity } from "@/lib/mock/data";
-import { RECON_NOTES } from "@/lib/mock/data";
 import {
   Badge,
   DEFAULT_MONTH,
@@ -48,8 +47,10 @@ const formatCloseTimestamp = (value: string | null | undefined): string =>
 //   actions (POST {reason}) behind an inline audited-reason input and a two-step
 //   arm/confirm latch (first click arms, second click executes), mapping a
 //   409 (blockers / wrong state) to a clear inline message and refetching
-//   status on success. The Reconciliation Equation side panel stays on mock
-//   data (not part of the close API) and is labelled as such.
+//   status on success. The mock Reconciliation Equation side panel was DELETED
+//   in P1.4: its two notes were fabricated statuses and its equation was an
+//   unverified restatement of the backend net formula, and the close API
+//   exposes neither — the real blockers already render in the checklist.
 // Database/ORM: None (frontend) — consumes the finance-close read endpoints and
 //   the guarded, audited lock/unlock write endpoints.
 // Standards: No client-side finance authorization is invented — the backend
@@ -497,38 +498,6 @@ const LockControlsPanel = ({
   );
 };
 
-/**
- * Static Reconciliation Equation reference panel. Still on mock data and labelled
- * as such — not part of the close API.
- */
-const ReconciliationPanel = () => {
-  return (
-    <section className="panel">
-      <div className="panel-header">
-        <div className="panel-title">
-          <strong>Reconciliation Equation</strong>
-          <span>Sample data — not yet wired to the API</span>
-        </div>
-        <Badge tone="amber">Mock</Badge>
-      </div>
-      <div className="formula" style={{ margin: 13 }}>
-        gross_reported - official_tax - payment_fees - allocation_gap + approved_overrides = locked_net
-      </div>
-      <div className="issue-list" role="list">
-        {RECON_NOTES.map((n) => (
-          <ItemRow
-            key={n.title}
-            tone={n.tone}
-            title={n.title}
-            sub={n.sub}
-            trailing={<Badge tone={n.badge.tone}>{n.badge.text}</Badge>}
-          />
-        ))}
-      </div>
-    </section>
-  );
-};
-
 // A month with no finance_month_close row is honestly OPEN: nothing has locked
 // it, and the backend only creates the row once a finance write touches the
 // month. This is not a UI invention — the backend itself already resolves a
@@ -682,7 +651,10 @@ const CloseStatusSummary = ({
   if (mode === "error") {
     // closeSummaryMode's contract: "error" is only reachable when error is
     // non-null, but a string mode cannot narrow the type — assert it here.
-    const { title, detail } = describeError(error as ApiError | Error);
+    const { title, detail } = describeError(
+      error as ApiError | Error,
+      "Your role cannot view month-close status for this month.",
+    );
     return (
       <div className="view-summary" aria-label="Month close summary" role="alert">
         <article className="summary-tile">
@@ -729,7 +701,10 @@ const ReadinessChecklist = ({
   error: ApiError | Error | null;
 }) => {
   if (error) {
-    const { title, detail } = describeError(error);
+    const { title, detail } = describeError(
+      error,
+      "Your role cannot view month-close readiness for this month.",
+    );
     return (
       <div className="table-wrap" role="alert">
         <div style={{ padding: 16 }}>
@@ -1061,7 +1036,6 @@ const CloseView = ({
             onActionClick={handleActionClick}
             onCancel={resetWorkflow}
           />
-          <ReconciliationPanel />
         </aside>
       </div>
     </section>
