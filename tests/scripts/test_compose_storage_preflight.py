@@ -1,3 +1,17 @@
+# ============================================================================
+# Purpose: Mutation-resistant host-only tests for the Compose storage
+#   boundary: provisioning contracts, rendered-model fail-closed mutations,
+#   identity guards, and real POSIX/Windows metadata checks.
+# Database/ORM: None. Filesystem and subprocess coverage only.
+# Standards: Every mutation of the reviewed model must fail closed with the
+#   typed StoragePathError; POSIX branches adapt the module APP_UID/GID to
+#   the runner identity exactly as the suite's real-identity tests do.
+# Blast Radius: None. Test-only; guards the launcher and validator contracts.
+# Connections:
+#   - File: scripts/compose.py -> the launcher under test.
+#   - File: scripts/validate_compose_storage_path.py -> the validator under
+#     test.
+# ============================================================================
 """Mutation-resistant host-only tests for the Compose storage boundary."""
 
 from __future__ import annotations
@@ -29,6 +43,20 @@ finally:
 def no_host_acl_probe(monkeypatch: pytest.MonkeyPatch) -> None:
     """Keep generic path tests independent of this workstation's inherited DACL."""
     monkeypatch.setattr(storage, "_require_windows_host_acl", lambda _path: None)
+
+
+@pytest.fixture
+def posix_runner_app_identity(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Adapt the validator's app identity to the runner, as the real-POSIX tests do.
+
+    Provisioning requires children owned by ``APP_UID``/``APP_GID``; on a
+    POSIX CI runner that is not root and not uid 10001, in-process prepare
+    tests pin the module constants to the runner identity so the creation
+    path — not the identity refusal — is what the test exercises.
+    """
+    if os.name == "posix" and os.geteuid() != 0:
+        monkeypatch.setattr(storage, "APP_UID", os.geteuid(), raising=False)
+        monkeypatch.setattr(storage, "APP_GID", os.getegid(), raising=False)
 
 
 def _storage_model(source: Path) -> dict[str, object]:
@@ -252,6 +280,7 @@ def _run_real_posix_script(script: str, *, wsl_as_root: bool = False) -> None:
 def test_prepare_creates_only_the_path_attested_default_store(
     tmp_path: Path,
     no_host_acl_probe: None,
+    posix_runner_app_identity: None,
 ) -> None:
     """The reserved missing default gets exactly two children and one sentinel."""
     checkout = tmp_path / "checkout"
@@ -269,6 +298,89 @@ def test_prepare_creates_only_the_path_attested_default_store(
         storage.storage_sentinel_content(result)
     )
     assert len(storage.storage_tree_identity(result)) == 4
+
+
+def test_posix_provisioning_refuses_incompatible_operator_identity(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    no_host_acl_probe: None,
+) -> None:
+    """A plain non-root operator gets the install command, not doomed children.
+
+    Automatic creation must never produce children the final boundary policy
+    rejects (app-owned, no group/world write); the launcher fails fast with
+    the exact operator command instead.
+    """
+    if os.name != "posix":
+        pytest.skip("the POSIX identity gate applies to POSIX hosts only")
+    monkeypatch.setattr(os, "geteuid", lambda: 1000, raising=False)
+    monkeypatch.setattr(os, "getegid", lambda: 1000, raising=False)
+    chown_calls: list[tuple[Path, int, int]] = []
+    monkeypatch.setattr(
+        os,
+        "chown",
+        lambda path, uid, gid: chown_calls.append((path, uid, gid)),
+        raising=False,
+    )
+    root = tmp_path / "store"
+    root.mkdir()
+    root_identity = storage._real_directory_identity(root)
+
+    with pytest.raises(
+        storage.StoragePathError,
+        match=f"sudo install -d -o {storage.APP_UID} -g {storage.APP_GID}",
+    ):
+        storage._create_storage_children(root, root_identity)
+    assert not (root / "artifacts").exists()
+    assert not (root / "blobs").exists()
+    assert chown_calls == []
+
+
+def test_posix_provisioning_as_app_identity_matches_the_boundary_policy(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    no_host_acl_probe: None,
+    posix_runner_app_identity: None,
+) -> None:
+    """Children created under the app identity are app-owned with no group write."""
+    if os.name != "posix":
+        pytest.skip("the POSIX identity gate applies to POSIX hosts only")
+    if os.geteuid() == 0:
+        pytest.skip("root provisioning takes the chown branch covered separately")
+    root = tmp_path / "store"
+    root.mkdir()
+    storage._create_storage_children(root, storage._real_directory_identity(root))
+    for child_name in storage.STORAGE_CHILDREN:
+        metadata = (root / child_name).stat()
+        assert metadata.st_uid == storage.APP_UID
+        assert metadata.st_gid == storage.APP_GID
+        assert metadata.st_mode & 0o022 == 0
+
+
+def test_posix_provisioning_as_root_chowns_children_to_the_app(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    no_host_acl_probe: None,
+) -> None:
+    """Root provisioning chowns every fresh child to APP_UID/APP_GID."""
+    if os.name != "posix":
+        pytest.skip("the POSIX identity gate applies to POSIX hosts only")
+    monkeypatch.setattr(os, "geteuid", lambda: 0, raising=False)
+    monkeypatch.setattr(os, "getegid", lambda: 0, raising=False)
+    chown_calls: list[tuple[Path, int, int]] = []
+    monkeypatch.setattr(
+        os,
+        "chown",
+        lambda path, uid, gid: chown_calls.append((path, uid, gid)),
+        raising=False,
+    )
+    root = tmp_path / "store"
+    root.mkdir()
+    storage._create_storage_children(root, storage._real_directory_identity(root))
+    assert chown_calls == [
+        (root / "artifacts", storage.APP_UID, storage.APP_GID),
+        (root / "blobs", storage.APP_UID, storage.APP_GID),
+    ]
 
 
 def test_custom_missing_path_is_never_created(
@@ -292,6 +404,7 @@ def test_custom_missing_path_is_never_created(
 def test_custom_existing_store_is_not_mutated_before_explicit_adoption(
     tmp_path: Path,
     no_host_acl_probe: None,
+    posix_runner_app_identity: None,
 ) -> None:
     """A custom empty directory receives no children or marker on implicit use."""
     checkout = tmp_path / "checkout"
@@ -1026,6 +1139,45 @@ def _require_model_fails_closed(model: dict[str, object]) -> None:
     """Require the validator to reject one mutated rendered model."""
     with pytest.raises(compose_launcher.StoragePathError):
         compose_launcher._validate_rendered_model(model, project_root=PROJECT_ROOT)
+
+
+def test_rendered_durable_binds_accept_compose_false_omission(tmp_path: Path) -> None:
+    """Compose versions that render create_host_path:false as {} still validate.
+
+    The safety guarantee lives in the pinned source YAML (four literal
+    ``create_host_path: false`` entries, asserted separately); the rendered
+    model may legally show either representation of the same contract.
+    """
+    source = (tmp_path / "store").resolve()
+    model = _storage_model(source)
+    services = model["services"]
+    assert isinstance(services, dict)
+    for service_name in ("app", "app-dev"):
+        service = services[service_name]
+        assert isinstance(service, dict)
+        volumes = service["volumes"]
+        assert isinstance(volumes, list)
+        for volume in volumes:
+            assert isinstance(volume, dict)
+            if volume.get("target") in compose_launcher.STORAGE_TARGETS.values():
+                volume["bind"] = {}
+    compose_launcher._validate_rendered_model(model, project_root=PROJECT_ROOT)
+
+
+def test_rendered_backend_bind_accepts_compose_true_default(tmp_path: Path) -> None:
+    """The app-dev backend source bind tolerates Compose's rendered true default."""
+    source = (tmp_path / "store").resolve()
+    model = _storage_model(source)
+    services = model["services"]
+    assert isinstance(services, dict)
+    app_dev = services["app-dev"]
+    assert isinstance(app_dev, dict)
+    volumes = app_dev["volumes"]
+    assert isinstance(volumes, list)
+    backend_mount = volumes[0]
+    assert isinstance(backend_mount, dict)
+    backend_mount["bind"] = {"create_host_path": True}
+    compose_launcher._validate_rendered_model(model, project_root=PROJECT_ROOT)
 
 
 @pytest.mark.parametrize(

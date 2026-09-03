@@ -1,3 +1,22 @@
+# ============================================================================
+# Purpose: Run the supported Docker Compose launcher workflows behind a narrow
+#   safety boundary: parse operator requests, pin the immutable image, prepare
+#   and hold the storage identity, and validate the authoritative rendered
+#   model before an application container can write the durable host bind.
+# Database/ORM: None. Process, environment, and host filesystem only.
+# Standards: Every rejection is a typed StoragePathError surfaced as launcher
+#   exit status 2; Docker Compose is never proxied transparently; the rendered
+#   model is revalidated inside the held storage-identity guard.
+# Blast Radius: Container lifecycle on the operator host and the durability of
+#   the bound storage tree; no finance, authorization, or audit behavior.
+# Connections:
+#   - File: scripts/validate_compose_storage_path.py -> storage preflight and
+#     identity guard implementation.
+#   - File: docker-compose.yml -> the pinned model this launcher renders and
+#     validates.
+#   - File: tests/scripts/test_compose_storage_preflight.py -> fail-closed
+#     mutation coverage.
+# ============================================================================
 """Run the supported Docker Compose workflow behind a narrow safety boundary.
 
 This launcher is intentionally not a transparent Docker Compose proxy. It
@@ -880,7 +899,15 @@ def _require_storage_bind_options(
             raise StoragePathError(
                 f"rendered service {service_name} changes {child} to a non-bind volume"
             )
-        if mount.get("bind") != {"create_host_path": False}:
+        # FIX: Docker Compose versions differ in how they render the reviewed
+        # source pin `create_host_path: false` in `config --format json` --
+        # some emit {"create_host_path": False}, others drop the explicit
+        # false and render {}. Both representations mean "never auto-create
+        # the host path"; only an explicit True (or any other option) is the
+        # dangerous mutation. The pinned source YAML keeps the literal
+        # `create_host_path: false` on all four durable binds, asserted by
+        # the storage preflight tests.
+        if mount.get("bind") not in ({"create_host_path": False}, {}):
             raise StoragePathError(
                 f"rendered service {service_name} changes safe {child} bind options"
             )
@@ -911,7 +938,11 @@ def _require_app_dev_backend_bind(
         or _canonical_model_source(backend_mount.get("source")) != project_root / "backend"
         or backend_mount.get("target") != "/srv/app/backend"
         or backend_mount.get("read_only") is not True
-        or backend_mount.get("bind") != {}
+        # FIX: like the durable binds above, Compose renders this source bind's
+        # options inconsistently -- {"create_host_path": True} (its default)
+        # or {}. Either is safe here: the bind is read-only and points inside
+        # the checkout, so nothing host-side is auto-created that matters.
+        or backend_mount.get("bind") not in ({"create_host_path": True}, {})
     ):
         raise StoragePathError("rendered app-dev changes the reviewed read-only source bind")
 
@@ -1675,7 +1706,19 @@ def _run_compose_command(
 #   - File: docker-compose.yml -> Pinned rendered service model.
 # ============================================================================
 def main(argv: list[str] | None = None) -> int:
-    """Execute one supported launcher action and return its process status."""
+    """Execute one supported launcher action and return its process status.
+
+    Args:
+        argv: Operator argument vector excluding the program name; defaults
+            to ``sys.argv[1:]`` so the launcher reads the real invocation.
+
+    Returns:
+        The process exit status: ``0`` on success, ``2`` when the storage
+        preflight (path, ownership, identity, or rendered-model validation)
+        rejected the request, ``127`` when Docker Compose itself could not be
+        executed, or the delegated ``docker compose`` exit status for
+        commands that were executed but reported their own failure.
+    """
     raw_arguments = list(sys.argv[1:] if argv is None else argv)
     try:
         request = _parse_request(raw_arguments)

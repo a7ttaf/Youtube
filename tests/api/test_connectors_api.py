@@ -442,7 +442,7 @@ def test_revenue_operations_admin_can_request_connector_job_and_audit(tmp_path):
 
 
 def test_request_connector_job_live_requires_successful_credential_smoke(tmp_path):
-    """A live submission for an unscredentialed-smoke account is rejected 422."""
+    """A live submission for an account whose credential smoke never succeeded is rejected 422."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     _seed_active_credential(database_url, credential_smoked=False)

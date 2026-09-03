@@ -1,3 +1,22 @@
+# ============================================================================
+# Purpose: Connector audit emitters and the tenant-pinned service principal
+#   that owns every connector-emitted audit row across one run's lifecycle
+#   edges (started/finished, raw-file downloaded/parsed/failed).
+# Database/ORM: None directly. Emitters write through the injected AuditSink
+#   (SqlAlchemyAuditSink persists AuditLogORM rows); no queries live here.
+# Standards: Fail closed -- build_connector_service_principal raises the typed
+#   ConnectorServicePrincipalUnavailableError for an unset or placeholder
+#   actor; every emitter takes the actor explicitly and never fabricates one.
+# Blast Radius: Audit actor identity and audit-row emission for connector
+#   runs; no finance totals, authorization checks, or graph projection.
+# Connections:
+#   - File: backend/ums_smart_revenue/config/settings.py -> supplies the
+#     configured UMS_GOOGLE_CONNECTOR_SERVICE_ACTOR_ID.
+#   - File: backend/ums_smart_revenue/connectors/google/errors.py -> the typed
+#     principal-unavailable failure family.
+#   - File: backend/ums_smart_revenue/connectors/runs/orchestrator.py ->
+#     calls these emitters at the reviewed lifecycle edges.
+# ============================================================================
 """Connector audit emitters and the service principal that owns them.
 
 The B2.6 orchestrator (wired in T37) calls these emitters at well-defined

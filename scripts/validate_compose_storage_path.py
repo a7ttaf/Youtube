@@ -1,3 +1,21 @@
+# ============================================================================
+# Purpose: Validate and optionally provision the dedicated host directory the
+#   Compose launcher binds into containers, refusing familiar or shared paths,
+#   link/submount redirection, and any owner/mode contract the app identity
+#   could not have written.
+# Database/ORM: None. Host filesystem only.
+# Standards: Dependency-free operator tooling; every rejection is a typed
+#   StoragePathError with an actionable message; no path is created or mutated
+#   outside the reviewed default/adopted store; POSIX and Windows identity
+#   checks bracket every bounded write.
+# Blast Radius: Host filesystem layout and Docker bind-source durability; no
+#   finance, authorization, or audit behavior.
+# Connections:
+#   - File: scripts/compose.py -> prepares and revalidates before every up/run.
+#   - File: docker-compose.yml -> mounts only this canonical source tree.
+#   - File: tests/scripts/test_compose_storage_preflight.py -> mutation and
+#     real-identity regression coverage.
+# ============================================================================
 """Validate and optionally provision the host directory used by Compose.
 
 The validator is deliberately dependency-free. It runs on the operator's
@@ -1198,7 +1216,32 @@ def validate_storage_path(
     require_exists: bool = True,
     require_attestation: bool = True,
 ) -> Path:
-    """Return a safe canonical storage path, optionally before attestation."""
+    """Return a safe canonical storage path, optionally before attestation.
+
+    Args:
+        raw_value: Operator-supplied storage source; defaults to the
+            ``UMS_APP_DATA_HOST`` environment variable or the reserved
+            in-checkout default store when ``None``/empty.
+        project_root: Checkout root that scopes relative sources and the
+            reserved default; resolved from this file when ``None``.
+        require_exists: When True (the default), a missing path is a
+            ``StoragePathError``; when False, a non-existing candidate is
+            returned before any on-disk inspection.
+        require_attestation: When True (the default), an existing directory
+            must already carry the path-bound sentinel; validation-only
+            callers pass False to inspect a store before adoption.
+
+    Returns:
+        The fully resolved canonical storage directory.
+
+    Raises:
+        StoragePathError: The source contains ``..`` segments, resolves to a
+            forbidden/shared system path, does not exist (with
+            ``require_exists``), is not a directory, holds unexpected or
+            linked/submount entries, misses the sentinel (with
+            ``require_attestation``), or violates the POSIX owner/mode policy,
+            the operator group-access rule, or the Windows ACL contract.
+    """
     raw_text = _storage_raw_text(raw_value)
     _reject_dotdot_segments(raw_text)
 
@@ -1297,18 +1340,43 @@ def _require_adoptable_custom_store(
 
 
 def _create_storage_children(canonical: Path, root_identity: tuple[int, int]) -> None:
-    """Create only the two reviewed direct children, as the current host operator.
+    """Create only the two reviewed direct children with app-owned metadata.
+
+    The final boundary policy requires each child to be owned by
+    ``APP_UID``/``APP_GID`` with no group/world write, so automatic creation
+    only proceeds when the invoking process can produce exactly that result:
+    it already runs as the app identity, or it is root and can chown the
+    fresh child into place. A plain non-root operator cannot fabricate that
+    ownership, so this refuses before creating anything the final validation
+    would reject, with the exact provisioning command an operator needs.
 
     The root identity is rechecked immediately before and after each write so a
     junction/root replacement cannot redirect later writes.
     """
+    current_identity = (
+        (os.geteuid(), os.getegid()) if os.name == "posix" else None
+    )
     for child_name in STORAGE_CHILDREN:
         child = canonical / child_name
         if not child.exists():
             if _real_directory_identity(canonical) != root_identity:
                 raise StoragePathError("storage root identity changed before child creation")
+            if (
+                current_identity is not None
+                and current_identity != (APP_UID, APP_GID)
+                and os.geteuid() != 0
+            ):
+                raise StoragePathError(
+                    f"cannot provision storage child {child!s} with the required app "
+                    f"identity ({APP_UID}:{APP_GID}) as uid/gid "
+                    f"{current_identity[0]}:{current_identity[1]}; create it explicitly "
+                    f"as root with: sudo install -d -o {APP_UID} -g {APP_GID} -m 750 "
+                    f"{child}"
+                )
             try:
-                child.mkdir(mode=0o770, exist_ok=False)
+                child.mkdir(mode=0o750, exist_ok=False)
+                if current_identity is not None and os.geteuid() == 0:
+                    os.chown(child, APP_UID, APP_GID)
             except OSError as exc:
                 raise StoragePathError(f"cannot create storage child {child!s}") from exc
         _real_directory_identity(child)
@@ -1347,7 +1415,28 @@ def prepare_storage_path(
     project_root: Path | None = None,
     adopt_existing: bool = False,
 ) -> Path:
-    """Validate an existing source or create/adopt a dedicated source safely."""
+    """Validate an existing source or create/adopt a dedicated source safely.
+
+    Args:
+        raw_value: Operator-supplied storage source; ``None`` falls back to
+            the ``UMS_APP_DATA_HOST`` variable or the reserved default store.
+        project_root: Checkout root scoping relative sources; resolved from
+            this file when ``None``.
+        adopt_existing: Explicit operator consent required to create the
+            sentinel and any missing children inside an existing custom
+            directory; the reserved default store is provisioned directly.
+
+    Returns:
+        The canonical, attested storage directory revalidated end-to-end
+        (identity, children, sentinel, POSIX/Windows policy).
+
+    Raises:
+        StoragePathError: The source fails ``validate_storage_path``; a
+            custom store is incomplete or un-attested without
+            ``adopt_existing``; or provisioning cannot establish the required
+            app-owned child metadata, including the non-root POSIX case that
+            must be prepared with the documented ``sudo install -d`` command.
+    """
     root = (project_root or Path(__file__).resolve().parents[1]).resolve(strict=True)
     canonical = validate_storage_path(
         raw_value,
@@ -1385,7 +1474,6 @@ def prepare_storage_path(
     if _real_directory_identity(canonical) != root_identity:
         raise StoragePathError("storage root identity changed during preparation")
     return validate_storage_path(canonical, project_root=root, require_exists=True)
-
 
 def _build_parser() -> argparse.ArgumentParser:
     """Return the validator CLI parser for the reviewed invocation options."""

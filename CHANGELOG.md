@@ -8,6 +8,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Breaking changes
+- Compose deployments now use a dedicated, launcher-provisioned host storage
+  tree (default `./data/ums`) with `artifacts/` and `blobs/` children that
+  must be owned by the application identity `10001:10001` and carry no
+  group/world write bits. The launcher creates them automatically only when
+  it can establish that ownership (running as the app identity or as root);
+  a plain non-root operator gets a fail-fast error naming the exact
+  `sudo install -d -o 10001 -g 10001 -m 750 ...` command per missing child
+  instead of silently mis-owned data directories. System/shared paths and
+  linked or submounted trees are refused before any host write.
+- Enabling scheduled group sync (`UMS_GROUP_SYNC_SCHEDULE_ENABLED=true`) now
+  fails application startup when `UMS_GOOGLE_CONNECTOR_SERVICE_ACTOR_ID` is
+  unset **or** still holds the well-known `.env.example` placeholder UUID
+  that previous releases accepted. Provision a real service actor UUID
+  (`Docs/19_GOOGLE_CREDENTIAL_SETUP_SMOKE.md`) before enabling the
+  scheduler; at use time the connector audit principal builder rejects both
+  unconfigured states with the typed
+  `ConnectorServicePrincipalUnavailableError` rather than attributing audit
+  rows to the published template UUID.
+- The `postgres` service now mounts the whole `/var/lib/postgresql` tree
+  (postgres:18 requirement: `PGDATA` lives at
+  `/var/lib/postgresql/18/docker`) instead of the pre-18
+  `/var/lib/postgresql/data` path, which the postgres:18 entrypoint
+  hard-errors on. Existing clusters created against the legacy path cannot
+  exist (the entrypoint refused them), so no data migration is required.
 - Export artifact downloads now require a same-origin `/exports/*` gateway
   route. The browser's real artifact GET is frontend-relative — the gateway
   injects trusted principal/tenant headers and no secret rides the URL —
@@ -18,6 +42,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   SPA origin and fail.
 
 ### Added
+- `scripts/compose.py`: a reviewed, non-transparent Docker Compose launcher
+  that validates the authoritative rendered model (service set, project
+  name, image pinning, bind targets, user namespaces), provisions and holds
+  the storage identity across `compose up`, and maps failures to explicit
+  exit statuses (`2` storage preflight, `127` Compose not executable).
 - Frontend crash containment and write-latch recovery: a view that throws now
   degrades to an in-place error card instead of unmounting the whole app; the
   shell navigation stays alive and a write that was in flight when the crash
