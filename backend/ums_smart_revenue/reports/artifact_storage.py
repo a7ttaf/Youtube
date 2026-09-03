@@ -18,6 +18,8 @@ DEFAULT_MAX_ARTIFACT_SIZE_BYTES = 500 * 1024 * 1024
 
 @dataclass(frozen=True)
 class ExportArtifactMetadata:
+    """Immutable descriptor of one persisted export artifact on disk."""
+
     file_url: str
     filename: str
     content_type: str
@@ -26,7 +28,7 @@ class ExportArtifactMetadata:
 
 
 class ExportArtifactStorageError(RuntimeError):
-    pass
+    """Raised when an artifact cannot be stored, read, or removed safely."""
 
 
 class FileSystemExportArtifactStore:
@@ -38,6 +40,12 @@ class FileSystemExportArtifactStore:
         *,
         max_artifact_size_bytes: int = DEFAULT_MAX_ARTIFACT_SIZE_BYTES,
     ):
+        """Bind the store to ``root_dir`` (or the default) and a size cap.
+
+        Raises:
+            ExportArtifactStorageError: ``max_artifact_size_bytes`` is not
+                positive.
+        """
         self._root_dir = Path(root_dir) if root_dir is not None else _default_root_dir()
         if max_artifact_size_bytes < 1:
             raise ExportArtifactStorageError("max_artifact_size_bytes must be positive")
@@ -45,6 +53,7 @@ class FileSystemExportArtifactStore:
 
     @classmethod
     def from_environment(cls) -> FileSystemExportArtifactStore:
+        """Build a store rooted at ``UMS_EXPORT_ARTIFACT_DIR`` or the default."""
         configured_root = os.environ.get(EXPORT_ARTIFACT_DIR_ENV)
         if configured_root and configured_root.strip():
             return cls(configured_root.strip())
@@ -165,6 +174,11 @@ class FileSystemExportArtifactStore:
         )
 
     def delete(self, *, file_url: str) -> None:
+        """Remove one persisted artifact identified by its ``file-store://`` URL.
+
+        Raises:
+            ExportArtifactStorageError: The cleanup unlink fails on the host.
+        """
         relative_path = _relative_path_from_file_url(file_url)
         target_path = self._root_dir / relative_path
         try:
@@ -173,6 +187,12 @@ class FileSystemExportArtifactStore:
             raise ExportArtifactStorageError("artifact cleanup unavailable") from exc
 
     def read(self, *, file_url: str) -> bytes:
+        """Return the exact bytes of one persisted artifact.
+
+        Raises:
+            ExportArtifactStorageError: The artifact is missing or the host
+                read fails.
+        """
         relative_path = _relative_path_from_file_url(file_url)
         target_path = self._root_dir / relative_path
         try:
@@ -184,10 +204,16 @@ class FileSystemExportArtifactStore:
 
 
 def _default_root_dir() -> Path:
+    """Return the default on-disk artifact root directory."""
     return DEFAULT_EXPORT_ARTIFACT_DIR
 
 
 def _normalize_export_id(value: str) -> str:
+    """Normalize ``value`` into a canonical UUID string.
+
+    Raises:
+        ExportArtifactStorageError: ``value`` is not a valid UUID.
+    """
     try:
         return str(UUID(value))
     except ValueError as exc:
@@ -195,6 +221,12 @@ def _normalize_export_id(value: str) -> str:
 
 
 def _normalize_filename(value: str) -> str:
+    """Validate and return one safe artifact filename segment.
+
+    Raises:
+        ExportArtifactStorageError: The name is blank, a dot segment, or
+            carries a path separator.
+    """
     normalized = value.strip()
     if not normalized or normalized in {".", ".."} or "/" in normalized or "\\" in normalized:
         raise ExportArtifactStorageError("artifact filename is invalid")
@@ -202,6 +234,11 @@ def _normalize_filename(value: str) -> str:
 
 
 def _normalize_content_type(value: str) -> str:
+    """Validate and return one non-blank artifact content type.
+
+    Raises:
+        ExportArtifactStorageError: The content type is blank.
+    """
     normalized = value.strip()
     if not normalized:
         raise ExportArtifactStorageError("artifact content_type is required")
@@ -209,6 +246,12 @@ def _normalize_content_type(value: str) -> str:
 
 
 def _relative_path_from_file_url(value: str) -> Path:
+    """Map one ``file-store://`` URL to its contained store-relative path.
+
+    Raises:
+        ExportArtifactStorageError: The URL uses a foreign scheme, escapes
+            the store, or does not start under ``exports/``.
+    """
     if not value.startswith(EXPORT_ARTIFACT_URI_PREFIX):
         raise ExportArtifactStorageError("artifact file_url is invalid")
     relative = value[len(EXPORT_ARTIFACT_URI_PREFIX) :].strip()
@@ -224,6 +267,7 @@ def _relative_path_from_file_url(value: str) -> Path:
 
 
 def _discard_temp_file(path: Path) -> None:
+    """Best-effort unlink of one temp file; cleanup failures are ignored."""
     try:
         path.unlink(missing_ok=True)
     except OSError:

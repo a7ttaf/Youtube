@@ -28,18 +28,32 @@ from ums_smart_revenue.connectors.google.errors import (
 
 
 class BlobStorageBackend(Protocol):
-    def upload(self, *, storage_uri: str, content: bytes) -> None: ...
-    def get_bytes(self, *, storage_uri: str) -> bytes: ...
+    """Storage contract every connector blob backend implements."""
+
+    def upload(self, *, storage_uri: str, content: bytes) -> None:
+        """Persist one payload at the backend URI."""
+
+    def get_bytes(self, *, storage_uri: str) -> bytes:
+        """Return the exact payload stored at the backend URI."""
 
 
 _FILE_STORE_PREFIX = "file-store://"
 
 
 class LocalFileStoreBackend:
+    """Filesystem blob backend serving ``file-store://`` URIs under one root."""
+
     def __init__(self, *, root: Path) -> None:
+        """Bind the backend to one storage ``root`` directory."""
         self._root = Path(root)
 
     def _path_for(self, storage_uri: str) -> Path:
+        """Resolve one ``file-store://`` URI to a contained on-disk path.
+
+        Raises:
+            ValueError: The URI uses a foreign scheme, a backslash or NUL
+                byte, ``..`` segments, or resolves outside the root.
+        """
         if not storage_uri.startswith(_FILE_STORE_PREFIX):
             raise ValueError(
                 f"LocalFileStoreBackend only handles {_FILE_STORE_PREFIX} URIs, got {storage_uri!r}"
@@ -150,11 +164,19 @@ _GCS_PREFIX = "gs://"
 
 
 class GcsBlobStorageBackend:
+    """Google Cloud Storage blob backend serving ``gs://`` URIs."""
+
     def __init__(self, *, client: GcsClient) -> None:
+        """Bind the backend to one authenticated GCS ``client``."""
         self._client = client
 
     @staticmethod
     def _parse_uri(storage_uri: str) -> tuple[str, str]:
+        """Split one ``gs://`` URI into its ``(bucket, key)`` parts.
+
+        Raises:
+            ValueError: The URI uses a foreign scheme or lacks a bucket/key.
+        """
         if not storage_uri.startswith(_GCS_PREFIX):
             raise ValueError(
                 f"GcsBlobStorageBackend only handles {_GCS_PREFIX} URIs, got {storage_uri!r}"
@@ -166,6 +188,12 @@ class GcsBlobStorageBackend:
         return bucket, key
 
     def upload(self, *, storage_uri: str, content: bytes) -> None:
+        """Upload one payload to the ``gs://`` location.
+
+        Raises:
+            BlobUploadError: The Google API call fails.
+            ValueError: The URI fails :meth:`_parse_uri` validation.
+        """
         bucket, key = self._parse_uri(storage_uri)
         try:
             blob = self._client.bucket(bucket).blob(key)
@@ -174,6 +202,12 @@ class GcsBlobStorageBackend:
             raise BlobUploadError(storage_uri=storage_uri, inner=exc) from exc
 
     def get_bytes(self, *, storage_uri: str) -> bytes:
+        """Download and return the payload stored at the ``gs://`` location.
+
+        Raises:
+            BlobDownloadError: The Google API call fails.
+            ValueError: The URI fails :meth:`_parse_uri` validation.
+        """
         bucket, key = self._parse_uri(storage_uri)
         try:
             return self._client.bucket(bucket).blob(key).download_as_bytes()
@@ -209,6 +243,7 @@ def deterministic_blob_path(
 
 
 def compute_checksum(content: bytes) -> str:
+    """Return the SHA-256 hex digest of ``content``."""
     return hashlib.sha256(content).hexdigest()
 
 
