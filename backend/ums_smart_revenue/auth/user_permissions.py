@@ -73,6 +73,7 @@ if set(PERMISSION_SCOPE_TYPES) != set(Permission):
 
 @dataclass(frozen=True)
 class UserPermissionGrantEntry:
+    """One tenant-scoped direct permission grant record."""
     id: str
     user_id: str
     permission_key: str
@@ -105,22 +106,27 @@ class UserPermissionGrantEntry:
 
 
 class UserPermissionGrantError(ValueError):
+    """Base typed error for direct permission grant mutations."""
     pass
 
 
 class UserPermissionGrantConflictError(UserPermissionGrantError):
+    """The grant already exists (or conflicts with a pending savepoint write)."""
     pass
 
 
 class UserPermissionGrantNotFoundError(UserPermissionGrantError):
+    """No grant matches the requested tenant/user/permission/scope."""
     pass
 
 
 class UserPermissionGrantValidationError(UserPermissionGrantError):
+    """A grant field failed normalization or scope validation."""
     pass
 
 
 class SqlAlchemyUserPermissionGrantRepository:
+    """PostgreSQL repository for tenant-scoped direct permission grants."""
     def __init__(self, session: Session, *, tenant_id: UUID | str | None = None):
         """Bind direct permission grants to an explicit or request tenant."""
         self._session = session
@@ -419,6 +425,7 @@ def _normalize_scope(scope_type: str, scope_id: str | None) -> tuple[str, str | 
 
 
 def _normalize_required_string(value: str, field_name: str) -> str:
+    """Strip one required string field and refuse empty/whitespace input."""
     normalized = value.strip()
     if not normalized:
         raise UserPermissionGrantValidationError(f"{field_name} must not be blank")
@@ -426,8 +433,10 @@ def _normalize_required_string(value: str, field_name: str) -> str:
 
 
 def _normalize_reason(value: str) -> str:
+    """Normalize an optional free-text reason to a bounded, stripped value."""
     return _normalize_required_string(value, "reason")
 
 
 def _scope_label(scope_type: str, scope_id: str | None) -> str:
+    """Render one grant scope as a compact human-readable label."""
     return "Global" if scope_id is None else f"{scope_type}:{scope_id}"

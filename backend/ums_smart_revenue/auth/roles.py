@@ -19,6 +19,7 @@ from enum import StrEnum
 
 
 class RoleKey(StrEnum):
+    """Role keys, one StrEnum member per seeded operating role."""
     SUPER_OWNER = "super_owner"
     CORPORATE_ADMIN = "corporate_admin"
     REVENUE_OPERATIONS_ADMIN = "revenue_operations_admin"
@@ -40,6 +41,7 @@ class RoleKey(StrEnum):
 
 @dataclass(frozen=True)
 class RoleDefinition:
+    """Label, description, and service-only flag for one role key."""
     role: RoleKey
     label: str
     description: str

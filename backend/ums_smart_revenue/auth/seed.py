@@ -168,6 +168,11 @@ ROLE_PERMISSIONS: dict[RoleKey, frozenset[Permission]] = {
 
 
 def initial_role_permission_rows() -> list[dict[str, str]]:
+    """Return the canonical role-to-permission seed rows.
+
+    The rows mirror security_seed.sql's assignments and feed the Alembic
+    seed migration and the backup tool's dynamic security floor.
+    """
     rows: list[dict[str, str]] = []
     for role, permissions in sorted(ROLE_PERMISSIONS.items(), key=lambda item: item[0].value):
         for permission in sorted(permissions, key=lambda item: item.value):
