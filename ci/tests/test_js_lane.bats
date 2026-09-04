@@ -2054,7 +2054,7 @@ ws_run() {
   if PATH=/usr/bin:/bin command -v bats >/dev/null 2>&1; then
     skip "bats resolves from /usr/bin on this host; cannot simulate its absence"
   fi
-  run bash -c 'PATH=/usr/bin:/bin bash ci/checks/tests-shell.sh'
+  run bash -c 'CI_GATE_TEST_WITHOUT_WORKTREE_BATS=1 PATH=/usr/bin:/bin bash ci/checks/tests-shell.sh'
   [ "$status" -eq 30 ]
   [[ "$output" == *"bats is not installed"* ]]
 }

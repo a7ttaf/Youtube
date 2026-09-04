@@ -83,17 +83,13 @@ def test_explanation_shape():
 
 def test_narrative_is_deterministic_prose():
     entry = build_reconciliation_explanation(month="2026-03", line=_line(), warnings=[])
-    narrative_component = next(
-        (c for c in entry.components if c["key"] == "narrative"), None
-    )
+    narrative_component = next((c for c in entry.components if c["key"] == "narrative"), None)
     assert narrative_component is not None, "narrative component missing"
     narrative = narrative_component["text"]
     assert "100" in narrative and "75" in narrative
     # Deterministic: same inputs => identical text.
     again = build_reconciliation_explanation(month="2026-03", line=_line(), warnings=[])
-    again_component = next(
-        (c for c in again.components if c["key"] == "narrative"), None
-    )
+    again_component = next((c for c in again.components if c["key"] == "narrative"), None)
     assert again_component is not None, "rebuilt narrative component missing"
     again_text = again_component["text"]
     assert narrative == again_text

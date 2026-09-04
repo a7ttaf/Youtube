@@ -10,6 +10,11 @@ collection for the entire repository.
 
 import os
 
+from scripts.ci_lane_runtime import assert_database_access_allowed
+
+# Explicit CI contract: importing this helper is database-lane-only.
+UMS_CI_DATABASE_REQUIRED = True
+
 
 # ============================================================================
 # Purpose: Resolve a non-empty PostgreSQL SQLAlchemy URL for the migration
@@ -24,6 +29,9 @@ import os
 #   - File: tests/db/test_google_revenue_source_migration_postgres.py -> caller.
 # ============================================================================
 def require_postgres_url() -> str:
+    # FIX: Required CI grants this capability only while executing an item in
+    # the exact database manifest; fixture indirection cannot move it to fast.
+    assert_database_access_allowed()
     # FIX: treat blank/whitespace-only values as missing. `if not url` let a
     # value like "   " through, which then fails later with an opaque DB
     # connection error instead of this fail-fast setup contract.
@@ -35,15 +43,8 @@ def require_postgres_url() -> str:
         # on other names — only one fixture enforces that guard today.
         raise RuntimeError(
             "UMS_TEST_DATABASE_URL required for PostgreSQL migration round-trip tests. "
-            "Spin up disposable Postgres: "
-            "`docker run --rm -d --name ums-mig-pg -p 55432:5432 "
-            "-e POSTGRES_PASSWORD=ums -e POSTGRES_DB=test_ums postgres:18-alpine`, "
-            "then set UMS_TEST_DATABASE_URL. PowerShell: "
-            "`$env:UMS_TEST_DATABASE_URL = "
-            "'postgresql+psycopg://postgres:ums@127.0.0.1:55432/test_ums'`. "
-            "POSIX shell: "
-            "`export UMS_TEST_DATABASE_URL="
-            "postgresql+psycopg://postgres:ums@127.0.0.1:55432/test_ums`. "
+            "Spin up a disposable PostgreSQL 18 cluster, create a dedicated test "
+            "database, and set UMS_TEST_DATABASE_URL to its postgresql+psycopg URL. "
             "The database name must start with `test_` or end with `_test` "
             "(schema-reset fixtures destructively recreate the public schema), "
             "and a cluster must only ever have migrations run against one "

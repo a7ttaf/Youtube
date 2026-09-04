@@ -21,6 +21,9 @@ helper only owns the body.
 import sqlalchemy as sa
 from sqlalchemy import text
 
+# Explicit CI contract: importing this helper is database-lane-only.
+UMS_CI_DATABASE_REQUIRED = True
+
 
 # ============================================================================
 # Purpose: Drop and recreate the ``public`` schema for one migration

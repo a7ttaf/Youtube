@@ -69,8 +69,9 @@ case "$HOOK_NAME" in
     # would misdirect a range or a tip the same way.
     unset CI_GATE_PUSH_DELETIONS_ONLY CI_GATE_PUSH_NEW_SHA CI_GATE_PUSH_OLD_SHA
     unset CI_GATE_PUSH_REMOTE_REFS CI_GATE_PUSH_BRANCH_TIPS CI_GATE_PUSH_TAG_TIPS
-    unset CI_GATE_PUSH_OTHER_TIPS
+    unset CI_GATE_PUSH_OTHER_TIPS CI_GATE_PUSH_NOTES_TIPS CI_GATE_PUSH_OUTGOING_REFS
     unset CI_GATE_PUSH_REMOTE_TIPS CI_GATE_PUSH_REMOTE_TIPS_FOR
+    unset CI_GATE_SECURITY_OBJECT_ONLY
     # The destination remote *name*, which is what scopes the tag-publication
     # check: without it that check asked whether any remote-tracking branch
     # contained the commit, so a commit published only to `upstream` counted as
@@ -100,7 +101,8 @@ case "$HOOK_NAME" in
     # HEAD — and here that means leaving the base empty so it can.
     if [ ! -t 0 ]; then
       _push_old="" _push_new="" _push_nobase=0 _push_unrelated="" _push_dests="" _push_any_content=0
-      _push_btips="" _push_ttips="" _push_otips="" _push_records=0 _push_is_notes=0
+      _push_btips="" _push_ttips="" _push_otips="" _push_ntips="" _push_outrefs=""
+      _push_records=0
       while read -r _lref _lsha _rref _rsha; do
         [ -n "${_lsha:-}" ] || continue
         # Counted separately from content, because "every record was a deletion"
@@ -137,6 +139,14 @@ case "$HOOK_NAME" in
         if [ "$_push_has_content" -eq 0 ]; then
           continue
         fi
+
+        # Security scans every name this push publishes, not only branch
+        # destinations. Git ref names cannot contain whitespace, so the same
+        # space-delimited contract used for object IDs is unambiguous here.
+        case " ${_push_outrefs} " in
+          *" ${_rref} "*) ;;
+          *) _push_outrefs="${_push_outrefs} ${_rref}" ;;
+        esac
 
         # Every commit a branch destination is being moved to, distinctly.
         #
@@ -181,21 +191,19 @@ case "$HOOK_NAME" in
               *) _push_ttips="${_push_ttips} ${_lsha}" ;;
             esac
             ;;
-          # Notes are annotations, not project source. `git push origin
-          # refs/notes/commits` publishes a commit whose tree is note blobs,
-          # which no content lane reads and none needs to -- and the covers rule
-          # refused it, with advice ("check out the commit being pushed") that
-          # cannot be followed for a notes commit.
-          # Content-free, not merely skipped. `_push_any_content` used to be
-          # raised above this case, so this arm's own conclusion arrived too
-          # late: a notes-only push exported neither a tip nor the
-          # deletions-only flag, ship preflight fell back to the checked-out
-          # HEAD, and an ordinary `git notes` update ran -- and could be blocked
-          # by -- the node lane, the build and the shell suites over unrelated
-          # project content. It is raised below this decision now. A mixed
-          # notes-and-branch push is unaffected: the branch record raises the
-          # flag for itself.
-          refs/notes/*) _push_is_notes=1 ;;
+          # A refs/notes/* name convention does not constrain the object behind
+          # it: Git accepts an arbitrary application commit there. Treat notes
+          # as application content for scheduling, while retaining the dedicated
+          # list so security also scans note commit metadata, paths, and blobs.
+          # This deliberately trades a rare push's availability for preventing
+          # an untested app tree from being published and later laundered through
+          # a label whose target merely appears destination-reachable.
+          refs/notes/*)
+            case " ${_push_ntips} " in
+              *" ${_lsha} "*) ;;
+              *) _push_ntips="${_push_ntips} ${_lsha}" ;;
+            esac
+            ;;
           # Everything else. Gerrit's refs/for/*, a refs/publish/* deployment
           # pointer, refs/meta/config: destinations this gate has no model of,
           # and they were invisible to both lists above, so the record
@@ -229,25 +237,9 @@ case "$HOOK_NAME" in
         _push_is_branch=0
         case "${_rref:-}" in refs/heads/*) _push_is_branch=1 ;; esac
 
-        # A notes record names no tree this run stands behind, so it does not
-        # become the tip either. Left in, the notes commit became
-        # CI_GATE_PUSH_NEW_SHA, worktree_covers_push found it was neither the
-        # checkout nor on the destination -- `git branch -r --contains` never
-        # lists a notes commit -- and the push was refused with "check out the
-        # commit being pushed", which cannot be done to a notes commit.
-        if [ "${_push_is_notes:-0}" -eq 1 ]; then
-          _push_is_notes=0
-          continue
-        fi
-
         # Content this run stands behind, recorded here rather than above the
-        # destination case: `_push_any_content` was raised before the record's
-        # namespace was known, so a notes-only push -- which the case just
-        # below decided carries nothing a content lane reads -- still counted as
-        # content. It exported neither a tip nor the deletions-only flag, ship
-        # preflight fell back to the checked-out HEAD, and an ordinary
-        # `git notes` update ran the node lane, the build and the shell suites
-        # over unrelated project content, where any existing failure blocked it.
+        # destination case. Notes deliberately reach this line too: their
+        # namespace is not proof that the object is a canonical notes tree.
         _push_any_content=1
 
         # The tip is chosen by ancestry, not by arrival. `_push_new="$_lsha"`
@@ -349,13 +341,14 @@ case "$HOOK_NAME" in
       export CI_GATE_PUSH_BRANCH_TIPS="${_push_btips# }"
       export CI_GATE_PUSH_TAG_TIPS="${_push_ttips# }"
       export CI_GATE_PUSH_OTHER_TIPS="${_push_otips# }"
-      # A push whose every record is a deletion carries no content, and there is
-      # nothing for a content or history check to report on. Stated explicitly
-      # rather than left as "no new sha", because that is indistinguishable from
-      # "nobody told us" and resolves to HEAD -- the checked-out branch, which
-      # is not being pushed anywhere. Destination protection still runs off
-      # CI_GATE_PUSH_REMOTE_REFS above: deleting `main` is exactly the push that
-      # must still be refused.
+      export CI_GATE_PUSH_NOTES_TIPS="${_push_ntips# }"
+      export CI_GATE_PUSH_OUTGOING_REFS="${_push_outrefs# }"
+      # A push whose records are all deletions carries no application tree.
+      # Stated explicitly rather than left as "no new sha", because that
+      # is indistinguishable from "nobody told us" and resolves to HEAD -- the
+      # checked-out branch, which is not being pushed anywhere. Destination
+      # protection still runs for deletions. Notes are application content and
+      # retain their security object scan through CI_GATE_PUSH_NOTES_TIPS above.
       #
       # `_push_records -gt 0` is the whole of the difference between a statement
       # and a shrug. `_push_any_content` starts at 0 and only rises inside the
@@ -404,7 +397,12 @@ case "$HOOK_NAME" in
     # ci::git::worktree_covers_push already models other namespaces; the query
     # was the narrower half.
     #
-    # Minus the forge's proposal namespaces, which is the one fail-open
+    # Minus the forge's proposal namespaces and refs/notes/*. A notes ref may
+    # legally point at an arbitrary application commit, so counting notes
+    # reachability as evidence that an app tree was already validated lets a
+    # later label skip every application lane.
+    #
+    # The proposal namespaces are the other fail-open
     # direction in widening this: a commit reachable only from `refs/pull/*`
     # (GitHub), `refs/merge-requests/*` (GitLab) or `refs/changes/*` (Gerrit) is
     # *proposed*, not merged, and counting it as published would let
@@ -421,7 +419,7 @@ case "$HOOK_NAME" in
       _rt_raw=""
       if _rt_raw="$(git ls-remote "$CI_GATE_PUSH_REMOTE" 2>/dev/null)"; then
         CI_GATE_PUSH_REMOTE_TIPS="$(printf '%s
-' "$_rt_raw" | awk '$2 !~ /^refs\/(pull|merge-requests|changes)\// { print $1 }' | sed '/^$/d' | sort -u)"
+' "$_rt_raw" | awk '$2 !~ /^refs\/(pull|merge-requests|changes|notes)\// { print $1 }' | sed '/^$/d' | sort -u)"
         export CI_GATE_PUSH_REMOTE_TIPS
         export CI_GATE_PUSH_REMOTE_TIPS_FOR="$CI_GATE_PUSH_REMOTE"
       fi

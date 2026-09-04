@@ -114,8 +114,12 @@ ci::git::_remote_tips() {
   # unvalidated tree. ci::git::worktree_covers_push explicitly models other
   # namespaces, so the query is the half that was narrower than the model.
   #
-  # Minus the forge's own pull-request mirrors, and that exclusion is the part
-  # worth being careful about, because it is the only fail-open direction here.
+  # Minus the forge's own pull-request mirrors and refs/notes/*. A notes ref may
+  # legally point at an arbitrary application commit; treating notes
+  # reachability as proof that the application tree was already validated lets
+  # a later label skip every content lane.
+  #
+  # The proposal exclusion is the other fail-open direction here.
   # `refs/pull/*` (GitHub), `refs/merge-requests/*` (GitLab) and
   # `refs/changes/*` (Gerrit) are refs the forge writes for *proposed* changes;
   # a commit reachable only from one of them has not been merged anywhere.
@@ -143,7 +147,7 @@ ci::git::_remote_tips() {
   if [ "$_rt_rc" -ne 0 ]; then
     return 1
   fi
-  _CI_GIT_REMOTE_TIPS="$(printf '%s\n' "$_rt_out" | awk '$2 !~ /^refs\/(pull|merge-requests|changes)\// { print $1 }' | sed '/^$/d' | sort -u)"
+  _CI_GIT_REMOTE_TIPS="$(printf '%s\n' "$_rt_out" | awk '$2 !~ /^refs\/(pull|merge-requests|changes|notes)\// { print $1 }' | sed '/^$/d' | sort -u)"
   _CI_GIT_REMOTE_TIPS_RC=0
   printf '%s' "$_CI_GIT_REMOTE_TIPS"
   return 0
@@ -548,6 +552,9 @@ ci::git::push_is_label_only() {
   # A deletion-only push is content-free for its own reason and has its own
   # path; this rule is about what a push *publishes*.
   [ "${CI_GATE_PUSH_DELETIONS_ONLY:-0}" = "1" ] && return 1
+  # Notes are never labels for scheduling. Git permits an arbitrary application
+  # commit under refs/notes/*, so their presence forces the full content plan.
+  [ -z "${CI_GATE_PUSH_NOTES_TIPS:-}" ] || return 1
 
   local _lo_tip _lo_res _lo_seen=0
   # Word-splitting is how the lists are carried; the shas cannot hold whitespace.
@@ -581,7 +588,8 @@ ci::git::worktree_covers_push() {
   if [ -z "$tip" ] \
      && [ -z "${CI_GATE_PUSH_BRANCH_TIPS:-}" ] \
      && [ -z "${CI_GATE_PUSH_TAG_TIPS:-}" ] \
-     && [ -z "${CI_GATE_PUSH_OTHER_TIPS:-}" ]; then
+     && [ -z "${CI_GATE_PUSH_OTHER_TIPS:-}" ] \
+     && [ -z "${CI_GATE_PUSH_NOTES_TIPS:-}" ]; then
     return 0
   fi
   local pushed head
@@ -638,8 +646,8 @@ ci::git::worktree_covers_push() {
   # nothing else, so such a record contributed to no list at all. `git push
   # origin feature <older>:refs/publish/prod` had the content lanes vouch for
   # HEAD while the second ref moved to a tree nothing in the run had read.
-  # refs/notes/* is the one namespace deliberately left out of this, upstream in
-  # the hook: a notes commit carries annotations rather than project source.
+  # refs/notes/* is included now. Its name does not constrain its object shape,
+  # so the worktree must vouch for that tip just like every other namespace.
   #
   # The "carried by a branch in this same push" arm is gone, and the argument
   # for it is why. It said the objects under the tag go to the remote as part of
@@ -659,7 +667,7 @@ ci::git::worktree_covers_push() {
   # gate applies to a refusal.
   local _wc_tag
   # shellcheck disable=SC2086
-  for _wc_tag in ${CI_GATE_PUSH_TAG_TIPS:-} ${CI_GATE_PUSH_OTHER_TIPS:-}; do
+  for _wc_tag in ${CI_GATE_PUSH_TAG_TIPS:-} ${CI_GATE_PUSH_OTHER_TIPS:-} ${CI_GATE_PUSH_NOTES_TIPS:-}; do
     _wc_res="$(git rev-parse --verify "${_wc_tag}^{commit}" 2>/dev/null || true)"
     [ -n "$_wc_res" ] || return 1
     [ "$_wc_res" = "$head" ] && continue

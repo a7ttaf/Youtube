@@ -111,9 +111,7 @@ def test_registry_boundary_leaves_a_foreign_write_standing() -> None:
         # The foreign writer lands AFTER our journaled write, on OUR key; its
         # value is what the store holds when the boundary unwinds.
         current = registry._channels[CHANNEL_ID]
-        registry._channels[CHANNEL_ID] = dataclasses.replace(
-            current, content_owner_id=None
-        )
+        registry._channels[CHANNEL_ID] = dataclasses.replace(current, content_owner_id=None)
         raise _BoomError()
 
     stored = registry.get_channel(CHANNEL_ID)

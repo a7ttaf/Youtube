@@ -540,8 +540,7 @@ def test_mid_apply_failure_rolls_back_channels_and_audit_on_postgres(
         )
         assert success.status_code == 200, success.text
         assert audit_counts_in_flight == [
-            before_tenant + offset
-            for offset in range(1, len(audit_counts_in_flight) + 1)
+            before_tenant + offset for offset in range(1, len(audit_counts_in_flight) + 1)
         ]
         # At least the row's CHANNEL_CREATED, one GROUP_UPDATED, and the
         # CHANNEL_IMPORTED summary.

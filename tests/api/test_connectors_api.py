@@ -2112,9 +2112,7 @@ def test_content_owners_group_manager_without_manage_connectors_gets_200(tmp_pat
     """The Qodo regression: MANAGE_GROUPS without MANAGE_CONNECTORS may load owners."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
-    _seed_credential_row(
-        database_url, connector_key="youtube-analytics", account_id="OwnerAaa"
-    )
+    _seed_credential_row(database_url, connector_key="youtube-analytics", account_id="OwnerAaa")
     client = TestClient(create_app(database_url=database_url))
 
     response = client.get(
@@ -2131,9 +2129,7 @@ def test_content_owners_returns_only_active_rows_for_requested_connector(tmp_pat
     """Revoked rows and other connector keys stay out of the picker payload."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
-    _seed_credential_row(
-        database_url, connector_key="youtube-analytics", account_id="OwnerActive"
-    )
+    _seed_credential_row(database_url, connector_key="youtube-analytics", account_id="OwnerActive")
     _seed_credential_row(
         database_url,
         connector_key="youtube-analytics",
@@ -2159,9 +2155,7 @@ def test_content_owners_discloses_only_account_id(tmp_path):
     """No credential UUIDs, has_secret_ref, status, or telemetry leave the route."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
-    _seed_credential_row(
-        database_url, connector_key="youtube-analytics", account_id="OwnerAaa"
-    )
+    _seed_credential_row(database_url, connector_key="youtube-analytics", account_id="OwnerAaa")
     client = TestClient(create_app(database_url=database_url))
 
     response = client.get(
@@ -2217,9 +2211,7 @@ def test_content_owners_forbids_company_scoped_group_manager(tmp_path):
     response = client.get(
         "/connectors/content-owners",
         params={"connector_key": "youtube-analytics"},
-        headers=auth_headers(
-            "data_steward", "company", "00000000-0000-0000-0000-000000003201"
-        ),
+        headers=auth_headers("data_steward", "company", "00000000-0000-0000-0000-000000003201"),
     )
 
     assert response.status_code == 403

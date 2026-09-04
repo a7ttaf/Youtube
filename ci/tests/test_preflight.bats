@@ -94,6 +94,11 @@ gs_setup() {
   (
     cd "$GS_SB"
     git init -q -b feature/x .
+    # A sandbox-local identity: `git merge` cannot take -c identity flags and
+    # a machine without a global git identity (every CI runner) would leave
+    # the merge-commit fixtures unable to create their commits.
+    git config user.email t@t
+    git config user.name t
     # The copied gate scripts stay out of the history under test. ci/checks/
     # defines the secret patterns as literal text and several of them match
     # themselves — the `DATABASE_URL` alternative is its own witness — so a
@@ -1610,7 +1615,7 @@ YML
   # Gerrit namespace arrived by being missing from exactly that kind of copy.
   kept="$(printf '%s\n' "$sample" | eval "$q_git" | tr '\n' ' ')"
   local want
-  for want in aaaaaaa1 aaaaaaa2 aaaaaaa3 aaaaaaa4 aaaaaaa5 aaaaaaa6; do
+  for want in aaaaaaa1 aaaaaaa2 aaaaaaa3 aaaaaaa4 aaaaaaa6; do
     [[ "$kept" == *"$want"* ]] || { echo "a published ref was dropped: ${want} (got [$kept])" >&2; return 1; }
   done
   local unwanted
@@ -1618,7 +1623,7 @@ YML
   # after the other two: there every change lives in that namespace until it is
   # submitted, so on a Gerrit remote counting them as published is not an edge
   # case but the normal state of unmerged work.
-  for unwanted in bbbbbbb1 bbbbbbb2 bbbbbbb3 bbbbbbb4 bbbbbbb5; do
+  for unwanted in aaaaaaa5 bbbbbbb1 bbbbbbb2 bbbbbbb3 bbbbbbb4 bbbbbbb5; do
     [[ "$kept" != *"$unwanted"* ]] || { echo "a proposal ref counted as published: ${unwanted}" >&2; return 1; }
   done
 }
@@ -1978,7 +1983,16 @@ YML
   ) >/dev/null 2>&1
 
   _pf_lanes() { # _pf_lanes <env assignments...>
-    ( cd "$sb" && env "$@" CI_GATE_USE_LANES=0 bash ci/preflight.sh --mode "$MODE_UNDER_TEST" 2>&1 ) \
+    # Hermetic against the surrounding gate: its exported scheduling context
+    # (changed files, incremental/caching, mode) must not reach the sandboxed
+    # preflight, whose lanes these assertions construct from scratch. A fresh
+    # cache per invocation, or the next invocation replays this one's cached
+    # RAN: markers under a different push context.
+    _PF_LANE_CACHE="$(mktemp -d "${TMPDIR:-/tmp}/ums-lane-cache.XXXXXX")"
+    ( cd "$sb" && env -u CI_GATE_CHANGED_FILES -u CI_GATE_INCREMENTAL \
+        -u CI_GATE_CACHE_ENABLED -u CI_GATE_MODE "$@" CI_GATE_USE_LANES=0 \
+        CI_GATE_CACHE_DIR="$_PF_LANE_CACHE" \
+        bash ci/preflight.sh --mode "$MODE_UNDER_TEST" 2>&1 ) \
       | grep -o 'RAN:[a-z-]*' | sed 's/RAN://' | sort -u | tr '\n' ' '
   }
 
@@ -2001,6 +2015,19 @@ YML
   [[ "$output" != *tests-shell* ]]
   [[ "$output" != *build* ]]
   [[ "$output" != *security* ]]
+
+  # A notes ref disqualifies the content-free path: refs/notes/* is only a
+  # naming convention and Git accepts an arbitrary application commit there,
+  # so a notes push schedules the full application plan plus the security
+  # object scan (the same ruling as the lanes.conf test below).
+  run _pf_lanes CI_GATE_PUSH_DELETIONS_ONLY=1 CI_GATE_PUSH_NOTES_TIPS=HEAD \
+                CI_GATE_PUSH_OUTGOING_REFS=refs/notes/commits
+  [ "$status" -eq 0 ]
+  [[ "$output" == *branch-protection* ]]
+  [[ "$output" == *security* ]]
+  [[ "$output" == *node* ]]
+  [[ "$output" == *test-layout* ]]
+  [[ "$output" == *tests-shell* ]]
 
   # And `full` is a deliberate whole-tree run. It is not a push at all, so an
   # environment variable left over from one must not narrow it.
@@ -2268,7 +2295,12 @@ YML
 
   _pf_lanes() { # _pf_lanes <mode> <env assignments...>
     local _m="$1"; shift
-    ( cd "$sb" && env "$@" bash ci/preflight.sh --mode "$_m" 2>&1 ) \
+    # Hermetic against the surrounding gate, as above; fresh cache as above.
+    _PF_LANE_CACHE="$(mktemp -d "${TMPDIR:-/tmp}/ums-lane-cache.XXXXXX")"
+    ( cd "$sb" && env -u CI_GATE_CHANGED_FILES -u CI_GATE_INCREMENTAL \
+        -u CI_GATE_CACHE_ENABLED -u CI_GATE_MODE "$@" \
+        CI_GATE_CACHE_DIR="$_PF_LANE_CACHE" \
+        bash ci/preflight.sh --mode "$_m" 2>&1 ) \
       | grep -o 'RAN:[a-z-]*' | sed 's/RAN://' | sort -u | tr '\n' ' '
   }
 
@@ -2314,8 +2346,22 @@ YML
   [ "$status" -eq 0 ]
   [[ "$output" == *branch-protection* ]] \
     || { echo "lanes.conf mode skipped destination protection for a tag: $output" >&2; rm -rf "$sb"; return 1; }
+  [[ "$output" == *security* ]] \
+    || { echo "label-only ref objects skipped security: $output" >&2; rm -rf "$sb"; return 1; }
   [[ "$output" != *test-layout* ]] \
     || { echo "a label-only push ran the content lanes under lanes.conf: $output" >&2; rm -rf "$sb"; return 1; }
+
+  # A notes ref disqualifies the narrow path. Git accepts an arbitrary app
+  # commit under refs/notes/*, so the full application plan must run even beside
+  # an otherwise published label.
+  run _pf_lanes ship CI_GATE_USE_LANES=1 CI_GATE_PUSH_REMOTE=origin \
+                CI_GATE_PUSH_REMOTE_REFS= CI_GATE_PUSH_TAG_TIPS="$published" \
+                CI_GATE_PUSH_NOTES_TIPS="$published"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *branch-protection* ]]
+  [[ "$output" == *security* ]]
+  [[ "$output" == *test-layout* ]]
+  [[ "$output" == *tests-shell* ]]
 
   # The control that the hoist did not widen the rule: `full` is a deliberate
   # whole-tree run, not a push, so a leftover push variable must not narrow it
@@ -2966,6 +3012,8 @@ YML
   [ "$status" -eq 0 ]
   [[ "$output" == *branch-protection* ]] \
     || { echo "destination protection was skipped: $output" >&2; rm -rf "$sb"; return 1; }
+  [[ "$output" == *security* ]] \
+    || { echo "label-only ref objects skipped security: $output" >&2; rm -rf "$sb"; return 1; }
   [[ "$output" != *test-layout* ]] \
     || { echo "a label-only push still ran the content lanes: $output" >&2; rm -rf "$sb"; return 1; }
   [[ "$output" != *tests-shell* ]]
@@ -2976,8 +3024,8 @@ YML
   # Asserted on test-layout alone. tests-shell is changeset-filtered and
   # these rows supply no push range, so its absence would say nothing about
   # the rule; test-layout is on the always-run list, and the short path runs
-  # branch-protection and nothing else -- so test-layout present is exactly
-  # "the short path was not taken".
+  # branch-protection plus security ref-object scanning -- so test-layout
+  # present is exactly "the short path was not taken".
   #
   # A tag on a commit the destination does not have is carrying that commit out,
   # and the lanes over the checkout are exactly the right thing to run.

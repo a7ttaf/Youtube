@@ -1354,14 +1354,8 @@ def test_sql_adapters_declare_their_session_as_the_unit_of_work():
     session = build_session()
     assert SqlAlchemyChannelRegistry(session).sql_unit_of_work is session
     assert SqlAlchemyChannelGroupRegistry(session).sql_unit_of_work is session
-    assert (
-        SqlAlchemyAuditSink(session, tenant_id=DEFAULT_TENANT_ID).sql_unit_of_work
-        is session
-    )
-    assert (
-        PlatformLaneAuditSink(session, tenant_id=DEFAULT_TENANT_ID).sql_unit_of_work
-        is session
-    )
+    assert SqlAlchemyAuditSink(session, tenant_id=DEFAULT_TENANT_ID).sql_unit_of_work is session
+    assert PlatformLaneAuditSink(session, tenant_id=DEFAULT_TENANT_ID).sql_unit_of_work is session
 
 
 def test_boundary_covered_create_conflict_still_recovers_via_the_boundary():

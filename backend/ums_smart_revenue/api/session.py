@@ -198,9 +198,7 @@ def _derive_capabilities(principal: UserPrincipal) -> SessionCapabilities:
         # re-check the grant for the requested month, so this stays a render hint.
         can_view_payments=payments_view_granted_any_scope(principal),
         can_view_bank_reconciliation=bank_reconciliation_view_granted_any_scope(principal),
-        payments_view_scopes=_scoped_hint(
-            principal, Permission.VIEW_FINALIZED_PAYMENTS
-        ),
+        payments_view_scopes=_scoped_hint(principal, Permission.VIEW_FINALIZED_PAYMENTS),
         bank_reconciliation_view_scopes=_scoped_hint(
             principal, Permission.VIEW_BANK_RECONCILIATION
         ),

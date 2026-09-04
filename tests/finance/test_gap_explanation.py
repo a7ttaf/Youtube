@@ -144,12 +144,10 @@ def test_matched_legs_and_deterministic_narratives():
     payload = explanation.to_api()
     assert payload["status"] == "MATCHED"
     assert payload["payment_leg"]["narrative"] == (
-        "YouTube revenue of $930.00 matches paid AdSense payments of $930.00 "
-        "within tolerance."
+        "YouTube revenue of $930.00 matches paid AdSense payments of $930.00 within tolerance."
     )
     assert payload["bank_leg"]["narrative"] == (
-        "Paid AdSense payments of $930.00 match bank receipts of $930.00 "
-        "within tolerance."
+        "Paid AdSense payments of $930.00 match bank receipts of $930.00 within tolerance."
     )
     assert payload["narrative"] == "2026-03: payment leg MATCHED, bank leg MATCHED."
 
@@ -185,8 +183,7 @@ def test_incomplete_legs_win_the_month_and_carry_low_confidence():
         "score": "0",
     }
     assert payload["payment_leg"]["narrative"] == (
-        "The payment leg cannot be reconciled: no YouTube revenue facts exist "
-        "for the month."
+        "The payment leg cannot be reconciled: no YouTube revenue facts exist for the month."
     )
     # The bank leg is fine on its own; the month still reads INCOMPLETE.
     assert payload["bank_leg"]["status"] == "MATCHED"
@@ -194,16 +191,10 @@ def test_incomplete_legs_win_the_month_and_carry_low_confidence():
     # Zero-fact operand provenance is honest about its missing source, and so
     # are the uncomputable gap and residual — never a fabricated VARIANCE.
     provenance = payload["money_provenance"]
-    assert (
-        provenance["payment_leg.youtube_revenue_total_usd"]["confidence"]
-        == "MISSING_SOURCE"
-    )
+    assert provenance["payment_leg.youtube_revenue_total_usd"]["confidence"] == "MISSING_SOURCE"
     assert provenance["payment_leg.payment_gap_usd"]["confidence"] == "MISSING_SOURCE"
     assert provenance["payment_leg.payment_gap_usd"]["export_value"] is None
-    assert (
-        provenance["payment_leg.unexplained_residual_usd"]["confidence"]
-        == "MISSING_SOURCE"
-    )
+    assert provenance["payment_leg.unexplained_residual_usd"]["confidence"] == "MISSING_SOURCE"
 
 
 def test_unexplained_bank_gap_without_evidence():
@@ -272,8 +263,7 @@ def test_gap_tolerance_edge_is_matched():
     assert bank_leg["bank_gap_usd"] == "0.01"
     assert bank_leg["status"] == "MATCHED"
     assert bank_leg["narrative"] == (
-        "Paid AdSense payments of $930.00 match bank receipts of $929.99 "
-        "within tolerance."
+        "Paid AdSense payments of $930.00 match bank receipts of $929.99 within tolerance."
     )
 
 
@@ -319,9 +309,9 @@ def test_zero_evidence_component_reads_low_even_on_an_explained_leg():
     assert component["amount_usd"] == "0"
     assert component["confidence"] == {"label": "LOW", "score": "0"}
     assert (
-        payload["money_provenance"][
-            "payment_leg.components.non_paid_adsense_payments.amount_usd"
-        ]["confidence"]
+        payload["money_provenance"]["payment_leg.components.non_paid_adsense_payments.amount_usd"][
+            "confidence"
+        ]
         == "MISSING_SOURCE"
     )
 
@@ -439,9 +429,7 @@ def test_provenance_covers_every_numeric_field():
     for leg_key in ("payment_leg", "bank_leg"):
         leg = payload[leg_key]
         numeric_fields = [
-            field
-            for field in leg
-            if field.endswith("_usd") and field != "unexplained_residual_usd"
+            field for field in leg if field.endswith("_usd") and field != "unexplained_residual_usd"
         ]
         for field in numeric_fields:
             expected_keys.add(f"{leg_key}.{field}")
@@ -457,7 +445,4 @@ def test_provenance_covers_every_numeric_field():
         provenance["payment_leg.payment_gap_usd"]["export_value"]
         == payload["payment_leg"]["payment_gap_usd"]
     )
-    assert (
-        provenance["bank_leg.components.fx_difference.amount_usd"]["export_value"]
-        == "5"
-    )
+    assert provenance["bank_leg.components.fx_difference.amount_usd"]["export_value"] == "5"
