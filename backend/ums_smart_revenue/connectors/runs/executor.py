@@ -264,14 +264,16 @@ class ConnectorJobExecutor:
         # never silently rejected mid-teardown.
         self._audit_lock = threading.Lock()
         self._audit_accepting = True
-        # _committed keys: reservations whose after_commit hook entered (proof
-        # the request transaction committed). _shutdown_audited keys: jobs the
-        # shutdown sweep (or post-close fallback) already wrote a failure row
-        # for, so a late hook queue call can never double-audit one job.
-        # Deliberately NOT populated on a normal queued submit — the same job
-        # key may legitimately fail activation again on a later attempt, and
-        # each failure needs its own audit row.
-        self._committed: set[_JobKey] = set()
+        # _committed: key -> the reservation instance whose after_commit hook
+        # entered (proof the request transaction committed). Instance-keyed so
+        # a stale hook's cleanup can never strip a same-key retry's mark.
+        # _shutdown_audited keys: jobs the shutdown sweep (or post-close
+        # fallback) already wrote a failure row for, so a late hook queue call
+        # can never double-audit one job. Deliberately NOT populated on a
+        # normal queued submit — the same job key may legitimately fail
+        # activation again on a later attempt, and each failure needs its own
+        # audit row.
+        self._committed: dict[_JobKey, _SlotReservation] = {}
         self._shutdown_audited: set[_JobKey] = set()
         # In-flight post-commit hooks: a hook that called
         # begin_post_commit but not yet end_post_commit. close() waits on
@@ -314,14 +316,30 @@ class ConnectorJobExecutor:
     def begin_post_commit(self, reservation: _SlotReservation) -> None:
         """Mark the reservation committed and register its hook as in-flight."""
         with self._lock:
-            self._committed.add(reservation.key)
+            self._committed[reservation.key] = reservation
             self._inflight_hooks += 1
 
+    # ========================================================================
+    # Purpose: Complete a post-commit hook — drop the in-flight count and the
+    #   committed mark, but ONLY the mark belonging to THIS reservation
+    #   instance; a same-key retry's mark must survive a stale cleanup.
+    # Database/ORM: None — in-memory lifecycle tracking under _lock.
+    # Standards: called from the hook's finally so every code path balances
+    #   its begin_post_commit; identity-checked removal keeps the counter and
+    #   the committed map consistent under concurrent same-key submissions.
+    # Blast Radius: Audit correctness — the committed map decides which
+    #   leftover reservations close() audits as ExecutorShutdown.
+    # Connections:
+    #   - File: backend/ums_smart_revenue/api/connectors.py -> hook caller.
+    #   - File: backend/ums_smart_revenue/connectors/runs/executor.py ->
+    #     begin_post_commit is the required pairing.
+    # ========================================================================
     def end_post_commit(self, reservation: _SlotReservation) -> None:
-        """Unregister the hook; the committed mark is released with it."""
+        """Unregister the hook; release only this reservation's committed mark."""
         with self._lock:
             self._inflight_hooks = max(0, self._inflight_hooks - 1)
-            self._committed.discard(reservation.key)
+            if self._committed.get(reservation.key) is reservation:
+                del self._committed[reservation.key]
 
     # ========================================================================
     # Purpose: Count unresolved post-commit work — _SlotReservation registry
@@ -515,9 +533,11 @@ class ConnectorJobExecutor:
                 # the real failure instead of a phantom in-flight slot.
                 if self._registry.get(key) is reservation:
                     del self._registry[key]
-                self._committed.discard(key)
+                if self._committed.get(key) is reservation:
+                    del self._committed[key]
                 raise
-            self._committed.discard(key)
+            if self._committed.get(key) is reservation:
+                del self._committed[key]
             self._stash_and_register(
                 future=future,
                 key=key,
@@ -599,7 +619,8 @@ class ConnectorJobExecutor:
             current = self._registry.get(reservation.key)
             if current is reservation:
                 self._registry.pop(reservation.key, None)
-                self._committed.discard(reservation.key)
+                if self._committed.get(reservation.key) is reservation:
+                    del self._committed[reservation.key]
                 return True
         return False
 
