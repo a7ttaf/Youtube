@@ -1,9 +1,10 @@
 from dataclasses import dataclass
+from uuid import UUID
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from ums_smart_revenue.auth.scopes import OrgAccessIndex
+from ums_smart_revenue.auth.scopes import AccessScope, OrgAccessIndex, ScopeType
 from ums_smart_revenue.db.org_models import OrgUnitORM, YouTubeChannelORM
 from ums_smart_revenue.tenancy.context import require_current_tenant
 
@@ -106,3 +107,128 @@ def load_org_access_index_from_session(session: Session) -> OrgAccessIndex:
         ).all()
     ]
     return build_org_access_index(org_units=org_units, channels=channels)
+
+
+# ============================================================================
+# Purpose: Single primary-key read of one active org unit's id/parent/type.
+# Database/ORM: org_units — one tenant-scoped, active-only SELECT.
+# Standards: read-only; returns None for missing/inactive rows.
+# Blast Radius: None detected — read helper for the scoped index builder.
+# Connections:
+#   - File: backend/ums_smart_revenue/org/access_index.py -> loader above.
+# ============================================================================
+def _active_org_unit_row(
+    session: Session, tenant_id: UUID, unit_id: UUID
+) -> tuple[UUID, UUID | None, str] | None:
+    """Return (id, parent_id, type) for one active org unit, or None."""
+    return session.execute(
+        select(OrgUnitORM.id, OrgUnitORM.parent_id, OrgUnitORM.type).where(
+            OrgUnitORM.tenant_id == tenant_id,
+            OrgUnitORM.id == unit_id,
+            OrgUnitORM.active.is_(True),
+        )
+    ).one_or_none()
+
+
+# ============================================================================
+# Purpose: Resolve a unit's parent id only when the parent is an active SECTOR
+#   — mirrors build_org_access_index's company->sector edge rule.
+# Database/ORM: org_units — one tenant-scoped, active-only type SELECT.
+# Standards: read-only; inactive or non-sector parents yield None.
+# Blast Radius: None detected — read helper for the scoped index builder.
+# Connections:
+#   - File: backend/ums_smart_revenue/org/access_index.py -> loader above.
+# ============================================================================
+def _parent_sector_id(
+    session: Session, tenant_id: UUID, unit_row: tuple[UUID, UUID | None, str]
+) -> str | None:
+    """Return the unit's parent id when it is an active SECTOR, else None."""
+    parent_id = unit_row[1]
+    if parent_id is None:
+        return None
+    parent_type = session.execute(
+        select(OrgUnitORM.type).where(
+            OrgUnitORM.tenant_id == tenant_id,
+            OrgUnitORM.id == parent_id,
+            OrgUnitORM.active.is_(True),
+        )
+    ).scalar_one_or_none()
+    return str(parent_id) if parent_type == "SECTOR" else None
+
+
+# ============================================================================
+# Purpose: Build the MINIMAL org-access index needed to evaluate
+#   OrgAccessIndex.contains for one target scope — the user-management
+#   mutations only ever consult the maps by the target's own id, so loading
+#   every org unit and channel in the tenant is wasted work.
+# Database/ORM: org_units + youtube_channels — at most three primary/indexed
+#   lookups (channel -> primary unit -> parent sector) scoped to the request
+#   tenant.
+# Standards: fail-closed — a target that fails to parse or resolve yields an
+#   empty index, so contains() returns False for every scoped caller; only
+#   global-scoped authority still passes (its check needs no index).
+# Blast Radius: Authorization scope containment for the four user-management
+#   mutation routes; containment results are identical to the full index for
+#   the queried target.
+# Connections:
+#   - File: backend/ums_smart_revenue/auth/scopes.py -> contains() lookups.
+#   - File: backend/ums_smart_revenue/api/users.py -> mutation routes.
+# ============================================================================
+def load_org_access_index_for_scope(
+    session: Session, target_scope: AccessScope
+) -> OrgAccessIndex:
+    """Build the minimal index covering only the target scope's ancestry."""
+    tenant_id = require_current_tenant().id
+    empty = OrgAccessIndex(channel_company={}, channel_sector={}, company_sector={})
+    if target_scope.id is None or target_scope.type not in (
+        ScopeType.CHANNEL,
+        ScopeType.COMPANY,
+    ):
+        return empty
+
+    if target_scope.type == ScopeType.CHANNEL:
+        primary_unit_id = session.execute(
+            select(YouTubeChannelORM.primary_org_unit_id).where(
+                YouTubeChannelORM.tenant_id == tenant_id,
+                YouTubeChannelORM.youtube_channel_id == target_scope.id,
+                YouTubeChannelORM.active.is_(True),
+                YouTubeChannelORM.primary_org_unit_id.is_not(None),
+            )
+        ).scalar_one_or_none()
+        if primary_unit_id is None:
+            return empty
+        unit = _active_org_unit_row(session, tenant_id, primary_unit_id)
+        if unit is None:
+            return empty
+        if unit[2] == "SECTOR":
+            return OrgAccessIndex(
+                channel_company={},
+                channel_sector={target_scope.id: str(unit[0])},
+                company_sector={},
+            )
+        if unit[2] != "COMPANY":
+            return empty
+        sector_id = _parent_sector_id(session, tenant_id, unit)
+        return OrgAccessIndex(
+            channel_company={target_scope.id: str(unit[0])},
+            channel_sector=(
+                {target_scope.id: sector_id} if sector_id is not None else {}
+            ),
+            company_sector={},
+        )
+
+    try:
+        company_id = UUID(target_scope.id)
+    except (TypeError, ValueError):
+        return empty
+    unit = _active_org_unit_row(session, tenant_id, company_id)
+    if unit is None or unit[2] != "COMPANY":
+        return empty
+    sector_id = _parent_sector_id(session, tenant_id, unit)
+    return OrgAccessIndex(
+        channel_company={},
+        channel_sector={},
+        company_sector=(
+            {target_scope.id: sector_id} if sector_id is not None else {}
+        ),
+    )

@@ -275,6 +275,11 @@ class ConnectorJobExecutor:
         # audit row.
         self._committed: dict[_JobKey, _SlotReservation] = {}
         self._shutdown_audited: set[_JobKey] = set()
+        # Reservation admission gate: flipped to False by close() under
+        # _lock BEFORE the pools stop, so a submission admitted before the
+        # flip always has its post-commit path covered by the grace/drain
+        # logic — and nothing new can be reserved mid-teardown.
+        self._accepting_reservations = True
         # In-flight post-commit hooks: a hook that called
         # begin_post_commit but not yet end_post_commit. close() waits on
         # this AND pending reservations because activate() pops the registry
@@ -415,6 +420,12 @@ class ConnectorJobExecutor:
         during this very shutdown — are drained and committed before the
         process exits instead of dying on an untracked thread.
         """
+        # Stop new reservations first — under _lock, so a submit_if_absent
+        # that already entered lands before the flip and is covered by the
+        # grace/drain below; anything later is refused (None -> route 409 /
+        # scheduler skip) instead of reserving a slot nobody will activate.
+        with self._lock:
+            self._accepting_reservations = False
         self._executor.shutdown(wait=False, cancel_futures=True)
         # A request can commit and still have its after_commit hook pending
         # when shutdown begins, and activate() pops the registry slot before
@@ -494,7 +505,7 @@ class ConnectorJobExecutor:
             actor_identity=actor_identity,
         )
         with self._lock:
-            if key in self._registry:
+            if not self._accepting_reservations or key in self._registry:
                 return None
             self._registry[key] = reservation
         return reservation
@@ -602,7 +613,7 @@ class ConnectorJobExecutor:
             job_kind=_JOB_KIND_GROUP_SYNC,
         )
         with self._lock:
-            if key in self._registry:
+            if not self._accepting_reservations or key in self._registry:
                 return None
             self._registry[key] = reservation
         return reservation
@@ -1150,12 +1161,13 @@ class ConnectorJobExecutor:
         # discard the row anyway.
         bind = self._session_factory.kw.get("bind")
         if bind is not None and bind.dialect.name == "sqlite":
+            # No raw account_id in runtime logs — it is an external Google/CMS
+            # identifier that can identify the account owner.
             logger.error(
                 "Dropping job_failed_before_start audit after audit-pool "
-                "close on SQLite (tenant=%s connector=%s account=%s month=%s)",
+                "close on SQLite (tenant=%s connector=%s month=%s)",
                 tenant_id,
                 connector_key,
-                account_id,
                 report_month,
             )
             return

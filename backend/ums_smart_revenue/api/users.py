@@ -3,7 +3,7 @@
 #   role assignments, and direct permission grants within access scopes.
 # Database/ORM: users / user_role_assignments / user_permission_grants /
 #   access_scopes via the auth repositories on the tenant session; org_units
-#   and youtube_channels are read by the current_org_access_index dependency.
+#   and youtube_channels read via the targeted load_org_access_index_for_scope.
 # Standards: thin routes — typed permission gates, role/permission family
 #   authority, and OrgAccessIndex scope containment before any write; typed
 #   repository errors -> 404/409/422/503; audit rows share the request
@@ -30,7 +30,6 @@ from ums_smart_revenue.api.dependencies_audit import (
     audit_record_to_api,
     current_atomic_audit_sink,
 )
-from ums_smart_revenue.api.dependencies_finance import current_org_access_index
 from ums_smart_revenue.auth.audit import AuditEventType
 from ums_smart_revenue.auth.audit_service import AuditSink, record_audit_event
 from ums_smart_revenue.auth.models import UserPrincipal
@@ -62,6 +61,7 @@ from ums_smart_revenue.auth.users import (
     UserAccountStorageError,
     UserAccountValidationError,
 )
+from ums_smart_revenue.org.access_index import load_org_access_index_for_scope
 
 router = APIRouter(prefix="/users", tags=["users"])
 logger = logging.getLogger(__name__)
@@ -494,7 +494,7 @@ def update_user_account(
 #   role-family grant authority against the populated org index.
 # Database/ORM: user_role_assignments/access_scopes via
 #   SqlAlchemyUserRoleAssignmentRepository on the tenant session; org_units and
-#   youtube_channels read by the current_org_access_index dependency on the
+#   youtube_channels read via load_org_access_index_for_scope on the
 #   same session.
 # Standards: Thin route — permission gate, then family policy with
 #   OrgAccessIndex scope containment; typed repository errors -> 409/404/422;
@@ -516,7 +516,7 @@ def assign_user_role(
         Depends(current_user_role_assignment_repository),
     ],
     audit_sink: Annotated[AuditSink, Depends(current_atomic_audit_sink)],
-    org_index: Annotated[OrgAccessIndex, Depends(current_org_access_index)],
+    session: Annotated[Session, Depends(current_db_session)],
 ) -> dict[str, object]:
     """Assign a role to a user within a scope.
 
@@ -525,6 +525,7 @@ def assign_user_role(
     _require_role_assignment_permission(user)
     role = _parse_role_for_policy(payload.role_key)
     target_scope = _parse_scope_for_policy(payload.scope_type, payload.scope_id)
+    org_index = load_org_access_index_for_scope(session, target_scope)
     _require_role_assignment_policy(user, role, target_scope, org_index)
     try:
         assignment = repository.assign_role(
@@ -561,7 +562,7 @@ def assign_user_role(
 #   against the STORED role/scope using the populated org index before writing.
 # Database/ORM: user_role_assignments/access_scopes via
 #   SqlAlchemyUserRoleAssignmentRepository on the tenant session; org_units and
-#   youtube_channels read by the current_org_access_index dependency.
+#   youtube_channels read via the targeted load_org_access_index_for_scope.
 # Standards: Thin route — permission gate, stored-scope policy check, typed
 #   repository errors -> 404/409/422; audit row shares the request transaction.
 # Blast Radius: Authorization write + audit; scoped authorities cannot revoke
@@ -581,7 +582,7 @@ def revoke_user_role(
         Depends(current_user_role_assignment_repository),
     ],
     audit_sink: Annotated[AuditSink, Depends(current_atomic_audit_sink)],
-    org_index: Annotated[OrgAccessIndex, Depends(current_org_access_index)],
+    session: Annotated[Session, Depends(current_db_session)],
 ) -> dict[str, object]:
     """Revoke an active role assignment.
 
@@ -601,6 +602,7 @@ def revoke_user_role(
     existing_scope = _parse_scope_for_policy(
         existing.scope_type, existing.scope_id, stored=True
     )
+    org_index = load_org_access_index_for_scope(session, existing_scope)
     _require_role_assignment_policy(user, existing_role, existing_scope, org_index)
 
     try:
@@ -636,7 +638,7 @@ def revoke_user_role(
 #   Admin) against the populated org index.
 # Database/ORM: user_permission_grants/access_scopes via
 #   SqlAlchemyUserPermissionGrantRepository on the tenant session; org_units
-#   and youtube_channels read by the current_org_access_index dependency.
+#   and youtube_channels read via the targeted load_org_access_index_for_scope.
 # Standards: Thin route — permission gate, then family policy with
 #   OrgAccessIndex scope containment; typed repository errors -> 409/404/422;
 #   audit row shares the request transaction.
@@ -657,12 +659,13 @@ def grant_user_permission(
         Depends(current_user_permission_grant_repository),
     ],
     audit_sink: Annotated[AuditSink, Depends(current_atomic_audit_sink)],
-    org_index: Annotated[OrgAccessIndex, Depends(current_org_access_index)],
+    session: Annotated[Session, Depends(current_db_session)],
 ) -> dict[str, object]:
     """Grant a direct permission to a user; enforces family-specific authority rules."""
     _require_role_assignment_permission(user)
     permission = _parse_permission_for_policy(payload.permission_key)
     target_scope = _parse_scope_for_policy(payload.scope_type, payload.scope_id)
+    org_index = load_org_access_index_for_scope(session, target_scope)
     _require_permission_grant_policy(user, permission, target_scope, org_index)
     try:
         grant = repository.grant_permission(
@@ -699,7 +702,7 @@ def grant_user_permission(
 #   against the STORED permission/scope using the populated org index.
 # Database/ORM: user_permission_grants/access_scopes via
 #   SqlAlchemyUserPermissionGrantRepository on the tenant session; org_units
-#   and youtube_channels read by the current_org_access_index dependency.
+#   and youtube_channels read via the targeted load_org_access_index_for_scope.
 # Standards: Thin route — permission gate, stored-scope policy check, typed
 #   repository errors -> 404/409/422; audit row shares the request transaction.
 # Blast Radius: Authorization write + audit; scoped authorities cannot revoke
@@ -719,7 +722,7 @@ def revoke_user_permission(
         Depends(current_user_permission_grant_repository),
     ],
     audit_sink: Annotated[AuditSink, Depends(current_atomic_audit_sink)],
-    org_index: Annotated[OrgAccessIndex, Depends(current_org_access_index)],
+    session: Annotated[Session, Depends(current_db_session)],
 ) -> dict[str, object]:
     """Revoke an active permission grant.
 
@@ -739,6 +742,7 @@ def revoke_user_permission(
     existing_scope = _parse_scope_for_policy(
         existing.scope_type, existing.scope_id, stored=True
     )
+    org_index = load_org_access_index_for_scope(session, existing_scope)
     _require_permission_grant_policy(user, permission, existing_scope, org_index)
 
     try:
