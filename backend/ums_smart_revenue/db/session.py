@@ -4,7 +4,7 @@ from collections.abc import Callable, Iterator
 from threading import Lock
 from typing import Any
 
-from sqlalchemy import Connection, Engine, create_engine, event
+from sqlalchemy import Connection, Engine, create_engine, event, text
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import QueuePool
 
@@ -82,7 +82,50 @@ def build_engine(database_url: str) -> Engine:
         )
         _enable_sqlite_transactional_savepoints(engine)
         return engine
-    return create_engine(database_url, pool_pre_ping=True)
+    # FIX: Bound the physical connect — psycopg's default has no connect
+    # timeout, so a dead DB/network route could stall checkout (and any
+    # shutdown path waiting on it) indefinitely. 10s matches the audit
+    # statement bounds and keeps failure detection prompt.
+    return create_engine(
+        database_url,
+        pool_pre_ping=True,
+        connect_args={"connect_timeout": 10},
+    )
+
+
+# ============================================================================
+# Purpose: Bound lock waits and statement runtime for the caller's current
+#   transaction — used by audit paths that must never stall process shutdown
+#   (checkout is bounded separately by pool_timeout + connect_timeout).
+# Database/ORM: SET LOCAL equivalents issued via parameterized set_config;
+#   no schema or model changes. PostgreSQL-only — a no-op on other dialects.
+# Standards: adapter-layer helper so callers never issue raw SET statements;
+#   parameter binding (no SQL interpolation); must be called inside the
+#   session's open transaction (autobegin counts) since is_local=true.
+# Blast Radius: Transaction duration bounds only — applies to the caller's
+#   transaction and rolls back with it; no cross-request leakage.
+# Connections:
+#   - File: backend/ums_smart_revenue/connectors/runs/executor.py ->
+#     _audit_failed_before_start bounds its audit write at shutdown.
+# ============================================================================
+def apply_statement_bounds(
+    session: Session, *, lock_timeout: str, statement_timeout: str
+) -> None:
+    """Apply lock/statement timeouts to the session's current transaction.
+
+    Uses ``set_config`` (the parameterized equivalent of ``SET LOCAL``) so
+    timeout values never enter SQL text. No-op on non-PostgreSQL dialects.
+    """
+    if session.get_bind().dialect.name != "postgresql":
+        return
+    session.execute(
+        text("SELECT set_config('lock_timeout', :value, true)"),
+        {"value": lock_timeout},
+    )
+    session.execute(
+        text("SELECT set_config('statement_timeout', :value, true)"),
+        {"value": statement_timeout},
+    )
 
 
 # ============================================================================

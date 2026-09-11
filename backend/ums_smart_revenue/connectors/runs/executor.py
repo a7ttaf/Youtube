@@ -33,8 +33,6 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from uuid import UUID
 
-from sqlalchemy import text
-
 from ums_smart_revenue.auth.audit import AuditEventType
 from ums_smart_revenue.auth.audit_service import AuditSink, record_audit_event
 from ums_smart_revenue.auth.models import PermissionGrant, UserPrincipal
@@ -61,7 +59,7 @@ from ums_smart_revenue.connectors.runs.tenant_context import (
     connector_tenant_context,
 )
 from ums_smart_revenue.db.lane import platform_lane
-from ums_smart_revenue.db.session import SessionFactory
+from ums_smart_revenue.db.session import SessionFactory, apply_statement_bounds
 from ums_smart_revenue.org.channel_group_sync import GroupSyncOutcome
 from ums_smart_revenue.org.channel_groups import (
     ChannelGroupConflictError,
@@ -1292,6 +1290,22 @@ class ConnectorJobExecutor:
             with self._lock:
                 self._last_chance_writers.discard(threading.current_thread())
 
+    # ========================================================================
+    # Purpose: Write ONE CONNECTOR_JOB_RUN job_failed_before_start row through
+    #   a fresh session — the persistence edge for accepted jobs whose worker
+    #   never started.
+    # Database/ORM: audit_logs INSERT via SqlAlchemyAuditSink on a standalone
+    #   session under platform_lane; TENANT_CTX is bridged so the audit_logs
+    #   RLS WITH CHECK sees app_current_tenant_id; Postgres transactions get
+    #   lock/statement bounds via apply_statement_bounds so the write can
+    #   never stall shutdown past connect + 10s.
+    # Standards: best-effort — every failure is caught and logged, never
+    #   raised into hooks or workers; timeout policy lives in db.session.
+    # Blast Radius: Audit completeness for accepted connector jobs.
+    # Connections:
+    #   - File: backend/ums_smart_revenue/api/connectors.py -> hook path.
+    #   - File: backend/ums_smart_revenue/db/session.py -> bounds adapter.
+    # ========================================================================
     def _audit_failed_before_start(
         self,
         *,
@@ -1349,13 +1363,13 @@ class ConnectorJobExecutor:
             )
             token = TENANT_CTX.set(minimal_tenant)
             with self._session_factory() as session, platform_lane(session):
-                if session.get_bind().dialect.name == "postgresql":
-                    # Bound every blocking point in this transaction so a
-                    # last-chance writer thread can never stall interpreter
-                    # exit indefinitely — checkout is already bounded by
-                    # pool_timeout; these cap lock waits and statement run.
-                    session.execute(text("SET LOCAL lock_timeout = '10s'"))
-                    session.execute(text("SET LOCAL statement_timeout = '10s'"))
+                # Bound every blocking point so a last-chance writer can
+                # never stall interpreter exit — checkout is bounded by
+                # pool_timeout + connect_timeout on the engine; these cap
+                # lock waits and statement runtime inside the transaction.
+                apply_statement_bounds(
+                    session, lock_timeout="10s", statement_timeout="10s"
+                )
                 # audit_logs is platform-only-write: elevate to app_platform for
                 # this standalone audit (run_one does its own elevation; this
                 # audit runs OUTSIDE run_one). No-op off Postgres.
