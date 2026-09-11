@@ -1,4 +1,19 @@
 from datetime import UTC, datetime
+# ============================================================================
+# Purpose: Unit coverage for org-access index builders — the pure
+#   build_org_access_index edge derivation plus the session-backed
+#   load_org_access_index_for_scope targeted loader, including the
+#   orphan-company authorization denial.
+# Database/ORM: org_units + youtube_channels seeded on an in-memory SQLite
+#   schema for the scoped-loader tests.
+# Standards: seeds minimal active rows under the default tenant; asserts the
+#   targeted loader's edges equal the canonical builder's, including the
+#   no-sector-parent case.
+# Blast Radius: Test-only — guards the authorization containment maps.
+# Connections:
+#   - File: backend/ums_smart_revenue/org/access_index.py -> loader under test.
+#   - File: backend/ums_smart_revenue/auth/scopes.py -> contains() contract.
+# ============================================================================
 from uuid import UUID, uuid4
 
 from sqlalchemy import create_engine
@@ -137,11 +152,23 @@ def _tenant() -> Tenant:
     )
 
 
+# ============================================================================
+# Purpose: Create an isolated org schema on SQLite and seed active org_units
+#   + youtube_channels rows for the scoped-index tests; returns the live
+#   session plus the label->UUID map callers use for scope assertions.
+# Database/ORM: creates OrgBase tables; inserts org_units and
+#   youtube_channels under the default tenant in one commit.
+# Standards: test fixture — explicit ids, active rows only, caller owns the
+#   session lifecycle.
+# Blast Radius: Test-only.
+# Connections:
+#   - File: tests/auth/test_access_index_builder.py -> scoped-loader tests.
+# ============================================================================
 def _seed_org_db(
     *,
     units: list[tuple[str, str | None, str]],
     channels: list[tuple[str, str | None]],
-) -> Session:
+) -> tuple[Session, dict[str, UUID]]:
     """Create an isolated org schema and seed units + channels.
 
     ``units`` rows are (id, parent_id, type); ``channels`` rows are
