@@ -21,6 +21,7 @@ _NOW = datetime(2026, 5, 17, 20, 0, tzinfo=UTC)
 
 
 def test_build_org_access_index_maps_channels_to_companies_and_sectors():
+    """Verify the builder derives company and sector edges for channels."""
     index = build_org_access_index(
         org_units=[
             OrgUnitRow(id="sector-tv", parent_id=None, type="SECTOR", name="TV", active=True),
@@ -75,6 +76,7 @@ def test_build_org_access_index_maps_channels_to_companies_and_sectors():
 
 
 def test_build_org_access_index_ignores_inactive_and_unmapped_channels():
+    """Verify inactive/unmapped channels are excluded from the index maps."""
     index = build_org_access_index(
         org_units=[
             OrgUnitRow(id="sector-tv", parent_id=None, type="SECTOR", name="TV", active=True),
@@ -214,7 +216,7 @@ def test_scoped_index_omits_company_edge_for_orphan_company() -> None:
     the company resolves to an active sector; the scoped loader must mirror
     that rule or company-scoped admins gain authority over orphan channels.
     """
-    session, id_map = _seed_org_db(
+    session, _id_map = _seed_org_db(
         units=[("company-orphan", None, "COMPANY")],
         channels=[("channel-orphan", "company-orphan")],
     )
