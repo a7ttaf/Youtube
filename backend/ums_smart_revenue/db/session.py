@@ -1,3 +1,20 @@
+# ============================================================================
+# Purpose: SQLAlchemy engine and session-factory helpers — per-URL engine
+#   caching, SQLite transaction discipline, Postgres connection bounds, and
+#   transaction statement/lock timeout application.
+# Database/ORM: Engine/Session construction for every lane (tenant, platform,
+#   audit); sets connect_timeout on PostgreSQL and applies lock/statement
+#   timeouts via set_config.
+# Standards: typed factories; SQLite serialized to a one-slot QueuePool with
+#   transactional savepoints; Postgres bounded at connect + statement level;
+#   no swallowed errors.
+# Blast Radius: Database connection topology and transaction duration for the
+#   entire backend — bounds affect every request, worker, and audit path.
+# Connections:
+#   - File: backend/ums_smart_revenue/app.py -> session factories.
+#   - File: backend/ums_smart_revenue/connectors/runs/executor.py ->
+#     apply_statement_bounds caller.
+# ============================================================================
 """SQLAlchemy engine and session-factory helpers with per-URL engine caching."""
 
 from collections.abc import Callable, Iterator
@@ -59,14 +76,22 @@ def begin_request_transaction(session: Session) -> None:
 #   connection. Postgres keeps the normal pool and distinct role-switched lanes.
 # Database/ORM: All ORM models (engine is the shared connection source).
 # Standards: typed boundary; no error swallowing; SQLite transaction recipe;
-#   PostgreSQL pool_pre_ping retained.
+#   PostgreSQL pool_pre_ping + fixed connect_timeout bound connection setup.
 # Blast Radius: DB connection topology. SQLite branch is test-only; Postgres
-#   path is intentionally unchanged so RLS role switching is not weakened.
+#   keeps pool_pre_ping and gains connect_timeout=10 — fail-fast on dead
+#   routes, RLS role switching unchanged.
 # Connections:
 #   - File: backend/ums_smart_revenue/app.py -> wires request + platform factories.
 # ============================================================================
 def build_engine(database_url: str) -> Engine:
-    """Create an Engine; SQLite serializes one connection, others use defaults."""
+    """Create an Engine; SQLite serializes one connection, Postgres bounds it.
+
+    SQLite gets a one-slot QueuePool (serialized access incl. :memory:).
+    PostgreSQL gets ``pool_pre_ping`` plus a fixed ``connect_timeout=10`` via
+    connect_args — the driver default has no connect timeout, so a dead DB or
+    network route could otherwise stall a checkout (and any shutdown path
+    waiting on it) indefinitely.
+    """
     if database_url.startswith("sqlite"):
         # FIX: StaticPool reissued one live DBAPI connection to overlapping
         # Session fairies. A second request's failed BEGIN/rollback could erase
