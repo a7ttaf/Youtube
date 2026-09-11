@@ -185,3 +185,105 @@ def test_non_superuser_owner_cannot_cross_irreversible_security_floor(
         assert "connectors.run_jobs" not in beta_permissions
         assert connection.scalar(sa.text("SELECT count(*) FROM user_role_assignments")) == 0
         assert connection.scalar(sa.text("SELECT count(*) FROM user_permission_grants")) == 0
+
+
+# ============================================================================
+# Purpose: Prove the 20260911_0001 rollback gate's PostgreSQL-only branches —
+#   row-security disable, bounded table lock, and ACTIVE count — refuse a real
+#   Alembic downgrade while a live beta_operator assignment exists, and pass
+#   once the row is revoked (the 0002 irreversibility floor then refuses).
+# Database/ORM: Disposable public schema; users/access_scopes/
+#   user_role_assignments rows inserted through the ORM.
+# Standards: Real alembic command.downgrade; exact typed error names, version
+#   stamp, and row-survival assertions.
+# Blast Radius: Test-only disposable PostgreSQL schema.
+# Connections:
+#   - File: backend/ums_smart_revenue/db/alembic/versions/
+#     20260911_0001_beta_operator_rollback_gate.py -> refused downgrade.
+# ============================================================================
+@pytest.fixture
+def gated_database() -> Iterator[sa.Engine]:
+    """Provide a disposable database migrated to head (past the gate)."""
+    admin_url = require_postgres_url()
+    admin_config = _alembic_config(admin_url)
+    reset_public_schema(admin_url)
+    command.upgrade(admin_config, "head")
+    engine = sa.create_engine(admin_url)
+    try:
+        yield engine
+    finally:
+        engine.dispose()
+        reset_public_schema(admin_url)
+
+
+def _insert_beta_assignment(engine: sa.Engine, *, active: bool) -> None:
+    """Insert one beta_operator assignment via the ORM on real PostgreSQL."""
+    from datetime import UTC, datetime
+
+    from sqlalchemy.orm import Session
+
+    from ums_smart_revenue.db.security_models import (
+        AccessScopeORM,
+        UserORM,
+        UserRoleAssignmentORM,
+    )
+
+    user_id = uuid4()
+    scope_id = uuid4()
+    with Session(engine) as session:
+        session.add(UserORM(id=user_id, email="beta@example.com", display_name="Beta"))
+        session.add(
+            AccessScopeORM(id=scope_id, scope_type="global", scope_id=None, label="Global")
+        )
+        session.add(
+            UserRoleAssignmentORM(
+                id=uuid4(),
+                user_id=user_id,
+                role_key="beta_operator",
+                scope_id=scope_id,
+                active=active,
+                # ck_user_role_assignments_revocation: an inactive row must
+                # carry its revocation fields.
+                revoked_by=None if active else user_id,
+                revoked_at=None if active else datetime.now(UTC),
+            )
+        )
+        session.commit()
+
+
+def test_gate_refuses_postgres_downgrade_while_beta_assignment_is_live(
+    gated_database: sa.Engine,
+) -> None:
+    """A live beta_operator row stops the real downgrade; revoking clears it."""
+    engine = gated_database
+    admin_url = require_postgres_url()
+    _insert_beta_assignment(engine, active=True)
+
+    with pytest.raises(Exception) as exc_info:
+        command.downgrade(_alembic_config(admin_url), "20260825_0002")
+    assert type(exc_info.value).__name__ == "LiveBetaOperatorAssignmentError"
+    assert "active beta_operator assignment" in str(exc_info.value)
+
+    with engine.connect() as connection:
+        assert connection.scalar(sa.text("SELECT version_num FROM alembic_version")) == (
+            "20260911_0001"
+        )
+        assert connection.scalar(
+            sa.text(
+                "SELECT count(*) FROM user_role_assignments "
+                "WHERE role_key = 'beta_operator' AND active"
+            )
+        ) == 1
+
+    # Once revoked, the gate's guard passes and the next refusal is the 0002
+    # irreversible-repair floor — proving the gate itself did not block.
+    with engine.begin() as connection:
+        connection.execute(
+            sa.text(
+                "UPDATE user_role_assignments SET active = false, "
+                "revoked_by = user_id, revoked_at = now()"
+            )
+        )
+    with pytest.raises(Exception) as exc_info:
+        command.downgrade(_alembic_config(admin_url), "20260825_0001")
+    assert type(exc_info.value).__name__ == "IrreversibleAuthorizationRepairError"

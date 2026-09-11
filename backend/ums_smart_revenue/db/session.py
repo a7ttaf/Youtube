@@ -134,20 +134,22 @@ def build_engine(database_url: str) -> Engine:
 #     _audit_failed_before_start bounds its audit write at shutdown.
 # ============================================================================
 def apply_statement_bounds(
-    session: Session, *, lock_timeout: str, statement_timeout: str
+    db: Session | Connection, *, lock_timeout: str, statement_timeout: str
 ) -> None:
-    """Apply lock/statement timeouts to the session's current transaction.
+    """Apply lock/statement timeouts to the caller's current transaction.
 
-    Uses ``set_config`` (the parameterized equivalent of ``SET LOCAL``) so
+    Accepts a ``Session`` or a bare ``Connection`` (Alembic binds). Uses
+    ``set_config`` — the parameterized equivalent of ``SET LOCAL`` — so
     timeout values never enter SQL text. No-op on non-PostgreSQL dialects.
     """
-    if session.get_bind().dialect.name != "postgresql":
+    dialect = db.get_bind().dialect if isinstance(db, Session) else db.dialect
+    if dialect.name != "postgresql":
         return
-    session.execute(
+    db.execute(
         text("SELECT set_config('lock_timeout', :value, true)"),
         {"value": lock_timeout},
     )
-    session.execute(
+    db.execute(
         text("SELECT set_config('statement_timeout', :value, true)"),
         {"value": statement_timeout},
     )

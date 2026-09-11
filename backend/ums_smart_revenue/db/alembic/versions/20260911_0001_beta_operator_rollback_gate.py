@@ -45,6 +45,8 @@ actionable refusal for the assignment-rooted case at the head boundary.
 import sqlalchemy as sa
 from alembic import op
 
+from ums_smart_revenue.db.session import apply_statement_bounds
+
 revision = "20260911_0001"
 down_revision = "20260825_0002"
 branch_labels = None
@@ -59,6 +61,10 @@ _USER_ROLE_ASSIGNMENTS = sa.table(
 
 class LiveBetaOperatorAssignmentError(RuntimeError):
     """Refuse a downgrade that would orphan a live ``beta_operator`` assignment."""
+
+
+class RollbackGateVerificationError(RuntimeError):
+    """The guard could not inspect ``user_role_assignments`` — real DB error."""
 
 
 # ============================================================================
@@ -102,14 +108,27 @@ def downgrade() -> None:
             superuser/BYPASSRLS role) and retries the downgrade.
     """
     bind = op.get_bind()
-    try:
-        if bind.dialect.name == "postgresql":
+    if bind.dialect.name == "postgresql":
+        try:
+            # Bound every blocking point first: a conflicting write lock must
+            # fail with an actionable refusal, not hang the migration.
+            apply_statement_bounds(
+                bind, lock_timeout="10s", statement_timeout="10s"
+            )
             # An operator-visible login may be row-security-bounded; disable
             # RLS for this read so the guard can prove the absence of live
             # rows rather than trusting a filtered count. Requires a role
             # permitted to set row_security (superuser/BYPASSRLS/migration
-            # owner); any failure lands in the except branch and refuses.
+            # owner); only THIS statement maps to the privilege message.
             bind.execute(sa.text("SET LOCAL row_security = off"))
+        except sa.exc.SQLAlchemyError as exc:
+            raise LiveBetaOperatorAssignmentError(
+                "downgrade could not prepare a trusted assignment read (a "
+                "row-security-bounded login cannot set row_security/lock "
+                "timeouts); re-run as a superuser/BYPASSRLS role after "
+                "revoking or migrating beta_operator assignments"
+            ) from exc
+        try:
             # Serialise the check against concurrent writers for the rest of
             # this transaction — a snapshot-only count would otherwise let a
             # role assignment slip in behind the downgrade.
@@ -118,6 +137,13 @@ def downgrade() -> None:
                     "LOCK TABLE user_role_assignments IN SHARE ROW EXCLUSIVE MODE"
                 )
             )
+        except sa.exc.SQLAlchemyError as exc:
+            raise RollbackGateVerificationError(
+                "downgrade could not lock user_role_assignments within the "
+                f"10s bound ({type(exc).__name__}); resolve the underlying "
+                "database contention or failure, then retry"
+            ) from exc
+    try:
         live = bind.execute(
             sa.select(sa.func.count())
             .select_from(_USER_ROLE_ASSIGNMENTS)
@@ -127,11 +153,10 @@ def downgrade() -> None:
             )
         ).scalar_one()
     except sa.exc.SQLAlchemyError as exc:
-        raise LiveBetaOperatorAssignmentError(
-            "downgrade could not verify active beta_operator assignments "
-            "(a row-security-bounded login cannot read across tenants); "
-            "re-run as a superuser/BYPASSRLS role after revoking or migrating "
-            "beta_operator assignments"
+        raise RollbackGateVerificationError(
+            "downgrade could not read user_role_assignments "
+            f"({type(exc).__name__}); resolve the underlying database error, "
+            "then retry"
         ) from exc
     if live:
         raise LiveBetaOperatorAssignmentError(
