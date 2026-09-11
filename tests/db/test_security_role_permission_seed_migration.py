@@ -87,24 +87,24 @@ REPAIR_MIGRATION_PATH = (
     / "20260825_0002_beta_operator_authorization_repair.py"
 )
 HISTORICAL_SNAPSHOT_PATH = PROJECT_ROOT / "backend/ums_smart_revenue/db/frozen_security_catalog.py"
+GATE_MIGRATION_PATH = (
+    PROJECT_ROOT
+    / "backend/ums_smart_revenue/db/alembic/versions/"
+    / "20260911_0001_beta_operator_rollback_gate.py"
+)
 SEED_SQL_PATH = PROJECT_ROOT / "backend/ums_smart_revenue/db/security_seed.sql"
 
-# Repinned 2026-09-10: downgrade() now refuses while an ACTIVE beta_operator
-# assignment exists (PR #223 review: a stranded assignment makes a rolled-back
-# binary raise PrincipalDataValidationError for that operator), the check
-# serializes concurrent writers under SHARE ROW EXCLUSIVE on PostgreSQL, and
-# the AGENTS.md contract blocks were added at module/upgrade/downgrade level.
-# Upgrade logic and the frozen catalog contract are unchanged.
-_HISTORICAL_MIGRATION_GIT_BLOB = "340d98951d5650c736d96705b7d4f421ea48abbd"
-_HISTORICAL_MIGRATION_SHA256 = "e61d0cd2bdb2cb117d085067db7d4c9cee240bde0a618e378a49adc9ff841887"
 # Repinned 2026-09-03: whitespace-only reformat of the frozen literal rows
 # (one key per line, <=100 cols) to clear analyzer line-length findings
 # pre-merge; the parsed catalog data is byte-for-data identical (verified
-# by ast comparison and the semantic digest assertions below). Repinned again
-# 2026-09-10 for the AGENTS.md module contract block (comments only — the
-# semantic digest below is unchanged and still proves data identity).
-_HISTORICAL_SNAPSHOT_GIT_BLOB = "77c80ca91c0f6361f0a88f7002a1d3ef157b377d"
-_HISTORICAL_SNAPSHOT_SHA256 = "42f52093f0241285016cb23d7a54ec5635a94e36473380a6928cae140daf3bf8"
+# by ast comparison and the semantic digest assertions below).
+# Published history stays byte-pinned: the live-beta_operator downgrade guard
+# lives in the follow-up 20260911_0001 rollback-gate revision, never in an
+# in-place edit of these files.
+_HISTORICAL_MIGRATION_GIT_BLOB = "9df02500cdc0508da211ad51e5d3e0306a67771b"
+_HISTORICAL_MIGRATION_SHA256 = "01a93d377fa9b5c296daffbc0cc600a6949021fa53bddeae546ce7cb6b7766c5"
+_HISTORICAL_SNAPSHOT_GIT_BLOB = "0f7defa1748ebe1a0406bd59dc96567416be0297"
+_HISTORICAL_SNAPSHOT_SHA256 = "afe311d65396b0cdef58dbd73d907b58593ebd7eee28bb3970fe0db89faafef1"
 _HISTORICAL_SNAPSHOT_SEMANTIC_SHA256 = (
     "376561bbe0f37448800df279d39b161f1f0d9ce03381dfc0c578df3e69704705"
 )
@@ -362,6 +362,11 @@ def _historical_migration_module() -> ModuleType:
 def _repair_migration_module() -> ModuleType:
     """Load the 20260825_0002 repair migration module without running it."""
     return _migration_module(REPAIR_MIGRATION_PATH, "m_20260825_0002")
+
+
+def _gate_migration_module() -> ModuleType:
+    """Load the 20260911_0001 rollback-gate migration module without running it."""
+    return _migration_module(GATE_MIGRATION_PATH, "m_20260911_0001")
 
 
 def _bind_operations(module: ModuleType, connection: Connection) -> None:
@@ -785,14 +790,15 @@ def _seed_beta_assignment(engine: Engine, *, active: bool) -> None:
         session.commit()
 
 
-def test_migration_downgrade_refuses_while_beta_assignment_is_live() -> None:
-    """A live beta_operator assignment blocks the downgrade; nothing is lost."""
-    module = _historical_migration_module()
+def test_gate_downgrade_refuses_while_beta_assignment_is_live() -> None:
+    """A live beta_operator assignment blocks the gate's downgrade."""
+    historical = _historical_migration_module()
+    gate = _gate_migration_module()
     engine = _security_engine()
 
     with engine.begin() as connection:
-        _bind_operations(module, connection)
-        module.upgrade()
+        _bind_operations(historical, connection)
+        historical.upgrade()
         catalog_before = (
             _stored_roles(connection),
             _stored_permissions(connection),
@@ -801,12 +807,12 @@ def test_migration_downgrade_refuses_while_beta_assignment_is_live() -> None:
     _seed_beta_assignment(engine, active=True)
 
     with engine.begin() as connection:
-        _bind_operations(module, connection)
+        _bind_operations(gate, connection)
         with pytest.raises(
-            module.LiveBetaOperatorAssignmentError,
+            gate.LiveBetaOperatorAssignmentError,
             match="active beta_operator assignment",
         ):
-            module.downgrade()
+            gate.downgrade()
 
         # The refusal leaves the catalog and the assignment itself untouched.
         assert (
@@ -820,18 +826,19 @@ def test_migration_downgrade_refuses_while_beta_assignment_is_live() -> None:
         assert remaining == 1
 
 
-def test_migration_downgrade_ignores_a_revoked_beta_assignment() -> None:
+def test_gate_downgrade_ignores_a_revoked_beta_assignment() -> None:
     """Only ACTIVE rows strand a rollback.
 
     A revoked assignment cannot be parsed by the principal loader, so it does
-    not block the downgrade.
+    not block the gate's downgrade.
     """
-    module = _historical_migration_module()
+    historical = _historical_migration_module()
+    gate = _gate_migration_module()
     engine = _security_engine()
 
     with engine.begin() as connection:
-        _bind_operations(module, connection)
-        module.upgrade()
+        _bind_operations(historical, connection)
+        historical.upgrade()
         catalog_before = (
             _stored_roles(connection),
             _stored_permissions(connection),
@@ -840,8 +847,8 @@ def test_migration_downgrade_ignores_a_revoked_beta_assignment() -> None:
     _seed_beta_assignment(engine, active=False)
 
     with engine.begin() as connection:
-        _bind_operations(module, connection)
-        module.downgrade()
+        _bind_operations(gate, connection)
+        gate.downgrade()
 
         assert (
             _stored_roles(connection),

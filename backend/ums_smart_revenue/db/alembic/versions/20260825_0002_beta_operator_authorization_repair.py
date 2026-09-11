@@ -1,22 +1,3 @@
-# ============================================================================
-# Purpose: Forward-only repair that converges the beta-operator authorization
-#   catalog: removes the unsafe connectors.run_jobs edge and adds the bounded
-#   finance.import_manual_revenue permission, without rewriting the stamped
-#   20260825_0001 snapshot.
-# Database/ORM: roles, permissions, role_permission_assignments — the three
-#   platform-wide catalog tables outside tenant RLS; no tenant-scoped tables
-#   are read or written.
-# Standards: Idempotent in both published field states; irreversible by design
-#   (downgrade refuses unconditionally via IrreversibleAuthorizationRepairError
-#   so a rolled-back binary never regains the unsafe connector contract).
-# Blast Radius: Authorization catalog rows only; no finance, audit, or
-#   user/tenant rows change.
-# Connections:
-#   - File: backend/ums_smart_revenue/db/frozen_security_catalog_20260825_0002.py
-#     -> frozen rows for this revision.
-#   - File: backend/ums_smart_revenue/db/security_seed.sql -> raw SQL twin.
-#   - File: tests/db/test_security_role_permission_seed_migration.py -> pins.
-# ============================================================================
 """Converge the beta-operator authorization catalog without rewriting history.
 
 Revision ID: 20260825_0002
@@ -114,19 +95,6 @@ def role_permission_seed_rows() -> list[dict[str, object]]:
     return [dict(row) for row in FROZEN_ROLE_PERMISSION_ROWS]
 
 
-# ============================================================================
-# Purpose: Repair upgrade — refresh role/permission metadata, insert missing
-#   canonical rows, remove only the unsafe beta_operator connectors.run_jobs
-#   edge, and preserve every other custom edge.
-# Database/ORM: roles, permissions, role_permission_assignments — the three
-#   platform-wide catalog tables; dialect-portable SELECT/INSERT/UPDATE/DELETE.
-# Standards: Idempotent for both published field states (original seed and the
-#   briefly amended copy); rows come only from this revision's frozen snapshot.
-# Blast Radius: Authorization catalog only; no user, tenant, or finance writes.
-# Connections:
-#   - File: backend/ums_smart_revenue/db/frozen_security_catalog_20260825_0002.py
-#     -> frozen rows.
-# ============================================================================
 def upgrade() -> None:
     """Seed (or refresh) the role, permission, and role-permission catalogs."""
     bind = op.get_bind()

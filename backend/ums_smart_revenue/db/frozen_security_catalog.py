@@ -1,16 +1,3 @@
-# ============================================================================
-# Purpose: Frozen authorization catalog rows for Alembic revision
-#   20260825_0001 — a byte-stable snapshot so the historical migration never
-#   imports live registries that can drift after merge.
-# Database/ORM: Declarative row dicts for roles / permissions /
-#   role_permission_assignments; no statements are emitted here.
-# Standards: Immutable contract — editing these rows requires a new revision
-#   and a new snapshot module instead of redefining this one.
-# Blast Radius: Read-only authorization seed data for the historical revision.
-# Connections:
-#   - File: backend/ums_smart_revenue/db/alembic/versions/
-#     20260825_0001_security_role_permission_seed.py -> imports these rows.
-# ============================================================================
 """Frozen authorization catalog snapshot for revision 20260825_0001.
 
 Generated from the live registries at migration authoring time. Historical

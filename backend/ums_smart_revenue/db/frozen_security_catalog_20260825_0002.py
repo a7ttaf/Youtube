@@ -1,16 +1,3 @@
-# ============================================================================
-# Purpose: Frozen authorization catalog rows for Alembic revision
-#   20260825_0002 — the post-repair catalog (beta_operator bounded to
-#   finance.import_manual_revenue) captured at migration authoring time.
-# Database/ORM: Declarative row dicts for roles / permissions /
-#   role_permission_assignments; no statements are emitted here.
-# Standards: Immutable contract — later registry changes require a new
-#   revision and a new snapshot module instead of redefining this one.
-# Blast Radius: Read-only authorization seed data for the repair revision.
-# Connections:
-#   - File: backend/ums_smart_revenue/db/alembic/versions/
-#     20260825_0002_beta_operator_authorization_repair.py -> imports these rows.
-# ============================================================================
 """Frozen authorization catalog snapshot for revision 20260825_0002.
 
 Generated from the live registries at migration authoring time. Historical
