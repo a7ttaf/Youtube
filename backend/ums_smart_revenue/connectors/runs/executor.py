@@ -33,6 +33,8 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from uuid import UUID
 
+from sqlalchemy import text
+
 from ums_smart_revenue.auth.audit import AuditEventType
 from ums_smart_revenue.auth.audit_service import AuditSink, record_audit_event
 from ums_smart_revenue.auth.models import PermissionGrant, UserPrincipal
@@ -396,9 +398,12 @@ class ConnectorJobExecutor:
         executor.shutdown(wait=False, cancel_futures=True)
         audit_executor.shutdown(wait=False)
         # Best-effort join on last-chance audit writers — each write is
-        # bounded by pool_timeout inside _audit_failed_before_start.
+        # bounded by pool_timeout + statement/lock timeouts inside
+        # _audit_failed_before_start; is_alive() skips not-yet-started
+        # threads (join() on them raises RuntimeError).
         for writer in list(last_chance_writers):
-            writer.join(timeout=30)
+            if writer.is_alive():
+                writer.join(timeout=30)
 
     # ========================================================================
     # Purpose: Deterministic executor shutdown from the app lifespan — cancel
@@ -468,7 +473,10 @@ class ConnectorJobExecutor:
         with self._lock:
             writers = list(self._last_chance_writers)
         for writer in writers:
-            writer.join(timeout=30)
+            # is_alive() also skips a thread registered but not yet started —
+            # join() on an unstarted thread raises RuntimeError.
+            if writer.is_alive():
+                writer.join(timeout=30)
         self._finalizer.detach()
 
     def has_active_job(
@@ -1209,18 +1217,20 @@ class ConnectorJobExecutor:
             },
             daemon=False,
         )
+        # Register + start atomically under _lock: close()/_shutdown_pools
+        # snapshot the set and join, and a thread present but unstarted
+        # would make join() raise RuntimeError mid-teardown.
         with self._lock:
             self._last_chance_writers.add(writer)
-        try:
-            writer.start()
-        except Exception:  # noqa: BLE001 — best-effort audit, never escape
-            with self._lock:
+            try:
+                writer.start()
+            except Exception:  # noqa: BLE001 — best-effort, never escape
                 self._last_chance_writers.discard(writer)
-            logger.exception(
-                "Failed to spawn last-chance job_failed_before_start audit "
-                "writer (tenant=%s)",
-                tenant_id,
-            )
+                logger.exception(
+                    "Failed to spawn last-chance job_failed_before_start "
+                    "audit writer (tenant=%s)",
+                    tenant_id,
+                )
 
     def audit_failed_before_start(
         self,
@@ -1339,6 +1349,13 @@ class ConnectorJobExecutor:
             )
             token = TENANT_CTX.set(minimal_tenant)
             with self._session_factory() as session, platform_lane(session):
+                if session.get_bind().dialect.name == "postgresql":
+                    # Bound every blocking point in this transaction so a
+                    # last-chance writer thread can never stall interpreter
+                    # exit indefinitely — checkout is already bounded by
+                    # pool_timeout; these cap lock waits and statement run.
+                    session.execute(text("SET LOCAL lock_timeout = '10s'"))
+                    session.execute(text("SET LOCAL statement_timeout = '10s'"))
                 # audit_logs is platform-only-write: elevate to app_platform for
                 # this standalone audit (run_one does its own elevation; this
                 # audit runs OUTSIDE run_one). No-op off Postgres.
