@@ -732,6 +732,7 @@ def test_close_drains_activation_failure_audits_queued_mid_teardown(tmp_path) ->
     (logged, never raised). Both interleavings are pinned deterministically.
     """
     import threading
+    import time
 
     factory = _factory(tmp_path)
     executor = ConnectorJobExecutor(session_factory=factory, max_workers=1, stale_running_hours=6)
@@ -763,10 +764,9 @@ def test_close_drains_activation_failure_audits_queued_mid_teardown(tmp_path) ->
         assert not closer.is_alive(), "close() must drain the in-flight audit"
         assert completed == ["RuntimeError"]
 
-        # A submission arriving after close() stops accepting is skipped
-        # cleanly — logged, never raised into the request lifecycle (on
-        # SQLite the post-close fallback is suppressed because the request
-        # session still holds the engine's only pooled connection).
+        # A submission arriving after close() stops accepting is handed to
+        # the last-chance daemon writer instead of being dropped — the audit
+        # row still lands without blocking the caller.
         executor.queue_failed_start_audit(
             tenant_id=TENANT,
             connector_key="youtube_reporting",
@@ -775,7 +775,10 @@ def test_close_drains_activation_failure_audits_queued_mid_teardown(tmp_path) ->
             error_class="RuntimeError",
             actor_identity=ACTOR,
         )
-        assert completed == ["RuntimeError"]
+        deadline = time.monotonic() + 5
+        while completed != ["RuntimeError", "RuntimeError"]:
+            assert time.monotonic() < deadline, "last-chance audit never ran"
+            time.sleep(0.02)
     finally:
         release.set()
         executor.close()
@@ -925,3 +928,81 @@ def test_close_keeps_audit_gate_open_for_hook_past_reservation_removal(tmp_path)
     assert len(failure_rows) == 1
     assert failure_rows[0].details["error_class"] == "RuntimeError"
     assert failure_rows[0].details["report_month"] == "2026-03"
+
+
+# ============================================================================
+# Purpose: Regression for the late-commit interleaving — a request that
+#   commits AFTER close()'s grace window still needs its
+#   job_failed_before_start row; the post-close queue path must write via the
+#   last-chance writer rather than drop the audit.
+# Database/ORM: audit_logs on the disposable file-backed SQLite engine.
+# Standards: proves the accepted-202 lifecycle edge survives shutdown on the
+#   strictest engine (SQLite), where a same-engine synchronous write inside
+#   after_commit would deadlock against the still-held request connection.
+# Blast Radius: Test-only — guards the post-close audit delivery path.
+# Connections:
+#   - File: backend/ums_smart_revenue/connectors/runs/executor.py ->
+#     queue_failed_start_audit post-close fallback.
+# ============================================================================
+def test_post_close_commit_still_lands_failure_audit(tmp_path, monkeypatch) -> None:
+    """A hook firing after close() still persists its failure audit.
+
+    The reservation's request outlives the shutdown grace, commits, and its
+    after_commit hook runs after the audit pool closed — the audit row must
+    still land instead of being dropped.
+    """
+    import time
+
+    from ums_smart_revenue.connectors.runs import executor as executor_module
+
+    monkeypatch.setattr(executor_module, "_PENDING_HOOK_GRACE_SECONDS", 0.05)
+    factory = _factory(tmp_path)
+    executor = ConnectorJobExecutor(
+        session_factory=factory, max_workers=1, stale_running_hours=6
+    )
+    reservation = executor.submit_if_absent(
+        tenant_id=TENANT,
+        connector_key="youtube_reporting",
+        account_id="acct-1",
+        report_month="2026-03",
+        dry_run=False,
+        triggered_by_user_id=None,
+        actor_identity=ACTOR,
+    )
+    assert reservation is not None
+    # Shutdown runs its full course while the request transaction is still
+    # open: grace expires and the uncommitted leftover is dropped un-audited.
+    executor.close()
+
+    # The request then commits and its after_commit hook runs post-close.
+    executor.begin_post_commit(reservation)
+    try:
+        executor.activate(reservation)
+        raise AssertionError("activate must fail after the registry was cleared")
+    except RuntimeError as exc:
+        executor.cancel_reservation(reservation)
+        executor.queue_failed_start_audit(
+            tenant_id=reservation.tenant_id,
+            connector_key=reservation.connector_key,
+            account_id=reservation.account_id,
+            report_month=reservation.report_month,
+            error_class=type(exc).__name__,
+            actor_identity=reservation.actor_identity,
+        )
+    finally:
+        executor.end_post_commit(reservation)
+
+    # The last-chance writer is asynchronous — poll for the row.
+    deadline = time.monotonic() + 5
+    while True:
+        with factory() as session:
+            rows = session.scalars(select(AuditLogORM)).all()
+        failures = [
+            a for a in rows if a.details.get("action") == "job_failed_before_start"
+        ]
+        if failures:
+            break
+        assert time.monotonic() < deadline, "post-close audit row never landed"
+        time.sleep(0.05)
+    assert len(failures) == 1
+    assert failures[0].details["report_month"] == "2026-03"

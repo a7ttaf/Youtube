@@ -1153,37 +1153,33 @@ class ConnectorJobExecutor:
             # Pool closed mid-teardown: claim the fallback so a second call
             # for this job cannot double-write.
             self._shutdown_audited.add(key)
-        # Last-resort synchronous write for a submission that arrived after
-        # the audit pool closed — the request committed, so the row must not
-        # be silently dropped. Skipped on SQLite: inside after_commit the
-        # request session still holds the engine's only pooled connection,
-        # so a fresh-session write here would stall on pool_timeout and
-        # discard the row anyway.
-        bind = self._session_factory.kw.get("bind")
-        if bind is not None and bind.dialect.name == "sqlite":
-            # No raw account_id in runtime logs — it is an external Google/CMS
-            # identifier that can identify the account owner.
-            logger.error(
-                "Dropping job_failed_before_start audit after audit-pool "
-                "close on SQLite (tenant=%s connector=%s month=%s)",
-                tenant_id,
-                connector_key,
-                report_month,
-            )
-            return
+        # Last-chance write for a submission that arrived after the audit
+        # pool closed (a request that committed past the shutdown grace
+        # window). A synchronous write here cannot work: inside after_commit
+        # the request session still holds its pooled connection, so a
+        # same-engine checkout would stall — on SQLite's one-slot pool that
+        # is a guaranteed pool_timeout, and under PostgreSQL saturation the
+        # same deadlock shape. A daemon thread is not blocked inside this
+        # hook: its checkout waits for the request session's imminent
+        # release, then persists the row — the accepted 202 keeps its
+        # lifecycle edge on every engine.
         try:
-            self._audit_failed_before_start(
-                tenant_id=tenant_id,
-                connector_key=connector_key,
-                account_id=account_id,
-                report_month=report_month,
-                error_class=error_class,
-                actor_identity=actor_identity,
-            )
+            threading.Thread(
+                target=self._audit_failed_before_start,
+                kwargs={
+                    "tenant_id": tenant_id,
+                    "connector_key": connector_key,
+                    "account_id": account_id,
+                    "report_month": report_month,
+                    "error_class": error_class,
+                    "actor_identity": actor_identity,
+                },
+                daemon=True,
+            ).start()
         except Exception:  # noqa: BLE001 — best-effort audit, never escape
             logger.exception(
-                "Failed to persist job_failed_before_start audit after "
-                "audit-pool close (tenant=%s)",
+                "Failed to spawn last-chance job_failed_before_start audit "
+                "writer (tenant=%s)",
                 tenant_id,
             )
 

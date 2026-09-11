@@ -243,7 +243,7 @@ def test_scoped_index_omits_company_edge_for_orphan_company() -> None:
     the company resolves to an active sector; the scoped loader must mirror
     that rule or company-scoped admins gain authority over orphan channels.
     """
-    session, _id_map = _seed_org_db(
+    session, _ = _seed_org_db(
         units=[("company-orphan", None, "COMPANY")],
         channels=[("channel-orphan", "company-orphan")],
     )
