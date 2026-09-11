@@ -280,6 +280,10 @@ class ConnectorJobExecutor:
         # flip always has its post-commit path covered by the grace/drain
         # logic — and nothing new can be reserved mid-teardown.
         self._accepting_reservations = True
+        # Last-chance audit writers spawned for post-close submissions —
+        # tracked so close()/_shutdown_pools can join any already started;
+        # non-daemon, so the interpreter also waits for stragglers at exit.
+        self._last_chance_writers: set[threading.Thread] = set()
         # In-flight post-commit hooks: a hook that called
         # begin_post_commit but not yet end_post_commit. close() waits on
         # this AND pending reservations because activate() pops the registry
@@ -291,6 +295,7 @@ class ConnectorJobExecutor:
             self._shutdown_pools,
             self._executor,
             self._audit_executor,
+            self._last_chance_writers,
         )
 
     # ========================================================================
@@ -385,10 +390,15 @@ class ConnectorJobExecutor:
     def _shutdown_pools(
         executor: ThreadPoolExecutor,
         audit_executor: ThreadPoolExecutor,
+        last_chance_writers: set[threading.Thread],
     ) -> None:
         """GC backstop: stop both pools if ``close()`` never ran."""
         executor.shutdown(wait=False, cancel_futures=True)
         audit_executor.shutdown(wait=False)
+        # Best-effort join on last-chance audit writers — each write is
+        # bounded by pool_timeout inside _audit_failed_before_start.
+        for writer in list(last_chance_writers):
+            writer.join(timeout=30)
 
     # ========================================================================
     # Purpose: Deterministic executor shutdown from the app lifespan — cancel
@@ -418,7 +428,10 @@ class ConnectorJobExecutor:
         The audit pool is shut down LAST with ``wait=True`` so route-queued
         activation-failure audits — accepted jobs whose ``activate()`` failed
         during this very shutdown — are drained and committed before the
-        process exits instead of dying on an untracked thread.
+        process exits instead of dying on an untracked thread. Last-chance
+        writers spawned by post-close queue calls are joined here when
+        already started; any spawned after close() returns are non-daemon,
+        so interpreter teardown itself waits for their commits.
         """
         # Stop new reservations first — under _lock, so a submit_if_absent
         # that already entered lands before the flip and is covered by the
@@ -448,6 +461,14 @@ class ConnectorJobExecutor:
         with self._audit_lock:
             self._audit_accepting = False
         self._audit_executor.shutdown(wait=True)
+        # Join last-chance writers already spawned by post-close queue calls —
+        # each write is bounded by pool_timeout inside _audit_failed_before_
+        # start, and the non-daemon threads also hold the interpreter open
+        # even if this join raced a still-running write.
+        with self._lock:
+            writers = list(self._last_chance_writers)
+        for writer in writers:
+            writer.join(timeout=30)
         self._finalizer.detach()
 
     def has_active_job(
@@ -1169,24 +1190,32 @@ class ConnectorJobExecutor:
         # the request session still holds its pooled connection, so a
         # same-engine checkout would stall — on SQLite's one-slot pool that
         # is a guaranteed pool_timeout, and under PostgreSQL saturation the
-        # same deadlock shape. A daemon thread is not blocked inside this
-        # hook: its checkout waits for the request session's imminent
-        # release, then persists the row — the accepted 202 keeps its
-        # lifecycle edge on every engine.
+        # same deadlock shape. The writer runs on a NON-daemon thread: it is
+        # not blocked inside this hook (its checkout waits for the request
+        # session's imminent release) and the interpreter joins non-daemon
+        # threads at exit, so process teardown cannot kill the write before
+        # its commit — the accepted 202 keeps its lifecycle edge on every
+        # engine. The thread is tracked in _last_chance_writers and joined by
+        # close()/_shutdown_pools when it outlives them.
+        writer = threading.Thread(
+            target=self._last_chance_write,
+            kwargs={
+                "tenant_id": tenant_id,
+                "connector_key": connector_key,
+                "account_id": account_id,
+                "report_month": report_month,
+                "error_class": error_class,
+                "actor_identity": actor_identity,
+            },
+            daemon=False,
+        )
+        with self._lock:
+            self._last_chance_writers.add(writer)
         try:
-            threading.Thread(
-                target=self._audit_failed_before_start,
-                kwargs={
-                    "tenant_id": tenant_id,
-                    "connector_key": connector_key,
-                    "account_id": account_id,
-                    "report_month": report_month,
-                    "error_class": error_class,
-                    "actor_identity": actor_identity,
-                },
-                daemon=True,
-            ).start()
+            writer.start()
         except Exception:  # noqa: BLE001 — best-effort audit, never escape
+            with self._lock:
+                self._last_chance_writers.discard(writer)
             logger.exception(
                 "Failed to spawn last-chance job_failed_before_start audit "
                 "writer (tenant=%s)",
@@ -1212,6 +1241,46 @@ class ConnectorJobExecutor:
             error_class=error_class,
             actor_identity=actor_identity,
         )
+
+    # ========================================================================
+    # Purpose: Run one post-close failure audit on a tracked non-daemon
+    #   thread — the last-chance path for hooks that outlive close().
+    # Database/ORM: audit_logs via _audit_failed_before_start's own session.
+    # Standards: bounded by pool_timeout on its session checkout; always
+    #   removes itself from _last_chance_writers so close()/finalizer joins
+    #   see only live writers.
+    # Blast Radius: Audit completeness for accepted jobs at shutdown.
+    # Connections:
+    #   - File: backend/ums_smart_revenue/connectors/runs/executor.py ->
+    #     queue_failed_start_audit spawns it; close()/_shutdown_pools join it.
+    # ========================================================================
+    def _last_chance_write(
+        self,
+        *,
+        tenant_id: UUID,
+        connector_key: str,
+        account_id: str,
+        report_month: str,
+        error_class: str,
+        actor_identity: ConnectorJobActor,
+    ) -> None:
+        """Write one post-close audit, then release the tracking entry."""
+        try:
+            self._audit_failed_before_start(
+                tenant_id=tenant_id,
+                connector_key=connector_key,
+                account_id=account_id,
+                report_month=report_month,
+                error_class=error_class,
+                actor_identity=actor_identity,
+            )
+        except Exception:  # noqa: BLE001 — best-effort audit, never escape
+            logger.exception(
+                "Last-chance job_failed_before_start audit write failed"
+            )
+        finally:
+            with self._lock:
+                self._last_chance_writers.discard(threading.current_thread())
 
     def _audit_failed_before_start(
         self,
