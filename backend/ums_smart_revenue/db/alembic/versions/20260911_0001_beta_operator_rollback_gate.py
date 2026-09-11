@@ -102,14 +102,18 @@ def downgrade() -> None:
 
     Raises:
         LiveBetaOperatorAssignmentError: when an ACTIVE ``beta_operator``
-            row remains in ``user_role_assignments``, or when the login cannot
-            read that table across row security to prove none remain. The
-            operator revokes/migrates the assignments (or re-runs as a
-            superuser/BYPASSRLS role) and retries the downgrade.
+            row remains in ``user_role_assignments``, or when the login lacks
+            the privilege to prove none remain (row-security denial, missing
+            lock grant). The operator revokes/migrates the assignments (or
+            re-runs as a superuser/BYPASSRLS role) and retries the downgrade.
+        RollbackGateVerificationError: when the inspection itself fails for a
+            reason other than privilege — lock timeout, deadlock, connection
+            loss, missing table. The message carries the real driver error
+            class so operators investigate the database, not their grants.
     """
     bind = op.get_bind()
-    if bind.dialect.name == "postgresql":
-        try:
+    try:
+        if bind.dialect.name == "postgresql":
             # Bound every blocking point first: a conflicting write lock must
             # fail with an actionable refusal, not hang the migration.
             apply_statement_bounds(
@@ -117,18 +121,8 @@ def downgrade() -> None:
             )
             # An operator-visible login may be row-security-bounded; disable
             # RLS for this read so the guard can prove the absence of live
-            # rows rather than trusting a filtered count. Requires a role
-            # permitted to set row_security (superuser/BYPASSRLS/migration
-            # owner); only THIS statement maps to the privilege message.
+            # rows rather than trusting a filtered count.
             bind.execute(sa.text("SET LOCAL row_security = off"))
-        except sa.exc.SQLAlchemyError as exc:
-            raise LiveBetaOperatorAssignmentError(
-                "downgrade could not prepare a trusted assignment read (a "
-                "row-security-bounded login cannot set row_security/lock "
-                "timeouts); re-run as a superuser/BYPASSRLS role after "
-                "revoking or migrating beta_operator assignments"
-            ) from exc
-        try:
             # Serialise the check against concurrent writers for the rest of
             # this transaction — a snapshot-only count would otherwise let a
             # role assignment slip in behind the downgrade.
@@ -137,13 +131,6 @@ def downgrade() -> None:
                     "LOCK TABLE user_role_assignments IN SHARE ROW EXCLUSIVE MODE"
                 )
             )
-        except sa.exc.SQLAlchemyError as exc:
-            raise RollbackGateVerificationError(
-                "downgrade could not lock user_role_assignments within the "
-                f"10s bound ({type(exc).__name__}); resolve the underlying "
-                "database contention or failure, then retry"
-            ) from exc
-    try:
         live = bind.execute(
             sa.select(sa.func.count())
             .select_from(_USER_ROLE_ASSIGNMENTS)
@@ -153,10 +140,25 @@ def downgrade() -> None:
             )
         ).scalar_one()
     except sa.exc.SQLAlchemyError as exc:
+        if isinstance(exc, sa.exc.InsufficientPrivilegeError):
+            # Includes RLS-forced denials: on user_role_assignments (FORCE
+            # ROW LEVEL SECURITY) row_security=off makes a NOBYPASSRLS
+            # owner's read fail rather than bypass, and LOCK requires table
+            # ownership — both surface as 42501 and get the privileged-rerun
+            # guidance below.
+            raise LiveBetaOperatorAssignmentError(
+                "downgrade could not verify active beta_operator assignments "
+                "(a row-security-bounded login cannot read across tenants); "
+                "re-run as a superuser/BYPASSRLS role after revoking or "
+                "migrating beta_operator assignments"
+            ) from exc
+        # Anything else is a real database failure — lock timeout, deadlock,
+        # connectivity, missing table — and must surface its own cause rather
+        # than privilege guidance.
         raise RollbackGateVerificationError(
-            "downgrade could not read user_role_assignments "
-            f"({type(exc).__name__}); resolve the underlying database error, "
-            "then retry"
+            "downgrade could not inspect user_role_assignments "
+            f"({type(exc).__name__}: {exc}); resolve the underlying database "
+            "error or lock contention, then retry"
         ) from exc
     if live:
         raise LiveBetaOperatorAssignmentError(

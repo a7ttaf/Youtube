@@ -216,6 +216,18 @@ def gated_database() -> Iterator[sa.Engine]:
         reset_public_schema(admin_url)
 
 
+# ============================================================================
+# Purpose: Seed one beta_operator user_role_assignments row (plus its users
+#   and access_scopes FK parents) for the rollback-gate test.
+# Database/ORM: users, access_scopes, user_role_assignments via the ORM on a
+#   disposable PostgreSQL schema; single committed transaction.
+# Standards: revoked assignments carry revoked_by/revoked_at per the
+#   ck_user_role_assignments_revocation invariant.
+# Blast Radius: Test-only disposable schema.
+# Connections:
+#   - File: tests/db/test_security_role_permission_seed_migration_postgres.py
+#     -> gate refusal test.
+# ============================================================================
 def _insert_beta_assignment(engine: sa.Engine, *, active: bool) -> None:
     """Insert one beta_operator assignment via the ORM on real PostgreSQL."""
     from datetime import UTC, datetime

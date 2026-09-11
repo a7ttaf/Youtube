@@ -141,6 +141,13 @@ def apply_statement_bounds(
     Accepts a ``Session`` or a bare ``Connection`` (Alembic binds). Uses
     ``set_config`` — the parameterized equivalent of ``SET LOCAL`` — so
     timeout values never enter SQL text. No-op on non-PostgreSQL dialects.
+
+    Raises:
+        sqlalchemy.exc.SQLAlchemyError: if the ``set_config`` statements
+            fail (e.g. connection loss mid-transaction). Callers that need
+            failure-classification — like the rollback-gate migration —
+            translate this into their own typed errors; other callers may
+            let it propagate.
     """
     dialect = db.get_bind().dialect if isinstance(db, Session) else db.dialect
     if dialect.name != "postgresql":
