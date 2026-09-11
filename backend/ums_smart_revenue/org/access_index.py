@@ -1,3 +1,21 @@
+# ============================================================================
+# Purpose: Build OrgAccessIndex — the company->sector and
+#   channel->company/sector containment maps every scoped authorization
+#   check resolves through. Two loaders: the full tenant index for read-heavy
+#   list paths, and a targeted per-target index for the user-management
+#   mutation routes.
+# Database/ORM: org_units + youtube_channels, read-only, always
+#   tenant-scoped and active-only.
+# Standards: fail-closed — missing/inactive/orphan edges are omitted, never
+#   granted; the targeted loader mirrors build_org_access_index edge rules
+#   exactly (a channel->company edge exists only with a live sector parent).
+# Blast Radius: Authorization — these maps decide whether scoped callers
+#   (sector/company admins) may act on companies, channels, and grants.
+# Connections:
+#   - File: backend/ums_smart_revenue/auth/scopes.py -> OrgAccessIndex.contains.
+#   - File: backend/ums_smart_revenue/api/dependencies_finance.py -> full index.
+#   - File: backend/ums_smart_revenue/api/users.py -> targeted loader callers.
+# ============================================================================
 from dataclasses import dataclass
 from uuid import UUID
 
@@ -216,12 +234,16 @@ def load_org_access_index_for_scope(
             )
         if unit[2] != "COMPANY":
             return empty
+        # Match build_org_access_index: the channel->company edge exists ONLY
+        # when the company has an active sector parent. A channel owned by an
+        # orphan company gets no company edge, so company-scoped admins cannot
+        # grant or revoke against it — sector/global authority still applies.
         sector_id = _parent_sector_id(session, tenant_id, unit)
+        if sector_id is None:
+            return empty
         return OrgAccessIndex(
             channel_company={target_scope.id: str(unit[0])},
-            channel_sector=(
-                {target_scope.id: sector_id} if sector_id is not None else {}
-            ),
+            channel_sector={target_scope.id: sector_id},
             company_sector={},
         )
 
