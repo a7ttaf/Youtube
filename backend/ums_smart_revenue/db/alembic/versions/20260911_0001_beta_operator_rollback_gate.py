@@ -140,21 +140,23 @@ def downgrade() -> None:
             )
         ).scalar_one()
     except sa.exc.SQLAlchemyError as exc:
-        if isinstance(exc, sa.exc.InsufficientPrivilegeError):
-            # Includes RLS-forced denials: on user_role_assignments (FORCE
-            # ROW LEVEL SECURITY) row_security=off makes a NOBYPASSRLS
-            # owner's read fail rather than bypass, and LOCK requires table
-            # ownership — both surface as 42501 and get the privileged-rerun
-            # guidance below.
+        # SQLAlchemy 2.0.52 has no InsufficientPrivilegeError wrapper — the
+        # driver's SQLSTATE arrives via exc.orig (pgcode/sqlstate). 42501
+        # covers RLS-forced denials (row_security=off makes a NOBYPASSRLS
+        # owner's read fail rather than bypass on the FORCE-RLS table),
+        # missing LOCK grants, and refused SETs — all get privileged-rerun
+        # guidance. Anything else is a real database failure and must surface
+        # its own cause.
+        pgcode = getattr(getattr(exc, "orig", None), "sqlstate", None) or getattr(
+            getattr(exc, "orig", None), "pgcode", None
+        )
+        if pgcode == "42501":
             raise LiveBetaOperatorAssignmentError(
                 "downgrade could not verify active beta_operator assignments "
                 "(a row-security-bounded login cannot read across tenants); "
                 "re-run as a superuser/BYPASSRLS role after revoking or "
                 "migrating beta_operator assignments"
             ) from exc
-        # Anything else is a real database failure — lock timeout, deadlock,
-        # connectivity, missing table — and must surface its own cause rather
-        # than privilege guidance.
         raise RollbackGateVerificationError(
             "downgrade could not inspect user_role_assignments "
             f"({type(exc).__name__}: {exc}); resolve the underlying database "
