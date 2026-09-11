@@ -24,11 +24,11 @@ from decimal import Decimal
 from unittest.mock import patch
 from uuid import UUID
 
-import pytest
 import sqlalchemy as sa
 from alembic import command
 from alembic.config import Config
 from fastapi.testclient import TestClient
+from pytest import fixture
 from sqlalchemy.orm import Session
 
 from tests.db._postgres_helpers import require_postgres_url
@@ -59,7 +59,7 @@ def _alembic_config(url: str) -> Config:
     return config
 
 
-@pytest.fixture(scope="module")
+@fixture(scope="module")
 def pg_url() -> Iterator[str]:
     """Require PostgreSQL, migrate to head, and release cached engines."""
     url = require_postgres_url()
@@ -115,7 +115,7 @@ def _purge_sentinel_rows(engine: sa.Engine) -> None:
         )
 
 
-@pytest.fixture
+@fixture
 def owner_engine(pg_url: str) -> Iterator[sa.Engine]:
     """Yield an owner verifier with exact sentinel cleanup on both sides."""
     engine = sa.create_engine(pg_url)
