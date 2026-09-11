@@ -1006,3 +1006,58 @@ def test_post_close_commit_still_lands_failure_audit(tmp_path, monkeypatch) -> N
         time.sleep(0.05)
     assert len(failures) == 1
     assert failures[0].details["report_month"] == "2026-03"
+
+
+# ============================================================================
+# Purpose: Prove close() joins a last-chance writer already spawned by a
+#   post-close queue call — the write must complete before close() returns,
+#   not be abandoned mid-commit by process teardown.
+# Database/ORM: audit write stubbed; only the join lifecycle is exercised.
+# Standards: deterministic interleaving — the audit flag is pre-flipped so
+#   the queue call spawns the writer, then close() must block on it.
+# Blast Radius: Test-only — guards the post-close audit-delivery path.
+# Connections:
+#   - File: backend/ums_smart_revenue/connectors/runs/executor.py ->
+#     _last_chance_writers join inside close().
+# ============================================================================
+def test_close_joins_an_inflight_last_chance_writer(tmp_path) -> None:
+    """close() blocks on a tracked last-chance writer until it commits."""
+    import threading
+    import time
+
+    factory = _factory(tmp_path)
+    executor = ConnectorJobExecutor(
+        session_factory=factory, max_workers=1, stale_running_hours=6
+    )
+    started = threading.Event()
+    release = threading.Event()
+    completed: list[str] = []
+
+    def _slow_audit(**kwargs):
+        """Block mid-write so close() provably overlaps the writer."""
+        started.set()
+        release.wait(timeout=5)
+        completed.append("RuntimeError")
+
+    executor._audit_failed_before_start = _slow_audit  # stub
+    # Simulate the post-close flag state a late request hook encounters.
+    with executor._audit_lock:
+        executor._audit_accepting = False
+    executor.queue_failed_start_audit(
+        tenant_id=TENANT,
+        connector_key="youtube_reporting",
+        account_id="acct-1",
+        report_month="2026-04",
+        error_class="RuntimeError",
+        actor_identity=ACTOR,
+    )
+    assert started.wait(timeout=5), "last-chance writer never started"
+
+    closer = threading.Thread(target=executor.close)
+    closer.start()
+    time.sleep(0.3)
+    assert closer.is_alive(), "close() returned while the writer was mid-write"
+    release.set()
+    closer.join(timeout=10)
+    assert not closer.is_alive()
+    assert completed == ["RuntimeError"]
