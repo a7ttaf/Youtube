@@ -1,4 +1,3 @@
-from datetime import UTC, datetime
 # ============================================================================
 # Purpose: Unit coverage for org-access index builders — the pure
 #   build_org_access_index edge derivation plus the session-backed
@@ -14,6 +13,7 @@ from datetime import UTC, datetime
 #   - File: backend/ums_smart_revenue/org/access_index.py -> loader under test.
 #   - File: backend/ums_smart_revenue/auth/scopes.py -> contains() contract.
 # ============================================================================
+from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
 from sqlalchemy import create_engine
