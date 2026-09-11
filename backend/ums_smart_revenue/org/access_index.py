@@ -191,8 +191,10 @@ def _parent_sector_id(
 #   lookups (channel -> primary unit -> parent sector) scoped to the request
 #   tenant.
 # Standards: fail-closed — a target that fails to parse or resolve yields an
-#   empty index, so contains() returns False for every scoped caller; only
-#   global-scoped authority still passes (its check needs no index).
+#   empty index with resolved_targets EMPTY, so contains() returns False for
+#   every scoped caller INCLUDING a same-type stale scope (the id-equality
+#   shortcut is gated on resolution); global-scoped authority still passes
+#   (its check needs no index).
 # Blast Radius: Authorization scope containment for the four user-management
 #   mutation routes; containment results are identical to the full index for
 #   the queried target.
@@ -205,12 +207,38 @@ def load_org_access_index_for_scope(
 ) -> OrgAccessIndex:
     """Build the minimal index covering only the target scope's ancestry."""
     tenant_id = require_current_tenant().id
-    empty = OrgAccessIndex(channel_company={}, channel_sector={}, company_sector={})
+    # resolved_targets=frozenset() turns ON same-type resolution checks: an
+    # org target that cannot be resolved is denied to same-type callers
+    # (contains() still answers True for global-scoped authority, so stale
+    # assignments stay reachable for cleanup by global admins only).
+    unresolved = OrgAccessIndex(
+        channel_company={},
+        channel_sector={},
+        company_sector={},
+        resolved_targets=frozenset(),
+    )
     if target_scope.id is None or target_scope.type not in (
         ScopeType.CHANNEL,
         ScopeType.COMPANY,
+        ScopeType.SECTOR,
     ):
-        return empty
+        return unresolved
+    resolved = frozenset({(target_scope.type, target_scope.id)})
+
+    if target_scope.type == ScopeType.SECTOR:
+        try:
+            sector_unit_id = UUID(target_scope.id)
+        except (TypeError, ValueError):
+            return unresolved
+        unit = _active_org_unit_row(session, tenant_id, sector_unit_id)
+        if unit is None or unit[2] != "SECTOR":
+            return unresolved
+        return OrgAccessIndex(
+            channel_company={},
+            channel_sector={},
+            company_sector={},
+            resolved_targets=resolved,
+        )
 
     if target_scope.type == ScopeType.CHANNEL:
         primary_unit_id = session.execute(
@@ -222,38 +250,47 @@ def load_org_access_index_for_scope(
             )
         ).scalar_one_or_none()
         if primary_unit_id is None:
-            return empty
+            return unresolved
         unit = _active_org_unit_row(session, tenant_id, primary_unit_id)
         if unit is None:
-            return empty
+            return unresolved
         if unit[2] == "SECTOR":
             return OrgAccessIndex(
                 channel_company={},
                 channel_sector={target_scope.id: str(unit[0])},
                 company_sector={},
+                resolved_targets=resolved,
             )
         if unit[2] != "COMPANY":
-            return empty
+            return unresolved
         # Match build_org_access_index: the channel->company edge exists ONLY
         # when the company has an active sector parent. A channel owned by an
         # orphan company gets no company edge, so company-scoped admins cannot
         # grant or revoke against it — sector/global authority still applies.
+        # The channel itself is a live anchored target, so it stays resolved
+        # (a same-type channel scope may still act on it).
         sector_id = _parent_sector_id(session, tenant_id, unit)
         if sector_id is None:
-            return empty
+            return OrgAccessIndex(
+                channel_company={},
+                channel_sector={},
+                company_sector={},
+                resolved_targets=resolved,
+            )
         return OrgAccessIndex(
             channel_company={target_scope.id: str(unit[0])},
             channel_sector={target_scope.id: sector_id},
             company_sector={},
+            resolved_targets=resolved,
         )
 
     try:
         company_id = UUID(target_scope.id)
     except (TypeError, ValueError):
-        return empty
+        return unresolved
     unit = _active_org_unit_row(session, tenant_id, company_id)
     if unit is None or unit[2] != "COMPANY":
-        return empty
+        return unresolved
     sector_id = _parent_sector_id(session, tenant_id, unit)
     return OrgAccessIndex(
         channel_company={},
@@ -261,4 +298,5 @@ def load_org_access_index_for_scope(
         company_sector=(
             {target_scope.id: sector_id} if sector_id is not None else {}
         ),
+        resolved_targets=resolved,
     )

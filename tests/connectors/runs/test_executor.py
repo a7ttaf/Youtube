@@ -894,11 +894,14 @@ def test_close_keeps_audit_gate_open_for_hook_past_reservation_removal(tmp_path)
     )
     assert reservation is not None
 
-    # Start close() so it enters the grace window with the slot pending,
-    # then run the hook inline: activate raises against the stopped pool,
-    # pops the slot, and the audit is queued while close() is still waiting.
+    # Start close() and WAIT for the worker pool to stop before running the
+    # hook — without the barrier, activate() could run before shutdown()
+    # lands and succeed, failing the test nondeterministically.
     closer = threading.Thread(target=executor.close)
     closer.start()
+    assert executor._worker_pool_stopped.wait(timeout=5), (
+        "close() never reached worker-pool shutdown"
+    )
 
     executor.begin_post_commit(reservation)
     try:
@@ -945,18 +948,50 @@ def test_close_keeps_audit_gate_open_for_hook_past_reservation_removal(tmp_path)
 #     queue_failed_start_audit post-close fallback.
 # ============================================================================
 def test_post_close_commit_still_lands_failure_audit(tmp_path, monkeypatch) -> None:
-    """A hook firing after close() still persists its failure audit.
+    """A real committing Session firing after close() still persists the audit.
 
     The reservation's request outlives the shutdown grace, commits, and its
     after_commit hook runs after the audit pool closed — the audit row must
-    still land instead of being dropped.
+    still land instead of being dropped. Uses the PRODUCTION one-slot engine
+    (build_engine) and a real request Session that retains the pool's only
+    connection through shutdown, so the interleaving the fallback exists for
+    is exercised end-to-end rather than simulated by direct method calls.
     """
     import time
 
+    from ums_smart_revenue.api.connectors import (
+        _attach_after_rollback_hook,
+        _enqueue_after_commit,
+    )
     from ums_smart_revenue.connectors.runs import executor as executor_module
+    from ums_smart_revenue.db.session import build_engine
 
     monkeypatch.setattr(executor_module, "_PENDING_HOOK_GRACE_SECONDS", 0.05)
-    factory = _factory(tmp_path)
+    url = f"sqlite+pysqlite:///{(tmp_path / 'exec.db').as_posix()}"
+    engine = build_engine(url)
+    OrgBase.metadata.create_all(engine)
+    SecurityBase.metadata.create_all(engine)
+    ReportBase.metadata.create_all(engine)
+    TenantBase.metadata.create_all(engine)
+    now = datetime(2026, 1, 1, tzinfo=UTC)
+    with Session(engine) as session:
+        session.add(
+            TenantORM(
+                id=TENANT,
+                slug="ums-test",
+                display_name="UMS Test",
+                primary_currency="USD",
+                status=TenantStatus.ACTIVE,
+                onboarding_at=now,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        session.add(
+            UserORM(id=UUID(ACTOR.user_id), email=ACTOR.email, display_name="Ops")
+        )
+        session.commit()
+    factory = sessionmaker(bind=engine, expire_on_commit=False)
     executor = ConnectorJobExecutor(
         session_factory=factory, max_workers=1, stale_running_hours=6
     )
@@ -970,27 +1005,28 @@ def test_post_close_commit_still_lands_failure_audit(tmp_path, monkeypatch) -> N
         actor_identity=ACTOR,
     )
     assert reservation is not None
+
+    # A real request session holding the pool's only connection, with the
+    # same listener pair the route attaches after submit_if_absent.
+    request_session = factory()
+    _attach_after_rollback_hook(
+        session=request_session, executor=executor, reservation=reservation
+    )
+    _enqueue_after_commit(
+        session=request_session, executor=executor, reservation=reservation
+    )
+    request_session.execute(select(1))  # claim + hold the single pooled conn
+
     # Shutdown runs its full course while the request transaction is still
     # open: grace expires and the uncommitted leftover is dropped un-audited.
     executor.close()
 
-    # The request then commits and its after_commit hook runs post-close.
-    executor.begin_post_commit(reservation)
-    try:
-        executor.activate(reservation)
-        raise AssertionError("activate must fail after the registry was cleared")
-    except RuntimeError as exc:
-        executor.cancel_reservation(reservation)
-        executor.queue_failed_start_audit(
-            tenant_id=reservation.tenant_id,
-            connector_key=reservation.connector_key,
-            account_id=reservation.account_id,
-            report_month=reservation.report_month,
-            error_class=type(exc).__name__,
-            actor_identity=reservation.actor_identity,
-        )
-    finally:
-        executor.end_post_commit(reservation)
+    # The request then commits: the REAL after_commit event fires the hook —
+    # activate() raises against the stopped pool, queue_failed_start_audit
+    # lands post-close, and the last-chance writer's checkout waits for this
+    # session's connection release before writing.
+    request_session.commit()
+    request_session.close()
 
     # The last-chance writer is asynchronous — poll for the row.
     deadline = time.monotonic() + 5
@@ -1006,6 +1042,152 @@ def test_post_close_commit_still_lands_failure_audit(tmp_path, monkeypatch) -> N
         time.sleep(0.05)
     assert len(failures) == 1
     assert failures[0].details["report_month"] == "2026-03"
+
+
+# ============================================================================
+# Purpose: Regression for the sweep mark-before-write hole — a committed
+#   leftover whose pausing hook still holds the one-slot request connection
+#   must be audited by a tracked writer that WAITS for the release, not a
+#   synchronous close() write that times out and strands the claim.
+# Database/ORM: audit_logs on the production one-slot SQLite engine.
+# Standards: deterministic interleaving — the request session holds the
+#   connection through the sweep; the writer is asserted blocked, then the
+#   release lets the row land before close() finishes.
+# Blast Radius: Test-only — guards the committed-leftover delivery path.
+# Connections:
+#   - File: backend/ums_smart_revenue/connectors/runs/executor.py ->
+#     _audit_pending_on_shutdown -> _start_last_chance_writer.
+# ============================================================================
+def test_close_sweep_audit_survives_held_request_connection(tmp_path, monkeypatch) -> None:
+    """A committed leftover is audited even while its request holds the conn."""
+    import threading
+    import time
+
+    from ums_smart_revenue.connectors.runs import executor as executor_module
+    from ums_smart_revenue.db.session import build_engine
+
+    monkeypatch.setattr(executor_module, "_PENDING_HOOK_GRACE_SECONDS", 0.05)
+    url = f"sqlite+pysqlite:///{(tmp_path / 'exec.db').as_posix()}"
+    engine = build_engine(url)
+    OrgBase.metadata.create_all(engine)
+    SecurityBase.metadata.create_all(engine)
+    ReportBase.metadata.create_all(engine)
+    TenantBase.metadata.create_all(engine)
+    now = datetime(2026, 1, 1, tzinfo=UTC)
+    with Session(engine) as session:
+        session.add(
+            TenantORM(
+                id=TENANT,
+                slug="ums-test",
+                display_name="UMS Test",
+                primary_currency="USD",
+                status=TenantStatus.ACTIVE,
+                onboarding_at=now,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        session.add(
+            UserORM(id=UUID(ACTOR.user_id), email=ACTOR.email, display_name="Ops")
+        )
+        session.commit()
+    factory = sessionmaker(bind=engine, expire_on_commit=False)
+    executor = ConnectorJobExecutor(
+        session_factory=factory, max_workers=1, stale_running_hours=6
+    )
+    reservation = executor.submit_if_absent(
+        tenant_id=TENANT,
+        connector_key="youtube_reporting",
+        account_id="acct-1",
+        report_month="2026-03",
+        dry_run=False,
+        triggered_by_user_id=None,
+        actor_identity=ACTOR,
+    )
+    assert reservation is not None
+
+    request_session = factory()
+    request_session.execute(select(1))  # hold the pool's only connection
+    # The hook entered (committed mark) but paused before queueing — exactly
+    # the interleaving that made a synchronous sweep write lose the row.
+    executor.begin_post_commit(reservation)
+
+    closer = threading.Thread(target=executor.close)
+    closer.start()
+    # Wait until the sweep has spawned the tracked writer, which is now
+    # blocked checking out the held connection.
+    deadline = time.monotonic() + 5
+    while not executor._last_chance_writers:
+        assert time.monotonic() < deadline, "sweep never spawned the writer"
+        time.sleep(0.02)
+    request_session.close()  # release the held connection
+    closer.join(timeout=15)
+    assert not closer.is_alive(), "close() must join the sweep writer"
+
+    with factory() as session:
+        rows = session.scalars(select(AuditLogORM)).all()
+    shutdown = [
+        a
+        for a in rows
+        if a.details.get("action") == "job_failed_before_start"
+        and a.details.get("error_class") == "ExecutorShutdown"
+    ]
+    assert len(shutdown) == 1
+    assert shutdown[0].details["report_month"] == "2026-03"
+
+
+# ============================================================================
+# Purpose: Regression for the refused-submit hole — when the tracked audit
+#   pool rejects a queue_failed_start_audit submission, the reservation is
+#   already deregistered, so without the last-chance fallback the only
+#   lifecycle row would be lost.
+# Database/ORM: audit_logs on the disposable file-backed SQLite engine.
+# Standards: deterministic — submit() is forced to raise; the writer must
+#   still deliver exactly one row.
+# Blast Radius: Test-only — guards the submit-failure fallback.
+# Connections:
+#   - File: backend/ums_smart_revenue/connectors/runs/executor.py ->
+#     queue_failed_start_audit submit-failure fallthrough.
+# ============================================================================
+def test_queue_failed_start_audit_falls_back_when_pool_rejects(tmp_path) -> None:
+    """A refused audit-pool submit still delivers the row via the writer."""
+    import time
+
+    factory = _factory(tmp_path)
+    executor = ConnectorJobExecutor(
+        session_factory=factory, max_workers=1, stale_running_hours=6
+    )
+
+    def _reject(*_args, **_kwargs):
+        """Simulate the audit pool refusing work mid-teardown."""
+        raise RuntimeError("simulated audit pool rejection")
+
+    try:
+        with patch.object(executor._audit_executor, "submit", side_effect=_reject):
+            executor.queue_failed_start_audit(
+                tenant_id=TENANT,
+                connector_key="youtube_reporting",
+                account_id="acct-1",
+                report_month="2026-03",
+                error_class="RuntimeError",
+                actor_identity=ACTOR,
+            )
+        deadline = time.monotonic() + 5
+        while True:
+            with factory() as session:
+                rows = session.scalars(select(AuditLogORM)).all()
+            failures = [
+                a
+                for a in rows
+                if a.details.get("action") == "job_failed_before_start"
+            ]
+            if failures:
+                break
+            assert time.monotonic() < deadline, "fallback audit row never landed"
+            time.sleep(0.05)
+        assert len(failures) == 1
+    finally:
+        executor.close()
 
 
 # ============================================================================

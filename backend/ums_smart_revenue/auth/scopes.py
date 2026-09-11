@@ -53,11 +53,22 @@ class AccessScope:
         return cls(ScopeType.CONNECTOR, connector_id)
 
 
+# Scope types whose targets resolve to a live org object (youtube_channels or
+# org_units). Only these are gated by OrgAccessIndex.resolved_targets — GROUP
+# and the non-org types have no org-unit resolution to consult.
+_ORG_RESOLVABLE_TYPES = frozenset({ScopeType.SECTOR, ScopeType.COMPANY, ScopeType.CHANNEL})
+
+
 @dataclass(frozen=True)
 class OrgAccessIndex:
     channel_company: dict[str, str] = field(default_factory=dict)
     channel_sector: dict[str, str] = field(default_factory=dict)
     company_sector: dict[str, str] = field(default_factory=dict)
+    # When not None, same-type containment for an org-resolvable target also
+    # requires the target in this set — i.e. the loader proved the channel /
+    # company / sector exists, is active, and belongs to the request tenant.
+    # None = untracked (the canonical full index; equality alone decides).
+    resolved_targets: frozenset[tuple[ScopeType, str]] | None = None
 
     def contains(self, granted_scope: AccessScope, target_scope: AccessScope) -> bool:
         if granted_scope.type == ScopeType.GLOBAL:
@@ -67,6 +78,18 @@ class OrgAccessIndex:
         if granted_scope.type == target_scope.type:
             if granted_scope.id is None or target_scope.id is None:
                 return granted_scope.id is None and target_scope.id is None
+            # Fail closed for unresolved org targets: without this gate a
+            # deleted/inactive channel or company still authorizes a caller
+            # holding that exact stale scope, because id equality alone never
+            # consults the maps. Global-scoped authority is unaffected — it
+            # already returned True above. Non-org target types are not
+            # resolvable here and keep equality semantics.
+            if (
+                self.resolved_targets is not None
+                and target_scope.type in _ORG_RESOLVABLE_TYPES
+                and (target_scope.type, target_scope.id) not in self.resolved_targets
+            ):
+                return False
             return granted_scope.id == target_scope.id
         # Cross-type containment requires real ids on both sides; a malformed
         # grant or target with id=None would otherwise compare equal to a

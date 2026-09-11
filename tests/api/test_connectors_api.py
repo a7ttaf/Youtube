@@ -1057,13 +1057,77 @@ def test_request_connector_job_after_rollback_cancels_reservation(tmp_path, monk
     # rolled back. The 500 may or may not surface depending on FastAPI's
     # exception handler; the contract we care about is the executor state.
     assert response.status_code == 500
-    # submit_if_absent was called, the rollback hook fired, the reservation
-    # was cancelled. Activate was never called. The fake's ``cancel_calls``
-    # only sees explicit ``cancel_reservation`` invocations, not hook fires
-    # (the real SQLAlchemy after_rollback event bypasses the fake), so we
-    # only assert activate was not called.
+    # submit_if_absent was called, the rollback hook fired, and the
+    # reservation was cancelled — the real after_rollback event invokes the
+    # fake's cancel_reservation, so the call IS observable and must carry the
+    # reservation the route reserved.
     assert len(fake.submit_calls) == 1
     assert fake.activate_calls == []
+    assert len(fake.cancel_calls) == 1
+    cancelled = fake.cancel_calls[0]["reservation"]
+    assert cancelled.account_id == "content-owner-1"
+    assert cancelled.report_month == "2026-03"
+
+
+def test_reservation_hooks_ignore_savepoint_events_and_run_once(tmp_path) -> None:
+    """SAVEPOINT transitions must not activate or cancel the reservation.
+
+    SQLAlchemy fires session after_commit/after_rollback for nested
+    transactions too: a savepoint release must not start the job while the
+    outer transaction can still roll back, a savepoint rollback must not
+    cancel a reservation whose outer transaction can still commit, and the
+    lifecycle action is strictly once per reservation.
+    """
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    fake = _FakeExecutor(active=False)
+    engine = create_engine(database_url)
+    try:
+        reservation = fake.submit_if_absent(
+            tenant_id=UUID(UMS_TENANT_ID),
+            connector_key="youtube_reporting",
+            account_id="content-owner-1",
+            report_month="2026-03",
+        )
+        session = Session(engine)
+        connectors_module._attach_after_rollback_hook(
+            session=session, executor=fake, reservation=reservation
+        )
+        connectors_module._enqueue_after_commit(
+            session=session, executor=fake, reservation=reservation
+        )
+
+        session.begin()
+        session.begin_nested().commit()  # savepoint release — must not fire
+        assert fake.activate_calls == []
+        session.commit()  # outermost commit — activates exactly once
+        assert len(fake.activate_calls) == 1
+        session.begin()
+        session.commit()  # second outer commit — still exactly once
+        assert len(fake.activate_calls) == 1
+        assert fake.cancel_calls == []
+        session.close()
+
+        # Fresh session + reservation: a savepoint rollback must not cancel;
+        # the outer rollback cancels exactly once.
+        reservation2 = fake.submit_if_absent(
+            tenant_id=UUID(UMS_TENANT_ID),
+            connector_key="youtube_reporting",
+            account_id="content-owner-2",
+            report_month="2026-03",
+        )
+        session2 = Session(engine)
+        connectors_module._attach_after_rollback_hook(
+            session=session2, executor=fake, reservation=reservation2
+        )
+        session2.begin()
+        session2.begin_nested().rollback()  # savepoint rollback — no cancel
+        assert fake.cancel_calls == []
+        session2.rollback()  # outermost rollback — cancels exactly once
+        assert len(fake.cancel_calls) == 1
+        session2.close()
+    finally:
+        engine.dispose()
 
 
 def test_request_connector_job_activate_failure_writes_bucket_a_audit(

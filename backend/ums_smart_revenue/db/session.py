@@ -22,6 +22,7 @@ from threading import Lock
 from typing import Any
 
 from sqlalchemy import Connection, Engine, create_engine, event, text
+from sqlalchemy.exc import InvalidRequestError
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import QueuePool
 
@@ -40,6 +41,14 @@ _SESSION_ROLE_KEY = "ums_db_role"
 # can set it (same trust boundary as the existing single-session elevation in
 # finance/committed_allocation.py); the fail-closed default is unchanged.
 _PLATFORM_LANE_ACTIVE_KEY = "ums_platform_lane_active"
+
+# Set on session.info to a ``(lock_timeout, statement_timeout)`` pair for
+# sessions whose every transaction must run bounded (e.g. the connector
+# executor's failure-audit writes, which must never stall shutdown). The
+# after_begin hook applies the bounds BEFORE its role/tenant-context SQL, so
+# even the first statement of a marked transaction is covered — applying them
+# from caller code afterwards would leave the hook's own writes unbounded.
+_STATEMENT_BOUNDS_KEY = "ums_statement_bounds"
 
 _engine_cache: dict[str, Engine] = {}
 _engine_cache_lock = Lock()
@@ -107,14 +116,24 @@ def build_engine(database_url: str) -> Engine:
         )
         _enable_sqlite_transactional_savepoints(engine)
         return engine
-    # FIX: Bound the physical connect — psycopg's default has no connect
-    # timeout, so a dead DB/network route could stall checkout (and any
-    # shutdown path waiting on it) indefinitely. 10s matches the audit
-    # statement bounds and keeps failure detection prompt.
+    # FIX: Bound the physical connect AND dead-peer detection — psycopg's
+    # default has no connect timeout, and keepalives sit at OS defaults
+    # (~hours), so a dead DB/network route or a stalled established socket
+    # (e.g. a pool_pre_ping against a silently dropped connection) could
+    # stall checkout — and any shutdown path waiting on it — indefinitely.
+    # connect_timeout=10 covers new-connection setup; keepalives detect a
+    # dead peer on a live socket within ~25s. Values match the audit
+    # statement bounds and keep failure detection prompt.
     return create_engine(
         database_url,
         pool_pre_ping=True,
-        connect_args={"connect_timeout": 10},
+        connect_args={
+            "connect_timeout": 10,
+            "keepalives": 1,
+            "keepalives_idle": 10,
+            "keepalives_interval": 5,
+            "keepalives_count": 3,
+        },
     )
 
 
@@ -152,6 +171,15 @@ def apply_statement_bounds(
     dialect = db.get_bind().dialect if isinstance(db, Session) else db.dialect
     if dialect.name != "postgresql":
         return
+    connection = db.connection() if isinstance(db, Session) else db
+    if connection.get_isolation_level() == "AUTOCOMMIT":
+        # set_config(..., is_local=true) is transaction-scoped: under
+        # AUTOCOMMIT each setting evaporates at the end of its own statement,
+        # leaving the target query unbounded while reporting success.
+        raise InvalidRequestError(
+            "apply_statement_bounds requires a real transaction; "
+            "AUTOCOMMIT isolation discards transaction-local settings"
+        )
     db.execute(
         text("SELECT set_config('lock_timeout', :value, true)"),
         {"value": lock_timeout},
@@ -287,6 +315,16 @@ def _apply_tenant_isolation(session, _transaction, connection):
     """Set transaction role + trusted tenant context for Postgres sessions."""
     if connection.dialect.name != "postgresql":
         return
+    # Apply marked statement bounds FIRST: the role/tenant-context statements
+    # below can block on locks (context-row write) or stall on a degraded
+    # socket, so a bounded session must establish its deadlines before the
+    # hook's own SQL — a caller-side apply_statement_bounds would run after
+    # all of this. Independent of the role marker on purpose.
+    bounds = session.info.get(_STATEMENT_BOUNDS_KEY)
+    if bounds is not None:
+        apply_statement_bounds(
+            connection, lock_timeout=bounds[0], statement_timeout=bounds[1]
+        )
     role = session.info.get(_SESSION_ROLE_KEY)
     if role is None:
         return

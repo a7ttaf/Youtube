@@ -299,3 +299,108 @@ def test_gate_refuses_postgres_downgrade_while_beta_assignment_is_live(
     with pytest.raises(Exception) as exc_info:
         command.downgrade(_alembic_config(admin_url), "20260825_0001")
     assert type(exc_info.value).__name__ == "IrreversibleAuthorizationRepairError"
+
+
+# ============================================================================
+# Purpose: Prove the gate's bounded LOCK TABLE fails as a typed verification
+#   error — not a silent hang — when a concurrent writer holds the table.
+# Database/ORM: user_role_assignments ACCESS EXCLUSIVE lock on a second
+#   connection; disposable PostgreSQL schema.
+# Standards: Real alembic command.downgrade; ~10s lock_timeout wait is
+#   expected (the gate's own bound); asserts the non-privilege error class
+#   and that the version stamp survives.
+# Blast Radius: Test-only disposable PostgreSQL schema.
+# Connections:
+#   - File: backend/ums_smart_revenue/db/alembic/versions/
+#     20260911_0001_beta_operator_rollback_gate.py -> bounded lock + classifier.
+# ============================================================================
+def test_gate_lock_contention_surfaces_verification_error(
+    gated_database: sa.Engine,
+) -> None:
+    """A conflicting table lock hits lock_timeout -> RollbackGateVerificationError."""
+    engine = gated_database
+    admin_url = require_postgres_url()
+    with engine.connect() as blocker:
+        blocker.execute(
+            sa.text("LOCK TABLE user_role_assignments IN ACCESS EXCLUSIVE MODE")
+        )
+        # The gate's LOCK TABLE ... SHARE ROW EXCLUSIVE now waits on this
+        # blocker; its own lock_timeout=10s converts the wait into a
+        # LockNotAvailable the classifier reports as a verification error.
+        with pytest.raises(Exception) as exc_info:
+            command.downgrade(_alembic_config(admin_url), "20260825_0002")
+        blocker.rollback()
+    assert type(exc_info.value).__name__ == "RollbackGateVerificationError"
+    with engine.connect() as connection:
+        assert connection.scalar(
+            sa.text("SELECT version_num FROM alembic_version")
+        ) == "20260911_0001"
+
+
+@pytest.fixture
+def gated_restricted_owner_database() -> Iterator[tuple[str, sa.Engine]]:
+    """Provide head schema owned by a NOBYPASSRLS login for gate 42501 coverage."""
+    admin_url = require_postgres_url()
+    admin_config = _alembic_config(admin_url)
+    role_name = f"authz_gate_owner_{uuid4().hex[:16]}"
+    password = f"GateOwner{uuid4().hex}"
+    owner_url = _owner_url(admin_url, role_name=role_name, password=password)
+
+    reset_public_schema(admin_url)
+    command.upgrade(admin_config, "head")
+    admin_engine = sa.create_engine(admin_url)
+    owner_engine: sa.Engine | None = None
+    try:
+        with admin_engine.connect().execution_options(
+            isolation_level="AUTOCOMMIT"
+        ) as connection:
+            connection.exec_driver_sql(
+                f'CREATE ROLE "{role_name}" LOGIN PASSWORD \'{password}\' '
+                "NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS INHERIT"
+            )
+            connection.exec_driver_sql(f'ALTER SCHEMA public OWNER TO "{role_name}"')
+            for table_name in (*_GUARDED_TABLES, "alembic_version"):
+                connection.exec_driver_sql(
+                    f'ALTER TABLE public."{table_name}" OWNER TO "{role_name}"'
+                )
+        owner_engine = sa.create_engine(owner_url)
+        yield owner_url, admin_engine
+    finally:
+        if owner_engine is not None:
+            owner_engine.dispose()
+        reset_public_schema(admin_url)
+        with admin_engine.connect().execution_options(
+            isolation_level="AUTOCOMMIT"
+        ) as connection:
+            _drop_generated_owner(connection, role_name)
+        command.upgrade(admin_config, "head")
+        admin_engine.dispose()
+
+
+# ============================================================================
+# Purpose: Prove the gate's 42501 classification — a NOBYPASSRLS owner under
+#   FORCE ROW LEVEL SECURITY passes the lock step but cannot disable
+#   row_security for the count read, so the refusal maps to
+#   LiveBetaOperatorAssignmentError with privileged-rerun guidance.
+# Database/ORM: user_role_assignments FORCE RLS (posture set by
+#   20260825_0002); generated disposable role.
+# Standards: Real alembic command.downgrade as the restricted owner; asserts
+#   the privilege error class and that the version stamp survives.
+# Blast Radius: Test-only disposable PostgreSQL schema + generated role.
+# Connections:
+#   - File: backend/ums_smart_revenue/db/alembic/versions/
+#     20260911_0001_beta_operator_rollback_gate.py -> SQLSTATE classifier.
+# ============================================================================
+def test_gate_privilege_denial_maps_to_assignment_error(
+    gated_restricted_owner_database: tuple[str, sa.Engine],
+) -> None:
+    """FORCE-RLS + NOBYPASSRLS owner read fails 42501 -> LiveBetaOperatorAssignmentError."""
+    owner_url, admin_engine = gated_restricted_owner_database
+    with pytest.raises(Exception) as exc_info:
+        command.downgrade(_alembic_config(owner_url), "20260825_0002")
+    assert type(exc_info.value).__name__ == "LiveBetaOperatorAssignmentError"
+    assert "row-security" in str(exc_info.value)
+    with admin_engine.connect() as connection:
+        assert connection.scalar(
+            sa.text("SELECT version_num FROM alembic_version")
+        ) == "20260911_0001"

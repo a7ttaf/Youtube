@@ -209,31 +209,107 @@ def _seed_org_db(
     return session, id_map
 
 
-def test_scoped_index_matches_full_index_for_company_and_channel() -> None:
-    """Targeted loader must produce the canonical edges for a normal tree."""
-    session, id_map = _seed_org_db(
-        units=[
-            ("sector-tv", None, "SECTOR"),
-            ("company-tv-a", "sector-tv", "COMPANY"),
+def test_scoped_index_contains_matches_canonical_index() -> None:
+    """contains() on the targeted index must equal the canonical index.
+
+    Builds BOTH indexes from the same seeded tree and compares containment
+    outcomes across a grant x target matrix — including a sector-owned
+    channel, an orphan company/channel, and a scope in another sector — so a
+    drift between the loaders (or a containment hole the maps alone don't
+    expose) fails here rather than in production.
+    """
+    units = [
+        ("sector-tv", None, "SECTOR"),
+        ("company-tv-a", "sector-tv", "COMPANY"),
+        ("company-orphan", None, "COMPANY"),
+        ("sector-news", None, "SECTOR"),
+    ]
+    channels = [
+        ("channel-tv-a", "company-tv-a"),
+        ("channel-orphan", "company-orphan"),
+    ]
+    session, id_map = _seed_org_db(units=units, channels=channels)
+    canonical = build_org_access_index(
+        org_units=[
+            OrgUnitRow(
+                id=str(id_map[label]),
+                parent_id=str(id_map[parent]) if parent else None,
+                type=unit_type,
+                name=label,
+                active=True,
+            )
+            for label, parent, unit_type in units
         ],
-        channels=[("channel-tv-a", "company-tv-a")],
+        channels=[
+            ChannelRegistryRow(
+                youtube_channel_id=channel_id,
+                primary_org_unit_id=str(id_map[unit]) if unit else None,
+                active=True,
+            )
+            for channel_id, unit in channels
+        ],
     )
+    sector_id = str(id_map["sector-tv"])
+    company_id = str(id_map["company-tv-a"])
+    orphan_company_id = str(id_map["company-orphan"])
+    other_sector_id = str(id_map["sector-news"])
+    grants = [
+        AccessScope.global_scope(),
+        AccessScope.sector(sector_id),
+        AccessScope.sector(other_sector_id),
+        AccessScope.company(company_id),
+        AccessScope.company(orphan_company_id),
+        AccessScope.channel("channel-tv-a"),
+        AccessScope.channel("channel-orphan"),
+    ]
+    targets = [
+        AccessScope.channel("channel-tv-a"),
+        AccessScope.channel("channel-orphan"),
+        AccessScope.company(company_id),
+        AccessScope.company(orphan_company_id),
+        AccessScope.sector(sector_id),
+        AccessScope.sector(other_sector_id),
+    ]
     token = TENANT_CTX.set(_tenant())
     try:
-        scoped_channel = load_org_access_index_for_scope(
-            session, AccessScope.channel("channel-tv-a")
-        )
-        scoped_company = load_org_access_index_for_scope(
-            session, AccessScope.company(str(id_map["company-tv-a"]))
-        )
+        for target in targets:
+            scoped = load_org_access_index_for_scope(session, target)
+            for granted in grants:
+                assert scoped.contains(granted, target) == canonical.contains(
+                    granted, target
+                ), (granted, target)
     finally:
         TENANT_CTX.reset(token)
 
-    company_id = str(id_map["company-tv-a"])
-    sector_id = str(id_map["sector-tv"])
-    assert scoped_channel.channel_company == {"channel-tv-a": company_id}
-    assert scoped_channel.channel_sector == {"channel-tv-a": sector_id}
-    assert scoped_company.company_sector == {company_id: sector_id}
+
+def test_scoped_index_fails_closed_for_unresolved_org_targets() -> None:
+    """Missing org targets deny same-type stale scopes; global still passes.
+
+    Regression for the same-type containment hole: contains() answers id
+    equality before consulting the maps, so an empty edge set alone cannot
+    stop a caller holding a scope for a deleted/inactive channel, company,
+    or sector. The targeted index therefore tracks resolved_targets — an
+    unresolved org target denies the same-type grant while global-scoped
+    authority (which needs no index) still authorizes cleanup.
+    """
+    session, _ = _seed_org_db(
+        units=[("sector-tv", None, "SECTOR")],
+        channels=[("channel-live", "sector-tv")],
+    )
+    token = TENANT_CTX.set(_tenant())
+    try:
+        for target in (
+            AccessScope.channel("channel-missing"),
+            AccessScope.company(str(uuid4())),
+            AccessScope.sector(str(uuid4())),
+        ):
+            scoped = load_org_access_index_for_scope(session, target)
+            # A stale same-type grant must NOT authorize on a dead target.
+            assert not scoped.contains(target, target)
+            # Global authority is unaffected — the row stays reachable.
+            assert scoped.contains(AccessScope.global_scope(), target)
+    finally:
+        TENANT_CTX.reset(token)
 
 
 def test_scoped_index_omits_company_edge_for_orphan_company() -> None:

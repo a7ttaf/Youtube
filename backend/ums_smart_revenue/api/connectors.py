@@ -1204,6 +1204,12 @@ def _reject_connector_job(
 # ============================================================================
 _AFTER_COMMIT_FLAG_KEY = object()
 _AFTER_ROLLBACK_FLAG_KEY = object()
+# Set on session.info once the reservation's OUTER transaction resolved —
+# SQLAlchemy fires after_commit/after_rollback for nested SAVEPOINT
+# transitions too, so the handlers below must (a) skip nested events and
+# (b) run their lifecycle action at most once across every transaction the
+# request session opens.
+_LIFECYCLE_RESOLVED_KEY = object()
 
 
 def _attach_after_rollback_hook(
@@ -1273,6 +1279,17 @@ def _make_after_commit_handler(executor: ConnectorJobExecutor, reservation: _Slo
 
     def _after_commit(_session: Session) -> None:
         """Activate the reservation, auditing a failure if activation raises."""
+        # after_commit fires for nested SAVEPOINT releases too — only the
+        # outermost commit may activate, and only once: a nested commit must
+        # not start the job while the outer transaction can still roll back,
+        # and a second outer commit must not re-enter activate() (which would
+        # raise into the failure-audit path and mint a phantom failure row
+        # for a job that is already running).
+        if _session.in_nested_transaction() or _session.info.get(
+            _LIFECYCLE_RESOLVED_KEY
+        ):
+            return
+        _session.info[_LIFECYCLE_RESOLVED_KEY] = True
         # Bracket the whole hook: begin_post_commit proves the transaction
         # committed (this hook can only run post-commit) and keeps close()'s
         # audit gate open until the failure audit is queued — activate() pops
@@ -1320,6 +1337,14 @@ def _make_after_rollback_handler(executor: ConnectorJobExecutor, reservation: _S
 
     def _after_rollback(_session: Session) -> None:
         """Cancel the reservation so its slot is released."""
+        # Same guards as the commit side: a nested SAVEPOINT rollback must
+        # not cancel a reservation whose outer transaction can still commit,
+        # and the resolved flag keeps this strictly once-per-reservation.
+        if _session.in_nested_transaction() or _session.info.get(
+            _LIFECYCLE_RESOLVED_KEY
+        ):
+            return
+        _session.info[_LIFECYCLE_RESOLVED_KEY] = True
         executor.cancel_reservation(reservation)
 
     return _after_rollback
