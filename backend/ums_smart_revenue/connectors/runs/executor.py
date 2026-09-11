@@ -1098,8 +1098,9 @@ class ConnectorJobExecutor:
     # Database/ORM: audit_logs write deferred to _audit_failed_before_start on
     #   the audit worker's own session (platform_lane elevation).
     # Standards: accepting-flag + lock serialize submissions against close();
-    #   post-close submissions are logged and skipped — never raised into the
-    #   request lifecycle.
+    #   submissions already claimed by the shutdown sweep are skipped; any
+    #   submission that lands after the pool closed is handed to a
+    #   last-chance daemon writer — never raised into the request lifecycle.
     # Blast Radius: Audit completeness for accepted connector jobs only.
     # Connections:
     #   - File: backend/ums_smart_revenue/api/connectors.py -> after_commit
@@ -1115,17 +1116,26 @@ class ConnectorJobExecutor:
         error_class: str,
         actor_identity: ConnectorJobActor,
     ) -> None:
-        """Queue a ``job_failed_before_start`` audit on the tracked audit worker.
+        """Deliver a ``job_failed_before_start`` audit through the live path.
 
         Called from the route's ``after_commit`` hook when ``activate()``
-        raises. The audit worker's session checkout happens OFF the request
-        lifecycle — on SQLite the committing request session still holds the
-        engine's only pooled connection inside ``after_commit``, so a
-        synchronous audit would wait out ``pool_timeout`` and drop the row;
-        on PostgreSQL a saturated pool produces the same stall under
-        concurrent failures. ``close()`` drains this pool with ``wait=True``
-        so an in-flight audit outlives the shutdown that triggered it. A
-        submit failure after the audit pool closed is logged, never raised.
+        raises. Three distinct delivery paths, in order:
+
+        1. While ``close()`` is still accepting, the audit is queued on the
+           tracked audit worker whose session checkout happens OFF the
+           request lifecycle — on SQLite the committing request session
+           still holds the engine's only pooled connection inside
+           ``after_commit``, so a synchronous audit would wait out
+           ``pool_timeout`` and drop the row; on PostgreSQL a saturated pool
+           produces the same stall under concurrent failures. ``close()``
+           drains this pool with ``wait=True`` so an in-flight audit
+           outlives the shutdown that triggered it.
+        2. If the shutdown sweep already emitted this job's failure row, the
+           call is skipped — one job, one row.
+        3. After the audit pool closed (a request that committed past the
+           grace window), a last-chance daemon thread runs the write itself:
+           its checkout is not bound to this hook, so it simply waits for
+           the request session's release and persists the row.
         """
         key = (tenant_id, connector_key, account_id, report_month)
         with self._audit_lock:
