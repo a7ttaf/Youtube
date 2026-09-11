@@ -2,6 +2,7 @@ from dataclasses import dataclass
 from uuid import UUID
 
 from sqlalchemy import select
+from sqlalchemy.engine import Row
 from sqlalchemy.orm import Session
 
 from ums_smart_revenue.auth.scopes import AccessScope, OrgAccessIndex, ScopeType
@@ -11,6 +12,8 @@ from ums_smart_revenue.tenancy.context import require_current_tenant
 
 @dataclass(frozen=True)
 class OrgUnitRow:
+    """Typed read row for one org_units entry used to build the index."""
+
     id: str
     parent_id: str | None
     type: str
@@ -20,6 +23,8 @@ class OrgUnitRow:
 
 @dataclass(frozen=True)
 class ChannelRegistryRow:
+    """Typed read row for one youtube_channels entry used to build the index."""
+
     youtube_channel_id: str
     primary_org_unit_id: str | None
     active: bool
@@ -30,6 +35,7 @@ def build_org_access_index(
     org_units: list[OrgUnitRow],
     channels: list[ChannelRegistryRow],
 ) -> OrgAccessIndex:
+    """Derive company->sector and channel->company/sector containment maps."""
     active_org_units = {unit.id: unit for unit in org_units if unit.active}
     company_sector: dict[str, str] = {}
     channel_company: dict[str, str] = {}
@@ -119,7 +125,7 @@ def load_org_access_index_from_session(session: Session) -> OrgAccessIndex:
 # ============================================================================
 def _active_org_unit_row(
     session: Session, tenant_id: UUID, unit_id: UUID
-) -> tuple[UUID, UUID | None, str] | None:
+) -> Row[tuple[UUID, UUID | None, str]] | None:
     """Return (id, parent_id, type) for one active org unit, or None."""
     return session.execute(
         select(OrgUnitORM.id, OrgUnitORM.parent_id, OrgUnitORM.type).where(
@@ -140,7 +146,9 @@ def _active_org_unit_row(
 #   - File: backend/ums_smart_revenue/org/access_index.py -> loader above.
 # ============================================================================
 def _parent_sector_id(
-    session: Session, tenant_id: UUID, unit_row: tuple[UUID, UUID | None, str]
+    session: Session,
+    tenant_id: UUID,
+    unit_row: Row[tuple[UUID, UUID | None, str]],
 ) -> str | None:
     """Return the unit's parent id when it is an active SECTOR, else None."""
     parent_id = unit_row[1]
