@@ -202,101 +202,132 @@ def _parent_sector_id(
 #   - File: backend/ums_smart_revenue/auth/scopes.py -> contains() lookups.
 #   - File: backend/ums_smart_revenue/api/users.py -> mutation routes.
 # ============================================================================
-def load_org_access_index_for_scope(
-    session: Session, target_scope: AccessScope
-) -> OrgAccessIndex:
-    """Build the minimal index covering only the target scope's ancestry."""
-    tenant_id = require_current_tenant().id
-    # resolved_targets=frozenset() turns ON same-type resolution checks: an
-    # org target that cannot be resolved is denied to same-type callers
-    # (contains() still answers True for global-scoped authority, so stale
-    # assignments stay reachable for cleanup by global admins only).
-    unresolved = OrgAccessIndex(
+def _unresolved_index() -> OrgAccessIndex:
+    """Return the fail-closed index for a target that did not resolve.
+
+    ``resolved_targets=frozenset()`` turns ON same-type resolution checks:
+    an org target that cannot be resolved is denied to same-type callers
+    (contains() still answers True for global-scoped authority, so stale
+    assignments stay reachable for cleanup by global admins only).
+    """
+    return OrgAccessIndex(
         channel_company={},
         channel_sector={},
         company_sector={},
         resolved_targets=frozenset(),
     )
-    if target_scope.id is None or target_scope.type not in (
-        ScopeType.CHANNEL,
-        ScopeType.COMPANY,
-        ScopeType.SECTOR,
-    ):
-        return unresolved
-    resolved = frozenset({(target_scope.type, target_scope.id)})
 
-    if target_scope.type == ScopeType.SECTOR:
-        try:
-            sector_unit_id = UUID(target_scope.id)
-        except (TypeError, ValueError):
-            return unresolved
-        unit = _active_org_unit_row(session, tenant_id, sector_unit_id)
-        if unit is None or unit[2] != "SECTOR":
-            return unresolved
+
+def _sector_target_index(
+    session: Session, tenant_id: UUID, target_scope: AccessScope
+) -> OrgAccessIndex:
+    """Build the index for a sector target: resolved iff the unit is a live SECTOR."""
+    sector_id_raw = target_scope.id
+    if sector_id_raw is None:
+        return _unresolved_index()
+    try:
+        sector_unit_id = UUID(sector_id_raw)
+    except (TypeError, ValueError):
+        return _unresolved_index()
+    unit = _active_org_unit_row(session, tenant_id, sector_unit_id)
+    if unit is None or unit[2] != "SECTOR":
+        return _unresolved_index()
+    return OrgAccessIndex(
+        channel_company={},
+        channel_sector={},
+        company_sector={},
+        resolved_targets=frozenset({(target_scope.type, sector_id_raw)}),
+    )
+
+
+def _channel_target_index(
+    session: Session, tenant_id: UUID, target_scope: AccessScope
+) -> OrgAccessIndex:
+    """Build the index for a channel target from its primary-unit ancestry."""
+    channel_id = target_scope.id
+    if channel_id is None:
+        return _unresolved_index()
+    resolved = frozenset({(target_scope.type, channel_id)})
+    primary_unit_id = session.execute(
+        select(YouTubeChannelORM.primary_org_unit_id).where(
+            YouTubeChannelORM.tenant_id == tenant_id,
+            YouTubeChannelORM.youtube_channel_id == channel_id,
+            YouTubeChannelORM.active.is_(True),
+            YouTubeChannelORM.primary_org_unit_id.is_not(None),
+        )
+    ).scalar_one_or_none()
+    if primary_unit_id is None:
+        return _unresolved_index()
+    unit = _active_org_unit_row(session, tenant_id, primary_unit_id)
+    if unit is None:
+        return _unresolved_index()
+    if unit[2] == "SECTOR":
+        return OrgAccessIndex(
+            channel_company={},
+            channel_sector={channel_id: str(unit[0])},
+            company_sector={},
+            resolved_targets=resolved,
+        )
+    if unit[2] != "COMPANY":
+        return _unresolved_index()
+    # Match build_org_access_index: the channel->company edge exists ONLY
+    # when the company has an active sector parent. A channel owned by an
+    # orphan company gets no company edge, so company-scoped admins cannot
+    # grant or revoke against it — sector/global authority still applies.
+    # The channel itself is a live anchored target, so it stays resolved
+    # (a same-type channel scope may still act on it).
+    sector_id = _parent_sector_id(session, tenant_id, unit)
+    if sector_id is None:
         return OrgAccessIndex(
             channel_company={},
             channel_sector={},
             company_sector={},
             resolved_targets=resolved,
         )
+    return OrgAccessIndex(
+        channel_company={channel_id: str(unit[0])},
+        channel_sector={channel_id: sector_id},
+        company_sector={},
+        resolved_targets=resolved,
+    )
 
-    if target_scope.type == ScopeType.CHANNEL:
-        primary_unit_id = session.execute(
-            select(YouTubeChannelORM.primary_org_unit_id).where(
-                YouTubeChannelORM.tenant_id == tenant_id,
-                YouTubeChannelORM.youtube_channel_id == target_scope.id,
-                YouTubeChannelORM.active.is_(True),
-                YouTubeChannelORM.primary_org_unit_id.is_not(None),
-            )
-        ).scalar_one_or_none()
-        if primary_unit_id is None:
-            return unresolved
-        unit = _active_org_unit_row(session, tenant_id, primary_unit_id)
-        if unit is None:
-            return unresolved
-        if unit[2] == "SECTOR":
-            return OrgAccessIndex(
-                channel_company={},
-                channel_sector={target_scope.id: str(unit[0])},
-                company_sector={},
-                resolved_targets=resolved,
-            )
-        if unit[2] != "COMPANY":
-            return unresolved
-        # Match build_org_access_index: the channel->company edge exists ONLY
-        # when the company has an active sector parent. A channel owned by an
-        # orphan company gets no company edge, so company-scoped admins cannot
-        # grant or revoke against it — sector/global authority still applies.
-        # The channel itself is a live anchored target, so it stays resolved
-        # (a same-type channel scope may still act on it).
-        sector_id = _parent_sector_id(session, tenant_id, unit)
-        if sector_id is None:
-            return OrgAccessIndex(
-                channel_company={},
-                channel_sector={},
-                company_sector={},
-                resolved_targets=resolved,
-            )
-        return OrgAccessIndex(
-            channel_company={target_scope.id: str(unit[0])},
-            channel_sector={target_scope.id: sector_id},
-            company_sector={},
-            resolved_targets=resolved,
-        )
 
+def _company_target_index(
+    session: Session, tenant_id: UUID, target_scope: AccessScope
+) -> OrgAccessIndex:
+    """Build the index for a company target: resolved iff the unit is a live COMPANY."""
+    company_id_raw = target_scope.id
+    if company_id_raw is None:
+        return _unresolved_index()
     try:
-        company_id = UUID(target_scope.id)
+        company_id = UUID(company_id_raw)
     except (TypeError, ValueError):
-        return unresolved
+        return _unresolved_index()
     unit = _active_org_unit_row(session, tenant_id, company_id)
     if unit is None or unit[2] != "COMPANY":
-        return unresolved
+        return _unresolved_index()
     sector_id = _parent_sector_id(session, tenant_id, unit)
     return OrgAccessIndex(
         channel_company={},
         channel_sector={},
         company_sector=(
-            {target_scope.id: sector_id} if sector_id is not None else {}
+            {company_id_raw: sector_id} if sector_id is not None else {}
         ),
-        resolved_targets=resolved,
+        resolved_targets=frozenset({(target_scope.type, company_id_raw)}),
     )
+
+
+def load_org_access_index_for_scope(
+    session: Session, target_scope: AccessScope
+) -> OrgAccessIndex:
+    """Build the minimal index covering only the target scope's ancestry."""
+    tenant_id = require_current_tenant().id
+    if target_scope.id is None:
+        return _unresolved_index()
+    if target_scope.type == ScopeType.SECTOR:
+        return _sector_target_index(session, tenant_id, target_scope)
+    if target_scope.type == ScopeType.CHANNEL:
+        return _channel_target_index(session, tenant_id, target_scope)
+    if target_scope.type == ScopeType.COMPANY:
+        return _company_target_index(session, tenant_id, target_scope)
+    return _unresolved_index()

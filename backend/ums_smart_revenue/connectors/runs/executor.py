@@ -1313,9 +1313,9 @@ class ConnectorJobExecutor:
         report_month: str,
         error_class: str,
         actor_identity: ConnectorJobActor,
-    ) -> bool:
+    ) -> None:
         """Public hook for request-session after_commit activation failures."""
-        return self._audit_failed_before_start(
+        self._audit_failed_before_start(
             tenant_id=tenant_id,
             connector_key=connector_key,
             account_id=account_id,
@@ -1347,16 +1347,23 @@ class ConnectorJobExecutor:
         actor_identity: ConnectorJobActor,
     ) -> None:
         """Write one post-close audit, then release the tracking entry."""
-        key = (tenant_id, connector_key, account_id, report_month)
-        delivered = False
         try:
-            delivered = self._audit_failed_before_start(
+            # The claim is released inside the write itself on failure —
+            # release_claim tells _audit_failed_before_start which
+            # _shutdown_audited key this delivery is responsible for.
+            self._audit_failed_before_start(
                 tenant_id=tenant_id,
                 connector_key=connector_key,
                 account_id=account_id,
                 report_month=report_month,
                 error_class=error_class,
                 actor_identity=actor_identity,
+                release_claim=(
+                    tenant_id,
+                    connector_key,
+                    account_id,
+                    report_month,
+                ),
             )
         except Exception:  # noqa: BLE001 — best-effort audit, never escape
             logger.exception(
@@ -1365,11 +1372,6 @@ class ConnectorJobExecutor:
         finally:
             with self._lock:
                 self._last_chance_writers.discard(threading.current_thread())
-        if not delivered:
-            # The claim must not outlive a failed delivery: release it so a
-            # later same-key submission is not deduped into a lost row.
-            with self._audit_lock:
-                self._shutdown_audited.discard(key)
 
     # ========================================================================
     # Purpose: Write ONE CONNECTOR_JOB_RUN job_failed_before_start row through
@@ -1396,12 +1398,15 @@ class ConnectorJobExecutor:
         report_month: str,
         error_class: str,
         actor_identity: ConnectorJobActor,
-    ) -> bool:
+        release_claim: _JobKey | None = None,
+    ) -> None:
         """Write ONE CONNECTOR_JOB_RUN job_failed_before_start row, fresh session.
 
-        Returns True only when the row committed; False when the best-effort
-        guard absorbed a failure — callers that claimed the job in
-        ``_shutdown_audited`` use this to release the claim on failure.
+        When ``release_claim`` names a key already recorded in
+        ``_shutdown_audited`` (the sweep and last-chance writer paths claim
+        before delivering), a failed write discards that claim so a later
+        same-key submission stays retryable instead of being deduped into a
+        lost row. A successful write keeps the claim as the dedupe mark.
 
         Intentionally does NOT re-enter ``connector_tenant_context()``: a
         pre-start failure can be caused by an inactive/suspended/deleted tenant,
@@ -1484,13 +1489,17 @@ class ConnectorJobExecutor:
                         },
                     )
                     session.commit()
-            return True
         except Exception:  # noqa: BLE001 — best-effort audit, never escape
             logger.exception(
                 "Failed to persist job_failed_before_start audit (tenant=%s)",
                 tenant_id,
             )
-            return False
+            if release_claim is not None:
+                # The claim must not outlive a failed delivery: release it
+                # so a later same-key submission is not deduped into a lost
+                # row.
+                with self._audit_lock:
+                    self._shutdown_audited.discard(release_claim)
         finally:
             if token is not None:
                 TENANT_CTX.reset(token)

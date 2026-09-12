@@ -5,6 +5,8 @@ from enum import StrEnum
 
 
 class ScopeType(StrEnum):
+    """Authorization scope kinds carried by role assignments and checks."""
+
     GLOBAL = "global"
     SECTOR = "sector"
     COMPANY = "company"
@@ -17,39 +19,49 @@ class ScopeType(StrEnum):
 
 @dataclass(frozen=True)
 class AccessScope:
+    """One typed authorization scope: a ScopeType plus an optional target id."""
+
     type: ScopeType
     id: str | None = None
 
     @classmethod
     def global_scope(cls) -> AccessScope:
+        """Return the tenant-wide scope that contains every other scope."""
         return cls(ScopeType.GLOBAL)
 
     @classmethod
     def sector(cls, sector_id: str) -> AccessScope:
+        """Return a scope anchored on one sector org unit."""
         return cls(ScopeType.SECTOR, sector_id)
 
     @classmethod
     def company(cls, company_id: str) -> AccessScope:
+        """Return a scope anchored on one company org unit."""
         return cls(ScopeType.COMPANY, company_id)
 
     @classmethod
     def channel(cls, channel_id: str) -> AccessScope:
+        """Return a scope anchored on one YouTube channel."""
         return cls(ScopeType.CHANNEL, channel_id)
 
     @classmethod
     def group(cls, group_id: str) -> AccessScope:
+        """Return a scope anchored on one channel group."""
         return cls(ScopeType.GROUP, group_id)
 
     @classmethod
     def finance_month(cls, month: str) -> AccessScope:
+        """Return a scope anchored on one finance month (YYYY-MM)."""
         return cls(ScopeType.FINANCE_MONTH, month)
 
     @classmethod
     def export(cls, export_id: str | None = None) -> AccessScope:
+        """Return a scope anchored on one export artifact."""
         return cls(ScopeType.EXPORT, export_id)
 
     @classmethod
     def connector(cls, connector_id: str | None = None) -> AccessScope:
+        """Return a scope anchored on one connector credential/account."""
         return cls(ScopeType.CONNECTOR, connector_id)
 
 
@@ -61,6 +73,13 @@ _ORG_RESOLVABLE_TYPES = frozenset({ScopeType.SECTOR, ScopeType.COMPANY, ScopeTyp
 
 @dataclass(frozen=True)
 class OrgAccessIndex:
+    """Org-hierarchy containment edges plus optional target-resolution proof.
+
+    The three maps carry the canonical sector -> company -> channel ancestry
+    edges; ``resolved_targets`` (when set) records which org scopes the loader
+    proved exist, are active, and belong to the request tenant.
+    """
+
     channel_company: dict[str, str] = field(default_factory=dict)
     channel_sector: dict[str, str] = field(default_factory=dict)
     company_sector: dict[str, str] = field(default_factory=dict)
@@ -71,26 +90,39 @@ class OrgAccessIndex:
     resolved_targets: frozenset[tuple[ScopeType, str]] | None = None
 
     def contains(self, granted_scope: AccessScope, target_scope: AccessScope) -> bool:
+        """Return True when the granted scope contains the target scope."""
         if granted_scope.type == ScopeType.GLOBAL:
             return True
         if target_scope.type == ScopeType.GLOBAL:
             return False
         if granted_scope.type == target_scope.type:
-            if granted_scope.id is None or target_scope.id is None:
-                return granted_scope.id is None and target_scope.id is None
-            # Fail closed for unresolved org targets: without this gate a
-            # deleted/inactive channel or company still authorizes a caller
-            # holding that exact stale scope, because id equality alone never
-            # consults the maps. Global-scoped authority is unaffected — it
-            # already returned True above. Non-org target types are not
-            # resolvable here and keep equality semantics.
-            if (
-                self.resolved_targets is not None
-                and target_scope.type in _ORG_RESOLVABLE_TYPES
-                and (target_scope.type, target_scope.id) not in self.resolved_targets
-            ):
-                return False
-            return granted_scope.id == target_scope.id
+            return self._contains_same_type(granted_scope, target_scope)
+        return self._contains_cross_type(granted_scope, target_scope)
+
+    def _contains_same_type(
+        self, granted_scope: AccessScope, target_scope: AccessScope
+    ) -> bool:
+        """Decide same-type containment with resolution-aware id equality."""
+        if granted_scope.id is None or target_scope.id is None:
+            return granted_scope.id is None and target_scope.id is None
+        # Fail closed for unresolved org targets: without this gate a
+        # deleted/inactive channel or company still authorizes a caller
+        # holding that exact stale scope, because id equality alone never
+        # consults the maps. Global-scoped authority is unaffected — it
+        # already returned True above. Non-org target types are not
+        # resolvable here and keep equality semantics.
+        if (
+            self.resolved_targets is not None
+            and target_scope.type in _ORG_RESOLVABLE_TYPES
+            and (target_scope.type, target_scope.id) not in self.resolved_targets
+        ):
+            return False
+        return granted_scope.id == target_scope.id
+
+    def _contains_cross_type(
+        self, granted_scope: AccessScope, target_scope: AccessScope
+    ) -> bool:
+        """Decide cross-type containment through the ancestry edge maps."""
         # Cross-type containment requires real ids on both sides; a malformed
         # grant or target with id=None would otherwise compare equal to a
         # missing mapping lookup (also None) and falsely authorize unrelated
