@@ -320,7 +320,12 @@ def _company_target_index(
 def load_org_access_index_for_scope(
     session: Session, target_scope: AccessScope
 ) -> OrgAccessIndex:
-    """Build the minimal index covering only the target scope's ancestry."""
+    """Build the minimal index covering only the target scope's ancestry.
+
+    Raises:
+        TenantContextMissing: when called without an active request tenant
+            context — every lookup below is scoped to ``require_current_tenant``.
+    """
     tenant_id = require_current_tenant().id
     if target_scope.id is None:
         return _unresolved_index()
