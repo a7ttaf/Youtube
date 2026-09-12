@@ -39,6 +39,22 @@ Database authorization rejects unknown users and disabled users before route cod
 
 ## Example endpoints
 
+### System health and readiness
+
+```http
+GET /health
+GET /livez
+GET /readyz
+```
+
+`/health` and `/livez` report the process baseline (liveness: the ASGI app,
+its routes, and the backend dependency set — no database round trip).
+`/readyz` additionally proves the configured database accepts a trivial
+`SELECT 1` read: it returns `503` with a typed readiness payload when the
+app was created without a database or the read fails, and it is the
+endpoint the container healthcheck probes. Readiness failures are log
+lines, not audit events.
+
 ### Session and tenant context
 
 ```http

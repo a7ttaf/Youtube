@@ -200,6 +200,7 @@ def resolves_ok(monkeypatch: pytest.MonkeyPatch) -> None:
     """
 
     def _resolver(**_kwargs: object) -> object:
+        """Resolve canned group rows for the scheduler under test."""
         return object()
 
     assert run_group_sync.__kwdefaults__ is not None
@@ -360,6 +361,7 @@ def test_worker_rolls_back_domain_and_audit_together_on_summary_failure(
     )
 
     def _boom_on_summary(*, event_type: AuditEventType, **kwargs: object) -> object:
+        """Raise on summary to prove the failure path records cleanly."""
         if event_type is AuditEventType.GROUPS_SYNCED:
             raise RuntimeError("summary audit boom")
         return _real_record(event_type=event_type, **kwargs)  # type: ignore[arg-type]
@@ -456,22 +458,34 @@ def test_worker_missing_credential_audits_failure(tmp_path: Path, service_actor:
 
 
 def test_worker_fetch_failure_audits_failure(
-    tmp_path: Path, service_actor: str, resolves_ok: None
+    tmp_path: Path, service_actor: str, resolves_ok: None, caplog
 ) -> None:
     """A fetch-phase GoogleConnectorError surfaces as GroupSyncFetchError -> one audit row."""
     factory = _factory(tmp_path)
     fake = _FakeGroupsClient(
         [("cms-a", "News", (CHANNEL_ONE,), 0)],
-        groups_error=GoogleApiResponseError(url="https://example/groups", reason="leaky"),
+        groups_error=GoogleApiResponseError(
+            url=("https://alice:password@example.test/groups?X-Goog-Signature=signed-secret"),
+            reason="Authorization: Bearer bearer-secret",
+        ),
     )
     executor = _executor(factory, client_factory=lambda _c: fake)
     try:
-        executor._run_group_sync_job(
-            tenant_id=TENANT, content_owner_id=CONTENT_OWNER, actor_identity=ACTOR
-        )
+        with caplog.at_level("ERROR", logger="ums_smart_revenue.connectors.runs.executor"):
+            executor._run_group_sync_job(
+                tenant_id=TENANT, content_owner_id=CONTENT_OWNER, actor_identity=ACTOR
+            )
     finally:
         executor.close()
     assert _one_failure_row(factory).details["error_class"] == "GroupSyncFetchError"
+    expected = [
+        record for record in caplog.records if "Scheduled group sync failed" in record.getMessage()
+    ]
+    assert len(expected) == 1
+    assert expected[0].exc_info is None
+    assert "failure_category=group_sync_fetch_failure" in expected[0].getMessage()
+    assert "signed-secret" not in expected[0].getMessage()
+    assert "bearer-secret" not in expected[0].getMessage()
 
 
 def test_worker_conflict_refusal_audits_failure(
@@ -569,6 +583,7 @@ def test_close_audits_queued_sync_job_with_before_start_row(
     started = threading.Event()
 
     def _slow_run_one(session: object, **kwargs: object) -> ConnectorRunOutcome:
+        """Block long enough to trigger the timeout path."""
         started.set()
         time.sleep(0.5)
         return ConnectorRunOutcome(run=None, counts={}, per_report_failures=[])
@@ -680,7 +695,7 @@ def test_failure_audits_swallow_actor_construction_error(tmp_path: Path) -> None
                 error_class="GroupSyncFetchError",
                 actor_identity=ACTOR,
             )
-            # ... its pull-job sibling via the public after_commit hook ...
+            # ... its pull-job sibling via the public activation-failure hook ...
             executor.audit_failed_before_start(
                 tenant_id=TENANT,
                 connector_key="youtube_reporting",

@@ -8,6 +8,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- P0-d structured logging and operational readiness: process-level
+  redaction-safe logging configuration (`UMS_LOG_LEVEL`, validated against
+  a fixed allowlist), a `/readyz` endpoint proving the configured database
+  accepts a trivial read (container healthcheck now probes readiness, not
+  just liveness), bounded graceful shutdown (uvicorn
+  `--timeout-graceful-shutdown 10` plus the 120s stop-grace budget), and
+  capped json-file log rotation in Compose.
 - Production Sentry observability design (exception capture policy,
   PII redaction, release health, and alert routing) in
   `Docs/superpowers/specs/2026-09-02-sentry-observability-design.md`.

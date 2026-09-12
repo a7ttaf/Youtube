@@ -67,11 +67,21 @@ from ums_smart_revenue.db.security_models import (
 
 
 def _exactly_one(items):
-    """Return the one expected item; a dry iterator fails the test."""
+    """Return the SINGLE expected item; dry or surplus iterators fail.
+
+    Consumes exactly one lookahead via a sentinel (never materializes the
+    remaining iterator, so infinite generators cannot hang the suite), and
+    raises AssertionError explicitly so the guard survives ``python -O``.
+    """
+    sentinel = object()
     try:
-        return next(items)
+        first = next(items)
     except StopIteration as exc:
-        raise AssertionError("expected one more canned item; got none") from exc
+        raise AssertionError("expected exactly one item; got none") from exc
+    extra = next(items, sentinel)
+    if extra is not sentinel:
+        raise AssertionError("expected exactly one item; got extras")
+    return first
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]

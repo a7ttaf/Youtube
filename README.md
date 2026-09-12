@@ -78,8 +78,9 @@ $env:UMS_AUTHZ_SOURCE = "headers"
 # 4) Run migrations
 uv run alembic upgrade head
 
-# 5) Run the API
-uv run uvicorn ums_smart_revenue.app:app --reload --host 0.0.0.0 --port 8000
+# 5) Run the API. PowerShell has no backslash line continuation, so this
+#    stays on one line; the bash block below keeps its backslashes.
+uv run uvicorn ums_smart_revenue.app:app --reload --host 0.0.0.0 --port 8000 --timeout-graceful-shutdown 10
 ```
 
 On Linux/macOS, run step 3 in bash instead — steps 1, 2, 4, and 5 are the same
@@ -144,6 +145,7 @@ uv run pytest -q tests/api
 | Variable | Required | Default | Purpose |
 |---|---|---|---|
 | `UMS_DATABASE_URL` | yes (prod) | none | SQLAlchemy URL for PostgreSQL. Use `postgresql+psycopg://…` (psycopg3 binary driver). Update `.env.example` to match. |
+| `UMS_LOG_LEVEL` | no | `INFO` | Application verbosity for the `ums_smart_revenue` logger (validated against DEBUG/INFO/WARNING/ERROR/CRITICAL; third-party loggers stay at WARNING — Uvicorn's access/uvicorn records are the documented exception, so request access lines survive). Docker log ROTATION is separate: `UMS_LOG_MAX_SIZE`/`UMS_LOG_MAX_FILE`. |
 | `UMS_AUTHZ_SOURCE` | no | `headers` | `headers` for dev/bootstrap, `database` for production (loads principal + roles from SQL). |
 | `UMS_TRUSTED_GATEWAY_TOKEN` | yes for protected routes | none | Shared secret asserted by the upstream identity gateway. Required for both `headers` bootstrap auth and `database` auth. Also read by `frontend/vite.config.ts` in Node to inject the dev proxy `X-UMS-Trusted-Gateway-Token` header. Keep the value in the repo-root `.env` and load it from there: the API and the dashboard normally run in separate terminals, so a value exported in one shell alone makes the two disagree and every protected route 401s. Note that `.env` is the lowest-precedence source Vite reads — `loadEnv` also picks up `.env.local`, `.env.[mode]`, and `.env.[mode].local`, then overlays the dashboard shell's own environment, in that increasing order — so clear a stale token from those rather than re-editing `.env`. **Never use a `VITE_*` alias** — any `VITE_*` env is embedded in the client bundle. |
 | `UMS_GOOGLE_CONNECTOR_SERVICE_ACTOR_ID` | required for Google connector runs | none | UUID used as the connector service principal for audit events. Optional at process boot so non-connector workloads can start; connector execution fails closed at runtime when unset, and malformed values fail settings load. The well-known placeholder UUID shipped in `.env.example` is rejected at runtime use — a copied template fails closed with a named placeholder instead of attributing audit rows to a published template id. |

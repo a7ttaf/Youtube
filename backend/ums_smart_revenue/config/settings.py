@@ -2,7 +2,8 @@
 # Purpose: Load process-level runtime settings from UMS_* environment
 #   variables into the frozen AppSettings dataclass (cached via lru_cache),
 #   including the connector job-executor and group-sync scheduler flags the
-#   app boot wiring enforces fail-fast. The raw bootstrap-tenant currency is
+#   app boot wiring enforces fail-fast, and the UMS_LOG_LEVEL the ASGI
+#   lifespan hands to configure_logging. The raw bootstrap-tenant currency is
 #   snapshotted here so create_app can resolve its effective authz mode before
 #   parsing it, while the public loader remains strict by default.
 # Database/ORM: None.
@@ -19,6 +20,8 @@
 #     AppSettings and enforces the cross-flag fail-fast contract;
 #     _bootstrap_tenant stamps tenant_primary_currency on the headers-mode
 #     bootstrap tenant.
+#   - File: backend/ums_smart_revenue/config/logging_config.py ->
+#     configure_logging consumes AppSettings.log_level.
 #   - File: backend/ums_smart_revenue/db/iso_4217_2026_05.py -> immutable
 #     repository snapshot used as the currency-code membership authority.
 # ============================================================================
@@ -86,6 +89,7 @@ CONNECTOR_JOB_MAX_WORKERS_ENV = "UMS_CONNECTOR_JOB_MAX_WORKERS"
 CONNECTOR_JOB_STALE_RUNNING_HOURS_ENV = "UMS_CONNECTOR_JOB_STALE_RUNNING_HOURS"
 GROUP_SYNC_SCHEDULE_ENABLED_ENV = "UMS_GROUP_SYNC_SCHEDULE_ENABLED"
 GROUP_SYNC_INTERVAL_HOURS_ENV = "UMS_GROUP_SYNC_INTERVAL_HOURS"
+LOG_LEVEL_ENV = "UMS_LOG_LEVEL"
 TENANT_PRIMARY_CURRENCY_ENV = "UMS_TENANT_PRIMARY_CURRENCY"
 
 _TRUTHY_TOKENS = frozenset({"1", "true", "yes", "on"})
@@ -105,6 +109,13 @@ DEFAULT_TENANT_PRIMARY_CURRENCY = "USD"
 AUTHZ_SOURCE_HEADERS = "headers"
 AUTHZ_SOURCE_DATABASE = "database"
 ALLOWED_AUTHZ_SOURCES = frozenset({AUTHZ_SOURCE_HEADERS, AUTHZ_SOURCE_DATABASE})
+
+DEFAULT_LOG_LEVEL = "INFO"
+# Severity order, not alphabetical: the tuple drives the operator-facing
+# "must be one of" message, where DEBUG < INFO < WARNING reads as a dial and
+# `sorted()` would read as noise. ALLOWED_LOG_LEVELS is the membership test.
+LOG_LEVEL_NAMES = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
+ALLOWED_LOG_LEVELS = frozenset(LOG_LEVEL_NAMES)
 
 
 @dataclass(frozen=True)
@@ -142,6 +153,22 @@ class AppSettings:
     # same contract as max_workers.
     group_sync_schedule_enabled: bool = False
     group_sync_interval_hours: int = 24
+    # APPLICATION logging level applied once at ASGI startup by
+    # config/logging_config.py::configure_logging. Stored as the canonical
+    # upper-case level NAME (not the int) so the value stays readable in
+    # settings dumps and so an unknown token is rejected at load time rather
+    # than silently degrading to WARNING. Default INFO: connector-run
+    # progress, tenant resolution, and the export lifecycle all log at INFO,
+    # and without them a half-completed run leaves no trace.
+    #
+    # Scope, because the name invites the wrong reading: this is applied to
+    # the `ums_smart_revenue` logger, NOT to the root logger. Third-party
+    # libraries stay at WARNING at every setting of this dial -- see
+    # config/logging_config.py::THIRD_PARTY_LOG_LEVEL for why (root-INFO
+    # newly INFO-enabled 56 library loggers, two of which print full request
+    # URLs). Setting this to DEBUG does not widen what any dependency prints.
+    log_level: str = DEFAULT_LOG_LEVEL
+
     # Snapshot the raw headers-only value without validating it in the
     # dataclass constructor. load_app_settings() validates it strictly by
     # default; create_app defers parsing until its explicit authz override has
@@ -203,6 +230,7 @@ def load_app_settings(*, validate_tenant_currency: bool = True) -> AppSettings:
         ),
         group_sync_schedule_enabled=_load_bool(GROUP_SYNC_SCHEDULE_ENABLED_ENV, default=False),
         group_sync_interval_hours=_load_int(GROUP_SYNC_INTERVAL_HOURS_ENV, default=24),
+        log_level=_load_log_level(),
         _tenant_primary_currency_raw=environ.get(TENANT_PRIMARY_CURRENCY_ENV),
     )
     if validate_tenant_currency:
@@ -328,6 +356,58 @@ def _load_int(env_name: str, *, default: int) -> int:
 
 
 # ============================================================================
+# Purpose: Parse UMS_LOG_LEVEL at settings-load time with the same two-tier
+#          contract as the other UMS_* loaders: missing/blank -> the INFO
+#          default; a recognised level name (any case) -> its canonical
+#          upper-case form; anything else -> ValueError carrying the env name.
+#          Fail-fast matters more here than elsewhere, because the silent
+#          alternative -- degrading an unknown token to WARNING -- reproduces
+#          exactly the "INFO is missing and nobody knows why" state P0.6
+#          exists to remove.
+# Database/ORM: None.
+# Standards: Mirrors _load_int's "missing -> default, blank -> default" and
+#            _load_bool's case/whitespace-insensitive token matching; the
+#            allowed set is ALLOWED_LOG_LEVELS, so numeric levels and the
+#            deprecated WARN/FATAL aliases are rejected rather than guessed.
+# Blast Radius: APPLICATION log verbosity only -- configure_logging puts this
+#               level on the `ums_smart_revenue` logger and holds the root
+#               logger at THIRD_PARTY_LOG_LEVEL, so no setting of this dial
+#               changes what a dependency prints. No authorization, finance,
+#               audit, or export behavior. Guarded CMS owner identifiers are
+#               fingerprinted at scheduler call sites and redacted from Google
+#               query/exception shapes by logging_config before handlers run.
+# Connections:
+#   - File: backend/ums_smart_revenue/config/logging_config.py ->
+#     configure_logging maps this name to its logging int, installs the single
+#     root handler, and decides which logger the level lands on.
+#   - File: backend/ums_smart_revenue/app.py -> the ASGI lifespan calls
+#     configure_logging with this value at startup.
+#   - File: docker-compose.yml -> x-app-env forwards UMS_LOG_LEVEL to `app`,
+#     `app-dev` and `migrate` with an explicit INFO default.
+# ============================================================================
+def _load_log_level() -> str:
+    """Parse ``UMS_LOG_LEVEL``, failing fast on an unrecognised level name.
+
+    Missing/blank env -> ``DEFAULT_LOG_LEVEL``. Present-but-unrecognised env
+    -> ``ValueError`` so a typo cannot silently cost the operator the INFO
+    lines that make a connector run traceable.
+
+    Raises:
+        ValueError: If ``UMS_LOG_LEVEL`` is present but is not one of
+            ``LOG_LEVEL_NAMES``.
+    """
+    raw = environ.get(LOG_LEVEL_ENV)
+    if raw is None:
+        return DEFAULT_LOG_LEVEL
+    candidate = raw.strip().upper()
+    if not candidate:
+        return DEFAULT_LOG_LEVEL
+    if candidate not in ALLOWED_LOG_LEVELS:
+        allowed = ", ".join(LOG_LEVEL_NAMES)
+        raise ValueError(f"{LOG_LEVEL_ENV} must be one of: {allowed}")
+    return candidate
+
+
 # Purpose: Parse the snapshotted UMS_* ISO-4217 currency value when the strict
 #          public loader or headers-mode app factory requires it, with the
 #          same two-tier contract as the other loaders: missing/blank

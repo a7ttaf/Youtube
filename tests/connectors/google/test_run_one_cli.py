@@ -145,7 +145,7 @@ def test_cli_rejects_bad_month_format() -> None:
 def test_cli_main_returns_2_when_database_url_missing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Cli main returns 2 when database url missing."""
+    """A missing database URL fails the CLI with exit code 2."""
     module = _load_cli_module()
 
     class _StubSettings:
@@ -158,7 +158,7 @@ def test_cli_main_returns_2_when_database_url_missing(
         return _StubSettings()
 
     def _build_session_factory_should_not_run(_url: str):
-        """Helper for the build session factory should not run scenario."""
+        """Fail the test if production session building is attempted."""
         raise AssertionError("build_session_factory must not run without a database URL")
 
     monkeypatch.setattr(module, "load_app_settings", _load_stub_settings)
@@ -226,20 +226,20 @@ class _SessionCtx:
     """Connection-context stub whose cursor answers one canned row."""
 
     def __init__(self, db_session: Session) -> None:
-        """Helper for the init scenario."""
+        """Init."""
         self._session = db_session
 
     def __enter__(self) -> Session:
-        """Helper for the enter scenario."""
+        """Enter."""
         return self._session
 
     def __exit__(self, *_exc_info: object) -> None:
-        """Helper for the exit scenario."""
+        """Exit."""
         return None
 
 
 def _patch_cli_runtime(module, monkeypatch: pytest.MonkeyPatch, db_session: Session) -> None:
-    """Helper for the patch cli runtime scenario."""
+    """Install every double the CLI main path touches."""
     class _StubSettings:
         """Settings double carrying only the fields the CLI reads."""
 
@@ -250,11 +250,11 @@ def _patch_cli_runtime(module, monkeypatch: pytest.MonkeyPatch, db_session: Sess
         return _StubSettings()
 
     def _fake_factory() -> _SessionCtx:
-        """Helper for the fake factory scenario."""
+        """Return a session factory double bound to one canned session."""
         return _SessionCtx(db_session)
 
     def _build_fake_session_factory(_url: str):
-        """Helper for the build fake session factory scenario."""
+        """Build a session-factory double for the CLI runtime."""
         return _fake_factory
 
     monkeypatch.setattr(module, "load_app_settings", _load_stub_settings)
@@ -270,7 +270,7 @@ def _seed_cli_credential(
     last_refresh_attempt_at: datetime | None = None,
     token_expiry_at: datetime | None = None,
 ) -> None:
-    """Helper for the seed cli credential scenario."""
+    """Seed one connector credential row for the CLI scenario."""
     db_session.add(
         ApiConnectorCredentialORM(
             id=uuid4(),
@@ -307,11 +307,11 @@ def test_cli_main_returns_2_when_credential_missing(
         """Connection-context stub whose cursor answers one canned row."""
 
         def __init__(self, db_session: Session) -> None:
-            """Helper for the init scenario."""
+            """Init."""
             self._session = db_session
 
         def __enter__(self) -> Session:
-            """Helper for the enter scenario."""
+            """Enter."""
             return self._session
 
         def __exit__(self, *_exc_info: object) -> None:
@@ -319,11 +319,11 @@ def test_cli_main_returns_2_when_credential_missing(
             # ``with Session(engine) as ...:`` so the context manager here
             # is a no-op exit. Closing the real session here would break
             # the fixture's cleanup.
-            """Helper for the exit scenario."""
+            """Exit."""
             return None
 
     def _fake_factory() -> _SessionCtx:
-        """Helper for the fake factory scenario."""
+        """Return a session factory double bound to one canned session."""
         return _SessionCtx(session)
 
     # ``load_app_settings`` is patched to return a stub with
@@ -341,7 +341,7 @@ def test_cli_main_returns_2_when_credential_missing(
         return _StubSettings()
 
     def _build_fake_session_factory(_url: str):
-        """Helper for the build fake session factory scenario."""
+        """Build a session-factory double for the CLI runtime."""
         return _fake_factory
 
     monkeypatch.setattr(module, "load_app_settings", _load_stub_settings)
@@ -365,19 +365,22 @@ def test_cli_main_returns_2_when_credential_missing(
     )
 
     assert exit_code == 2
-    assert "CredentialNotFoundError" in captured_err.getvalue()
+    stderr = captured_err.getvalue()
+    assert "CredentialNotFoundError" in stderr
+    assert "connector credential not found" in stderr
+    assert "missing-account" not in stderr
 
 
 def test_cli_main_returns_2_when_live_credential_smoke_missing(
     session: Session, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Cli main returns 2 when live credential smoke missing."""
+    """A live run without a smoke-passed credential exits 2."""
     _seed_cli_credential(session)
     module = _load_cli_module()
     _patch_cli_runtime(module, monkeypatch, session)
 
     def _run_one_should_not_run(*_args, **_kwargs):
-        """Helper for the run one should not run scenario."""
+        """Fail the test if run_one executes despite the refusal."""
         raise AssertionError("run_one must not start before credential smoke passes")
 
     monkeypatch.setattr(module, "run_one", _run_one_should_not_run)
@@ -405,7 +408,7 @@ def test_cli_main_returns_2_when_live_credential_smoke_missing(
 def test_cli_main_returns_2_when_live_credential_smoke_expired(
     session: Session, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Cli main returns 2 when live credential smoke expired."""
+    """An expired credential smoke fails the live run with exit 2."""
     _seed_cli_credential(
         session,
         last_refresh_status="succeeded",
@@ -416,7 +419,7 @@ def test_cli_main_returns_2_when_live_credential_smoke_expired(
     _patch_cli_runtime(module, monkeypatch, session)
 
     def _run_one_should_not_run(*_args, **_kwargs):
-        """Helper for the run one should not run scenario."""
+        """Fail the test if run_one executes despite the refusal."""
         raise AssertionError("run_one must not start after expired credential smoke")
 
     monkeypatch.setattr(module, "run_one", _run_one_should_not_run)
@@ -456,7 +459,7 @@ def test_cli_main_preserves_inactive_credential_error_before_smoke_wrapper(
     _patch_cli_runtime(module, monkeypatch, session)
 
     def _run_one_should_not_run(*_args, **_kwargs):
-        """Helper for the run one should not run scenario."""
+        """Fail the test if run_one executes despite the refusal."""
         raise AssertionError("run_one must not start for inactive credentials")
 
     monkeypatch.setattr(module, "run_one", _run_one_should_not_run)
@@ -484,7 +487,7 @@ def test_cli_main_preserves_inactive_credential_error_before_smoke_wrapper(
 def test_cli_main_allows_live_after_successful_credential_smoke(
     session: Session, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Cli main allows live after successful credential smoke."""
+    """A successful smoke admits the live connector run."""
     _seed_cli_credential(
         session,
         last_refresh_status="succeeded",
@@ -508,7 +511,7 @@ def test_cli_main_allows_live_after_successful_credential_smoke(
         per_report_failures: list[object] = []
 
     def _fake_run_one(*_args, **kwargs):
-        """Helper for the fake run one scenario."""
+        """Record the call and return the canned run outcome."""
         calls.append(kwargs)
         return _Outcome()
 
@@ -563,19 +566,19 @@ def test_cli_main_returns_2_when_tenant_lifecycle_rejected(
         """Connection-context stub whose cursor answers one canned row."""
 
         def __init__(self, db_session: Session) -> None:
-            """Helper for the init scenario."""
+            """Init."""
             self._session = db_session
 
         def __enter__(self) -> Session:
-            """Helper for the enter scenario."""
+            """Enter."""
             return self._session
 
         def __exit__(self, *_exc_info: object) -> None:
-            """Helper for the exit scenario."""
+            """Exit."""
             return None
 
     def _fake_factory() -> _SessionCtx:
-        """Helper for the fake factory scenario."""
+        """Return a session factory double bound to one canned session."""
         return _SessionCtx(session)
 
     class _StubSettings:
@@ -588,7 +591,7 @@ def test_cli_main_returns_2_when_tenant_lifecycle_rejected(
         return _StubSettings()
 
     def _build_fake_session_factory(_url: str):
-        """Helper for the build fake session factory scenario."""
+        """Build a session-factory double for the CLI runtime."""
         return _fake_factory
 
     class _RaiseOnEnter:
@@ -609,11 +612,11 @@ def test_cli_main_returns_2_when_tenant_lifecycle_rejected(
             """Accept and ignore the production helper's call signature."""
 
         def __enter__(self) -> None:
-            """Helper for the enter scenario."""
+            """Enter."""
             raise TenantLifecycleError(tenant_id=TENANT_ID, status="SUSPENDED")
 
         def __exit__(self, *_exc_info: object) -> None:
-            """Helper for the exit scenario."""
+            """Exit."""
             return None  # pragma: no cover -- __enter__ always raises
 
     monkeypatch.setattr(module, "load_app_settings", _load_stub_settings)
