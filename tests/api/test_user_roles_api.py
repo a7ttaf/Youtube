@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 
 from ums_smart_revenue.app import create_app
 from ums_smart_revenue.auth.roles import ROLE_DEFINITIONS
-from ums_smart_revenue.db.org_models import OrgBase
+from ums_smart_revenue.db.org_models import OrgBase, OrgUnitORM
 from ums_smart_revenue.db.security_models import (
     AuditLogORM,
     RoleORM,
@@ -15,10 +15,13 @@ from ums_smart_revenue.db.security_models import (
     UserORM,
     UserRoleAssignmentORM,
 )
+from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
 
 ADMIN_ID = UUID("00000000-0000-0000-0000-000000014001")
 TARGET_ID = UUID("00000000-0000-0000-0000-000000014002")
-COMPANY_ID = "company-tv-a"
+# A real org-unit UUID — the targeted access index must resolve the scope
+# against org_units, so seeded company targets can no longer be slugs.
+COMPANY_ID = str(UUID("00000000-0000-0000-0000-0000000c0a01"))
 
 
 def auth_headers(role: str, user_id: UUID = ADMIN_ID) -> dict[str, str]:
@@ -64,6 +67,17 @@ def seed_database(database_url: str, *, target_is_service_account: bool = False)
                     service_only=definition.service_only,
                 )
             )
+        # The targeted org index must resolve the company scope before an
+        # assignment write — seed the live unit the scope ids point at.
+        session.add(
+            OrgUnitORM(
+                id=UUID(COMPANY_ID),
+                tenant_id=UUID(UMS_TENANT_ID),
+                type="COMPANY",
+                name="Company TV A",
+                active=True,
+            )
+        )
         session.commit()
 
 
@@ -323,6 +337,33 @@ def test_incompatible_scope_type_rejected_before_persisting(tmp_path):
     assert response_mixed.status_code == 422
     assert "cannot be assigned to scope type" in response_mixed.json()["detail"]
 
+    engine = create_engine(database_url)
+    with Session(engine) as session:
+        assert session.scalars(select(UserRoleAssignmentORM)).all() == []
+        assert session.scalars(select(AuditLogORM)).all() == []
+
+
+def test_assign_role_rejects_unresolved_company_scope(tmp_path):
+    """A company scope that resolves to no live org unit is a 404, even for
+    global authority — assign must not persist a dangling access_scopes row."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    client = TestClient(create_app(database_url=database_url))
+
+    response = client.post(
+        f"/users/{TARGET_ID}/roles",
+        headers=auth_headers("corporate_admin"),
+        json={
+            "role_key": "assistant_analyst",
+            "scope_type": "company",
+            # Well-formed UUID but no org_units row — unresolved target.
+            "scope_id": str(UUID("00000000-0000-0000-0000-000000dead01")),
+            "reason": "Attempt assignment to a missing company",
+        },
+    )
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == "scope target not found"
     engine = create_engine(database_url)
     with Session(engine) as session:
         assert session.scalars(select(UserRoleAssignmentORM)).all() == []

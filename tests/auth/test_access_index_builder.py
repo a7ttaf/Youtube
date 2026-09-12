@@ -225,6 +225,7 @@ def test_scoped_index_contains_matches_canonical_index() -> None:
         ("sector-news", None, "SECTOR"),
     ]
     channels = [
+        ("channel-sector", "sector-tv"),  # direct-sector anchor: SECTOR branch
         ("channel-tv-a", "company-tv-a"),
         ("channel-orphan", "company-orphan"),
     ]
@@ -259,10 +260,12 @@ def test_scoped_index_contains_matches_canonical_index() -> None:
         AccessScope.sector(other_sector_id),
         AccessScope.company(company_id),
         AccessScope.company(orphan_company_id),
+        AccessScope.channel("channel-sector"),
         AccessScope.channel("channel-tv-a"),
         AccessScope.channel("channel-orphan"),
     ]
     targets = [
+        AccessScope.channel("channel-sector"),
         AccessScope.channel("channel-tv-a"),
         AccessScope.channel("channel-orphan"),
         AccessScope.company(company_id),

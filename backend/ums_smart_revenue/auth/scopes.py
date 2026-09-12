@@ -127,6 +127,27 @@ class OrgAccessIndex:
     #   - File: backend/ums_smart_revenue/org/access_index.py -> populates
     #     resolved_targets in the targeted loader.
     # ========================================================================
+    # ========================================================================
+    # Purpose: Answer whether the index's resolution proof covers the target —
+    #   False only when the index tracks resolution AND the target is an
+    #   org-resolvable type the loader could not prove live.
+    # Database/ORM: None — pure in-memory check over resolved_targets.
+    # Standards: fail-open only where tracking is absent (the canonical full
+    #   index) or the target type has no org resolution to consult; every
+    #   tracked org target must appear in resolved_targets.
+    # Blast Radius: Authorization + data integrity — assignment routes use
+    #   this to refuse dangling scopes even under global authority.
+    # Connections:
+    #   - File: backend/ums_smart_revenue/api/users.py -> assignment gate.
+    # ========================================================================
+    def target_resolved(self, target_scope: AccessScope) -> bool:
+        """Return True unless a tracked org target failed to resolve."""
+        if self.resolved_targets is None:
+            return True
+        if target_scope.type not in _ORG_RESOLVABLE_TYPES:
+            return True
+        return (target_scope.type, target_scope.id) in self.resolved_targets
+
     def _contains_same_type(
         self, granted_scope: AccessScope, target_scope: AccessScope
     ) -> bool:
@@ -139,11 +160,7 @@ class OrgAccessIndex:
         # consults the maps. Global-scoped authority is unaffected — it
         # already returned True above. Non-org target types are not
         # resolvable here and keep equality semantics.
-        if (
-            self.resolved_targets is not None
-            and target_scope.type in _ORG_RESOLVABLE_TYPES
-            and (target_scope.type, target_scope.id) not in self.resolved_targets
-        ):
+        if not self.target_resolved(target_scope):
             return False
         return granted_scope.id == target_scope.id
 

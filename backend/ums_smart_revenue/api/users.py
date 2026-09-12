@@ -526,6 +526,7 @@ def assign_user_role(
     role = _parse_role_for_policy(payload.role_key)
     target_scope = _parse_scope_for_policy(payload.scope_type, payload.scope_id)
     org_index = load_org_access_index_for_scope(session, target_scope)
+    _require_resolved_org_scope(target_scope, org_index)
     _require_role_assignment_policy(user, role, target_scope, org_index)
     try:
         assignment = repository.assign_role(
@@ -666,6 +667,7 @@ def grant_user_permission(
     permission = _parse_permission_for_policy(payload.permission_key)
     target_scope = _parse_scope_for_policy(payload.scope_type, payload.scope_id)
     org_index = load_org_access_index_for_scope(session, target_scope)
+    _require_resolved_org_scope(target_scope, org_index)
     _require_permission_grant_policy(user, permission, target_scope, org_index)
     try:
         grant = repository.grant_permission(
@@ -974,6 +976,31 @@ def _has_any_role(
     return any(
         _has_scoped_role(user, role, target_scope, org_index) for role in roles
     )
+
+
+# ============================================================================
+# Purpose: Refuse CREATE-path mutations whose org target the index could not
+#   resolve — contains() correctly lets GLOBAL authority through for revoke
+#   and cleanup of stale rows, but assign/grant would persist a NEW dangling
+#   access_scopes row against a dead or never-existing org object.
+# Database/ORM: None — reads the targeted index's resolved_targets proof.
+# Standards: Fail closed — a tracked unresolved org target is a 404, not a
+#   creatable scope; non-org and untracked targets pass through unchanged.
+# Blast Radius: Data integrity — stops dangling organization-scoped
+#   assignments/grants even under global authority.
+# Connections:
+#   - File: backend/ums_smart_revenue/auth/scopes.py -> target_resolved.
+#   - File: backend/ums_smart_revenue/org/access_index.py -> loader proof.
+# ============================================================================
+def _require_resolved_org_scope(
+    target_scope: AccessScope, org_index: OrgAccessIndex
+) -> None:
+    """Raise 404 when a create-path mutation targets an unresolved org scope."""
+    if not org_index.target_resolved(target_scope):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="scope target not found",
+        )
 
 
 # ============================================================================

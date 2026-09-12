@@ -172,7 +172,19 @@ def apply_statement_bounds(
     if dialect.name != "postgresql":
         return
     connection = db.connection() if isinstance(db, Session) else db
-    if connection.get_isolation_level() == "AUTOCOMMIT":
+    # Three AUTOCOMMIT surfaces, any of which discards SET LOCAL at statement
+    # end: the SQLAlchemy execution option (execution_options(
+    # isolation_level="AUTOCOMMIT") — get_isolation_level() can still report
+    # the stored level such as READ COMMITTED because psycopg keeps autocommit
+    # separate from isolation_level), the dialect-reported level, and the raw
+    # DBAPI autocommit flag for connections opened autocommit=True.
+    execution_level = connection.get_execution_options().get("isolation_level")
+    autocommit = (
+        execution_level == "AUTOCOMMIT"
+        or connection.get_isolation_level() == "AUTOCOMMIT"
+        or bool(getattr(connection.connection, "autocommit", False))
+    )
+    if autocommit:
         # set_config(..., is_local=true) is transaction-scoped: under
         # AUTOCOMMIT each setting evaporates at the end of its own statement,
         # leaving the target query unbounded while reporting success.

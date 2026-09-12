@@ -1304,26 +1304,6 @@ class ConnectorJobExecutor:
                     tenant_id,
                 )
 
-    def audit_failed_before_start(
-        self,
-        *,
-        tenant_id: UUID,
-        connector_key: str,
-        account_id: str,
-        report_month: str,
-        error_class: str,
-        actor_identity: ConnectorJobActor,
-    ) -> None:
-        """Public hook for request-session after_commit activation failures."""
-        self._audit_failed_before_start(
-            tenant_id=tenant_id,
-            connector_key=connector_key,
-            account_id=account_id,
-            report_month=report_month,
-            error_class=error_class,
-            actor_identity=actor_identity,
-        )
-
     # ========================================================================
     # Purpose: Run one post-close failure audit on a tracked non-daemon
     #   thread — the last-chance path for hooks that outlive close().

@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 from ums_smart_revenue.app import create_app
 from ums_smart_revenue.auth.permissions import PERMISSION_DEFINITIONS
 from ums_smart_revenue.auth.roles import ROLE_DEFINITIONS
-from ums_smart_revenue.db.org_models import OrgBase
+from ums_smart_revenue.db.org_models import OrgBase, OrgUnitORM
 from ums_smart_revenue.db.security_models import (
     AuditLogORM,
     PermissionORM,
@@ -16,10 +16,13 @@ from ums_smart_revenue.db.security_models import (
     UserORM,
     UserPermissionGrantORM,
 )
+from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
 
 ADMIN_ID = UUID("00000000-0000-0000-0000-000000015001")
 TARGET_ID = UUID("00000000-0000-0000-0000-000000015002")
-COMPANY_ID = "company-tv-a"
+# A real org-unit UUID — the targeted access index must resolve the scope
+# against org_units, so seeded company targets can no longer be slugs.
+COMPANY_ID = str(UUID("00000000-0000-0000-0000-0000000c0b01"))
 
 
 def auth_headers(role: str, user_id: UUID = ADMIN_ID) -> dict[str, str]:
@@ -69,6 +72,17 @@ def seed_database(database_url: str) -> None:
                     audit_on_use=definition.audit_on_use,
                 )
             )
+        # The targeted org index must resolve the company scope before a
+        # grant write — seed the live unit the scope ids point at.
+        session.add(
+            OrgUnitORM(
+                id=UUID(COMPANY_ID),
+                tenant_id=UUID(UMS_TENANT_ID),
+                type="COMPANY",
+                name="Company TV A",
+                active=True,
+            )
+        )
         session.commit()
 
 

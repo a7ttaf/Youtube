@@ -1100,11 +1100,19 @@ def test_reservation_hooks_ignore_savepoint_events_and_run_once(tmp_path) -> Non
         session.begin()
         session.begin_nested().commit()  # savepoint release — must not fire
         assert fake.activate_calls == []
+        assert fake.committed_marks == []
+        assert fake.ended_hooks == []
         session.commit()  # outermost commit — activates exactly once
         assert len(fake.activate_calls) == 1
+        # The shutdown bracket is balanced: begin/end fire exactly once and
+        # only around the outer commit's lifecycle action.
+        assert fake.committed_marks == [reservation]
+        assert fake.ended_hooks == [reservation]
         session.begin()
         session.commit()  # second outer commit — still exactly once
         assert len(fake.activate_calls) == 1
+        assert fake.committed_marks == [reservation]
+        assert fake.ended_hooks == [reservation]
         assert fake.cancel_calls == []
         session.close()
 

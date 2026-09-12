@@ -894,16 +894,27 @@ def test_close_keeps_audit_gate_open_for_hook_past_reservation_removal(tmp_path)
     )
     assert reservation is not None
 
-    # Start close() and WAIT for the worker pool to stop before running the
-    # hook — without the barrier, activate() could run before shutdown()
-    # lands and succeed, failing the test nondeterministically.
+    # Spy on the tracked audit pool so the test can prove the failure audit
+    # was submitted through it — not the post-close last-chance writer.
+    submitted: list[object] = []
+    real_submit = executor._audit_executor.submit
+
+    def _spy_submit(fn, *args, **kwargs):
+        submitted.append(fn)
+        return real_submit(fn, *args, **kwargs)
+
+    executor._audit_executor.submit = _spy_submit  # type: ignore[method-assign]
+
+    # Register the hook BEFORE close() — the outstanding-post-commit counter
+    # is what keeps the audit gate open through shutdown, so it must be held
+    # before shutdown begins for the interleaving to be deterministic.
+    executor.begin_post_commit(reservation)
     closer = threading.Thread(target=executor.close)
     closer.start()
     assert executor._worker_pool_stopped.wait(timeout=5), (
         "close() never reached worker-pool shutdown"
     )
 
-    executor.begin_post_commit(reservation)
     try:
         executor.activate(reservation)
         raise AssertionError("activate must fail against a stopped pool")
@@ -922,6 +933,10 @@ def test_close_keeps_audit_gate_open_for_hook_past_reservation_removal(tmp_path)
 
     closer.join(timeout=10)
     assert not closer.is_alive(), "close() must wait for the in-flight hook"
+    # The outstanding hook kept _audit_accepting open, so the failure audit
+    # went through the tracked pool — the last-chance writer never ran.
+    assert submitted == [executor._audit_failed_before_start]
+    assert executor._last_chance_writers == set()
 
     with factory() as session:
         audits = session.scalars(select(AuditLogORM)).all()
