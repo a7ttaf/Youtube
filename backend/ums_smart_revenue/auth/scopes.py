@@ -1,3 +1,19 @@
+# ============================================================================
+# Purpose: Authorization scope vocabulary — ScopeType/AccessScope identify
+#   what a role assignment grants, and OrgAccessIndex answers whether one
+#   scope contains another through the org hierarchy (or by resolution-aware
+#   same-type equality for targeted indexes).
+# Database/ORM: None directly — the maps here are populated by loaders in
+#   org/access_index.py from org_units + youtube_channels.
+# Standards: fail-closed — global grants contain everything, a global target
+#   is never contained by a scoped grant, malformed id-less scopes deny, and
+#   resolution-aware indexes deny same-type stale scopes on dead org targets.
+# Blast Radius: Authorization — every scoped permission check funnels
+#   through OrgAccessIndex.contains; a wrong True is a privilege grant.
+# Connections:
+#   - File: backend/ums_smart_revenue/org/access_index.py -> index loaders.
+#   - File: backend/ums_smart_revenue/api/users.py -> mutation authorization.
+# ============================================================================
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -99,6 +115,18 @@ class OrgAccessIndex:
             return self._contains_same_type(granted_scope, target_scope)
         return self._contains_cross_type(granted_scope, target_scope)
 
+    # ========================================================================
+    # Purpose: Decide same-type containment — id equality, but gated on the
+    #   index's resolved_targets when the index tracks resolution.
+    # Database/ORM: None — pure in-memory check over the loaded index.
+    # Standards: fail-closed — unresolved org targets deny even an exact-id
+    #   stale scope; id-less pairs only match when both sides are id-less.
+    # Blast Radius: Authorization — a wrong True grants a scoped admin
+    #   authority over a dead or malformed target.
+    # Connections:
+    #   - File: backend/ums_smart_revenue/org/access_index.py -> populates
+    #     resolved_targets in the targeted loader.
+    # ========================================================================
     def _contains_same_type(
         self, granted_scope: AccessScope, target_scope: AccessScope
     ) -> bool:
@@ -119,6 +147,19 @@ class OrgAccessIndex:
             return False
         return granted_scope.id == target_scope.id
 
+    # ========================================================================
+    # Purpose: Decide cross-type containment — sector>company, sector>channel,
+    #   company>channel — through the loaded ancestry edge maps.
+    # Database/ORM: None — pure in-memory map lookups.
+    # Standards: fail-closed — either side missing an id denies (a None id
+    #   would compare equal to a missing lookup and falsely authorize), and
+    #   any scope pair without a real ancestry edge denies.
+    # Blast Radius: Authorization — a wrong True lets a sector/company admin
+    #   reach a target outside their subtree.
+    # Connections:
+    #   - File: backend/ums_smart_revenue/org/access_index.py -> builds the
+    #     edge maps this helper reads.
+    # ========================================================================
     def _contains_cross_type(
         self, granted_scope: AccessScope, target_scope: AccessScope
     ) -> bool:

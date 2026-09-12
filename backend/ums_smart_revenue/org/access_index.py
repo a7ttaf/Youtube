@@ -202,14 +202,43 @@ def _parent_sector_id(
 #   - File: backend/ums_smart_revenue/auth/scopes.py -> contains() lookups.
 #   - File: backend/ums_smart_revenue/api/users.py -> mutation routes.
 # ============================================================================
-def _unresolved_index() -> OrgAccessIndex:
-    """Return the fail-closed index for a target that did not resolve.
+def load_org_access_index_for_scope(
+    session: Session, target_scope: AccessScope
+) -> OrgAccessIndex:
+    """Build the minimal index covering only the target scope's ancestry.
 
-    ``resolved_targets=frozenset()`` turns ON same-type resolution checks:
-    an org target that cannot be resolved is denied to same-type callers
-    (contains() still answers True for global-scoped authority, so stale
-    assignments stay reachable for cleanup by global admins only).
+    Raises:
+        TenantContextMissing: when called without an active request tenant
+            context — every lookup below is scoped to ``require_current_tenant``.
     """
+    tenant_id = require_current_tenant().id
+    if target_scope.id is None:
+        return _unresolved_index()
+    if target_scope.type == ScopeType.SECTOR:
+        return _sector_target_index(session, tenant_id, target_scope)
+    if target_scope.type == ScopeType.CHANNEL:
+        return _channel_target_index(session, tenant_id, target_scope)
+    if target_scope.type == ScopeType.COMPANY:
+        return _company_target_index(session, tenant_id, target_scope)
+    return _unresolved_index()
+
+
+# ============================================================================
+# Purpose: Produce the shared fail-closed index for a target that did not
+#   resolve — empty edge maps plus an EMPTY resolved_targets set.
+# Database/ORM: None — pure construction, no queries.
+# Standards: resolved_targets=frozenset() turns ON same-type resolution
+#   checks: an org target that cannot be resolved is denied to same-type
+#   callers (contains() still answers True for global-scoped authority, so
+#   stale assignments stay reachable for cleanup by global admins only).
+# Blast Radius: Authorization — this is the deny-by-default shape every
+#   unresolvable target falls back to.
+# Connections:
+#   - File: backend/ums_smart_revenue/auth/scopes.py -> resolved_targets gate
+#     inside OrgAccessIndex._contains_same_type.
+# ============================================================================
+def _unresolved_index() -> OrgAccessIndex:
+    """Return the fail-closed index for a target that did not resolve."""
     return OrgAccessIndex(
         channel_company={},
         channel_sector={},
@@ -218,6 +247,18 @@ def _unresolved_index() -> OrgAccessIndex:
     )
 
 
+# ============================================================================
+# Purpose: Resolve a sector target to its minimal index — resolved iff the
+#   parsed UUID names a live SECTOR org unit in the request tenant.
+# Database/ORM: one indexed org_units lookup via _active_org_unit_row,
+#   tenant-scoped and active-only.
+# Standards: fail-closed — malformed id, missing unit, or non-SECTOR type
+#   all yield the unresolved index.
+# Blast Radius: Authorization — a sector target's same-type containment.
+# Connections:
+#   - File: backend/ums_smart_revenue/org/access_index.py ->
+#     load_org_access_index_for_scope is the sole caller.
+# ============================================================================
 def _sector_target_index(
     session: Session, tenant_id: UUID, target_scope: AccessScope
 ) -> OrgAccessIndex:
@@ -240,6 +281,21 @@ def _sector_target_index(
     )
 
 
+# ============================================================================
+# Purpose: Resolve a channel target to its minimal index from the channel's
+#   primary org unit and that unit's ancestry.
+# Database/ORM: one indexed youtube_channels lookup plus _active_org_unit_row
+#   / _parent_sector_id reads — tenant-scoped and active-only.
+# Standards: fail-closed and canonical-identical — the channel->company edge
+#   exists ONLY when the company has a live sector parent (orphan-company
+#   channels stay resolved but edge-less); a SECTOR primary unit yields the
+#   channel->sector edge directly.
+# Blast Radius: Authorization — channel-target containment for
+#   channel/company/sector-scoped callers.
+# Connections:
+#   - File: backend/ums_smart_revenue/org/access_index.py ->
+#     build_org_access_index defines the edge rules this mirrors.
+# ============================================================================
 def _channel_target_index(
     session: Session, tenant_id: UUID, target_scope: AccessScope
 ) -> OrgAccessIndex:
@@ -292,6 +348,20 @@ def _channel_target_index(
     )
 
 
+# ============================================================================
+# Purpose: Resolve a company target to its minimal index — resolved iff the
+#   parsed UUID names a live COMPANY org unit, with the company->sector edge
+#   when a live sector parent exists.
+# Database/ORM: one indexed org_units lookup plus _parent_sector_id —
+#   tenant-scoped and active-only.
+# Standards: fail-closed — malformed id, missing unit, or non-COMPANY type
+#   yield the unresolved index; an orphan company resolves with no edge.
+# Blast Radius: Authorization — company-target containment for
+#   company/sector-scoped callers.
+# Connections:
+#   - File: backend/ums_smart_revenue/org/access_index.py ->
+#     build_org_access_index defines the edge rules this mirrors.
+# ============================================================================
 def _company_target_index(
     session: Session, tenant_id: UUID, target_scope: AccessScope
 ) -> OrgAccessIndex:
@@ -315,24 +385,3 @@ def _company_target_index(
         ),
         resolved_targets=frozenset({(target_scope.type, company_id_raw)}),
     )
-
-
-def load_org_access_index_for_scope(
-    session: Session, target_scope: AccessScope
-) -> OrgAccessIndex:
-    """Build the minimal index covering only the target scope's ancestry.
-
-    Raises:
-        TenantContextMissing: when called without an active request tenant
-            context — every lookup below is scoped to ``require_current_tenant``.
-    """
-    tenant_id = require_current_tenant().id
-    if target_scope.id is None:
-        return _unresolved_index()
-    if target_scope.type == ScopeType.SECTOR:
-        return _sector_target_index(session, tenant_id, target_scope)
-    if target_scope.type == ScopeType.CHANNEL:
-        return _channel_target_index(session, tenant_id, target_scope)
-    if target_scope.type == ScopeType.COMPANY:
-        return _company_target_index(session, tenant_id, target_scope)
-    return _unresolved_index()
