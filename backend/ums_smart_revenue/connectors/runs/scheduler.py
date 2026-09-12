@@ -38,8 +38,8 @@
 #   its per-tenant behavior. Activation follows a durable intent commit so a
 #   cancelled queued future remains recoverable after process loss.
 # Blast Radius: Triggers CMS group-sync jobs on a timer and adds its submission
-#   intent to audit_logs. The
-#   jobs it submits run through the SAME core (group_sync.py) and worker
+#   intent to audit_logs. The jobs it submits run through the SAME core
+#   (group_sync.py) and worker
 #   (executor.py) the manual route and Sched 2 already exercise, so their
 #   audit/RLS/atomicity guarantees are inherited here, not reimplemented.
 # Connections:

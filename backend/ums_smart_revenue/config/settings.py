@@ -3,9 +3,7 @@
 #   variables into the frozen AppSettings dataclass (cached via lru_cache),
 #   including the connector job-executor and group-sync scheduler flags the
 #   app boot wiring enforces fail-fast, and the UMS_LOG_LEVEL the ASGI
-#   lifespan hands to configure_logging.
-
-#   app boot wiring enforces fail-fast. The raw bootstrap-tenant currency is
+#   lifespan hands to configure_logging. The raw bootstrap-tenant currency is
 #   snapshotted here so create_app can resolve its effective authz mode before
 #   parsing it, while the public loader remains strict by default.
 # Database/ORM: None.
@@ -19,13 +17,11 @@
 #   row; database-mode tenant currency remains PostgreSQL-backed.
 # Connections:
 #   - File: backend/ums_smart_revenue/app.py -> create_app consumes
-#     AppSettings and enforces the cross-flag fail-fast contract.
-#   - File: backend/ums_smart_revenue/config/logging_config.py ->
-#     configure_logging consumes AppSettings.log_level.
-
 #     AppSettings and enforces the cross-flag fail-fast contract;
 #     _bootstrap_tenant stamps tenant_primary_currency on the headers-mode
 #     bootstrap tenant.
+#   - File: backend/ums_smart_revenue/config/logging_config.py ->
+#     configure_logging consumes AppSettings.log_level.
 #   - File: backend/ums_smart_revenue/db/iso_4217_2026_05.py -> immutable
 #     repository snapshot used as the currency-code membership authority.
 # ============================================================================
@@ -94,7 +90,6 @@ CONNECTOR_JOB_STALE_RUNNING_HOURS_ENV = "UMS_CONNECTOR_JOB_STALE_RUNNING_HOURS"
 GROUP_SYNC_SCHEDULE_ENABLED_ENV = "UMS_GROUP_SYNC_SCHEDULE_ENABLED"
 GROUP_SYNC_INTERVAL_HOURS_ENV = "UMS_GROUP_SYNC_INTERVAL_HOURS"
 LOG_LEVEL_ENV = "UMS_LOG_LEVEL"
-
 TENANT_PRIMARY_CURRENCY_ENV = "UMS_TENANT_PRIMARY_CURRENCY"
 
 _TRUTHY_TOKENS = frozenset({"1", "true", "yes", "on"})
@@ -236,7 +231,6 @@ def load_app_settings(*, validate_tenant_currency: bool = True) -> AppSettings:
         group_sync_schedule_enabled=_load_bool(GROUP_SYNC_SCHEDULE_ENABLED_ENV, default=False),
         group_sync_interval_hours=_load_int(GROUP_SYNC_INTERVAL_HOURS_ENV, default=24),
         log_level=_load_log_level(),
-
         _tenant_primary_currency_raw=environ.get(TENANT_PRIMARY_CURRENCY_ENV),
     )
     if validate_tenant_currency:

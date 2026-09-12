@@ -180,18 +180,6 @@ def _defer_logging_restore_until_workers_finish(
         _wait_and_restore()
 
 
-# ============================================================================
-# Purpose: Build the API after resolving the effective authorization mode and
-#   validate only settings consumed by that mode.
-# Database/ORM: Configures SQLAlchemy session factories when database_url resolves.
-# Standards: Explicit factory overrides win over environment defaults; headers
-#   currency validation stays fail-closed without affecting database mode.
-# Blast Radius: Application startup, tenant resolution, and authorization wiring.
-# Connections:
-#   - File: backend/ums_smart_revenue/config/settings.py -> mode-aware currency resolver.
-#   - File: backend/ums_smart_revenue/tenancy/resolver.py -> database tenant rows.
-# ============================================================================
-
 def _shutdown_background_workers(
     fastapi_app: FastAPI, logging_configuration: LoggingConfiguration
 ) -> None:
@@ -246,6 +234,17 @@ def _shutdown_background_workers(
         raise ExceptionGroup("background worker shutdown failed", shutdown_errors)
 
 
+# ============================================================================
+# Purpose: Build the API after resolving the effective authorization mode and
+#   validate only settings consumed by that mode.
+# Database/ORM: Configures SQLAlchemy session factories when database_url resolves.
+# Standards: Explicit factory overrides win over environment defaults; headers
+#   currency validation stays fail-closed without affecting database mode.
+# Blast Radius: Application startup, tenant resolution, and authorization wiring.
+# Connections:
+#   - File: backend/ums_smart_revenue/config/settings.py -> mode-aware currency resolver.
+#   - File: backend/ums_smart_revenue/tenancy/resolver.py -> database tenant rows.
+# ============================================================================
 def create_app(*, database_url: str | None = None, authz_source: str | None = None) -> FastAPI:
     """Create the FastAPI application with optional SQL-backed authorization."""
     settings = load_app_settings(validate_tenant_currency=False)
