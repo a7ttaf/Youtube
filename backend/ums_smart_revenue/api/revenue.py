@@ -1044,8 +1044,13 @@ def _revenue_fact_import_permission(
         AccessScope.global_scope(),
     ):
         return Permission.IMPORT_MANUAL_REVENUE
-    require_permission(user, Permission.RUN_CONNECTOR_JOBS, connector_scope)
-    return Permission.RUN_CONNECTOR_JOBS
+    # FIX: RUN_CONNECTOR_JOBS is also granted to human Revenue Operations and
+    # Connector Admin roles; only a persisted service principal may use the
+    # connector-execution path. Humans fail closed onto the manual grant.
+    if user.is_service_account:
+        require_permission(user, Permission.RUN_CONNECTOR_JOBS, connector_scope)
+        return Permission.RUN_CONNECTOR_JOBS
+    raise_missing_permission(Permission.IMPORT_MANUAL_REVENUE)
 
 
 # ============================================================================

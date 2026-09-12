@@ -231,6 +231,7 @@ def _load_dependencies() -> dict[str, Any]:
     from ums_smart_revenue.db.org_models import OrgUnitORM
     from ums_smart_revenue.db.security_models import RoleORM
     from ums_smart_revenue.db.session import build_session_factory
+    from ums_smart_revenue.org.sql_org_units import ensure_org_unit_row
     from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
     from ums_smart_revenue.tenancy.context import TENANT_CTX
     from ums_smart_revenue.tenancy.models import TenantStatus
@@ -265,6 +266,7 @@ def _load_dependencies() -> dict[str, Any]:
         "UserRoleAssignmentConflictError": UserRoleAssignmentConflictError,
         "UserRoleAssignmentError": UserRoleAssignmentError,
         "build_session_factory": build_session_factory,
+        "ensure_org_unit_row": ensure_org_unit_row,
         "load_app_settings": load_app_settings,
         "record_audit_event": record_audit_event,
     }
@@ -826,10 +828,11 @@ def _org_unit_drift(
 #   row's OWN stored values. Every field of the outcome is read back from the
 #   ORM row rather than echoed from the CLI arguments, so the summary can only
 #   ever describe what the database actually holds.
-# Database/ORM: ``org_units`` (OrgUnitORM) written directly. ``org_units`` has
-#   NO repository and NO API writer anywhere in the codebase (audit H2); the
-#   only other writer is scripts/seed_demo_month.py, whose guarded-insert shape
-#   this mirrors. Building POST /org-units was explicitly ruled out of the beta.
+# Database/ORM: ``org_units`` via the org write repository
+#   ``org/sql_org_units.ensure_org_unit_row`` — the guarded savepointed insert
+#   lives behind the adapter; this layer keeps only drift policy and outcome
+#   shaping. ``org_units`` has NO API writer anywhere in the codebase (audit
+#   H2); building POST /org-units was explicitly ruled out of the beta.
 # Standards: Deterministic ``uuid5`` id, insert guarded by a primary-key lookup
 #   so a re-run mutates nothing, and the insert is flushed before the caller
 #   moves on so the self-referential composite FK
@@ -838,13 +841,13 @@ def _org_unit_drift(
 #   authorization change; the caller emits ORG_UNIT_CHANGED with the first
 #   bootstrapped account as actor when this helper creates a row.
 # Connections:
+#   - File: backend/ums_smart_revenue/org/sql_org_units.py -> the repository.
 #   - File: backend/ums_smart_revenue/db/org_models.py -> OrgUnitORM constraints.
 #   - File: backend/ums_smart_revenue/auth/audit.py -> ORG_UNIT_CHANGED event.
-#   - File: scripts/seed_demo_month.py -> the guarded-insert pattern lifted here.
 # ============================================================================
 def _ensure_org_unit(
     session: Any,
-    org_orm: Any,
+    deps: dict[str, Any],
     *,
     unit_id: UUID,
     tenant_id: UUID,
@@ -854,46 +857,14 @@ def _ensure_org_unit(
     name_flag: str,
 ) -> _OrgUnitOutcome:
     """Create the unit if absent; report the stored row's own values either way."""
-    from sqlalchemy.exc import IntegrityError
-
-    row = session.get(org_orm, unit_id)
-    created = row is None
-    if created:
-        candidate = org_orm(
-            id=unit_id,
-            tenant_id=tenant_id,
-            parent_id=parent_id,
-            type=unit_type,
-            name=name,
-            # A bootstrap unit is always created active; ``_org_unit_drift``
-            # refuses a pre-existing row that is not, because an inactive unit
-            # is dropped by every org read.
-            active=True,
-        )
-        # FIX: org ids are DETERMINISTIC (_bootstrap_uuid over tenant + role),
-        # so two concurrent --org-skeleton runs -- even for different operator
-        # emails -- compute the same id, both miss the get() above, and the
-        # loser's flush raises IntegrityError. Unwrapped, that escaped to main's
-        # `except SQLAlchemyError` and rolled back the WHOLE invocation,
-        # including its freshly created account and role, even though the
-        # skeleton it wanted now exists. The savepoint confines the failed
-        # insert so the enclosing transaction stays usable, exactly as
-        # SqlAlchemyUserRoleAssignmentRepository._get_or_create_scope does for
-        # concurrent access-scope creators.
-        try:
-            with session.begin_nested():
-                session.add(candidate)
-                session.flush()
-            row = candidate
-        except IntegrityError:
-            # The savepoint rolled back; re-read the winning row and fall
-            # through to the SAME drift validation an ordinary EXISTING row
-            # gets, so a concurrent writer that created a drifted or inactive
-            # unit still fails closed instead of being silently accepted.
-            row = session.get(org_orm, unit_id)
-            if row is None:
-                raise
-            created = False
+    row, created = deps["ensure_org_unit_row"](
+        session,
+        unit_id=unit_id,
+        tenant_id=tenant_id,
+        parent_id=parent_id,
+        unit_type=unit_type,
+        name=name,
+    )
     if not created:
         drift = _org_unit_drift(
             row,
@@ -951,12 +922,11 @@ def _ensure_org_skeleton(
     actor: Any,
 ) -> list[_OrgUnitOutcome]:
     """Create the SECTOR and its child COMPANY if absent; report both stored rows."""
-    org_orm = deps["OrgUnitORM"]
     sector_id = _bootstrap_uuid(tenant_id, "org", "sector")
     company_id = _bootstrap_uuid(tenant_id, "org", "company")
     sector = _ensure_org_unit(
         session,
-        org_orm,
+        deps,
         unit_id=sector_id,
         tenant_id=tenant_id,
         parent_id=None,
@@ -966,7 +936,7 @@ def _ensure_org_skeleton(
     )
     company = _ensure_org_unit(
         session,
-        org_orm,
+        deps,
         unit_id=company_id,
         tenant_id=tenant_id,
         parent_id=sector_id,

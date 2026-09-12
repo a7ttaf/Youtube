@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+- Connector-execution ingestion surfaces are service-principal only:
+  `POST /reports/raw-files` and the connector-source path of
+  `POST /revenue/facts` now require a persisted service account holding
+  `connectors.run_jobs` at the connector scope; human Revenue Operations and
+  Connector Admin holders fail closed with the uniform missing-permission 403
+  instead of writing connector-provenance rows.
+- User-management grant authority is scope-checked: role assignment and
+  direct permission grant/revoke routes now require the caller's qualifying
+  role assignment to contain the target scope, and `connector_admin` can only
+  be assigned or revoked by a Super Owner.
+- `alembic downgrade` across `20260825_0001` refuses while an active
+  `beta_operator` assignment remains, so a rolled-back binary cannot inherit
+  role keys it cannot parse.
+
 ### Added
 - Production Sentry observability design (exception capture policy,
   PII redaction, release health, and alert routing) in

@@ -24,10 +24,10 @@ import os
 #   - File: tests/db/test_google_revenue_source_migration_postgres.py -> caller.
 # ============================================================================
 def require_postgres_url() -> str:
+    """Return the required UMS_TEST_DATABASE_URL or fail fast with setup guidance."""
     # FIX: treat blank/whitespace-only values as missing. `if not url` let a
     # value like "   " through, which then fails later with an opaque DB
     # connection error instead of this fail-fast setup contract.
-    """Return the required PostgreSQL test URL or fail fast with setup guidance."""
     url = os.environ.get("UMS_TEST_DATABASE_URL")
     if url is None or not url.strip():
         # FIX: State the database-name rule exactly as the shared destructive

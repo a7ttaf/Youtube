@@ -30,6 +30,7 @@ from ums_smart_revenue.auth.principals import (
     SqlAlchemyPrincipalLoader,
 )
 from ums_smart_revenue.auth.roles import ROLE_DEFINITIONS
+from ums_smart_revenue.db.org_models import OrgBase
 from ums_smart_revenue.db.security_models import (
     AccessScopeORM,
     AuditLogORM,
@@ -229,6 +230,8 @@ def seed_database(database_url: str) -> None:
     engine = create_engine(database_url)
     TenantBase.metadata.create_all(engine)
     SecurityBase.metadata.create_all(engine)
+    # OrgAccessIndex loader dependency reads org_units/youtube_channels.
+    OrgBase.metadata.create_all(engine)
     with Session(engine) as session:
         session.add(
             TenantORM(

@@ -32,6 +32,43 @@ _EXPORT_SCOPE_TYPES = _ORG_SCOPE_TYPES | frozenset({ScopeType.EXPORT.value})
 _CONNECTOR_SCOPE_TYPES = frozenset({ScopeType.GLOBAL.value, ScopeType.CONNECTOR.value})
 _GLOBAL_SCOPE_TYPES = frozenset({ScopeType.GLOBAL.value})
 
+_ACTIVE_GRANT_UNIQUE_INDEX = "uq_active_user_permission_scope"
+
+
+# ============================================================================
+# Purpose: Decide whether an INSERT IntegrityError is the active-grant
+#   uniqueness guard (uq_active_user_permission_scope) so the 409 answer comes
+#   from the violation itself — a post-race re-query can miss a winner already
+#   revoked by a concurrent transaction.
+# Database/ORM: Inspects the DBAPI error (diag.constraint_name on PostgreSQL;
+#   the UNIQUE-constraint column list on SQLite); emits no statements.
+# Standards: Fail closed — unrecognized violations still fall back to the
+#   re-query and re-raise path; nothing is swallowed.
+# Blast Radius: user_permission_grants conflict handling only.
+# Connections:
+#   - File: backend/ums_smart_revenue/db/security_models.py -> index name.
+#   - File: backend/ums_smart_revenue/connectors/credentials.py -> same
+#     classifier pattern.
+# ============================================================================
+def _is_active_grant_unique_violation(exc: IntegrityError) -> bool:
+    """Return whether the failure is the active-grant uniqueness guard."""
+    diag = getattr(getattr(exc, "orig", None), "diag", None)
+    if getattr(diag, "constraint_name", None) == _ACTIVE_GRANT_UNIQUE_INDEX:
+        return True
+    # PostgreSQL exposes the partial index via diag.constraint_name; SQLite
+    # reports the indexed column list instead, so require the UNIQUE prefix —
+    # a NOT NULL/CHECK failure names the same columns without meaning a
+    # duplicate.
+    error_text = f"{exc.orig!s} {exc!s}"
+    return (
+        _ACTIVE_GRANT_UNIQUE_INDEX in error_text
+        or (
+            "UNIQUE constraint failed" in error_text
+            and "user_permission_grants.permission_key" in error_text
+        )
+    )
+
+
 PERMISSION_SCOPE_TYPES: dict[Permission, frozenset[str]] = {
     Permission.VIEW_ANALYTICS: _ORG_SCOPE_TYPES,
     Permission.VIEW_CONFIDENCE: _ORG_SCOPE_TYPES,
@@ -156,13 +193,18 @@ class SqlAlchemyUserPermissionGrantRepository:
         scope = self._get_or_create_scope(scope_type=scope_type, scope_id=scope_id)
 
         existing = self._session.scalars(
-            select(UserPermissionGrantORM).where(
+            select(UserPermissionGrantORM)
+            .where(
                 UserPermissionGrantORM.tenant_id == self._tenant_id,
                 UserPermissionGrantORM.user_id == target_user_id,
                 UserPermissionGrantORM.permission_key == permission.value,
                 UserPermissionGrantORM.scope_id == scope.id,
                 UserPermissionGrantORM.active.is_(True),
             )
+            # FIX: Lock an existing active grant before returning the
+            # idempotent conflict; a concurrent revoker must not be able to
+            # commit after this read and invalidate the conflict answer.
+            .with_for_update()
         ).one_or_none()
         if existing is not None:
             raise UserPermissionGrantConflictError("Active permission grant already exists")
@@ -182,14 +224,27 @@ class SqlAlchemyUserPermissionGrantRepository:
                 self._session.add(row)
                 self._session.flush()
         except IntegrityError as exc:
+            # FIX: Classify the violated constraint from the error itself
+            # before any re-query. A concurrent revoker can commit between our
+            # failed insert and the follow-up read, leaving the winning row
+            # already inactive; trusting only the re-query would then leak the
+            # raw IntegrityError as a 500 instead of the truthful conflict.
+            if _is_active_grant_unique_violation(exc):
+                raise UserPermissionGrantConflictError(
+                    "Active permission grant already exists"
+                ) from exc
             duplicate = self._session.scalars(
-                select(UserPermissionGrantORM).where(
+                select(UserPermissionGrantORM)
+                .where(
                     UserPermissionGrantORM.tenant_id == self._tenant_id,
                     UserPermissionGrantORM.user_id == target_user_id,
                     UserPermissionGrantORM.permission_key == permission.value,
                     UserPermissionGrantORM.scope_id == scope.id,
                     UserPermissionGrantORM.active.is_(True),
                 )
+                # FIX: lock the surviving row so the conflict decision reads
+                # the post-race state, not a pre-race snapshot.
+                .with_for_update()
             ).one_or_none()
             if duplicate is not None:
                 raise UserPermissionGrantConflictError(

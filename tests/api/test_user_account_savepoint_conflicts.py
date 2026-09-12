@@ -1,3 +1,16 @@
+# ============================================================================
+# Purpose: Savepoint-isolation guards for user-account IntegrityError
+#   diagnosis — proves a handled savepoint conflict leaves the enclosing
+#   transaction usable and returns typed errors.
+# Database/ORM: SQLite disposable databases seeded per test; exercises
+#   users/accounts repository savepoint handling.
+# Standards: Test-only; no production behavior asserted beyond typed-error
+#   translation.
+# Blast Radius: None — test module.
+# Connections:
+#   - File: backend/ums_smart_revenue/auth/users.py -> account repository.
+#   - File: tests/api/test_user_accounts_api.py -> shared seed helpers.
+# ============================================================================
 """Savepoint-isolation guards for user-account IntegrityError diagnosis."""
 
 from uuid import UUID, uuid4

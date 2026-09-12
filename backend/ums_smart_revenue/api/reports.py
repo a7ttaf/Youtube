@@ -4,7 +4,11 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.orm import Session
 
-from ums_smart_revenue.api.authz import raise_missing_permission, require_permission
+from ums_smart_revenue.api.authz import (
+    raise_missing_permission,
+    require_permission,
+    require_service_connector_jobs,
+)
 from ums_smart_revenue.api.dependencies import (
     current_db_session,
     current_principal_from_headers,
@@ -96,7 +100,11 @@ def register_raw_report_file(
 ) -> dict[str, object]:
     """Register a downloaded raw report file's metadata and audit the write."""
     connector_scope = AccessScope.connector(payload.source)
-    require_permission(user, Permission.RUN_CONNECTOR_JOBS, connector_scope)
+    # FIX: a plain RUN_CONNECTOR_JOBS gate let human Revenue Operations and
+    # Connector Admin users register raw-file metadata; connector execution is
+    # a service-principal-only path here. Manual fact access deliberately does
+    # NOT widen the connector provenance surface (recorded ruling).
+    require_service_connector_jobs(user, connector_scope)
     try:
         raw_file = repository.register_file(
             source=payload.source,

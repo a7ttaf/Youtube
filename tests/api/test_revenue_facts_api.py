@@ -215,7 +215,9 @@ def test_beta_operator_manual_alias_with_non_manual_source_fails_closed(
         assert session.scalars(select(AuditLogORM)).all() == []
 
     assert response.status_code == 403
-    assert response.json()["detail"] == "Missing permission: connectors.run_jobs"
+    # Humans fail closed onto the manual grant: the connector-execution path
+    # is service-principal-only.
+    assert response.json()["detail"] == "Missing permission: finance.import_manual_revenue"
 
 
 def test_beta_operator_cannot_import_connector_sourced_revenue(tmp_path):
@@ -243,11 +245,13 @@ def test_beta_operator_cannot_import_connector_sourced_revenue(tmp_path):
         assert session.scalars(select(AuditLogORM)).all() == []
 
     assert response.status_code == 403
-    assert response.json()["detail"] == "Missing permission: connectors.run_jobs"
+    # Humans fail closed onto the manual grant: the connector-execution path
+    # is service-principal-only.
+    assert response.json()["detail"] == "Missing permission: finance.import_manual_revenue"
 
 
 def test_import_rejects_connector_source_kind_mismatch(tmp_path):
-    """Import rejects connector source kind mismatch."""
+    """A source_kind that contradicts the route's source is rejected."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -689,12 +693,12 @@ def test_import_rejects_invalid_source_kind(tmp_path):
 
 
 def test_import_accepts_gateway_subject_actor_id(tmp_path):
+    """A non-UUID gateway subject maps to a deterministic uuid5 on imported_by."""
     # Header-auth deployments can deliver non-UUID gateway subjects via
     # x-user-id (e.g. service-account slugs). The revenue-fact repository
     # used to reject these with 422; per the shared actor_identity_uuid
     # helper the subject is now mapped to a deterministic uuid5 and the
     # write succeeds with that value persisted to imported_by.
-    """Import accepts gateway subject actor id."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -729,3 +733,31 @@ def test_import_accepts_gateway_subject_actor_id(tmp_path):
             )
         ).one()
     assert fact.imported_by == expected_actor_uuid
+
+
+def test_human_connector_admin_cannot_import_connector_sourced_revenue(tmp_path):
+    """A human holding RUN_CONNECTOR_JOBS cannot repurpose it as fact import."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    client = TestClient(create_app(database_url=database_url))
+
+    response = client.post(
+        "/revenue/facts",
+        headers=auth_headers("connector_admin", "connector", "youtube-cms"),
+        json={
+            "month": "2026-03",
+            "youtube_channel_id": "channel-tv-a",
+            "source_kind": "YOUTUBE_CMS",
+            "connector_key": "youtube-cms",
+            "gross_revenue_usd": "1234.56",
+            "reason": "Attempt human connector-power import",
+        },
+    )
+
+    engine = create_engine(database_url)
+    with Session(engine) as session:
+        assert session.scalars(select(MonthlyChannelRevenueFactORM)).all() == []
+        assert session.scalars(select(AuditLogORM)).all() == []
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Missing permission: finance.import_manual_revenue"
