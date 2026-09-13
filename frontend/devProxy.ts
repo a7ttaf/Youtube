@@ -319,18 +319,6 @@ const rejectRequest = (
   return "/";
 };
 
-// ============================================================================
-// Purpose: Replace browser-controlled gateway claims before http-proxy copies
-//   the incoming header map into an outbound request.
-// Database/ORM: None.
-// Standards: Reserve the complete trusted namespaces, preserve unrelated
-//   headers, and inject only values validated from Node-side configuration.
-// Blast Radius: Development authorization headers on proxied requests only.
-// Connections:
-//   - File: frontend/tests/devProxySecurity.test.ts -> exercises normal and
-//     Expect: 100-continue flows through a real Vite proxy.
-//   - File: backend/ums_smart_revenue/api/dependencies.py -> trusted consumer.
-// ============================================================================
 /** HTTP/1 hop-by-hop fields that must terminate at this proxy, not cross it. */
 const HOP_BY_HOP_HEADERS = new Set([
   "connection",
@@ -343,21 +331,37 @@ const HOP_BY_HOP_HEADERS = new Set([
   "upgrade",
 ]);
 
-/** Strip the fixed hop-by-hop set plus every field a Connection header nominates. */
-const stripHopByHopHeaders = (
+/** Rebuild a header map without the fixed hop-by-hop set or Connection-nominated fields. */
+const withoutHopByHopHeaders = (
   headers: Record<string, string | string[] | undefined>,
-): void => {
-  for (const token of singleHeader(headers.connection)?.split(",") ?? []) {
-    const nominated = token.trim().toLowerCase();
-    if (nominated) {
-      delete headers[nominated];
-    }
-  }
-  for (const name of HOP_BY_HOP_HEADERS) {
-    delete headers[name];
-  }
+): Record<string, string | string[] | undefined> => {
+  const nominated = new Set(
+    (singleHeader(headers.connection) ?? "")
+      .split(",")
+      .map((token) => token.trim().toLowerCase())
+      .filter(Boolean),
+  );
+  return Object.fromEntries(
+    Object.entries(headers).filter(
+      ([name]) => !HOP_BY_HOP_HEADERS.has(name) && !nominated.has(name),
+    ),
+  );
 };
 
+// ============================================================================
+// Purpose: Replace browser-controlled gateway claims before http-proxy copies
+//   the incoming header map into an outbound request.
+// Database/ORM: None.
+// Standards: Reserve the complete trusted namespaces, preserve unrelated
+//   headers, and inject only values validated from Node-side configuration.
+//   Hop-by-hop fields are stripped separately via withoutHopByHopHeaders.
+// Blast Radius: Development authorization headers on proxied requests only.
+// Connections:
+//   - File: frontend/tests/devProxySecurity.test.ts -> exercises normal and
+//     Expect: 100-continue flows through a real Vite proxy.
+//   - File: backend/ums_smart_revenue/api/dependencies.py -> trusted consumer.
+// ============================================================================
+/** Replace caller-supplied trusted claims with the validated gateway set. */
 const applyTrustedGatewayHeaders = (
   request: IncomingMessage,
   gatewayHeaders: readonly GatewayHeader[],
@@ -412,7 +416,7 @@ export const buildTenantScopedProxy = (
           }
           // Hop-by-hop fields and everything Connection nominates end here;
           // http-proxy copies req.headers onto the backend request verbatim.
-          stripHopByHopHeaders(request.headers);
+          request.headers = withoutHopByHopHeaders(request.headers);
           // FIX: proxyReq is not emitted on every Expect: 100-continue path.
           // Replace trusted claims here before http-proxy copies req.headers.
           applyTrustedGatewayHeaders(request, gatewayHeaders);
@@ -420,7 +424,7 @@ export const buildTenantScopedProxy = (
         },
         configure(proxy) {
           proxy.on("proxyRes", (proxyResponse) => {
-            stripHopByHopHeaders(proxyResponse.headers);
+            proxyResponse.headers = withoutHopByHopHeaders(proxyResponse.headers);
           });
           proxy.on("proxyReq", (proxyRequest) => {
             // FIX: Deleting the complete trusted set before injection prevents
