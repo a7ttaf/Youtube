@@ -1264,3 +1264,43 @@ def test_close_joins_an_inflight_last_chance_writer(tmp_path) -> None:
     closer.join(timeout=10)
     assert not closer.is_alive()
     assert completed == ["RuntimeError"]
+
+
+def test_deprecated_audit_hook_delegates_to_queued_path(tmp_path) -> None:
+    """The published audit_failed_before_start alias warns + delegates."""
+    import warnings
+
+    factory = _factory(tmp_path)
+    executor = ConnectorJobExecutor(
+        session_factory=factory, max_workers=1, stale_running_hours=6
+    )
+    delegated: list[dict[str, object]] = []
+
+    def _capture(**kwargs: object) -> None:
+        """Stand in for queue_failed_start_audit and record the call."""
+        delegated.append(kwargs)
+
+    executor.queue_failed_start_audit = _capture  # type: ignore[method-assign]
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        executor.audit_failed_before_start(
+            tenant_id=TENANT,
+            connector_key="youtube_reporting",
+            account_id="acct-1",
+            report_month="2026-04",
+            error_class="RuntimeError",
+            actor_identity=ACTOR,
+        )
+
+    assert any(w.category is DeprecationWarning for w in caught)
+    assert delegated == [
+        {
+            "tenant_id": TENANT,
+            "connector_key": "youtube_reporting",
+            "account_id": "acct-1",
+            "report_month": "2026-04",
+            "error_class": "RuntimeError",
+            "actor_identity": ACTOR,
+        }
+    ]
+    executor.close()

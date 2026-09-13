@@ -28,6 +28,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
+import warnings
 import weakref
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
@@ -1238,6 +1239,49 @@ class ConnectorJobExecutor:
             self._shutdown_audited.add(key)
         self._start_last_chance_writer(
             key=key,
+            tenant_id=tenant_id,
+            connector_key=connector_key,
+            account_id=account_id,
+            report_month=report_month,
+            error_class=error_class,
+            actor_identity=actor_identity,
+        )
+
+    # ========================================================================
+    # Purpose: Backward-compatible alias for the published public hook —
+    #   external callers and the documented contract keep working while the
+    #   queued delivery path owns the semantics.
+    # Database/ORM: None — delegates to queue_failed_start_audit.
+    # Standards: emits DeprecationWarning; same signature as
+    #   queue_failed_start_audit so call sites migrate by rename only.
+    # Blast Radius: Audit completeness — deprecated path preserves delivery.
+    # Connections:
+    #   - File: backend/ums_smart_revenue/connectors/runs/executor.py ->
+    #     queue_failed_start_audit is the live entry point.
+    # ========================================================================
+    def audit_failed_before_start(
+        self,
+        *,
+        tenant_id: UUID,
+        connector_key: str,
+        account_id: str,
+        report_month: str,
+        error_class: str,
+        actor_identity: ConnectorJobActor,
+    ) -> None:
+        """Deprecated alias for :meth:`queue_failed_start_audit`.
+
+        .. deprecated:: Use ``queue_failed_start_audit`` — the audit is
+           delivered through the tracked pool (or the last-chance writer
+           after close), never synchronously on the caller's thread.
+        """
+        warnings.warn(
+            "audit_failed_before_start is deprecated; use "
+            "queue_failed_start_audit",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        self.queue_failed_start_audit(
             tenant_id=tenant_id,
             connector_key=connector_key,
             account_id=account_id,
