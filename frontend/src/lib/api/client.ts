@@ -43,21 +43,26 @@ export class ApiError extends Error {
  * normalization only: a cross-origin value does not establish CORS or
  * trusted-gateway auth.
  */
-/** Fail closed unless an absolute request URL shares a trusted origin. */
-const assertTrustedAbsoluteUrl = (path: string, base: string): void => {
-  const requestUrl = new URL(path);
-  const trustedOrigins = new Set<string>();
+/** Collect the configured API origin plus the browser's own origin. */
+const trustedApiOrigins = (base: string): Set<string> => {
+  const origins = new Set<string>();
   if (/^https?:\/\//i.test(base)) {
-    trustedOrigins.add(new URL(base).origin);
+    origins.add(new URL(base).origin);
   }
   const browserOrigin = globalThis.location?.origin;
   if (browserOrigin) {
-    trustedOrigins.add(browserOrigin);
+    origins.add(browserOrigin);
   }
+  return origins;
+};
+
+/** Fail closed unless an absolute request URL shares a trusted origin. */
+const assertTrustedAbsoluteUrl = (path: string, base: string): void => {
+  const requestUrl = new URL(path);
   if (
     requestUrl.username ||
     requestUrl.password ||
-    !trustedOrigins.has(requestUrl.origin)
+    !trustedApiOrigins(base).has(requestUrl.origin)
   ) {
     throw new Error("API request URL origin is outside the configured API origin");
   }

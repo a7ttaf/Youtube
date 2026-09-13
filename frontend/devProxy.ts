@@ -273,14 +273,19 @@ const parseOriginHeader = (origin: string): URL | null => {
 const requestProtocol = (request: IncomingMessage): string =>
   "encrypted" in request.socket && request.socket.encrypted ? "https:" : "http:";
 
+/** An origin must not smuggle userinfo credentials past the Host check. */
+const hasCleanAuthority = (parsed: URL): boolean =>
+  !(parsed.username || parsed.password);
+
+/** A bare origin targets only the scheme's default root document. */
+const isRootTarget = (parsed: URL): boolean =>
+  parsed.pathname === "/" && !(parsed.search || parsed.hash);
+
 /** A bare origin carries no credentials, path, query, or fragment. */
 const isBareOrigin = (parsed: URL, request: IncomingMessage): boolean =>
   parsed.protocol === requestProtocol(request) &&
-  !parsed.username &&
-  !parsed.password &&
-  parsed.pathname === "/" &&
-  !parsed.search &&
-  !parsed.hash;
+  hasCleanAuthority(parsed) &&
+  isRootTarget(parsed);
 
 /** A trusted Origin is a bare same-origin http(s) value matching Host. */
 const originMatchesRequest = (parsed: URL, request: IncomingMessage): boolean => {
@@ -289,6 +294,7 @@ const originMatchesRequest = (parsed: URL, request: IncomingMessage): boolean =>
     parsed.host.toLowerCase() === host;
 };
 
+/** Return whether the request passes the Origin/Fetch-Metadata trust gate. */
 const requestUsesTrustedOrigin = (request: IncomingMessage): boolean => {
   if (!fetchSiteAllowsRequest(request)) {
     return false;

@@ -87,21 +87,33 @@ const decodeLayer = (candidate: string): string | null => {
 const firstSegmentMatches = (candidate: string, route: string): boolean =>
   `/${candidate.slice(1).split("/", 1)[0] ?? ""}` === route;
 
+/** Advance one decode layer: false rejects, true is stable, string continues. */
+const nextRouteCandidate = (
+  candidate: string,
+  route: string,
+): string | boolean => {
+  if (hasUnsafeSegments(candidate) || !firstSegmentMatches(candidate, route)) {
+    return false;
+  }
+  const decoded = decodeLayer(candidate);
+  if (decoded === null) {
+    return false;
+  }
+  return decoded === candidate || decoded;
+};
+
 /** Match one exact route root through every supported decode layer. */
 export const isSafeRouteUrl = (requestUrl: string, route: string): boolean => {
   let candidate = pathPart(requestUrl);
   for (let decodeDepth = 0; decodeDepth < 5; decodeDepth += 1) {
-    if (hasUnsafeSegments(candidate) || !firstSegmentMatches(candidate, route)) {
+    const next = nextRouteCandidate(candidate, route);
+    if (next === false) {
       return false;
     }
-    const decoded = decodeLayer(candidate);
-    if (decoded === null) {
-      return false;
-    }
-    if (decoded === candidate) {
+    if (next === true) {
       return true;
     }
-    candidate = decoded;
+    candidate = next;
   }
   return false;
 };

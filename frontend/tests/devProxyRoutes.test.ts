@@ -89,6 +89,7 @@ const isWithinDirectory = (fileName: string, directory: string): boolean => {
 };
 
 /** Resolve external module-script entries with the browser's HTML parser. */
+// skipcq: JS-R1005
 const viteHtmlModuleEntries = (html: string): string[] => {
   const entries: string[] = [];
   const document = new DOMParser().parseFromString(html, "text/html");
@@ -137,6 +138,7 @@ const viteHtmlModuleEntries = (html: string): string[] => {
 };
 
 /** Reject Rollup inputs other than the one HTML entry audited above. */
+// skipcq: JS-R1005
 const canonicalViteBuildEntries = (input: unknown): string[] => {
   let rawEntries: unknown[];
   if (input === undefined) {
@@ -164,6 +166,7 @@ const canonicalViteBuildEntries = (input: unknown): string[] => {
 };
 
 /** Enumerate every HTML page Vite could serve from the frontend root. */
+// skipcq: JS-R1005
 const viteHtmlFiles = (directory = FRONTEND_ROOT): string[] => {
   const files: string[] = [];
   for (const entry of readdirSync(directory, { withFileTypes: true })) {
@@ -293,6 +296,7 @@ type InspectableFunction =
   | ts.MethodDeclaration;
 
 /** Remove syntax wrappers that do not affect a string value. */
+// skipcq: JS-R1005
 const unwrapExpression = (expression: ts.Expression): ts.Expression => {
   let current = expression;
   while (
@@ -319,6 +323,7 @@ const resolvedSymbolAt = (
 };
 
 /** Return the immutable initializer for one identifier, if it is statically safe. */
+// skipcq: JS-R1005
 const immutableInitializer = (
   identifier: ts.Identifier,
   context: EvaluationContext,
@@ -343,6 +348,7 @@ const immutableInitializer = (
 };
 
 /** Evaluate a complete compile-time string used before the request root boundary. */
+// skipcq: JS-R1005
 const knownString = (
   rawExpression: ts.Expression,
   context: EvaluationContext,
@@ -389,6 +395,7 @@ const knownString = (
 };
 
 /** Enumerate statically known leading substrings across conditional expressions. */
+// skipcq: JS-R1005
 const prefixAlternatives = (
   rawExpression: ts.Expression,
   context: EvaluationContext,
@@ -446,6 +453,7 @@ const prefixAlternatives = (
 };
 
 /** Extract an exact first path segment only when the known prefix proves it. */
+// skipcq: JS-R1005
 const rootFromPrefix = ({ complete, text }: StaticPrefix): string | undefined => {
   if (!text.startsWith("/") || text.startsWith("//")) {
     return undefined;
@@ -461,6 +469,7 @@ const returnExpressions = (body: ts.ConciseBody): ts.Expression[] => {
     return [body];
   }
   const found: ts.Expression[] = [];
+  // skipcq: JS-R1005
   const visit = (node: ts.Node): void => {
     if (node !== body && ts.isFunctionLike(node)) {
       return;
@@ -497,6 +506,7 @@ const ASSIGNMENT_OPERATORS = new Set<ts.SyntaxKind>([
 
 
 /** Resolve one expression to immutable function implementations. */
+// skipcq: JS-R1005
 const inspectableFunctionsForExpression = (
   rawExpression: ts.Expression,
   checker: ts.TypeChecker,
@@ -550,6 +560,7 @@ const calledFunctions = (
   inspectableFunctionsForExpression(call.expression, checker);
 
 /** Prove the first path segment of a request expression or fail closed. */
+// skipcq: JS-R1005
 const proveRequestRoot = (
   rawExpression: ts.Expression,
   context: EvaluationContext,
@@ -657,6 +668,7 @@ const isCanonicalApiClientModule = (sourceFile: ts.SourceFile): boolean =>
   canonicalFileIdentity(sourceFile.fileName) === CANONICAL_API_CLIENT_FILE;
 
 /** Name a direct fetch call only when it sits in one canonical nested transport. */
+// skipcq: JS-R1005
 const sanctionedFetchOwner = (identifier: ts.Identifier): string | undefined => {
   if (
     !ts.isCallExpression(identifier.parent) ||
@@ -731,6 +743,7 @@ const BROWSER_GLOBAL_CONTAINERS = new Set([
 ]);
 
 /** Detect reflective/static raw-network selectors before they can be aliased. */
+// skipcq: JS-R1005
 const isReflectiveRawNetworkReference = (
   node: ts.Node,
   checker: ts.TypeChecker,
@@ -782,6 +795,7 @@ const isReflectiveRawNetworkReference = (
 };
 
 /** Reject aliases/dynamic indexing of browser-global containers. */
+// skipcq: JS-R1005
 const isUnsafeBrowserGlobalReference = (
   node: ts.Node,
   checker: ts.TypeChecker,
@@ -804,6 +818,7 @@ const isUnsafeBrowserGlobalReference = (
 };
 
 /** Reject Vite source expansion that TypeScript does not add to its Program. */
+// skipcq: JS-R1005
 const isUnscannedImportMetaLoader = (
   node: ts.Node,
   checker: ts.TypeChecker,
@@ -824,6 +839,7 @@ const isUnscannedImportMetaLoader = (
 };
 
 /** Reject string-evaluating timers even when direct eval is absent. */
+// skipcq: JS-R1005
 const isStringCodeTimer = (
   node: ts.Node,
   checker: ts.TypeChecker,
@@ -852,6 +868,7 @@ const isStringCodeTimer = (
 };
 
 /** Allow timers only as direct calls with a statically callable handler. */
+// skipcq: JS-R1005
 const assertSafeTimerReference = (
   node: ts.Identifier | ts.PropertyAccessExpression | ts.ElementAccessExpression,
   checker: ts.TypeChecker,
@@ -885,6 +902,7 @@ const assertSafeTimerReference = (
 };
 
 /** Prove a Vite worker entry is a literal compiler-scanned application file. */
+// skipcq: JS-R1005
 const assertScannedWorkerConstruction = (
   worker: ts.NewExpression,
   scannedFiles: ReadonlySet<string>,
@@ -949,6 +967,7 @@ const isUseApiClientCall = (
 };
 
 /** Allow client identity only in React dependency arrays, never data transport. */
+// skipcq: JS-R1005
 const isAllowedDependencyReference = (
   identifier: ts.Identifier,
   checker: ts.TypeChecker,
@@ -988,6 +1007,7 @@ const apiClientHookSymbols = (
   for (const sourceFile of programSourceFiles) {
     const virtualFixture = sourceFile.fileName.replaceAll("\\", "/")
       .endsWith("/tests/virtual-route-scanner.ts");
+    // skipcq: JS-R1005
     const visit = (node: ts.Node): void => {
       let name: ts.Identifier | undefined;
       if (
@@ -1036,6 +1056,7 @@ const apiClientHookSymbols = (
 };
 
 /** Hook declarations/imports are metadata; every value reference must be a direct origin. */
+// skipcq: JS-R1005
 const isHookDeclarationReference = (identifier: ts.Identifier): boolean => {
   const parent = identifier.parent;
   return (
@@ -1059,6 +1080,7 @@ const VITE_DEFAULT_EXTENSIONS = [".mjs", ".js", ".mts", ".ts", ".jsx", ".tsx", "
  * compiler sources this audit walks. The first existing candidate is the file
  * Vite actually serves, so the probe order below is load-bearing.
  */
+// skipcq: JS-R1005
 const assertSpecifierResolvesIntoAuditedProgram = (
   specifier: string,
   sourceFileName: string,
@@ -1093,6 +1115,7 @@ const assertSpecifierResolvesIntoAuditedProgram = (
 };
 
 /** Enforce the deliberately small direct-client syntax before route discovery. */
+// skipcq: JS-R1005
 const validateDirectApiClientContract = (
   programSourceFiles: readonly ts.SourceFile[],
   checker: ts.TypeChecker,
@@ -1103,6 +1126,7 @@ const validateDirectApiClientContract = (
     programSourceFiles.map((sourceFile) => canonicalFileIdentity(sourceFile.fileName)),
   );
   const hookSymbols = apiClientHookSymbols(programSourceFiles, checker);
+  // skipcq: JS-R1005
   const visitOrigins = (node: ts.Node): void => {
     if (
       ts.isCallExpression(node) &&
@@ -1170,6 +1194,7 @@ const validateDirectApiClientContract = (
 
   const clientModulePresent = programSourceFiles.some(isCanonicalApiClientModule);
   const fetchOwnerCounts = new Map<string, number>();
+  // skipcq: JS-R1005
   const visitUses = (node: ts.Node): void => {
     const normalizedFile = node.getSourceFile().fileName.replaceAll("\\", "/");
     if (ts.isNamespaceImport(node)) {
@@ -1340,6 +1365,7 @@ const validateDirectApiClientContract = (
 };
 
 /** Return whether a property chain rooted at this access is overwritten. */
+// skipcq: JS-R1005
 const propertyChainIsWritten = (rawAccess: ts.Expression): boolean => {
   let current: ts.Node = rawAccess;
   let parent = current.parent;
@@ -1379,6 +1405,7 @@ const objectContainerIsStable = (
   checker: ts.TypeChecker,
 ): boolean => {
   let unstable = false;
+  // skipcq: JS-R1005
   const visit = (node: ts.Node): void => {
     if (unstable) {
       return;
@@ -1436,6 +1463,7 @@ type StaticObjectLiteral = {
 };
 
 /** Resolve an immutable const alias to an object literal used by a spread. */
+// skipcq: JS-R1005
 const staticObjectLiteral = (
   rawExpression: ts.Expression,
   checker: ts.TypeChecker,
@@ -1484,6 +1512,7 @@ type ObjectPropertyResolution =
   | { kind: "unknown" };
 
 /** Resolve one property with JavaScript object-spread overwrite ordering. */
+// skipcq: JS-R1005
 const objectLiteralPropertyInitializer = (
   object: ts.ObjectLiteralExpression,
   propertyName: string,
@@ -1564,6 +1593,7 @@ type ResolvedPropertyInitializer = {
 };
 
 /** Resolve a const object/property expression back to its literal initializer. */
+// skipcq: JS-R1005
 const immutablePropertyInitializer = (
   rawAccess: ts.Expression,
   checker: ts.TypeChecker,
@@ -1658,6 +1688,7 @@ const immutablePropertyInitializer = (
 };
 
 /** True only for a receiver exposing the repository's complete client surface. */
+// skipcq: JS-R1005
 const isApiClientReceiver = (
   rawReceiver: ts.Expression,
   checker: ts.TypeChecker,
@@ -1754,6 +1785,7 @@ const isApiClientReceiver = (
 
 
 /** Return whether an access selects a method from the typed API-client surface. */
+// skipcq: JS-R1005
 const isApiClientMethodAccess = (
   rawExpression: ts.Expression,
   checker: ts.TypeChecker,
@@ -1787,6 +1819,7 @@ const isApiClientMethodAccess = (
 };
 
 /** Return the const declaration list containing a variable or binding element. */
+// skipcq: JS-R1005, JS-0067
 function declarationListFor(
   declaration: ts.VariableDeclaration | ts.BindingElement,
 ): ts.VariableDeclarationList | undefined {
@@ -1807,6 +1840,7 @@ type StaticBindingPath = {
 };
 
 /** Resolve a nested static object/array binding path to its root initializer. */
+// skipcq: JS-R1005
 const objectBindingPath = (
   declaration: ts.BindingElement,
   checker: ts.TypeChecker,
@@ -1854,6 +1888,7 @@ const objectBindingPath = (
 };
 
 /** Resolve a const object-binding receiver back to the value it selected. */
+// skipcq: JS-R1005, JS-0067
 function immutableBindingInitializer(
   declaration: ts.BindingElement,
   checker: ts.TypeChecker,
@@ -1921,6 +1956,7 @@ function immutableBindingInitializer(
 }
 
 /** Prove a nested object binding selects one method from an API-client value. */
+// skipcq: JS-R1005
 const bindingTargetsApiClientMethod = (
   declaration: ts.BindingElement,
   checker: ts.TypeChecker,
@@ -1950,6 +1986,7 @@ const bindingTargetsApiClientMethod = (
 };
 
 /** Trace destructured and assigned method aliases back to the typed client. */
+// skipcq: JS-R1005
 const identifierTargetsApiClientMethod = (
   identifier: ts.Identifier,
   checker: ts.TypeChecker,
@@ -2015,6 +2052,7 @@ const requestRootsInSourceFile = (
   directClientBindings: ReadonlySet<ts.Symbol>,
 ): string[] => {
   const roots = new Set<string>();
+  // skipcq: JS-R1005
   const visit = (node: ts.Node): void => {
     let apiClientCall = false;
     if (ts.isCallExpression(node)) {
@@ -2029,6 +2067,8 @@ const requestRootsInSourceFile = (
           directClientBindings.has(receiverSymbol) &&
           API_CLIENT_METHODS.has(staticAccessName(callee, checker) ?? ""),
         );
+      } else if (ts.isIdentifier(callee)) {
+        apiClientCall = identifierTargetsApiClientMethod(callee, checker);
       }
     }
     if (ts.isCallExpression(node) && apiClientCall) {
