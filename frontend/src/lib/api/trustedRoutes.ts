@@ -45,36 +45,57 @@ const apiRequestTarget = (rawPath: string): string => {
 const pathPart = (requestUrl: string): string =>
   requestUrl.split(/[?#]/u, 1)[0] ?? "";
 
-/** Return whether a request target carries traversal, control, or split segments. */
-const hasUnsafeSegments = (value: string): boolean => {
-  if (
-    !value.startsWith("/") ||
-    value.startsWith("//") ||
-    value.includes("\\") ||
-    /[\u0000-\u001f\u007f]/u.test(value) ||
-    value.slice(1).includes("//") ||
-    /%(?:0[0-9a-f]|1[0-9a-f]|23|2f|5c|7f)/iu.test(value)
-  ) {
-    return true;
+/** Return whether a value contains C0 or DEL control characters. */
+const hasControlChar = (value: string): boolean => {
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    if (code < 0x20 || code === 0x7f) {
+      return true;
+    }
   }
-  return value.split("/").some((segment) => segment === "." || segment === "..");
+  return false;
 };
+
+/** Return whether a request target carries a dangerous percent encoding. */
+const hasUnsafeEncoding = (value: string): boolean =>
+  /%(?:0[0-9a-f]|1[0-9a-f]|23|2f|5c|7f)/iu.test(value);
+
+const UNSAFE_TARGET_CHECKS: ReadonlyArray<(value: string) => boolean> = [
+  (value) => !value.startsWith("/"),
+  (value) => value.startsWith("//"),
+  (value) => value.includes("\\"),
+  hasControlChar,
+  (value) => value.slice(1).includes("//"),
+  hasUnsafeEncoding,
+];
+
+/** Return whether a request target carries traversal, control, or split segments. */
+const hasUnsafeSegments = (value: string): boolean =>
+  UNSAFE_TARGET_CHECKS.some((check) => check(value)) ||
+  value.split("/").some((segment) => segment === "." || segment === "..");
+
+/** Decode one candidate layer, returning null when the encoding is malformed. */
+const decodeLayer = (candidate: string): string | null => {
+  try {
+    return decodeURIComponent(candidate);
+  } catch {
+    return null;
+  }
+};
+
+/** Return whether the candidate's first path segment is exactly this route. */
+const firstSegmentMatches = (candidate: string, route: string): boolean =>
+  `/${candidate.slice(1).split("/", 1)[0] ?? ""}` === route;
 
 /** Match one exact route root through every supported decode layer. */
 export const isSafeRouteUrl = (requestUrl: string, route: string): boolean => {
   let candidate = pathPart(requestUrl);
   for (let decodeDepth = 0; decodeDepth < 5; decodeDepth += 1) {
-    if (hasUnsafeSegments(candidate)) {
+    if (hasUnsafeSegments(candidate) || !firstSegmentMatches(candidate, route)) {
       return false;
     }
-    const firstSegment = `/${candidate.slice(1).split("/", 1)[0] ?? ""}`;
-    if (firstSegment !== route) {
-      return false;
-    }
-    let decoded: string;
-    try {
-      decoded = decodeURIComponent(candidate);
-    } catch {
+    const decoded = decodeLayer(candidate);
+    if (decoded === null) {
       return false;
     }
     if (decoded === candidate) {

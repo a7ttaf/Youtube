@@ -43,6 +43,26 @@ export class ApiError extends Error {
  * normalization only: a cross-origin value does not establish CORS or
  * trusted-gateway auth.
  */
+/** Fail closed unless an absolute request URL shares a trusted origin. */
+const assertTrustedAbsoluteUrl = (path: string, base: string): void => {
+  const requestUrl = new URL(path);
+  const trustedOrigins = new Set<string>();
+  if (/^https?:\/\//i.test(base)) {
+    trustedOrigins.add(new URL(base).origin);
+  }
+  const browserOrigin = globalThis.location?.origin;
+  if (browserOrigin) {
+    trustedOrigins.add(browserOrigin);
+  }
+  if (
+    requestUrl.username ||
+    requestUrl.password ||
+    !trustedOrigins.has(requestUrl.origin)
+  ) {
+    throw new Error("API request URL origin is outside the configured API origin");
+  }
+};
+
 export const resolveUrl = (path: string): string => {
   // FIX: The canonical browser client and trusted dev proxy now consume the
   // same route-root contract; a new request cannot outrun proxy coverage.
@@ -50,22 +70,7 @@ export const resolveUrl = (path: string): string => {
   const raw = import.meta.env.VITE_API_BASE_URL ?? "";
   const base = raw.replace(/\/+$/, "");
   if (/^https?:\/\//i.test(path)) {
-    const requestUrl = new URL(path);
-    const trustedOrigins = new Set<string>();
-    if (/^https?:\/\//i.test(base)) {
-      trustedOrigins.add(new URL(base).origin);
-    }
-    const browserOrigin = globalThis.location?.origin;
-    if (browserOrigin) {
-      trustedOrigins.add(browserOrigin);
-    }
-    if (
-      requestUrl.username ||
-      requestUrl.password ||
-      !trustedOrigins.has(requestUrl.origin)
-    ) {
-      throw new Error("API request URL origin is outside the configured API origin");
-    }
+    assertTrustedAbsoluteUrl(path, base);
     return path;
   }
   const normalisedPath = path.startsWith("/") ? path : `/${path}`;

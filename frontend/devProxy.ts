@@ -73,6 +73,28 @@ const requiredEnvValue = (
   return value;
 };
 
+/** Pair the resolved headers with a validated X-Scope-ID per the scope type. */
+const withScopeIdHeader = (
+  resolved: GatewayHeader[],
+  scopeType: string,
+  scopeId: string,
+): GatewayHeader[] => {
+  if (scopeType === "global") {
+    if (scopeId) {
+      throw new Error(
+        "[vite] VITE_DEV_GATEWAY_SCOPE_ID must be blank when VITE_DEV_GATEWAY_SCOPE_TYPE is global",
+      );
+    }
+    return resolved;
+  }
+  if (!scopeId) {
+    throw new Error(
+      `[vite] VITE_DEV_GATEWAY_SCOPE_ID must be non-blank for scope type ${scopeType}`,
+    );
+  }
+  return [...resolved, ["X-Scope-ID", scopeId]];
+};
+
 // ============================================================================
 // Purpose: Resolve the complete trusted-principal header set for the local
 //   development gateway and reject incomplete or contradictory scope config.
@@ -100,20 +122,7 @@ export const resolveGatewayHeaders = (
   resolved[scopeTypeIndex] = ["X-Scope-Type", scopeType];
 
   const scopeId = (env.VITE_DEV_GATEWAY_SCOPE_ID ?? "").trim();
-  if (scopeType === "global") {
-    if (scopeId) {
-      throw new Error(
-        "[vite] VITE_DEV_GATEWAY_SCOPE_ID must be blank when VITE_DEV_GATEWAY_SCOPE_TYPE is global",
-      );
-    }
-    return resolved;
-  }
-  if (!scopeId) {
-    throw new Error(
-      `[vite] VITE_DEV_GATEWAY_SCOPE_ID must be non-blank for scope type ${scopeType}`,
-    );
-  }
-  return [...resolved, ["X-Scope-ID", scopeId]];
+  return withScopeIdHeader(resolved, scopeType, scopeId);
 };
 
 /** Return whether a parsed URL uses one of the proxy's supported protocols. */
@@ -245,36 +254,51 @@ const singleHeader = (value: string | string[] | undefined): string | undefined 
 //   - File: frontend/tests/devProxySecurity.test.ts -> Host/origin counterexamples.
 //   - File: frontend/vite.config.ts -> binds the dev server to 127.0.0.1.
 // ============================================================================
-const requestUsesTrustedOrigin = (request: IncomingMessage): boolean => {
+/** Sec-Fetch-Site present on a cross-site request always fails closed. */
+const fetchSiteAllowsRequest = (request: IncomingMessage): boolean => {
   const fetchSite = singleHeader(request.headers["sec-fetch-site"]);
-  if (fetchSite && fetchSite !== "same-origin" && fetchSite !== "none") {
+  return !fetchSite || fetchSite === "same-origin" || fetchSite === "none";
+};
+
+/** Parse an Origin header value, returning null for malformed input. */
+const parseOriginHeader = (origin: string): URL | null => {
+  try {
+    return new URL(origin);
+  } catch {
+    return null;
+  }
+};
+
+/** The wire protocol this request actually arrived on. */
+const requestProtocol = (request: IncomingMessage): string =>
+  "encrypted" in request.socket && request.socket.encrypted ? "https:" : "http:";
+
+/** A bare origin carries no credentials, path, query, or fragment. */
+const isBareOrigin = (parsed: URL, request: IncomingMessage): boolean =>
+  parsed.protocol === requestProtocol(request) &&
+  !parsed.username &&
+  !parsed.password &&
+  parsed.pathname === "/" &&
+  !parsed.search &&
+  !parsed.hash;
+
+/** A trusted Origin is a bare same-origin http(s) value matching Host. */
+const originMatchesRequest = (parsed: URL, request: IncomingMessage): boolean => {
+  const host = singleHeader(request.headers.host)?.trim().toLowerCase();
+  return Boolean(host) && isBareOrigin(parsed, request) &&
+    parsed.host.toLowerCase() === host;
+};
+
+const requestUsesTrustedOrigin = (request: IncomingMessage): boolean => {
+  if (!fetchSiteAllowsRequest(request)) {
     return false;
   }
   const origin = singleHeader(request.headers.origin);
   if (!origin) {
     return true;
   }
-  const host = singleHeader(request.headers.host)?.trim().toLowerCase();
-  if (!host) {
-    return false;
-  }
-  let parsed: URL;
-  try {
-    parsed = new URL(origin);
-  } catch {
-    return false;
-  }
-  const requestProtocol =
-    "encrypted" in request.socket && request.socket.encrypted ? "https:" : "http:";
-  return (
-    parsed.protocol === requestProtocol &&
-    !parsed.username &&
-    !parsed.password &&
-    parsed.pathname === "/" &&
-    !parsed.search &&
-    !parsed.hash &&
-    parsed.host.toLowerCase() === host
-  );
+  const parsed = parseOriginHeader(origin);
+  return parsed !== null && originMatchesRequest(parsed, request);
 };
 
 /** Answer one untrusted request and report the path Vite should serve instead. */

@@ -1,0 +1,36 @@
+version = 1
+
+# Test files are analyzed with test-file semantics: documentation, style,
+# antipattern, and cyclomatic-complexity findings are suppressed there while
+# bug-risk and security checks still apply.
+test_patterns = [
+  "tests/**",
+  "frontend/tests/**",
+  "ci/tests/**",
+  "**/*.test.ts",
+  "**/*.test.tsx",
+]
+
+[[analyzers]]
+name = "python"
+enabled = true
+
+[[analyzers]]
+name = "javascript"
+enabled = true
+
+[[analyzers]]
+name = "docker"
+enabled = true
+
+[[analyzers]]
+name = "sql"
+enabled = true
+
+[[analyzers]]
+name = "secrets"
+enabled = true
+
+[[analyzers]]
+name = "shell"
+enabled = true

@@ -100,7 +100,7 @@ const viteHtmlModuleEntries = (html: string): string[] => {
       if (
         attribute.name.toLowerCase().startsWith("on") ||
         attribute.name.toLowerCase() === "srcdoc" ||
-        attribute.value.trim().toLowerCase().startsWith("javascript:")
+        attribute.value.trim().toLowerCase().startsWith("javascript:") // skipcq: JS-0087 — detection literal, not an eval sink
       ) {
         throw new Error("inline executable HTML attributes are unsupported by route coverage");
       }
@@ -242,7 +242,7 @@ const assertPublicAssetsCarryNoExecutableContent = (
       continue;
     }
     const normalized = content.toLowerCase();
-    if (normalized.includes("<script") || normalized.includes("javascript:")) {
+    if (normalized.includes("<script") || normalized.includes("javascript:")) { // skipcq: JS-0087 — detection literal, not an eval sink
       throw new Error(
         `executable script in a statically served public document is unsupported: ${file}`,
       );
@@ -494,23 +494,6 @@ const ASSIGNMENT_OPERATORS = new Set<ts.SyntaxKind>([
   ts.SyntaxKind.SlashEqualsToken,
 ]);
 
-/** Return whether a write target contains the exact bound parameter symbol. */
-const targetContainsSymbol = (
-  target: ts.Node,
-  symbol: ts.Symbol,
-  checker: ts.TypeChecker,
-): boolean => {
-  let found = false;
-  const visit = (node: ts.Node): void => {
-    if (ts.isIdentifier(node) && resolvedSymbolAt(node, checker) === symbol) {
-      found = true;
-      return;
-    }
-    ts.forEachChild(node, visit);
-  };
-  visit(target);
-  return found;
-};
 
 
 /** Resolve one expression to immutable function implementations. */
@@ -1356,17 +1339,6 @@ const validateDirectApiClientContract = (
   return bindings;
 };
 
-/** Cheap guard before attempting provenance on arbitrary call arguments. */
-const hasApiClientMethodType = (
-  rawType: ts.Type,
-  checker: ts.TypeChecker,
-): boolean => {
-  const type = checker.getNonNullableType(rawType);
-  return API_CLIENT_METHOD_NAMES.some(
-    (method) => checker.getPropertyOfType(type, method) !== undefined,
-  );
-};
-
 /** Return whether a property chain rooted at this access is overwritten. */
 const propertyChainIsWritten = (rawAccess: ts.Expression): boolean => {
   let current: ts.Node = rawAccess;
@@ -1780,53 +1752,6 @@ const isApiClientReceiver = (
   return true;
 };
 
-/** Return whether a function actually invokes an API-named method on a parameter. */
-const parameterUsesApiClientMethod = (
-  implementation: InspectableFunction,
-  parameterSymbol: ts.Symbol,
-  checker: ts.TypeChecker,
-): boolean => {
-  let found = false;
-  const visit = (node: ts.Node): void => {
-    if (found) {
-      return;
-    }
-    if (ts.isPropertyAccessExpression(node)) {
-      const receiver = unwrapExpression(node.expression);
-      if (
-        API_CLIENT_METHODS.has(node.name.text) &&
-        ts.isIdentifier(receiver) &&
-        resolvedSymbolAt(receiver, checker) === parameterSymbol
-      ) {
-        found = true;
-        return;
-      }
-    }
-    if (ts.isElementAccessExpression(node) && node.argumentExpression) {
-      const receiver = unwrapExpression(node.expression);
-      const method = knownString(node.argumentExpression, {
-        checker,
-        substitutions: new Map(),
-        visiting: new Set(),
-      });
-      if (
-        method !== undefined &&
-        API_CLIENT_METHODS.has(method) &&
-        ts.isIdentifier(receiver) &&
-        resolvedSymbolAt(receiver, checker) === parameterSymbol
-      ) {
-        found = true;
-        return;
-      }
-    }
-    ts.forEachChild(node, visit);
-  };
-  if (implementation.body) {
-    visit(implementation.body);
-  }
-  return found;
-};
-
 
 /** Return whether an access selects a method from the typed API-client surface. */
 const isApiClientMethodAccess = (
@@ -1862,9 +1787,9 @@ const isApiClientMethodAccess = (
 };
 
 /** Return the const declaration list containing a variable or binding element. */
-const declarationListFor = (
+function declarationListFor(
   declaration: ts.VariableDeclaration | ts.BindingElement,
-): ts.VariableDeclarationList | undefined => {
+): ts.VariableDeclarationList | undefined {
   let current: ts.Node | undefined = declaration;
   while (current && !ts.isVariableDeclaration(current)) {
     current = current.parent;
@@ -1873,7 +1798,7 @@ const declarationListFor = (
   return variable && ts.isVariableDeclarationList(variable.parent)
     ? variable.parent
     : undefined;
-};
+}
 
 type StaticBindingPath = {
   properties: string[];
@@ -1929,11 +1854,11 @@ const objectBindingPath = (
 };
 
 /** Resolve a const object-binding receiver back to the value it selected. */
-const immutableBindingInitializer = (
+function immutableBindingInitializer(
   declaration: ts.BindingElement,
   checker: ts.TypeChecker,
   visiting: ReadonlySet<ts.Symbol>,
-): ResolvedPropertyInitializer | undefined => {
+): ResolvedPropertyInitializer | undefined {
   const path = objectBindingPath(declaration, checker);
   if (!path) {
     return undefined;
@@ -1993,7 +1918,7 @@ const immutableBindingInitializer = (
     ];
   }
   return { expression, unstableContainers, visiting: nestedVisiting };
-};
+}
 
 /** Prove a nested object binding selects one method from an API-client value. */
 const bindingTargetsApiClientMethod = (
@@ -2080,24 +2005,6 @@ const identifierTargetsApiClientMethod = (
   }
   return false;
 };
-
-/** True only for calls through the repository's typed API-client surface. */
-const isApiClientCall = (
-  node: ts.CallExpression,
-  checker: ts.TypeChecker,
-  clientParameters: ReadonlySet<ts.Symbol>,
-): boolean => {
-  const callee = unwrapExpression(node.expression);
-  return isApiClientMethodAccess(callee, checker, clientParameters) ||
-    (ts.isIdentifier(callee) &&
-      identifierTargetsApiClientMethod(
-        callee,
-        checker,
-        new Set(),
-        clientParameters,
-      ));
-};
-
 
 /** Derive all request roots in one compiler-bound source file. */
 // FIX: The former literal-only scan silently dropped composed or type-erased
@@ -3263,7 +3170,7 @@ describe("dev proxy route coverage (derived from frontend/src)", () => {
     );
   });
 
-  it("resolves a const-backed interpolation in client.get(`/${resource}/daily`)", () => {
+  it("resolves a const-backed interpolation in a client.get template path", () => {
     // Build the interpolation delimiter without putting a template-like string
     // in this test module; the virtual source is exactly the regression shape.
     const interpolation = String.fromCharCode(36, 123);

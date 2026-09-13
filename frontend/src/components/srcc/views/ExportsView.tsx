@@ -794,7 +794,16 @@ const ExportDownloadAction = ({
       // protected GET is consumed by the browser's native download manager.
       // Typed as undefined, not void: the prepare leg answers 204 and the
       // client's parseBody maps bodyless statuses to undefined.
-      await client.get<undefined>(`${download.path}?prepare=true`, {
+      //
+      // The download path is built locally by DOWNLOAD_ROUTES and is always
+      // `/exports/<id>/<file>`; re-anchoring onto the literal root keeps the
+      // static route audit able to prove the request root, and the guard fails
+      // loudly if a future route stops honoring it.
+      if (!download.path.startsWith("/exports/")) {
+        throw new Error("export download path escaped the /exports route root");
+      }
+      const preparePath = `/exports/${download.path.slice("/exports/".length)}`;
+      await client.get<undefined>(`${preparePath}?prepare=true`, {
         // A cached 204 would skip generation and authorization on a later click.
         // The backend also marks both handshake legs no-store; request cache mode
         // makes the browser-side half of that contract explicit.

@@ -45,20 +45,25 @@ export const shouldEnableDevGateway = (
   isPreview = false,
 ): boolean => command === "serve" && mode === "development" && !isPreview;
 
-/** True only for explicit loopback bind hosts; wildcard/network binds are unsafe. */
-export const isLoopbackDevServerHost = (host: string | boolean | undefined): boolean => {
-  if (typeof host !== "string") {
-    return false;
-  }
-  const normalized = host.trim().replace(/^\[|\]$/gu, "").replace(/\.$/u, "")
-    .toLowerCase();
-  if (normalized === "localhost" || normalized === "::1") {
-    return true;
-  }
+/** Normalize a bind host: trim, unwrap IPv6 brackets, drop a trailing dot. */
+const normalizeBindHost = (host: string): string =>
+  host.trim().replace(/^\[|\]$/gu, "").replace(/\.$/u, "").toLowerCase();
+
+/** True only for dotted-quad IPv4 addresses inside 127.0.0.0/8. */
+const isLoopbackIpv4 = (normalized: string): boolean => {
   const octets = normalized.split(".");
   return octets.length === 4 &&
     octets[0] === "127" &&
     octets.every((octet) => /^\d{1,3}$/u.test(octet) && Number(octet) <= 255);
+};
+
+/** True only for explicit loopback bind hosts; wildcard/network binds are unsafe. */
+export const isLoopbackDevServerHost = (host?: string | boolean | undefined): boolean => {
+  if (typeof host !== "string") {
+    return false;
+  }
+  const normalized = normalizeBindHost(host);
+  return normalized === "localhost" || normalized === "::1" || isLoopbackIpv4(normalized);
 };
 
 // ============================================================================

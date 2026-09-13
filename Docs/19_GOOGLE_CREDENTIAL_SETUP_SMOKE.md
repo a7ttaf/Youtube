@@ -506,7 +506,7 @@ $operatorUserId = [guid]::Parse($operator.id).ToString()
 
 # The administrator actor exists, so this role write has a real actor FK and audit event.
 $rolePayload = @{
-  role_key = "connector_admin"
+  role_key = "connector_admin"  # skipcq: SCT-A000 — role name, not a credential
   scope_type = "global"
   reason = "Grant connector administration for local credential smoke"
 } | ConvertTo-Json

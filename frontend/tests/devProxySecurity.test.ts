@@ -22,8 +22,7 @@ import {
   type ViteDevServer,
 } from "vite";
 
-import viteConfig from "../vite.config";
-import {
+import viteConfig, {
   TENANT_SCOPED_ROUTES,
   buildTenantScopedProxy,
   isLoopbackDevServerHost,
@@ -266,9 +265,7 @@ describe("development gateway config", () => {
 
   it("preserves creation failures without attempting cleanup before ownership", async () => {
     const startupError = new Error("synthetic Vite creation failure");
-    const createServer = vi.fn(async () => {
-      throw startupError;
-    });
+    const createServer = vi.fn(() => Promise.reject(startupError));
     const resolvePort = vi.fn(httpServerPort);
 
     await expect(
@@ -282,20 +279,18 @@ describe("development gateway config", () => {
 
   it("closes an owned Vite server when listen fails", async () => {
     const startupError = new Error("synthetic Vite listen failure");
-    const close = vi.fn(async () => undefined);
+    const close = vi.fn(() => Promise.resolve());
     const server = {
       close,
       httpServer: null,
-      listen: vi.fn(async () => {
-        throw startupError;
-      }),
+      listen: vi.fn(() => Promise.reject(startupError)),
     } as unknown as ViteDevServer;
 
     await expect(
       startViteServer(
         { configFile: false },
         {
-          createServer: vi.fn(async () => server),
+          createServer: vi.fn(() => Promise.resolve(server)),
           resolvePort: httpServerPort,
         },
       ),
@@ -473,7 +468,7 @@ describe("actual Vite serve and preview activation", () => {
     expect(isLoopbackDevServerHost("::")).toBe(false);
     expect(isLoopbackDevServerHost("api.example.test")).toBe(false);
     expect(isLoopbackDevServerHost(true)).toBe(false);
-    expect(isLoopbackDevServerHost(undefined)).toBe(false);
+    expect(isLoopbackDevServerHost()).toBe(false);
   });
 
   it("proxies adversarial development traffic but keeps development-mode preview inert", async () => {
