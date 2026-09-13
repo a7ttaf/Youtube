@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import io
 from datetime import UTC, datetime
+from typing import Any, TypeVar
 from unittest.mock import patch
 from uuid import UUID, uuid4
 
@@ -60,6 +61,8 @@ def _exactly_one(items):
 
 TENANT = UUID(UMS_TENANT_ID)
 ACTOR = ConnectorJobActor(user_id=str(uuid4()), email="ops@example.com")
+
+_T = TypeVar("_T")
 
 
 def _factory(tmp_path) -> sessionmaker:
@@ -378,6 +381,10 @@ def test_submit_if_absent_returns_none_for_duplicate(tmp_path) -> None:
             )
             is True
         )
+        # Mirror the request lifecycle: a live reservation must be activated
+        # or cancelled before close(), which now treats a dangling slot as an
+        # in-flight post-commit hook and waits for it.
+        executor.cancel_reservation(first)
     finally:
         executor.close()
 

@@ -64,7 +64,11 @@ from ums_smart_revenue.connectors.runs.tenant_context import (
 )
 from ums_smart_revenue.db.lane import platform_lane
 from ums_smart_revenue.db.security_models import AuditLogORM
-from ums_smart_revenue.db.session import SessionFactory
+from ums_smart_revenue.db.session import (
+    _STATEMENT_BOUNDS_KEY,
+    SessionFactory,
+    apply_statement_bounds,
+)
 from ums_smart_revenue.db.tenant_models import TenantORM
 from ums_smart_revenue.org.channel_group_sync import GroupSyncOutcome
 from ums_smart_revenue.org.channel_groups import (
@@ -137,8 +141,19 @@ _JOB_KIND_GROUP_SYNC = "group_sync"
 _JOB_ACTION_SUBMITTED = "job_submitted"
 _JOB_ACTION_DISPATCH_STARTED = "job_dispatch_started"
 _JOB_ACTION_FAILED_BEFORE_START = "job_failed_before_start"
+# ``group_sync_job_failed`` is written for every typed failure a scheduled
+# group-sync worker records — INCLUDING pre-dispatch ones (tenant-context
+# entry, service-actor construction) where no ``job_dispatch_started`` edge
+# exists yet. Recovery must treat it as terminal so that row is the ONE
+# failure record; otherwise the next startup would append a second
+# ``job_failed_before_start`` for the same submission job id.
+_JOB_ACTION_GROUP_SYNC_FAILED = "group_sync_job_failed"
 _JOB_RECOVERY_TERMINAL_ACTIONS = frozenset(
-    {_JOB_ACTION_DISPATCH_STARTED, _JOB_ACTION_FAILED_BEFORE_START}
+    {
+        _JOB_ACTION_DISPATCH_STARTED,
+        _JOB_ACTION_FAILED_BEFORE_START,
+        _JOB_ACTION_GROUP_SYNC_FAILED,
+    }
 )
 _JOB_RECOVERY_BATCH_SIZE = 100
 
@@ -173,6 +188,13 @@ def _expected_failure_category(exc: Exception) -> str:
     if isinstance(exc, ChannelGroupOwnerReassignmentError):
         return _EXPECTED_GROUP_OWNER_CATEGORY
     raise TypeError("expected connector failure category requested for unsupported exception")
+
+# (lock_timeout, statement_timeout) stamped on session.info for every
+# standalone failure-audit write. The after_begin hook applies them before
+# its own role/tenant-context SQL so the whole transaction — not just the
+# audit INSERT — is bounded; the writer paths below also re-assert them via
+# apply_statement_bounds for session factories that lack the hook.
+_AUDIT_STATEMENT_BOUNDS = ("10s", "10s")
 
 
 @dataclass(frozen=True)
@@ -331,6 +353,11 @@ class ConnectorJobExecutor:
             max_workers=max_workers,
             thread_name_prefix="ums-connector-job",
         )
+        # Reservation admission gate: flipped to False by close() under
+        # _lock BEFORE the pool stops, so a submission admitted before the
+        # flip always has its lifecycle covered by the bounded drain — and
+        # nothing new can be reserved mid-teardown.
+        self._accepting_reservations = True
         self._finalizer = weakref.finalize(
             self,
             self._executor.shutdown,
@@ -374,6 +401,12 @@ class ConnectorJobExecutor:
         # falsely report success while the first call's worker was still hung.
         with self._close_lock:
             deadline = time.monotonic() + CLOSE_DRAIN_TIMEOUT_SECONDS
+            # Close the admission gate under the registry lock BEFORE the pool
+            # stops: a submit admitted before this flip is guaranteed to find
+            # its registry slot here (or reach the audit/recovery paths), and
+            # nothing new can be reserved mid-teardown.
+            with self._lock:
+                self._accepting_reservations = False
             self._executor.shutdown(wait=False, cancel_futures=True)
             running_futures, current_audits_durable = self._audit_pending_on_shutdown(deadline)
             self._shutdown_pending_futures.update(running_futures)
@@ -412,6 +445,8 @@ class ConnectorJobExecutor:
         loop below rather than by the first phase.
         """
         with self._close_lock:
+            with self._lock:
+                self._accepting_reservations = False
             self._executor.shutdown(wait=False, cancel_futures=True)
             running_futures, _ = self._audit_pending_on_shutdown(float("inf"))
             self._shutdown_pending_futures.update(running_futures)
@@ -507,7 +542,7 @@ class ConnectorJobExecutor:
             job_id=uuid4(),
         )
         with self._lock:
-            if key in self._registry:
+            if not self._accepting_reservations or key in self._registry:
                 return None
             self._registry[key] = reservation
         return reservation
@@ -615,7 +650,7 @@ class ConnectorJobExecutor:
             job_kind=_JOB_KIND_GROUP_SYNC,
         )
         with self._lock:
-            if key in self._registry:
+            if not self._accepting_reservations or key in self._registry:
                 return None
             self._registry[key] = reservation
         return reservation
@@ -812,26 +847,17 @@ class ConnectorJobExecutor:
         job_id: UUID,
     ) -> set[str]:
         """Lock one request's lifecycle rows and return their bounded actions."""
-        # PERF follow-up (recorded, not fixed here): ``audit_logs.request_id``
-        # has no index (security_models.py defines user/event/entity/tenant
-        # indexes only; migration 20260510_0001 declares the column bare). On
-        # PostgreSQL this query therefore scans every CONNECTOR_JOB_RUN row of
-        # the tenant under FOR UPDATE on each dispatch, and recovery's
-        # request_id anti-join scans per candidate intent. Adding the index
-        # needs a fresh Alembic revision; chaining it here would fork the graph
-        # (PR #228's 20260828_0001 already parents 20260825_0002), so it lands
-        # as a linear follow-up revision on main once this band merges.
+        # The lifecycle predicate — (tenant_id, event_type, request_id) — is
+        # served by ``ix_audit_logs_tenant_event_request`` (migration
+        # 20260913_0001), so this FOR UPDATE lock acquisition and recovery's
+        # request_id anti-join do not scan the tenant's whole audit history.
         action = AuditLogORM.details["action"].as_string()
         statement = select(AuditLogORM).where(
             AuditLogORM.tenant_id == tenant_id,
             AuditLogORM.event_type == AuditEventType.CONNECTOR_JOB_RUN.value,
             AuditLogORM.request_id == str(job_id),
             action.in_(
-                {
-                    _JOB_ACTION_SUBMITTED,
-                    _JOB_ACTION_DISPATCH_STARTED,
-                    _JOB_ACTION_FAILED_BEFORE_START,
-                }
+                {_JOB_ACTION_SUBMITTED, *_JOB_RECOVERY_TERMINAL_ACTIONS}
             ),
         )
         if session.get_bind().dialect.name == "postgresql":
@@ -1474,24 +1500,32 @@ class ConnectorJobExecutor:
                 display_name="group sync job failed-audit",
             )
             token = TENANT_CTX.set(minimal_tenant)
-            with self._session_factory() as session, platform_lane(session):
-                sink = SqlAlchemyAuditSink(session, tenant_id=tenant_id)
-                record_audit_event(
-                    sink=sink,
-                    actor=actor,
-                    event_type=AuditEventType.CONNECTOR_JOB_RUN,
-                    entity_type="api_connector",
-                    entity_id=f"{GROUP_SYNC_JOB_CONNECTOR_SLUG}:{content_owner_id}",
-                    scope=AccessScope.connector(GROUP_SYNC_JOB_CONNECTOR_SLUG),
-                    reason="scheduled group sync failed",
-                    request_id=str(job_id) if job_id is not None else None,
-                    details={
-                        "action": "group_sync_job_failed",
-                        "content_owner_id": content_owner_id,
-                        "error_class": error_class,
-                    },
-                )
-                session.commit()
+            with self._session_factory() as session:
+                # Marked before the first statement so the after_begin hook
+                # bounds the transaction (incl. its own role/tenant SQL) —
+                # see _audit_failed_before_start for the full rationale.
+                session.info[_STATEMENT_BOUNDS_KEY] = _AUDIT_STATEMENT_BOUNDS
+                with platform_lane(session):
+                    apply_statement_bounds(
+                        session, lock_timeout="10s", statement_timeout="10s"
+                    )
+                    sink = SqlAlchemyAuditSink(session, tenant_id=tenant_id)
+                    record_audit_event(
+                        sink=sink,
+                        actor=actor,
+                        event_type=AuditEventType.CONNECTOR_JOB_RUN,
+                        entity_type="api_connector",
+                        entity_id=f"{GROUP_SYNC_JOB_CONNECTOR_SLUG}:{content_owner_id}",
+                        scope=AccessScope.connector(GROUP_SYNC_JOB_CONNECTOR_SLUG),
+                        reason="scheduled group sync failed",
+                        request_id=str(job_id) if job_id is not None else None,
+                        details={
+                            "action": _JOB_ACTION_GROUP_SYNC_FAILED,
+                            "content_owner_id": content_owner_id,
+                            "error_class": error_class,
+                        },
+                    )
+                    session.commit()
             return True
         except Exception:  # noqa: BLE001 — best-effort audit, never escape
             logger.exception(
@@ -1503,6 +1537,24 @@ class ConnectorJobExecutor:
             if token is not None:
                 TENANT_CTX.reset(token)
 
+    # ========================================================================
+    # Purpose: Public entry point for a connector job's activation-failure
+    #   audit — writes ONE ``job_failed_before_start`` row on a fresh session
+    #   so the failed dispatch is durable even when the worker never ran.
+    # Database/ORM: delegates to _audit_failed_before_start (audit_logs INSERT
+    #   via SqlAlchemyAuditSink under platform_lane + statement bounds).
+    # Standards: synchronous by design — every caller invokes it only AFTER
+    #   the request/scheduler session released its checkout (route hooks run
+    #   on after_transaction_end; the scheduler calls it post-commit), so the
+    #   fresh-session write can never block on a held pooled connection.
+    # Blast Radius: Audit completeness for accepted connector jobs only.
+    # Connections:
+    #   - File: backend/ums_smart_revenue/api/connectors.py -> lifecycle hook.
+    #   - File: backend/ums_smart_revenue/connectors/runs/scheduler.py ->
+    #     activation-failure path.
+    #   - File: backend/ums_smart_revenue/connectors/runs/executor.py ->
+    #     _write_shutdown_audits + recovery reuse it for the shared taxonomy.
+    # ========================================================================
     def audit_failed_before_start(
         self,
         *,
@@ -1514,7 +1566,7 @@ class ConnectorJobExecutor:
         actor_identity: ConnectorJobActor,
         job_id: UUID | None = None,
     ) -> bool:
-        """Public hook for request-session after_commit activation failures."""
+        """Public hook for post-checkout activation-failure audits."""
         return self._audit_failed_before_start(
             tenant_id=tenant_id,
             connector_key=connector_key,
@@ -1524,7 +1576,24 @@ class ConnectorJobExecutor:
             actor_identity=actor_identity,
             job_id=job_id,
         )
-
+    # ========================================================================
+    # Purpose: Write ONE CONNECTOR_JOB_RUN job_failed_before_start row through
+    #   a fresh session — the persistence edge for accepted jobs whose worker
+    #   never started.
+    # Database/ORM: audit_logs INSERT via SqlAlchemyAuditSink on a standalone
+    #   session under platform_lane; TENANT_CTX is bridged so the audit_logs
+    #   RLS WITH CHECK sees app_current_tenant_id; Postgres transactions get
+    #   lock/statement bounds via apply_statement_bounds so the write can
+    #   never stall shutdown past connect + 10s.
+    # Standards: best-effort — every failure is caught and logged, never
+    #   raised into hooks or workers; timeout policy lives in db.session.
+    # Blast Radius: Audit completeness for accepted connector jobs.
+    # Connections:
+    #   - File: backend/ums_smart_revenue/api/connectors.py -> hook path.
+    #   - File: backend/ums_smart_revenue/connectors/runs/scheduler.py ->
+    #     activation-failure + recovery callers.
+    #   - File: backend/ums_smart_revenue/db/session.py -> bounds adapter.
+    # ========================================================================
     def _audit_failed_before_start(
         self,
         *,
@@ -1583,19 +1652,35 @@ class ConnectorJobExecutor:
             )
             token = TENANT_CTX.set(minimal_tenant)
             with self._session_factory() as session:
+                # Stamp bounds on session.info BEFORE the first statement:
+                # the after_begin hook reads the marker and applies them
+                # ahead of its own role/tenant-context SQL, so even the
+                # transaction-opening writes are bounded — a bounds call
+                # issued after platform_lane would run too late to cover
+                # those. The explicit call below re-asserts the same values
+                # for session factories that do not carry the hook.
+                session.info[_STATEMENT_BOUNDS_KEY] = _AUDIT_STATEMENT_BOUNDS
                 if job_id is not None:
                     existing_actions = self._lock_job_lifecycle_actions(
                         session=session,
                         tenant_id=tenant_id,
                         job_id=job_id,
                     )
-                    if _JOB_ACTION_FAILED_BEFORE_START in existing_actions:
+                    if existing_actions & _JOB_RECOVERY_TERMINAL_ACTIONS:
+                        # FIX: Any committed terminal edge — dispatch_started,
+                        # a group_sync_job_failed pre-dispatch row, or an
+                        # earlier failed_before_start — already closed this
+                        # submission; a second failure row would double-audit
+                        # one job.
                         session.rollback()
                         return True
                 # audit_logs is platform-only-write: elevate to app_platform for
                 # this standalone audit (run_one does its own elevation; this
                 # audit runs OUTSIDE run_one). No-op off Postgres.
                 with platform_lane(session):
+                    apply_statement_bounds(
+                        session, lock_timeout="10s", statement_timeout="10s"
+                    )
                     sink = SqlAlchemyAuditSink(session, tenant_id=tenant_id)
                     record_audit_event(
                         sink=sink,
@@ -1612,7 +1697,7 @@ class ConnectorJobExecutor:
                             "error_class": error_class,
                         },
                     )
-                session.commit()
+                    session.commit()
             return True
         except Exception:  # noqa: BLE001 — best-effort audit, never escape
             logger.exception(

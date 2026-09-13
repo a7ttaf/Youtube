@@ -1,3 +1,20 @@
+# ============================================================================
+# Purpose: User-administration API — account lifecycle (create/update/status),
+#   role assignments, and direct permission grants within access scopes.
+# Database/ORM: users / user_role_assignments / user_permission_grants /
+#   access_scopes via the auth repositories on the tenant session; org_units
+#   and youtube_channels read via the targeted load_org_access_index_for_scope.
+# Standards: thin routes — typed permission gates, role/permission family
+#   authority, and OrgAccessIndex scope containment before any write; typed
+#   repository errors -> 404/409/422/503; audit rows share the request
+#   transaction.
+# Blast Radius: Authorization and audit — every mutating route writes role or
+#   permission state plus its audit row.
+# Connections:
+#   - File: backend/ums_smart_revenue/auth/user_roles.py -> role repository.
+#   - File: backend/ums_smart_revenue/auth/user_permissions.py -> grant repo.
+#   - File: backend/ums_smart_revenue/api/dependencies_finance.py -> org index.
+# ============================================================================
 import logging
 from typing import Annotated
 
@@ -19,7 +36,7 @@ from ums_smart_revenue.auth.models import UserPrincipal
 from ums_smart_revenue.auth.permissions import Permission
 from ums_smart_revenue.auth.policy import has_permission
 from ums_smart_revenue.auth.roles import RoleKey
-from ums_smart_revenue.auth.scopes import AccessScope
+from ums_smart_revenue.auth.scopes import AccessScope, OrgAccessIndex, ScopeType
 from ums_smart_revenue.auth.user_permissions import (
     SqlAlchemyUserPermissionGrantRepository,
     UserPermissionGrantConflictError,
@@ -44,6 +61,7 @@ from ums_smart_revenue.auth.users import (
     UserAccountStorageError,
     UserAccountValidationError,
 )
+from ums_smart_revenue.org.access_index import load_org_access_index_for_scope
 
 router = APIRouter(prefix="/users", tags=["users"])
 logger = logging.getLogger(__name__)
@@ -78,6 +96,7 @@ CONNECTOR_PERMISSION_KEYS = frozenset(
     {
         Permission.RUN_CONNECTOR_JOBS,
         Permission.MANAGE_CONNECTORS,
+        Permission.VIEW_CONNECTOR_HEALTH,
         Permission.VIEW_RAW_FILES,
     }
 )
@@ -470,6 +489,23 @@ def update_user_account(
     return response
 
 
+# ============================================================================
+# Purpose: Assign a role to a user within a scope; enforces ASSIGN_ROLES plus
+#   role-family grant authority against the populated org index.
+# Database/ORM: user_role_assignments/access_scopes via
+#   SqlAlchemyUserRoleAssignmentRepository on the tenant session; org_units and
+#   youtube_channels read via load_org_access_index_for_scope on the
+#   same session.
+# Standards: Thin route — permission gate, then family policy with
+#   OrgAccessIndex scope containment; typed repository errors -> 409/404/422;
+#   the audit row shares the request transaction.
+# Blast Radius: Authorization write + audit. connector_admin remains
+#   Super-Owner-only; finance roles require a Finance Admin/Super Owner
+#   assignment containing the target scope.
+# Connections:
+#   - File: backend/ums_smart_revenue/auth/user_roles.py -> repository + errors.
+#   - File: backend/ums_smart_revenue/api/dependencies_finance.py -> org index.
+# ============================================================================
 @router.post("/{user_id}/roles", status_code=status.HTTP_201_CREATED)
 def assign_user_role(
     user_id: str,
@@ -480,6 +516,7 @@ def assign_user_role(
         Depends(current_user_role_assignment_repository),
     ],
     audit_sink: Annotated[AuditSink, Depends(current_atomic_audit_sink)],
+    session: Annotated[Session, Depends(current_db_session)],
 ) -> dict[str, object]:
     """Assign a role to a user within a scope.
 
@@ -487,7 +524,10 @@ def assign_user_role(
     """
     _require_role_assignment_permission(user)
     role = _parse_role_for_policy(payload.role_key)
-    _require_role_assignment_policy(user, role)
+    target_scope = _parse_scope_for_policy(payload.scope_type, payload.scope_id)
+    org_index = load_org_access_index_for_scope(session, target_scope)
+    _require_resolved_org_scope(target_scope, org_index)
+    _require_role_assignment_policy(user, role, target_scope, org_index)
     try:
         assignment = repository.assign_role(
             user_id=user_id,
@@ -518,6 +558,20 @@ def assign_user_role(
     return response
 
 
+# ============================================================================
+# Purpose: Revoke an active role assignment; re-checks family grant authority
+#   against the STORED role/scope using the populated org index before writing.
+# Database/ORM: user_role_assignments/access_scopes via
+#   SqlAlchemyUserRoleAssignmentRepository on the tenant session; org_units and
+#   youtube_channels read via the targeted load_org_access_index_for_scope.
+# Standards: Thin route — permission gate, stored-scope policy check, typed
+#   repository errors -> 404/409/422; audit row shares the request transaction.
+# Blast Radius: Authorization write + audit; scoped authorities cannot revoke
+#   assignments outside their contained subtree.
+# Connections:
+#   - File: backend/ums_smart_revenue/auth/user_roles.py -> repository + errors.
+#   - File: backend/ums_smart_revenue/api/dependencies_finance.py -> org index.
+# ============================================================================
 @router.post("/{user_id}/roles/{assignment_id}/revoke")
 def revoke_user_role(
     user_id: str,
@@ -529,6 +583,7 @@ def revoke_user_role(
         Depends(current_user_role_assignment_repository),
     ],
     audit_sink: Annotated[AuditSink, Depends(current_atomic_audit_sink)],
+    session: Annotated[Session, Depends(current_db_session)],
 ) -> dict[str, object]:
     """Revoke an active role assignment.
 
@@ -544,7 +599,12 @@ def revoke_user_role(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)
         ) from exc
 
-    _require_role_assignment_policy(user, RoleKey(existing.role_key))
+    existing_role = _parse_role_for_policy(existing.role_key)
+    existing_scope = _parse_scope_for_policy(
+        existing.scope_type, existing.scope_id, stored=True
+    )
+    org_index = load_org_access_index_for_scope(session, existing_scope)
+    _require_role_assignment_policy(user, existing_role, existing_scope, org_index)
 
     try:
         assignment = repository.revoke_role(
@@ -573,6 +633,23 @@ def revoke_user_role(
     return response
 
 
+# ============================================================================
+# Purpose: Grant a direct permission to a user; enforces ASSIGN_ROLES plus
+#   permission-family authority (Super Owner / Finance Admin / Connector
+#   Admin) against the populated org index.
+# Database/ORM: user_permission_grants/access_scopes via
+#   SqlAlchemyUserPermissionGrantRepository on the tenant session; org_units
+#   and youtube_channels read via the targeted load_org_access_index_for_scope.
+# Standards: Thin route — permission gate, then family policy with
+#   OrgAccessIndex scope containment; typed repository errors -> 409/404/422;
+#   audit row shares the request transaction.
+# Blast Radius: Authorization write + audit; administrative permissions stay
+#   Super-Owner-only and scoped authorities cannot mint grants outside their
+#   subtree.
+# Connections:
+#   - File: backend/ums_smart_revenue/auth/user_permissions.py -> repository.
+#   - File: backend/ums_smart_revenue/api/dependencies_finance.py -> org index.
+# ============================================================================
 @router.post("/{user_id}/permissions", status_code=status.HTTP_201_CREATED)
 def grant_user_permission(
     user_id: str,
@@ -583,11 +660,15 @@ def grant_user_permission(
         Depends(current_user_permission_grant_repository),
     ],
     audit_sink: Annotated[AuditSink, Depends(current_atomic_audit_sink)],
+    session: Annotated[Session, Depends(current_db_session)],
 ) -> dict[str, object]:
     """Grant a direct permission to a user; enforces family-specific authority rules."""
     _require_role_assignment_permission(user)
     permission = _parse_permission_for_policy(payload.permission_key)
-    _require_permission_grant_policy(user, permission)
+    target_scope = _parse_scope_for_policy(payload.scope_type, payload.scope_id)
+    org_index = load_org_access_index_for_scope(session, target_scope)
+    _require_resolved_org_scope(target_scope, org_index)
+    _require_permission_grant_policy(user, permission, target_scope, org_index)
     try:
         grant = repository.grant_permission(
             user_id=user_id,
@@ -618,6 +699,20 @@ def grant_user_permission(
     return response
 
 
+# ============================================================================
+# Purpose: Revoke an active permission grant; re-checks family authority
+#   against the STORED permission/scope using the populated org index.
+# Database/ORM: user_permission_grants/access_scopes via
+#   SqlAlchemyUserPermissionGrantRepository on the tenant session; org_units
+#   and youtube_channels read via the targeted load_org_access_index_for_scope.
+# Standards: Thin route — permission gate, stored-scope policy check, typed
+#   repository errors -> 404/409/422; audit row shares the request transaction.
+# Blast Radius: Authorization write + audit; scoped authorities cannot revoke
+#   grants outside their contained subtree.
+# Connections:
+#   - File: backend/ums_smart_revenue/auth/user_permissions.py -> repository.
+#   - File: backend/ums_smart_revenue/api/dependencies_finance.py -> org index.
+# ============================================================================
 @router.post("/{user_id}/permissions/{grant_id}/revoke")
 def revoke_user_permission(
     user_id: str,
@@ -629,6 +724,7 @@ def revoke_user_permission(
         Depends(current_user_permission_grant_repository),
     ],
     audit_sink: Annotated[AuditSink, Depends(current_atomic_audit_sink)],
+    session: Annotated[Session, Depends(current_db_session)],
 ) -> dict[str, object]:
     """Revoke an active permission grant.
 
@@ -645,7 +741,11 @@ def revoke_user_permission(
         ) from exc
 
     permission = _parse_permission_for_policy(existing.permission_key)
-    _require_permission_grant_policy(user, permission)
+    existing_scope = _parse_scope_for_policy(
+        existing.scope_type, existing.scope_id, stored=True
+    )
+    org_index = load_org_access_index_for_scope(session, existing_scope)
+    _require_permission_grant_policy(user, permission, existing_scope, org_index)
 
     try:
         grant = repository.revoke_permission(
@@ -723,15 +823,95 @@ def _parse_permission_for_policy(permission_key: str) -> Permission:
         ) from exc
 
 
-def _require_role_assignment_policy(user: UserPrincipal, role: RoleKey) -> None:
-    """Enforce role-family-specific assignment authority."""
+def _parse_scope_for_policy(
+    scope_type: str,
+    scope_id: str | None,
+    *,
+    stored: bool = False,
+) -> AccessScope:
+    """Parse a requested or stored scope before applying grant authority."""
+    try:
+        parsed_type = ScopeType(scope_type.strip().lower())
+    except (AttributeError, ValueError) as exc:
+        if stored:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Stored authorization scope is invalid",
+            ) from exc
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=f"Unknown scope_type: {scope_type}",
+        ) from exc
+
+    normalized_id = scope_id.strip() if isinstance(scope_id, str) else scope_id
+    if parsed_type == ScopeType.GLOBAL:
+        if normalized_id is not None:
+            detail = (
+                "Stored global authorization scope has an id"
+                if stored
+                else "scope_id must be omitted for global scope"
+            )
+            raise HTTPException(
+                status_code=(
+                    status.HTTP_403_FORBIDDEN if stored else status.HTTP_422_UNPROCESSABLE_CONTENT
+                ),
+                detail=detail,
+            )
+        return AccessScope.global_scope()
+    if not normalized_id:
+        detail = (
+            "Stored scoped authorization scope is missing an id"
+            if stored
+            else f"scope_id is required for scope type: {parsed_type.value}"
+        )
+        raise HTTPException(
+            status_code=(
+                status.HTTP_403_FORBIDDEN if stored else status.HTTP_422_UNPROCESSABLE_CONTENT
+            ),
+            detail=detail,
+        )
+    return AccessScope(parsed_type, normalized_id)
+
+
+# ============================================================================
+# Purpose: Enforce family-specific grant authority and scope containment for
+#          role assignments and direct permission grants.
+# Database/ORM: None; evaluates the database-backed UserPrincipal snapshot.
+# Standards: Disabled or malformed principals fail closed; only Super Owner can
+#            assign/revoke Connector Admin, and a scoped authority cannot mint
+#            or revoke a broader connector or finance grant.
+# Blast Radius: Authorization and audit-gated user-management writes only.
+# Connections:
+#   - File: backend/ums_smart_revenue/auth/scopes.py -> OrgAccessIndex containment.
+#   - File: backend/ums_smart_revenue/auth/user_roles.py -> stored role scope.
+#   - File: backend/ums_smart_revenue/auth/user_permissions.py -> stored grant scope.
+# ============================================================================
+def _require_role_assignment_policy(
+    user: UserPrincipal,
+    role: RoleKey,
+    target_scope: AccessScope,
+    org_index: OrgAccessIndex,
+) -> None:
+    """Enforce role-family authority without permitting scoped escalation."""
     if role == RoleKey.SUPER_OWNER and not _has_role(user, RoleKey.SUPER_OWNER):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Super Owner assignments require Super Owner",
         )
+    # FIX: Corporate Admin carries roles.assign@global. Because Connector
+    # Admin was not a protected role family, that was enough to assign the
+    # role to itself (or another account) and acquire connectors.manage
+    # indirectly. Connector administration is bootstrapped only by Super
+    # Owner; scoped Connector Admins may still manage direct connector grants
+    # below their own scope but cannot reproduce or widen their role
+    # assignment.
+    if role == RoleKey.CONNECTOR_ADMIN and not _has_role(user, RoleKey.SUPER_OWNER):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Connector Admin assignments require Super Owner",
+        )
     if role in FINANCE_ROLE_KEYS and not _has_any_role(
-        user, {RoleKey.FINANCE_ADMIN, RoleKey.SUPER_OWNER}
+        user, {RoleKey.FINANCE_ADMIN, RoleKey.SUPER_OWNER}, target_scope, org_index
     ):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -739,22 +919,41 @@ def _require_role_assignment_policy(user: UserPrincipal, role: RoleKey) -> None:
         )
 
 
-def _require_permission_grant_policy(user: UserPrincipal, permission: Permission) -> None:
-    """Enforce permission-family-specific grant authority."""
+# ============================================================================
+# Purpose: Enforce permission-family grant authority and target-scope
+#   containment for direct permission grants/revocations — Super-Owner-only
+#   administrative keys, Finance Admin/Super Owner for finance keys, and
+#   Connector Admin/Super Owner for connector keys.
+# Database/ORM: None directly; evaluates the database-backed UserPrincipal
+#   snapshot plus the request's populated OrgAccessIndex.
+# Standards: Fail closed — disabled or malformed principals and
+#   non-containing scopes yield 403 before any repository write.
+# Blast Radius: Authorization decision for user_permission_grants writes.
+# Connections:
+#   - File: backend/ums_smart_revenue/auth/scopes.py -> OrgAccessIndex.
+#   - File: backend/ums_smart_revenue/auth/user_permissions.py -> grant store.
+# ============================================================================
+def _require_permission_grant_policy(
+    user: UserPrincipal,
+    permission: Permission,
+    target_scope: AccessScope,
+    org_index: OrgAccessIndex,
+) -> None:
+    """Enforce permission-family authority and target-scope containment."""
     if permission in SUPER_OWNER_ONLY_PERMISSION_KEYS and not _has_role(user, RoleKey.SUPER_OWNER):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Administrative permissions require Super Owner",
         )
     if permission in FINANCE_PERMISSION_KEYS and not _has_any_role(
-        user, {RoleKey.FINANCE_ADMIN, RoleKey.SUPER_OWNER}
+        user, {RoleKey.FINANCE_ADMIN, RoleKey.SUPER_OWNER}, target_scope, org_index
     ):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Finance permissions require Finance Admin or Super Owner",
         )
     if permission in CONNECTOR_PERMISSION_KEYS and not _has_any_role(
-        user, {RoleKey.CONNECTOR_ADMIN, RoleKey.SUPER_OWNER}
+        user, {RoleKey.CONNECTOR_ADMIN, RoleKey.SUPER_OWNER}, target_scope, org_index
     ):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -764,15 +963,76 @@ def _require_permission_grant_policy(user: UserPrincipal, permission: Permission
 
 def _has_role(user: UserPrincipal, role: RoleKey) -> bool:
     """Return whether the caller has an active assignment for one role."""
+    return _has_scoped_role(user, role, AccessScope.global_scope(), OrgAccessIndex())
+
+
+def _has_any_role(
+    user: UserPrincipal,
+    roles: set[RoleKey],
+    target_scope: AccessScope,
+    org_index: OrgAccessIndex,
+) -> bool:
+    """Return whether the caller has any active assignment in a role set."""
     return any(
-        assignment.active and assignment.role == role for assignment in user.role_assignments
+        _has_scoped_role(user, role, target_scope, org_index) for role in roles
     )
 
 
-def _has_any_role(user: UserPrincipal, roles: set[RoleKey]) -> bool:
-    """Return whether the caller has any active assignment in a role set."""
+# ============================================================================
+# Purpose: Refuse CREATE-path mutations whose org target the index could not
+#   resolve — contains() correctly lets GLOBAL authority through for revoke
+#   and cleanup of stale rows, but assign/grant would persist a NEW dangling
+#   access_scopes row against a dead or never-existing org object.
+# Database/ORM: None — reads the targeted index's resolved_targets proof.
+# Standards: Fail closed — a tracked unresolved org target is a 404, not a
+#   creatable scope; non-org and untracked targets pass through unchanged.
+# Blast Radius: Data integrity — stops dangling organization-scoped
+#   assignments/grants even under global authority.
+# Connections:
+#   - File: backend/ums_smart_revenue/auth/scopes.py -> target_resolved.
+#   - File: backend/ums_smart_revenue/org/access_index.py -> loader proof.
+# ============================================================================
+def _require_resolved_org_scope(
+    target_scope: AccessScope, org_index: OrgAccessIndex
+) -> None:
+    """Raise 404 when a create-path mutation targets an unresolved org scope."""
+    if not org_index.target_resolved(target_scope):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="scope target not found",
+        )
+
+
+# ============================================================================
+# Purpose: Decide whether an active role assignment on the principal contains
+#   the target scope under the request's populated OrgAccessIndex (sector ->
+#   company/channel, company -> channel, same-scope equality, global -> all).
+# Database/ORM: None directly; reads the UserPrincipal snapshot and the
+#   request-scoped OrgAccessIndex loaded from org_units/youtube_channels.
+# Standards: Fail closed — disabled users and non-containing scopes return
+#   False; an empty index still answers GLOBAL correctly.
+# Blast Radius: Authorization decision shared by all grant-policy checks.
+# Connections:
+#   - File: backend/ums_smart_revenue/auth/scopes.py -> contains() rules.
+#   - File: backend/ums_smart_revenue/org/access_index.py -> index loader.
+# ============================================================================
+def _has_scoped_role(
+    user: UserPrincipal,
+    role: RoleKey,
+    target_scope: AccessScope,
+    org_index: OrgAccessIndex,
+) -> bool:
+    """Return whether an active role assignment contains the target scope."""
+    if user.disabled:
+        return False
+    # FIX: the index must be the request's populated OrgAccessIndex; an empty
+    # index makes every cross-scope containment answer False, so a scoped
+    # Finance Admin could never administer inside its own sector/company.
     return any(
-        assignment.active and assignment.role in roles for assignment in user.role_assignments
+        assignment.active
+        and assignment.role == role
+        and org_index.contains(assignment.scope, target_scope)
+        for assignment in user.role_assignments
     )
 
 
