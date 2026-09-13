@@ -62,8 +62,9 @@ Rules:
 - Name test files `*.test.ts` / `*.test.tsx`. `.spec.*` is **not** collected.
 - Import the code under test through the `@/` alias, never a relative path.
   The alias is what makes the tests movable and the layout cheap to change.
-  The dev-proxy contract lives in `src/devProxy.ts`, so its test follows this
-  rule; the root `vite.config.ts` imports that Node-side module relatively.
+  The dev-proxy contract lives in the root `devProxy.ts`, so its test follows
+  this rule for source imports; the supplied infrastructure test's relative
+  `../vite.config` import is the sanctioned exception.
 - Do not create `__tests__/` directories. That convention is retired.
 
 The layout is declared by `test.include` in `vitest.config.ts` and enforced by
@@ -316,7 +317,7 @@ guard test will tell you if you forget.
 
 ### Demo headers the dev proxy injects
 
-Defaults live in `vite.config.ts` and are overridable via repo-root `.env`
+Defaults live in `devProxy.ts` and are overridable via repo-root `.env`
 (`VITE_DEV_*`). To see finance money cells you MUST use a finance role — the
 default `assistant_analyst` has no finance visibility. It holds **2 of the 26**
 permissions in `backend/ums_smart_revenue/auth/permissions.py` (`analytics.view` and

@@ -213,11 +213,15 @@ built first.
 `docker-compose.yml` is a local single-box development/smoke stack: one operator, one
 box, every published port bound to `127.0.0.1`. It is not a completed beta deployment.
 
+`scripts/compose.py` is the supported launcher — it validates and holds the
+application storage identity before any lifecycle action, so a direct
+`docker compose` invocation bypasses that preflight and is unsupported.
+
 ```powershell
-docker compose --env-file .env config   # renders the stack; fails loudly on anything missing
-docker compose up -d                    # postgres + redis + migrate + app
-docker compose logs -f app
-docker compose down                     # stop + remove containers, KEEP the data volumes
+python scripts/compose.py --env-file .env config   # renders the stack; fails loudly on anything missing
+python scripts/compose.py up -d                    # postgres + redis + migrate + app
+python scripts/compose.py logs -f app
+python scripts/compose.py down                     # stop + remove containers, KEEP the data volumes
 ```
 
 > ⚠️ **Application files are already ephemeral in this Compose file.** Only
@@ -245,19 +249,19 @@ docker compose down                     # stop + remove containers, KEEP the dat
 > The compose file's own header repeats this authoritative list beside the actual
 > interpolations. Completing the template is plan item P0.3.
 
-> **Logging contract in this snapshot:** there is no `UMS_LOG_LEVEL`, no
-> `config/logging_config.py`, and no Compose `logging:` rotation block. Uvicorn's
-> normal logging is what `docker compose logs app` shows. Do not set invented
-> `UMS_LOG_*` variables and assume retention or redaction changed; configure the
-> process/container logging explicitly in a separate deployment change.
+> **Logging contract in this snapshot:** `UMS_LOG_LEVEL` (default `INFO`) controls
+> the `ums_smart_revenue` logger and is forwarded by `x-app-env`; Uvicorn's
+> access/uvicorn records are the documented exception, so request lines survive.
+> Docker json-file rotation is configured by `UMS_LOG_MAX_SIZE`/`UMS_LOG_MAX_FILE`
+> in the `x-logging` anchor. Anything beyond that is a separate deployment change.
 
-> **Compose environment boundary:** `docker-compose.yml` passes the database, auth,
-> CORS, rate-limit, forwarding, and Redis settings shown in its `x-app-env` block.
-> The connector executor, group-sync scheduler, and service-actor settings are **not
-> forwarded by this branch**, so setting those names in `.env` alone does not change
-> the long-running `app` container. Run the backend directly with `uv run uvicorn`
-> when testing those process-level settings, or use the dependency that adds the
-> corresponding Compose pass-throughs.
+> **Compose environment boundary:** `x-app-env` forwards every setting shown in
+> its block — database, auth, CORS, rate-limit, forwarding, `UMS_LOG_LEVEL`, and
+> the connector-executor, service-actor, and group-sync scheduler variables —
+> into both `app` and `app-dev`. These names therefore take effect from `.env`,
+> and a malformed value fails settings parsing at boot: under the service's
+> restart policy the container loops until the value is fixed. Validate the
+> rendered environment with `python scripts/compose.py config` before `up`.
 
 UMS has no login of its own: identity arrives as gateway-asserted headers, and the
 Compose stack ships no gateway. The loopback binding is the only network boundary in

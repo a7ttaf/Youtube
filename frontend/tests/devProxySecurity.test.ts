@@ -564,7 +564,14 @@ describe("real development gateway proxy", () => {
       request.resume();
       request.once("end", () => {
         hits.push({ headers: request.headers, method: request.method, url: request.url });
-        response.writeHead(200, { "Content-Type": "application/json" });
+        const hopHeaders = request.headers["x-probe-response-hop"]
+          ? {
+              Connection: "x-resp-smuggle",
+              "Keep-Alive": "timeout=1",
+              "X-Resp-Smuggle": "must-not-cross",
+            }
+          : {};
+        response.writeHead(200, { "Content-Type": "application/json", ...hopHeaders });
         response.end(JSON.stringify({ proxied: true }));
       });
     });
@@ -690,6 +697,38 @@ describe("real development gateway proxy", () => {
     expect(headers?.["x-ums-impersonation"]).toBeUndefined();
     expect(headers?.["x-user-impersonated"]).toBeUndefined();
     expect(headers?.["x-unrelated-header"]).toBe("preserve-me");
+  });
+
+  it("does not forward hop-by-hop or Connection-nominated request headers", async () => {
+    const result = await sendRequest(vitePort, "/users", {
+      Connection: "keep-alive, x-hop-smuggle",
+      "Keep-Alive": "timeout=5",
+      "Proxy-Authorization": "Basic dGVzdDp0ZXN0",
+      Upgrade: "websocket",
+      "X-Hop-Smuggle": "must-not-cross",
+    });
+
+    expect(result.status).toBe(200);
+    expect(hits).toHaveLength(1);
+    const headers = hits[0]?.headers;
+    // `connection` on the backend socket is http-proxy's own client framing;
+    // the strip is proven by the nominated field and the fixed set below.
+    expect(headers?.["keep-alive"]).toBeUndefined();
+    expect(headers?.["proxy-authorization"]).toBeUndefined();
+    expect(headers?.upgrade).toBeUndefined();
+    expect(headers?.["x-hop-smuggle"]).toBeUndefined();
+  });
+
+  it("does not pass backend hop-by-hop response headers back to the client", async () => {
+    const result = await sendRequest(vitePort, "/users", {
+      "X-Probe-Response-Hop": "1",
+    });
+
+    // The backend nominates x-resp-smuggle via Connection; if the proxy did not
+    // strip the nominated field it would reach the client. Vite's own framing
+    // connection/keep-alive headers are expected on the client-facing socket.
+    expect(result.status).toBe(200);
+    expect(result.headers["x-resp-smuggle"]).toBeUndefined();
   });
 
   it("scrubs and replaces trusted headers on a real Expect: 100-continue request", async () => {

@@ -331,6 +331,33 @@ const rejectRequest = (
 //     Expect: 100-continue flows through a real Vite proxy.
 //   - File: backend/ums_smart_revenue/api/dependencies.py -> trusted consumer.
 // ============================================================================
+/** HTTP/1 hop-by-hop fields that must terminate at this proxy, not cross it. */
+const HOP_BY_HOP_HEADERS = new Set([
+  "connection",
+  "keep-alive",
+  "proxy-authenticate",
+  "proxy-authorization",
+  "te",
+  "trailer",
+  "transfer-encoding",
+  "upgrade",
+]);
+
+/** Strip the fixed hop-by-hop set plus every field a Connection header nominates. */
+const stripHopByHopHeaders = (
+  headers: Record<string, string | string[] | undefined>,
+): void => {
+  for (const token of singleHeader(headers.connection)?.split(",") ?? []) {
+    const nominated = token.trim().toLowerCase();
+    if (nominated) {
+      delete headers[nominated];
+    }
+  }
+  for (const name of HOP_BY_HOP_HEADERS) {
+    delete headers[name];
+  }
+};
+
 const applyTrustedGatewayHeaders = (
   request: IncomingMessage,
   gatewayHeaders: readonly GatewayHeader[],
@@ -350,9 +377,10 @@ const applyTrustedGatewayHeaders = (
 //   supplied trusted identity, role, scope, tenant, and token header.
 // Database/ORM: None.
 // Standards: Reject encoded path confusion and cross-origin browser requests;
-//   scrub and inject claims before http-proxy copies incoming headers, retaining
-//   proxyReq replacement as defense in depth. Preserve the browser Origin while
-//   changeOrigin rewrites Host to the validated backend.
+//   terminate hop-by-hop framing on both legs, then scrub and inject claims
+//   before http-proxy copies incoming headers, retaining proxyReq replacement
+//   as defense in depth. Preserve the browser Origin while changeOrigin
+//   rewrites Host to the validated backend.
 // Blast Radius: Development authorization boundary; no production activation.
 // Connections:
 //   - File: frontend/tests/devProxySecurity.test.ts -> drives a real Vite proxy.
@@ -382,12 +410,18 @@ export const buildTenantScopedProxy = (
           if (!requestUsesTrustedOrigin(request)) {
             return rejectRequest(response, 403, "Untrusted development gateway origin");
           }
+          // Hop-by-hop fields and everything Connection nominates end here;
+          // http-proxy copies req.headers onto the backend request verbatim.
+          stripHopByHopHeaders(request.headers);
           // FIX: proxyReq is not emitted on every Expect: 100-continue path.
           // Replace trusted claims here before http-proxy copies req.headers.
           applyTrustedGatewayHeaders(request, gatewayHeaders);
           return undefined;
         },
         configure(proxy) {
+          proxy.on("proxyRes", (proxyResponse) => {
+            stripHopByHopHeaders(proxyResponse.headers);
+          });
           proxy.on("proxyReq", (proxyRequest) => {
             // FIX: Deleting the complete trusted set before injection prevents
             // optional headers (especially X-Scope-ID for global identities)

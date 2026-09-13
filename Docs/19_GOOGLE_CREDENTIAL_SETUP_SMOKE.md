@@ -242,59 +242,44 @@ dry-run pass.
 
 ## Supplying the service actor under `docker compose`
 
-Read this before signing the service-actor line in the live-run gate below. It is
-the one checklist item that can be satisfied exactly as an operator would expect
-and still leave every connector run refusing.
+Read this before signing the service-actor line in the live-run gate below.
 
-**`docker-compose.yml` does not forward `UMS_GOOGLE_CONNECTOR_SERVICE_ACTOR_ID`.**
-Compose forwards plenty of other variables from `.env`, but not this one, so
-putting it there has no effect on the compose `app` service. Every connector run
-then fails closed with the variable reported as *unset*:
+`docker-compose.yml` forwards `UMS_GOOGLE_CONNECTOR_SERVICE_ACTOR_ID` through
+`x-app-env`, so a provisioned UUID in `.env` reaches both `app` and `app-dev`
+directly — no override file is needed. `.env.example` keeps the variable
+commented and supplies no UUID; `connectors/google/audit.py` refuses only on
+*unset*, accepting any syntactically valid UUID, so use only the service-account
+UUID recorded after audited provisioning.
 
-```text
-ValueError: UMS_GOOGLE_CONNECTOR_SERVICE_ACTOR_ID must be set to a UUID before
-connector audit emitters can build a service principal
-```
-
-— while the operator is looking at the line they set in `.env`. This is a
-deployment gap, not an intentional safety mechanism. `.env.example` therefore
-keeps the variable commented and supplies no UUID. `connectors/google/audit.py`
-refuses only on *unset*, accepting any syntactically valid UUID, so use only the
-service-account UUID recorded after audited provisioning.
-
-To supply the value under compose, add an untracked `docker-compose.override.yml`
-beside `docker-compose.yml`. Compose merges it automatically — no `-f` flag:
-
-```yaml
-services:
-  app:
-    environment:
-      UMS_GOOGLE_CONNECTOR_SERVICE_ACTOR_ID: "<your provisioned service-actor uuid>"
-```
-
-Then prove the value actually reached the service before you sign anything:
+Prove the value actually reached the service before you sign anything:
 
 ```powershell
-docker compose config | Select-String SERVICE_ACTOR
-docker compose up -d app
+python scripts/compose.py config | Select-String SERVICE_ACTOR
+python scripts/compose.py up -d app
 ```
 
 If the first command prints nothing, the app will refuse every connector run no
-matter what `.env` says. The override reaches **only** the service it names — add
-a matching `app-dev:` block if you run the dev profile.
+matter what `.env` says. If you prefer keeping the UUID out of `.env`, an
+untracked `docker-compose.override.yml` beside `docker-compose.yml` still works —
+Compose merges it automatically, no `-f` flag — but it reaches **only** the
+service it names, so add a matching `app-dev:` block if you run the dev profile.
 
-Two things that do **not** work, both worth knowing before you burn an hour:
+Two failure shapes that do **not** fix it, both worth knowing before you burn an
+hour:
 
+- `UMS_GOOGLE_CONNECTOR_SERVICE_ACTOR_ID=` — an **empty** assignment in `.env`
+  parses as *unset*, and every connector run then fails closed with the
+  `ValueError: UMS_GOOGLE_CONNECTOR_SERVICE_ACTOR_ID must be set to a UUID …`
+  line while the operator is looking at the very line they set.
 - `docker compose run -e UMS_GOOGLE_CONNECTOR_SERVICE_ACTOR_ID=… app` — this
   affects a one-off container, not the long-running `app` service that serves
   `POST /connectors/jobs`.
-- Setting it in `.env`, in any form. It is not forwarded; there is nothing to
-  pick it up.
 
-Outside compose there is no such gap: `uv run uvicorn …` and the
+Outside compose there is no such ceremony: `uv run uvicorn …` and the
 `scripts/run_google_connector.py` CLI read the variable from the environment
-normally, which is why the CLI dry-run in the previous section works with a
-plain `$env:` assignment.
+normally. The CLI dry-run needs only `UMS_DATABASE_URL` — the command in the
+previous section sets it — while `UMS_GOOGLE_CONNECTOR_SERVICE_ACTOR_ID` is
+required only for live runs.
 
 ## Live-run gate
 
@@ -308,10 +293,10 @@ Before the first `dry_run: false` job:
 - CLI `--dry-run` passed for the exact tenant/connector/account/month.
 - `UMS_GOOGLE_CONNECTOR_SERVICE_ACTOR_ID` is set to the recorded service-account
   UUID, **and the process that will run the job has been shown to see it.** Sign
-  this off against observed output, not against a line in `.env`: Compose does
-  not forward this particular variable, so
-  `docker compose config | Select-String SERVICE_ACTOR` must print the variable.
-  If it prints nothing, this item is NOT satisfied however the env file looks —
+  this off against observed output, not against a line in `.env`:
+  `python scripts/compose.py config | Select-String SERVICE_ACTOR` must print
+  the variable — an empty assignment renders as *unset*. If it prints nothing,
+  this item is NOT satisfied however the env file looks —
   see [Supplying the service actor under `docker compose`](#supplying-the-service-actor-under-docker-compose).
 - The service account was created and assigned through the audited `/users`
   API. This is a governance check: the current runtime builds an in-memory
@@ -370,8 +355,8 @@ the approved operator tracker or secret store, not in repository docs.
 6. After credential registration succeeds, provision a service account through
    audited `POST /users`, then assign the
    `system_integration_user` role through `POST /users/{user_id}/roles`. Set
-   `UMS_GOOGLE_CONNECTOR_SERVICE_ACTOR_ID` to that account UUID using the Compose
-   override above. Record the current runtime limitation: connector execution
+   `UMS_GOOGLE_CONNECTOR_SERVICE_ACTOR_ID` to that account UUID in `.env` (or the
+   Compose override) as documented above. Record the current runtime limitation: connector execution
    validates only UUID syntax and fabricates its in-memory permission; the SQL
    account/role is operator governance, not yet a runtime-enforced lookup.
 7. Run the credential probe, then the CLI dry-run. A dry-run still resolves the
@@ -596,7 +581,8 @@ role (which carries `connectors.run_jobs`), then set
 `UMS_GOOGLE_CONNECTOR_SERVICE_ACTOR_ID` to that UUID. Do **not** reuse the human
 `$operatorUserId` provisioned in Step 3; using it would attribute unattended
 connector audit rows to the operator. Never substitute a placeholder UUID.
-Under Compose, supply the UUID via the override documented in
+Under Compose, set it in `.env` — `x-app-env` forwards it — or via the override
+documented in
 [Supplying the service actor under `docker compose`](#supplying-the-service-actor-under-docker-compose).
 
 **Step 6 — optional dry-run.** Costs the same ~54 API calls as a live run.
