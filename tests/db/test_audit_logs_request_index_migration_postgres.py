@@ -17,11 +17,13 @@ INDEX_NAME = "ix_audit_logs_tenant_event_request"
 
 @pytest.fixture
 def postgres_url() -> str:
+    """Return the disposable PostgreSQL URL or skip the module's tests."""
     return require_postgres_url()
 
 
 @pytest.fixture
 def alembic_config(postgres_url: str) -> Config:
+    """Build an Alembic Config pointed at the disposable database."""
     cfg = Config()
     cfg.set_main_option("sqlalchemy.url", postgres_url)
     cfg.set_main_option(
@@ -45,6 +47,7 @@ def fresh_engine(postgres_url: str) -> object:
     #   - File: tests/db/_pg_schema_helpers.py -> schema reset.
     #   - File: tests/_postgres_helpers.py -> require_postgres_url().
     # ============================================================================
+    """Yield a fresh engine on a reset public schema for one round-trip test."""
     reset_public_schema(postgres_url)
     engine = create_engine(postgres_url)
     try:

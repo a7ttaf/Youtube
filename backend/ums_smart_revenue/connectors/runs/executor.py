@@ -189,6 +189,7 @@ def _expected_failure_category(exc: Exception) -> str:
         return _EXPECTED_GROUP_OWNER_CATEGORY
     raise TypeError("expected connector failure category requested for unsupported exception")
 
+
 # (lock_timeout, statement_timeout) stamped on session.info for every
 # standalone failure-audit write. The after_begin hook applies them before
 # its own role/tenant-context SQL so the whole transaction — not just the
@@ -1576,6 +1577,7 @@ class ConnectorJobExecutor:
             actor_identity=actor_identity,
             job_id=job_id,
         )
+
     # ========================================================================
     # Purpose: Write ONE CONNECTOR_JOB_RUN job_failed_before_start row through
     #   a fresh session — the persistence edge for accepted jobs whose worker

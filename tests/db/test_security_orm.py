@@ -5,6 +5,7 @@ from ums_smart_revenue.db.security_models import SecurityBase
 
 
 def test_security_orm_metadata_contains_required_tables():
+    """SecurityBase registers every authz, audit, and credential table."""
     assert set(SecurityBase.metadata.tables) >= {
         "users",
         "roles",
@@ -19,6 +20,7 @@ def test_security_orm_metadata_contains_required_tables():
 
 
 def test_user_role_assignments_model_has_scope_and_revocation_controls():
+    """user_role_assignments keeps scope, revocation, and index controls."""
     table = SecurityBase.metadata.tables["user_role_assignments"]
 
     assert {
@@ -51,6 +53,7 @@ def test_user_role_assignments_model_has_scope_and_revocation_controls():
 
 
 def test_postgresql_ddl_contains_sensitive_audit_and_connector_tables():
+    """Compiled Postgres DDL keeps audit/credential tables and secret flags."""
     ddl = "\n".join(
         str(CreateTable(table).compile(dialect=postgresql.dialect()))
         for table in SecurityBase.metadata.sorted_tables
@@ -64,6 +67,7 @@ def test_postgresql_ddl_contains_sensitive_audit_and_connector_tables():
 
 
 def test_sqlite_global_access_scope_singleton_index_is_partial():
+    """The global-scope singleton stays a partial unique index on SQLite."""
     table = SecurityBase.metadata.tables["access_scopes"]
     index = next(
         (index for index in table.indexes if index.name == "uq_access_scopes_global_singleton"),
