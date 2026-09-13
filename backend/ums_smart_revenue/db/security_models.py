@@ -382,6 +382,15 @@ class AuditLogORM(SecurityBase):
         Index("ix_audit_logs_event_created", "event_type", "created_at"),
         Index("ix_audit_logs_entity", "entity_type", "entity_id"),
         Index("ix_audit_logs_tenant_id", "tenant_id"),
+        # Connector-job lifecycle lookups (dispatch claim, dedupe, startup
+        # recovery) filter on exactly this predicate tuple; without it each
+        # check scans the tenant's full audit history.
+        Index(
+            "ix_audit_logs_tenant_event_request",
+            "tenant_id",
+            "event_type",
+            "request_id",
+        ),
     )
 
 

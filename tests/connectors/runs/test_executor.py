@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import io
 from datetime import UTC, datetime
-from typing import Any, TypeVar
+from typing import TypeVar
 from unittest.mock import patch
 from uuid import UUID, uuid4
 
@@ -1154,3 +1154,52 @@ def test_dispatch_started_edge_prevents_false_shutdown_recovery(tmp_path) -> Non
     actions = [row.details["action"] for row in rows]
     assert len(actions) == 2
     assert set(actions) == {"job_submitted", "job_dispatch_started"}
+
+
+def test_group_sync_failure_edge_prevents_false_shutdown_recovery(tmp_path) -> None:
+    """A committed group_sync_job_failed row is a terminal recovery edge.
+
+    Qodo PR-224 finding: a scheduled group-sync worker can fail BEFORE its
+    ``job_dispatch_started`` edge lands (tenant-context entry or
+    service-actor construction raises), and that pre-dispatch failure is
+    audited as ``group_sync_job_failed`` carrying the submission job id.
+    Recovery must treat it as terminal — otherwise every startup appends a
+    second ``job_failed_before_start`` for a submission that already has its
+    failure record.
+    """
+    factory = _factory(tmp_path)
+    executor = ConnectorJobExecutor(session_factory=factory, max_workers=1, stale_running_hours=6)
+    reservation = executor.submit_group_sync_if_absent(
+        tenant_id=TENANT,
+        content_owner_id="content-owner-recovery",
+        actor_identity=ACTOR,
+    )
+    assert reservation is not None
+    with factory() as session:
+        executor.persist_submission_intent(
+            session=session,
+            reservation=reservation,
+            reason="group-sync recovery test submission",
+        )
+        session.commit()
+    assert executor.cancel_reservation(reservation) is True
+
+    # The pre-dispatch failure edge the worker's catch writes for the intent.
+    assert executor._audit_group_sync_failure(
+        tenant_id=TENANT,
+        content_owner_id="content-owner-recovery",
+        error_class="ConnectorServicePrincipalUnavailableError",
+        actor_identity=ACTOR,
+        job_id=reservation.job_id,
+    ) is True
+
+    assert executor.recover_abandoned_submission_intents() == 0
+    executor.close()
+
+    with factory() as session:
+        rows = session.scalars(
+            select(AuditLogORM).where(AuditLogORM.request_id == str(reservation.job_id))
+        ).all()
+    actions = [row.details["action"] for row in rows]
+    assert len(actions) == 2
+    assert set(actions) == {"job_submitted", "group_sync_job_failed"}

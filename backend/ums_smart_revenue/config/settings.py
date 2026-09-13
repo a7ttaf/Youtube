@@ -163,10 +163,11 @@ class AppSettings:
     #
     # Scope, because the name invites the wrong reading: this is applied to
     # the `ums_smart_revenue` logger, NOT to the root logger. Third-party
-    # libraries stay at WARNING at every setting of this dial -- see
-    # config/logging_config.py::THIRD_PARTY_LOG_LEVEL for why (root-INFO
-    # newly INFO-enabled 56 library loggers, two of which print full request
-    # URLs). Setting this to DEBUG does not widen what any dependency prints.
+    # libraries are floored at max(WARNING, this level) -- at DEBUG/INFO they
+    # stay at WARNING (see config/logging_config.py::THIRD_PARTY_LOG_LEVEL for
+    # why: root-INFO newly INFO-enabled 56 library loggers, two of which print
+    # full request URLs), while ERROR/CRITICAL raise the floor with the dial
+    # so turning the knob down also quiets dependencies.
     log_level: str = DEFAULT_LOG_LEVEL
 
     # Snapshot the raw headers-only value without validating it in the

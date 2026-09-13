@@ -75,3 +75,29 @@ def test_sqlite_global_access_scope_singleton_index_is_partial():
 
     assert "CREATE UNIQUE INDEX uq_access_scopes_global_singleton" in ddl
     assert "WHERE scope_type = 'global' AND scope_id IS NULL" in ddl
+
+
+def test_audit_logs_model_declares_request_lifecycle_index():
+    """audit_logs carries the (tenant_id, event_type, request_id) index.
+
+    Connector-job dispatch claiming, activation-failure dedupe, and startup
+    recovery all filter audit_logs on that tuple (executor.py
+    _lock_job_lifecycle_actions + the recovery anti-join); the index keeps
+    those probes proportional to the lifecycle rows instead of scanning the
+    tenant's full audit history. Migration 20260913_0001 creates it.
+    """
+    table = SecurityBase.metadata.tables["audit_logs"]
+    index = next(
+        (
+            index
+            for index in table.indexes
+            if index.name == "ix_audit_logs_tenant_event_request"
+        ),
+        None,
+    )
+    assert index is not None
+    assert [column.name for column in index.columns] == [
+        "tenant_id",
+        "event_type",
+        "request_id",
+    ]

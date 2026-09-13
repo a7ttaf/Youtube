@@ -101,7 +101,10 @@ from ums_smart_revenue.db.session import (
     session_dependency,
 )
 from ums_smart_revenue.ops.health import (
+    ReadinessChecks,
+    ReadinessResponse,
     ReadinessUnavailableError,
+    RuntimeVersions,
     check_database_readiness,
 )
 from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
@@ -389,16 +392,20 @@ def create_app(*, database_url: str | None = None, authz_source: str | None = No
     #   - File: docker-compose.yml -> app healthcheck uses /readyz.
     #   - File: Dockerfile -> image healthcheck uses /readyz.
     # ========================================================================
-    @_app.get("/readyz", tags=["system"])
-    def readyz() -> dict[str, object]:
+    @_app.get("/readyz", tags=["system"], response_model=ReadinessResponse)
+    def readyz() -> ReadinessResponse:
         """Return readiness only when the configured database is reachable."""
         try:
             check_database_readiness(readiness_session_factory)
         except ReadinessUnavailableError:
             raise HTTPException(status_code=503, detail="Service not ready") from None
         payload = health_payload()
-        payload["checks"] = {"database": "ok"}
-        return payload
+        return ReadinessResponse(
+            status=str(payload["status"]),
+            service=str(payload["service"]),
+            runtime=RuntimeVersions.model_validate(payload["runtime"]),
+            checks=ReadinessChecks(database="ok"),
+        )
 
     return _app
 

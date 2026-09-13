@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+from pydantic import BaseModel
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 
@@ -24,6 +25,29 @@ from ums_smart_revenue.db.session import SessionFactory
 
 class ReadinessUnavailableError(RuntimeError):
     """Raised when a required application dependency cannot be reached."""
+
+
+class RuntimeVersions(BaseModel):
+    """Runtime stack versions reported by the health probes."""
+
+    python: str
+    fastapi: str
+    pydantic: str
+
+
+class ReadinessChecks(BaseModel):
+    """Per-dependency readiness results; each value is a safe status string."""
+
+    database: str
+
+
+class ReadinessResponse(BaseModel):
+    """Public ``/readyz`` contract: liveness metadata plus dependency checks."""
+
+    status: str
+    service: str
+    runtime: RuntimeVersions
+    checks: ReadinessChecks
 
 
 def check_database_readiness(session_factory: SessionFactory | None) -> None:
