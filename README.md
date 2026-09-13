@@ -218,7 +218,7 @@ application storage identity before any lifecycle action, so a direct
 `docker compose` invocation bypasses that preflight and is unsupported.
 
 ```powershell
-python scripts/compose.py --env-file .env config   # renders the stack; fails loudly on anything missing
+python scripts/compose.py --env-file .env config --quiet   # validates the render; fails loudly on anything missing
 python scripts/compose.py up -d                    # postgres + redis + migrate + app
 python scripts/compose.py logs -f app
 python scripts/compose.py down                     # stop + remove containers, KEEP the data volumes

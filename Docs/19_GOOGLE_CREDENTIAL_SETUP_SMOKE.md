@@ -251,18 +251,20 @@ commented and supplies no UUID; `connectors/google/audit.py` refuses only on
 *unset*, accepting any syntactically valid UUID, so use only the service-account
 UUID recorded after audited provisioning.
 
-Prove the value actually reached the service before you sign anything:
+Prove the value actually reached the service before you sign anything. A raw
+`docker compose config` is a render-only inspection — it starts nothing and
+touches no storage, so it is the one direct Compose command that is safe here
+(the launcher's own `config` accepts only `--quiet`, which suppresses output):
 
 ```powershell
-python scripts/compose.py config | Select-String SERVICE_ACTOR
+docker compose config | Select-String SERVICE_ACTOR
 python scripts/compose.py up -d app
 ```
 
 If the first command prints nothing, the app will refuse every connector run no
-matter what `.env` says. If you prefer keeping the UUID out of `.env`, an
-untracked `docker-compose.override.yml` beside `docker-compose.yml` still works —
-Compose merges it automatically, no `-f` flag — but it reaches **only** the
-service it names, so add a matching `app-dev:` block if you run the dev profile.
+matter what `.env` says. Do not reach for `docker-compose.override.yml`: the
+launcher pins `COMPOSE_FILE` to the base file, so an override is never merged
+on the supported path — `.env` is the only documented route.
 
 Two failure shapes that do **not** fix it, both worth knowing before you burn an
 hour:
@@ -294,7 +296,7 @@ Before the first `dry_run: false` job:
 - `UMS_GOOGLE_CONNECTOR_SERVICE_ACTOR_ID` is set to the recorded service-account
   UUID, **and the process that will run the job has been shown to see it.** Sign
   this off against observed output, not against a line in `.env`:
-  `python scripts/compose.py config | Select-String SERVICE_ACTOR` must print
+  `docker compose config | Select-String SERVICE_ACTOR` (render-only) must print
   the variable — an empty assignment renders as *unset*. If it prints nothing,
   this item is NOT satisfied however the env file looks —
   see [Supplying the service actor under `docker compose`](#supplying-the-service-actor-under-docker-compose).
@@ -355,8 +357,8 @@ the approved operator tracker or secret store, not in repository docs.
 6. After credential registration succeeds, provision a service account through
    audited `POST /users`, then assign the
    `system_integration_user` role through `POST /users/{user_id}/roles`. Set
-   `UMS_GOOGLE_CONNECTOR_SERVICE_ACTOR_ID` to that account UUID in `.env` (or the
-   Compose override) as documented above. Record the current runtime limitation: connector execution
+   `UMS_GOOGLE_CONNECTOR_SERVICE_ACTOR_ID` to that account UUID in `.env` as
+   documented above. Record the current runtime limitation: connector execution
    validates only UUID syntax and fabricates its in-memory permission; the SQL
    account/role is operator governance, not yet a runtime-enforced lookup.
 7. Run the credential probe, then the CLI dry-run. A dry-run still resolves the
@@ -431,13 +433,14 @@ host credential probe exits 2 with `SecretFetchError`.
 
 *Compose `app` / in-process jobs:* host ADC is **not** visible inside the
 container. `docker-compose.yml` does not mount ADC or forward
-`GOOGLE_APPLICATION_CREDENTIALS`. Before treating Step 2 as sufficient for
-Compose live runs, mount a service-account key (or ADC directory) into `app`
-and set `GOOGLE_APPLICATION_CREDENTIALS` via an untracked
-`docker-compose.override.yml` (same override pattern as
-[Supplying the service actor under `docker compose`](#supplying-the-service-actor-under-docker-compose)).
-Otherwise the host probe can pass while API credential tests and connector jobs
-fail with `SecretFetchError` inside the container.
+`GOOGLE_APPLICATION_CREDENTIALS`, and the `scripts/compose.py` launcher pins
+`COMPOSE_FILE` so an untracked `docker-compose.override.yml` is never merged —
+there is no supported way to give the compose `app` container Google
+credentials in this snapshot. Until the stack grows a secrets mount, run live
+connector work through `uv run uvicorn …` or the CLI, where the process reads
+host ADC/`GOOGLE_APPLICATION_CREDENTIALS` normally. Otherwise the host probe
+can pass while API credential tests and connector jobs fail with
+`SecretFetchError` inside the container.
 
 **Step 3 — provision the administrator and operator, then register through the
 audited APIs.** The fresh local database has no user row, and credential creation
@@ -581,8 +584,7 @@ role (which carries `connectors.run_jobs`), then set
 `UMS_GOOGLE_CONNECTOR_SERVICE_ACTOR_ID` to that UUID. Do **not** reuse the human
 `$operatorUserId` provisioned in Step 3; using it would attribute unattended
 connector audit rows to the operator. Never substitute a placeholder UUID.
-Under Compose, set it in `.env` — `x-app-env` forwards it — or via the override
-documented in
+Under Compose, set it in `.env` — `x-app-env` forwards it; see
 [Supplying the service actor under `docker compose`](#supplying-the-service-actor-under-docker-compose).
 
 **Step 6 — optional dry-run.** Costs the same ~54 API calls as a live run.
