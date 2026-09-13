@@ -177,6 +177,51 @@ def test_finish_run_truncates_error_summary_to_500_chars(
     assert finished.error_summary == "x" * 500
 
 
+def test_finish_run_persists_a_redacted_error_summary(session: Session) -> None:
+    """Credential-shaped exception text cannot enter connector_runs verbatim."""
+    entry = _start_default_run(session)
+
+    finished = finish_run(
+        session,
+        tenant_id=TENANT_ID,
+        connector_run_id=UUID(entry.id),
+        status="FAILED",
+        counts=_zero_counts(),
+        error_summary="OAuthError: access_token=TOPSECRET\nforged",
+    )
+
+    assert finished.error_summary is not None
+    assert "TOPSECRET" not in finished.error_summary
+    assert "[REDACTED]" in finished.error_summary
+    assert r"\n" in finished.error_summary
+
+    row = session.get(ConnectorRunORM, UUID(entry.id))
+    assert row is not None
+    assert "TOPSECRET" not in (row.error_summary or "")
+
+
+def test_finish_run_redaction_does_not_take_commit_ownership(session: Session) -> None:
+    """The caller can roll back the terminal transition and sanitized summary."""
+    entry = _start_default_run(session)
+    session.commit()
+
+    finish_run(
+        session,
+        tenant_id=TENANT_ID,
+        connector_run_id=UUID(entry.id),
+        status="FAILED",
+        counts=_zero_counts(),
+        error_summary="access_token=TOPSECRET",
+    )
+    session.rollback()
+
+    row = session.get(ConnectorRunORM, UUID(entry.id))
+    assert row is not None
+    assert row.status == "RUNNING"
+    assert row.finished_at is None
+    assert row.error_summary is None
+
+
 @pytest.mark.parametrize("status", ["RUNNING", "SUCCESS", "failed"])
 def test_finish_run_rejects_non_terminal_or_unknown_status(session: Session, status: str) -> None:
     """Check that finish_run rejects non-terminal or invalid statuses."""

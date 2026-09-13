@@ -8,6 +8,7 @@ from uuid import uuid4
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
+from ums_smart_revenue.config.logging_config import fingerprint_log_identifier
 from ums_smart_revenue.connectors.google_source_rows.dataclasses import (
     ParsedSourceRow,
 )
@@ -28,6 +29,9 @@ ACTOR_USER_ID = "00000000-0000-0000-0000-000000010001"
 def test_normalize_month_logging_redacts_payload_amount_channel_id_source_row_id(  # noqa: N802
     caplog,
 ):
+    """INFO output carries aggregates only; amounts, ids, payloads and the
+    raw triggering user UUID stay out of retained Docker logs.
+    """
     from datetime import UTC, datetime
 
     engine = create_engine("sqlite+pysqlite:///:memory:")
@@ -140,6 +144,13 @@ def test_normalize_month_logging_redacts_payload_amount_channel_id_source_row_id
         assert "rep-log-001" not in log_text  # source_report_id (provenance, not log-worthy)
         assert "DO_NOT_LOG" not in log_text  # raw_payload contents
         assert "UC_test_log_42" not in log_text  # individual channel id
+
+        # PR #210 review: the raw triggering user's UUID must never reach the
+        # retained Docker logs at the default UMS_LOG_LEVEL=INFO; only its
+        # process-local keyed fingerprint may appear.
+        assert ACTOR_USER_ID not in log_text
+        expected_fp = fingerprint_log_identifier(ACTOR_USER_ID)
+        assert f"actor_fp={expected_fp}" in log_text
         # source_row_id UUIDs are never emitted as individual values.
         for row_entry in SqlAlchemyGoogleRevenueSourceRowRepository(session).list(
             tenant_id,

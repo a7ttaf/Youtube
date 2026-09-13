@@ -79,6 +79,19 @@ def test_secret_not_found_carries_ref() -> None:
     assert "gcp-secret-manager" in str(err)
 
 
+def test_credential_not_found_retains_fields_but_renders_canned_message() -> None:
+    """Guarded account identifiers remain typed and never enter exception text."""
+    err = CredentialNotFoundError(
+        connector_key="youtube_reporting",
+        account_id="GuardedOwnerCredential123",
+    )
+    assert err.connector_key == "youtube_reporting"
+    assert err.account_id == "GuardedOwnerCredential123"
+    assert str(err) == "connector credential not found"
+    assert "GuardedOwnerCredential123" not in str(err)
+    assert "youtube_reporting" not in str(err)
+
+
 def test_malformed_secret_uri_redacts_secret_resource_name() -> None:
     """``MalformedSecretUriError`` redacts the resource name in ``str(...)``."""
     ref = "gcp-secret-manager://projects/x/secrets/y/versions/latest"

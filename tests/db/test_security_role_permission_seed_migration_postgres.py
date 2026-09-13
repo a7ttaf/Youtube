@@ -24,6 +24,7 @@ import pytest
 import sqlalchemy as sa
 from alembic import command
 from alembic.config import Config
+from alembic.script import ScriptDirectory
 from tests.db._pg_schema_helpers import reset_public_schema
 from tests.db._postgres_helpers import require_postgres_url
 
@@ -40,6 +41,16 @@ def _alembic_config(url: str) -> Config:
         str(PROJECT_ROOT / "backend/ums_smart_revenue/db/alembic"),
     )
     return config
+
+
+def _current_head(config: Config) -> str:
+    """Return the live head revision these refused-downgrade tests pin.
+
+    The gate tests migrate to ``head`` and then assert a refused downgrade
+    left the stamp untouched; hardcoding the gate revision itself breaks the
+    moment a linear successor lands (e.g. 20260913_0001's audit index).
+    """
+    return ScriptDirectory.from_config(config).get_current_head()
 
 
 def _owner_url(admin_url: str, *, role_name: str, password: str) -> str:
@@ -278,7 +289,7 @@ def test_gate_refuses_postgres_downgrade_while_beta_assignment_is_live(
 
     with engine.connect() as connection:
         assert connection.scalar(sa.text("SELECT version_num FROM alembic_version")) == (
-            "20260911_0001"
+            _current_head(_alembic_config(admin_url))
         )
         assert connection.scalar(
             sa.text(
@@ -334,7 +345,7 @@ def test_gate_lock_contention_surfaces_verification_error(
     with engine.connect() as connection:
         assert connection.scalar(
             sa.text("SELECT version_num FROM alembic_version")
-        ) == "20260911_0001"
+        ) == _current_head(_alembic_config(admin_url))
 
 
 @pytest.fixture
@@ -403,4 +414,4 @@ def test_gate_privilege_denial_maps_to_assignment_error(
     with admin_engine.connect() as connection:
         assert connection.scalar(
             sa.text("SELECT version_num FROM alembic_version")
-        ) == "20260911_0001"
+        ) == _current_head(_alembic_config(require_postgres_url()))
