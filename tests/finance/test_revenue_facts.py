@@ -2,10 +2,14 @@ from decimal import Decimal
 from uuid import UUID, uuid4
 
 import pytest
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
-from ums_smart_revenue.db.finance_models import FinanceBase, FinanceMonthCloseORM
+from ums_smart_revenue.db.finance_models import (
+    FinanceBase,
+    FinanceMonthCloseORM,
+    MonthlyChannelRevenueFactORM,
+)
 from ums_smart_revenue.db.org_models import OrgBase, YouTubeChannelORM
 from ums_smart_revenue.finance.revenue_facts import (
     RevenueFactLockedMonthError,
@@ -21,6 +25,7 @@ DEFAULT_TENANT_ID = UUID(UMS_TENANT_ID)
 
 
 def test_revenue_fact_repository_rejects_invalid_metric_ranges():
+    """Reject negative counts and confidence scores outside zero through one."""
     engine = create_engine("sqlite+pysqlite:///:memory:")
     OrgBase.metadata.create_all(engine)
     FinanceBase.metadata.create_all(engine)
@@ -105,6 +110,7 @@ def test_revenue_fact_repository_rejects_invalid_metric_ranges():
 
 
 def test_revenue_fact_repository_rejects_invalid_amounts_and_non_finite_metrics():
+    """Reject negative revenue and non-finite decimal metrics."""
     engine = create_engine("sqlite+pysqlite:///:memory:")
     OrgBase.metadata.create_all(engine)
     FinanceBase.metadata.create_all(engine)
@@ -191,7 +197,60 @@ def test_revenue_fact_repository_rejects_invalid_amounts_and_non_finite_metrics(
             )
 
 
+def test_revenue_fact_repository_upserts_duplicate_source_key_without_duplicate_rows():
+    """A repeated month/channel/source input updates one canonical fact row."""
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    OrgBase.metadata.create_all(engine)
+    FinanceBase.metadata.create_all(engine)
+    with Session(engine) as session:
+        session.add(
+            YouTubeChannelORM(
+                id=CHANNEL_ROW_ID,
+                youtube_channel_id="channel-tv-a",
+                channel_name="TV A",
+                cms_status="INSIDE_CMS",
+                revenue_required=True,
+                active=True,
+            )
+        )
+        session.commit()
+
+        repository = SqlAlchemyRevenueFactRepository(session)
+        repository.record_fact(
+            month="2026-03",
+            youtube_channel_id="channel-tv-a",
+            source_kind="YOUTUBE_CMS",
+            source_report_id=None,
+            gross_revenue_usd=Decimal("1000.00"),
+            net_revenue_usd=None,
+            views=1,
+            watch_time_minutes=Decimal("1"),
+            confidence_score=Decimal("0.9000"),
+            actor_user_id=USER_ID,
+        )
+        repository.record_fact(
+            month="2026-03",
+            youtube_channel_id="channel-tv-a",
+            source_kind="YOUTUBE_CMS",
+            source_report_id="cms-report-2026-03",
+            gross_revenue_usd=Decimal("1100.00"),
+            net_revenue_usd=None,
+            views=2,
+            watch_time_minutes=Decimal("2"),
+            confidence_score=Decimal("0.9500"),
+            actor_user_id=USER_ID,
+        )
+        session.commit()
+
+        rows = session.scalars(select(MonthlyChannelRevenueFactORM)).all()
+        assert len(rows) == 1
+        assert rows[0].source_report_id == "cms-report-2026-03"
+        assert rows[0].gross_revenue_usd == Decimal("1100.00")
+        assert rows[0].views == 2
+
+
 def test_delete_month_facts_can_scope_by_source_report_id():
+    """Deleting one report leaves facts from other reports in the month intact."""
     engine = create_engine("sqlite+pysqlite:///:memory:")
     OrgBase.metadata.create_all(engine)
     FinanceBase.metadata.create_all(engine)
@@ -267,6 +326,7 @@ def test_delete_month_facts_can_scope_by_source_report_id():
 
 
 def test_revenue_fact_rejects_locked_month_in_bound_tenant():
+    """Reject fact writes only when the matching tenant-month is locked."""
     engine = create_engine("sqlite+pysqlite:///:memory:")
     OrgBase.metadata.create_all(engine)
     FinanceBase.metadata.create_all(engine)

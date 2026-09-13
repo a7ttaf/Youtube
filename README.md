@@ -145,8 +145,7 @@ export UMS_AUTHZ_SOURCE=headers
 > `UMS_GOOGLE_CONNECTOR_SERVICE_ACTOR_ID` is intentionally commented out in
 > `.env.example`. Provision a real service account through the audited user APIs
 > only after registering the connector credential reference; never substitute a
-> public placeholder. Compose does not forward this variable, so use the explicit
-> untracked override described in the environment-variable notes below.
+> public placeholder — the runtime rejects the template UUID.
 
 ### Run the tests
 
@@ -170,7 +169,8 @@ uv run pytest -q tests/api
 | `UMS_DATABASE_URL` | yes (prod) | none | SQLAlchemy URL for PostgreSQL. Use `postgresql+psycopg://…` (psycopg3 binary driver). Update `.env.example` to match. |
 | `UMS_AUTHZ_SOURCE` | no | `headers` | `headers` for dev/bootstrap, `database` for production (loads principal + roles from SQL). |
 | `UMS_TRUSTED_GATEWAY_TOKEN` | yes for protected routes | none | Shared secret asserted by the upstream identity gateway. Required for both `headers` bootstrap auth and `database` auth. Also read by `frontend/vite.config.ts` in Node to inject the dev proxy `X-UMS-Trusted-Gateway-Token` header. Keep the value in the repo-root `.env` and load it from there: the API and the dashboard normally run in separate terminals, so a value exported in one shell alone makes the two disagree and every protected route 401s. Note that `.env` is the lowest-precedence source Vite reads — `loadEnv` also picks up `.env.local`, `.env.[mode]`, and `.env.[mode].local`, then overlays the dashboard shell's own environment, in that increasing order — so clear a stale token from those rather than re-editing `.env`. **Never use a `VITE_*` alias** — any `VITE_*` env is embedded in the client bundle. |
-| `UMS_GOOGLE_CONNECTOR_SERVICE_ACTOR_ID` | required for Google connector runs — **but not currently forwarded by compose**, see below | none | UUID stamped onto connector audit events. Optional at process boot so non-connector workloads can start; connector execution fails closed when unset, and malformed values fail settings load. The runtime currently validates UUID syntax only and fabricates the connector permission on the in-memory service principal; it does not prove that the UUID maps to an active SQL service account. |
+| `UMS_GOOGLE_CONNECTOR_SERVICE_ACTOR_ID` | required for Google connector runs | none | UUID used as the connector service principal for audit events. Optional at process boot so non-connector workloads can start; connector execution fails closed at runtime when unset, and malformed values fail settings load. The well-known placeholder UUID shipped in `.env.example` is rejected at runtime use — a copied template fails closed with a named placeholder instead of attributing audit rows to a published template id. `docker-compose.yml` passes it through to `app` and `app-dev` when set. |
+| `UMS_TENANT_PRIMARY_CURRENCY` | no | `USD` | ISO-4217 alphabetic code declared as the bootstrap tenant's primary currency in `headers` auth mode. Headers-mode startup rejects malformed or snapshot-unknown codes (such as `ZZZ`); unset or blank falls back to `USD`. The database-mode app factory and its runtime settings consumers do not parse or consume this setting because PostgreSQL `tenants.primary_currency` is authoritative; direct `load_app_settings()` calls remain strict unless a consumer explicitly defers this check. A future database-mode EGP flip therefore requires a reviewed, tenant-scoped data migration/backfill with captured prior values for rollback; changing this environment value alone is insufficient. A **label only** — UMS performs no currency conversion, so changing it re-labels the declared tenant currency and converts nothing. `docker-compose.yml` forwards it to `migrate`, `app`, and `app-dev` for headers-mode deployments. |
 | `VITE_DEV_BACKEND_URL` | no (dev) | `http://127.0.0.1:8000` | Exact backend origin for the development proxy. Verified loopback (`localhost`, `127.0.0.0/8`, `::1`) may use HTTP; a non-loopback origin must use HTTPS and also appear in `UMS_DEV_TRUSTED_BACKEND_ORIGINS` before it can receive the gateway token. |
 | `UMS_DEV_TRUSTED_BACKEND_ORIGINS` | no (dev) | none | Comma-separated exact origins trusted to receive the dev gateway token when `VITE_DEV_BACKEND_URL` is not loopback. Every non-loopback entry must use HTTPS. Node-side only, never bundled; never use a `VITE_*` name for this allowlist. |
 | `VITE_DEV_GATEWAY_USER_ID` | no (dev) | `00000000-0000-0000-0000-0000000000aa` | Dev `X-User-ID` injected by the Vite proxy on tenant-scoped routes. Non-secret. |
@@ -179,32 +179,15 @@ uv run pytest -q tests/api
 | `VITE_DEV_GATEWAY_SCOPE_TYPE` | no (dev) | `global` | Dev `X-Scope-Type` injected by the Vite proxy. Non-secret. |
 | `VITE_DEV_GATEWAY_SCOPE_ID` | required for non-global dev scope | none | Dev `X-Scope-ID`. Vite refuses to start if this is blank for a non-global scope, or non-blank for `global`. |
 
-> ⚠️ **`UMS_GOOGLE_CONNECTOR_SERVICE_ACTOR_ID` is not forwarded by
-> `docker-compose.yml`.** Setting it in `.env` therefore has **no effect on the
-> compose `app` service**, and connector runs there report it as unset. Do not infer
-> intent from that omission: it is a deployment gap. `.env.example` keeps the
-> variable commented and supplies no UUID; use only the service actor created
-> through the audited operator flow. The runtime check still refuses only on
-> *unset* — any syntactically valid UUID is accepted — and a refused connector run
-> is recoverable while a mis-attributed audit trail is not, so never substitute a
-> public placeholder even though the template no longer ships one.
->
-> To run Google connectors under compose in the meantime, add a
-> `docker-compose.override.yml` beside `docker-compose.yml` setting the variable on
-> the `app` service to **your own provisioned** service-principal UUID. Verified
-> against this repo's compose file with no `-f` flags: compose picks the override up
-> by filename alone and the value lands in `app`'s environment. It lands **only** on
-> the service the override names, so add a matching `app-dev:` block if you use the
-> dev profile. Confirm either way with
-> `docker compose config | Select-String SERVICE_ACTOR` — if that prints nothing,
-> connector runs will refuse no matter what `.env` says. Note that
-> `docker compose run -e …` is **not** a substitute — it affects a one-off
-> container, not the long-running `app` service. Running the backend directly with
-> `uv run uvicorn` reads the variable normally. The full operator runbook for this
-> is in
-> [`Docs/19_GOOGLE_CREDENTIAL_SETUP_SMOKE.md`](Docs/19_GOOGLE_CREDENTIAL_SETUP_SMOKE.md);
-> the durable placeholder rejection is a separate dependency and is not included
-> in this branch.
+> `docker-compose.yml` passes `UMS_GOOGLE_CONNECTOR_SERVICE_ACTOR_ID` through to
+> `app` and `app-dev` when the value is set, so a real provisioned UUID in `.env`
+> reaches the runtime directly. `.env.example` keeps the variable commented and
+> supplies no UUID; use only the service actor created through the audited
+> operator flow, and never substitute a public placeholder — the runtime rejects
+> the template value with a named error. Confirm forwarding with
+> `docker compose config | Select-String SERVICE_ACTOR`. The full operator
+> runbook is in
+> [`Docs/19_GOOGLE_CREDENTIAL_SETUP_SMOKE.md`](Docs/19_GOOGLE_CREDENTIAL_SETUP_SMOKE.md).
 
 > ⚠️ **The default dev role sees almost nothing.** `assistant_analyst` holds **2 of
 > the 26** permissions in `auth/permissions.py` — `analytics.view` and

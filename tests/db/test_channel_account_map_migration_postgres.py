@@ -14,6 +14,10 @@ from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
+# FIX: Reversible migration tests must stop at the revision under test; dynamic
+# head can include later irreversible security floors that correctly refuse.
+CHANNEL_ACCOUNT_MAP_REVISION = "20260531_0001"
+
 
 @pytest.fixture
 def postgres_url() -> str:
@@ -108,7 +112,7 @@ def test_upgrade_creates_both_tables_with_constraints(alembic_config, fresh_engi
 
 def test_downgrade_drops_both_tables(alembic_config, fresh_engine):
     """Downgrade removes both map tables."""
-    command.upgrade(alembic_config, "head")
+    command.upgrade(alembic_config, CHANNEL_ACCOUNT_MAP_REVISION)
     command.downgrade(alembic_config, "20260529_0002")
     inspector = inspect(fresh_engine)
     assert "adsense_content_owner_links" not in inspector.get_table_names()
@@ -117,9 +121,9 @@ def test_downgrade_drops_both_tables(alembic_config, fresh_engine):
 
 def test_round_trip_idempotency(alembic_config, fresh_engine):
     """Upgrade -> downgrade -> upgrade completes without errors."""
-    command.upgrade(alembic_config, "head")
+    command.upgrade(alembic_config, CHANNEL_ACCOUNT_MAP_REVISION)
     command.downgrade(alembic_config, "20260529_0002")
-    command.upgrade(alembic_config, "head")
+    command.upgrade(alembic_config, CHANNEL_ACCOUNT_MAP_REVISION)
     assert "adsense_content_owner_links" in inspect(fresh_engine).get_table_names()
 
 

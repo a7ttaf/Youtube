@@ -145,15 +145,20 @@ def test_cli_rejects_bad_month_format() -> None:
 def test_cli_main_returns_2_when_database_url_missing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Cli main returns 2 when database url missing."""
     module = _load_cli_module()
 
     class _StubSettings:
+        """Settings double carrying only the fields the CLI reads."""
+
         database_url = None
 
-    def _load_stub_settings() -> _StubSettings:
+    def _load_stub_settings(**_kwargs) -> _StubSettings:
+        """Return the stub settings the CLI under test reads."""
         return _StubSettings()
 
     def _build_session_factory_should_not_run(_url: str):
+        """Helper for the build session factory should not run scenario."""
         raise AssertionError("build_session_factory must not run without a database URL")
 
     monkeypatch.setattr(module, "load_app_settings", _load_stub_settings)
@@ -218,27 +223,38 @@ def session() -> Generator[Session]:
 
 
 class _SessionCtx:
+    """Connection-context stub whose cursor answers one canned row."""
+
     def __init__(self, db_session: Session) -> None:
+        """Helper for the init scenario."""
         self._session = db_session
 
     def __enter__(self) -> Session:
+        """Helper for the enter scenario."""
         return self._session
 
     def __exit__(self, *_exc_info: object) -> None:
+        """Helper for the exit scenario."""
         return None
 
 
 def _patch_cli_runtime(module, monkeypatch: pytest.MonkeyPatch, db_session: Session) -> None:
+    """Helper for the patch cli runtime scenario."""
     class _StubSettings:
+        """Settings double carrying only the fields the CLI reads."""
+
         database_url = "sqlite+pysqlite:///:memory:"
 
-    def _load_stub_settings() -> _StubSettings:
+    def _load_stub_settings(**_kwargs) -> _StubSettings:
+        """Return the stub settings the CLI under test reads."""
         return _StubSettings()
 
     def _fake_factory() -> _SessionCtx:
+        """Helper for the fake factory scenario."""
         return _SessionCtx(db_session)
 
     def _build_fake_session_factory(_url: str):
+        """Helper for the build fake session factory scenario."""
         return _fake_factory
 
     monkeypatch.setattr(module, "load_app_settings", _load_stub_settings)
@@ -254,6 +270,7 @@ def _seed_cli_credential(
     last_refresh_attempt_at: datetime | None = None,
     token_expiry_at: datetime | None = None,
 ) -> None:
+    """Helper for the seed cli credential scenario."""
     db_session.add(
         ApiConnectorCredentialORM(
             id=uuid4(),
@@ -287,10 +304,14 @@ def test_cli_main_returns_2_when_credential_missing(
     module = _load_cli_module()
 
     class _SessionCtx:
+        """Connection-context stub whose cursor answers one canned row."""
+
         def __init__(self, db_session: Session) -> None:
+            """Helper for the init scenario."""
             self._session = db_session
 
         def __enter__(self) -> Session:
+            """Helper for the enter scenario."""
             return self._session
 
         def __exit__(self, *_exc_info: object) -> None:
@@ -298,9 +319,11 @@ def test_cli_main_returns_2_when_credential_missing(
             # ``with Session(engine) as ...:`` so the context manager here
             # is a no-op exit. Closing the real session here would break
             # the fixture's cleanup.
+            """Helper for the exit scenario."""
             return None
 
     def _fake_factory() -> _SessionCtx:
+        """Helper for the fake factory scenario."""
         return _SessionCtx(session)
 
     # ``load_app_settings`` is patched to return a stub with
@@ -309,12 +332,16 @@ def test_cli_main_returns_2_when_credential_missing(
     # ``_fake_factory`` itself (a zero-arg callable that yields the
     # session context manager the CLI calls via ``with factory() as ...``).
     class _StubSettings:
+        """Settings double carrying only the fields the CLI reads."""
+
         database_url = "sqlite+pysqlite:///:memory:"
 
-    def _load_stub_settings() -> _StubSettings:
+    def _load_stub_settings(**_kwargs) -> _StubSettings:
+        """Return the stub settings the CLI under test reads."""
         return _StubSettings()
 
     def _build_fake_session_factory(_url: str):
+        """Helper for the build fake session factory scenario."""
         return _fake_factory
 
     monkeypatch.setattr(module, "load_app_settings", _load_stub_settings)
@@ -344,11 +371,13 @@ def test_cli_main_returns_2_when_credential_missing(
 def test_cli_main_returns_2_when_live_credential_smoke_missing(
     session: Session, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Cli main returns 2 when live credential smoke missing."""
     _seed_cli_credential(session)
     module = _load_cli_module()
     _patch_cli_runtime(module, monkeypatch, session)
 
     def _run_one_should_not_run(*_args, **_kwargs):
+        """Helper for the run one should not run scenario."""
         raise AssertionError("run_one must not start before credential smoke passes")
 
     monkeypatch.setattr(module, "run_one", _run_one_should_not_run)
@@ -376,6 +405,7 @@ def test_cli_main_returns_2_when_live_credential_smoke_missing(
 def test_cli_main_returns_2_when_live_credential_smoke_expired(
     session: Session, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Cli main returns 2 when live credential smoke expired."""
     _seed_cli_credential(
         session,
         last_refresh_status="succeeded",
@@ -386,6 +416,7 @@ def test_cli_main_returns_2_when_live_credential_smoke_expired(
     _patch_cli_runtime(module, monkeypatch, session)
 
     def _run_one_should_not_run(*_args, **_kwargs):
+        """Helper for the run one should not run scenario."""
         raise AssertionError("run_one must not start after expired credential smoke")
 
     monkeypatch.setattr(module, "run_one", _run_one_should_not_run)
@@ -413,6 +444,7 @@ def test_cli_main_returns_2_when_live_credential_smoke_expired(
 def test_cli_main_preserves_inactive_credential_error_before_smoke_wrapper(
     session: Session, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Cli main preserves inactive credential error before smoke wrapper."""
     _seed_cli_credential(
         session,
         status="disabled",
@@ -424,6 +456,7 @@ def test_cli_main_preserves_inactive_credential_error_before_smoke_wrapper(
     _patch_cli_runtime(module, monkeypatch, session)
 
     def _run_one_should_not_run(*_args, **_kwargs):
+        """Helper for the run one should not run scenario."""
         raise AssertionError("run_one must not start for inactive credentials")
 
     monkeypatch.setattr(module, "run_one", _run_one_should_not_run)
@@ -451,6 +484,7 @@ def test_cli_main_preserves_inactive_credential_error_before_smoke_wrapper(
 def test_cli_main_allows_live_after_successful_credential_smoke(
     session: Session, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Cli main allows live after successful credential smoke."""
     _seed_cli_credential(
         session,
         last_refresh_status="succeeded",
@@ -462,14 +496,19 @@ def test_cli_main_allows_live_after_successful_credential_smoke(
     calls: list[dict[str, object]] = []
 
     class _Run:
+        """Connector-run row stub carrying only the fields the CLI prints."""
+
         status = "SUCCEEDED"
 
     class _Outcome:
+        """Outcome stub pairing a run with its recorded submission result."""
+
         run = _Run()
         counts = {"reports_seen": 0}
         per_report_failures: list[object] = []
 
     def _fake_run_one(*_args, **kwargs):
+        """Helper for the fake run one scenario."""
         calls.append(kwargs)
         return _Outcome()
 
@@ -521,25 +560,35 @@ def test_cli_main_returns_2_when_tenant_lifecycle_rejected(
     module = _load_cli_module()
 
     class _SessionCtx:
+        """Connection-context stub whose cursor answers one canned row."""
+
         def __init__(self, db_session: Session) -> None:
+            """Helper for the init scenario."""
             self._session = db_session
 
         def __enter__(self) -> Session:
+            """Helper for the enter scenario."""
             return self._session
 
         def __exit__(self, *_exc_info: object) -> None:
+            """Helper for the exit scenario."""
             return None
 
     def _fake_factory() -> _SessionCtx:
+        """Helper for the fake factory scenario."""
         return _SessionCtx(session)
 
     class _StubSettings:
+        """Settings double carrying only the fields the CLI reads."""
+
         database_url = "sqlite+pysqlite:///:memory:"
 
-    def _load_stub_settings() -> _StubSettings:
+    def _load_stub_settings(**_kwargs) -> _StubSettings:
+        """Return the stub settings the CLI under test reads."""
         return _StubSettings()
 
     def _build_fake_session_factory(_url: str):
+        """Helper for the build fake session factory scenario."""
         return _fake_factory
 
     class _RaiseOnEnter:
@@ -560,9 +609,11 @@ def test_cli_main_returns_2_when_tenant_lifecycle_rejected(
             """Accept and ignore the production helper's call signature."""
 
         def __enter__(self) -> None:
+            """Helper for the enter scenario."""
             raise TenantLifecycleError(tenant_id=TENANT_ID, status="SUSPENDED")
 
         def __exit__(self, *_exc_info: object) -> None:
+            """Helper for the exit scenario."""
             return None  # pragma: no cover -- __enter__ always raises
 
     monkeypatch.setattr(module, "load_app_settings", _load_stub_settings)

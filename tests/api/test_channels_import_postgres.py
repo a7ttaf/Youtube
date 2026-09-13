@@ -403,7 +403,12 @@ def test_imported_channels_are_tenant_isolated(
     assert CHANNEL_ID not in _channel_ids_visible_to_tenant(pg_url, TENANT_B, "rotana")
 
     # API boundary: the same app serving tenant B must not list the channel.
-    with patch("ums_smart_revenue.app._bootstrap_tenant", lambda: _tenant(TENANT_B, "rotana")):
+    # The real middleware passes its configured primary_currency; this patch
+    # only pins the tenant, so it accepts and ignores that kwarg.
+    with patch(
+        "ums_smart_revenue.app._bootstrap_tenant",
+        lambda **_bootstrap_kwargs: _tenant(TENANT_B, "rotana"),
+    ):
         other_tenant_listing = client.get("/channels", headers=auth_headers())
     assert other_tenant_listing.status_code == 200, other_tenant_listing.text
     assert all(entry["youtube_channel_id"] != CHANNEL_ID for entry in other_tenant_listing.json())

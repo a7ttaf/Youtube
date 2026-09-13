@@ -1,7 +1,20 @@
+// ============================================================================
+// Purpose: TypeScript mirror of the backend GET /tenants/me JSON contract.
+// Database/ORM: None (frontend) — mirrors the read-only tenant DTO.
+// Standards: Fields are matched 1:1 against backend/ums_smart_revenue/api/
+//   tenants.py; the declared currency is a label only and never client-side
+//   finance math or conversion.
+// Blast Radius: Tenant identity/display/declared-currency contract only; no authorization,
+//   finance writes, exports, or browser-side currency calculations.
+// Connections:
+//   - File: backend/ums_smart_revenue/api/tenants.py -> TenantRead.
+//   - File: frontend/src/contexts/TenantContext.tsx -> identity hydration.
+// ============================================================================
 export type TenantRead = {
   id: string;
   slug: string;
   display_name: string;
+  primary_currency: string;
 };
 
 // ============================================================================
@@ -27,11 +40,12 @@ export type TenantRead = {
 // ============================================================================
 
 // The resolved tenant context on the session, or null when unresolved.
-// Source: SessionTenant (session.py:21-26).
+// Source: SessionTenant (session.py:44-55).
 export type SessionTenantRef = {
   id: string;
   slug: string;
   display_name: string;
+  primary_currency: string;
 };
 
 // One active role assignment flattened for the SPA.
@@ -544,11 +558,15 @@ export type NumberExplanation = {
 //   the Exports screen. Fields are matched 1:1 against the backend serializers
 //   (not guessed); nullable fields serialize as null. An export is requested
 //   (POST), tracked through its lifecycle (QUEUED -> COMPLETED | FAILED |
-//   CANCELLED), and its artifact is downloaded over a plain browser anchor
-//   (binary, NOT through the JSON-strict useApiClient). The download routes
-//   generate-on-demand: a QUEUED job builds + persists + streams its bytes on
-//   first request, so QUEUED and COMPLETED jobs are both downloadable (QUEUED
-//   triggers generation; COMPLETED serves the cached artifact).
+//   CANCELLED), and its artifact is delivered through the two-leg handshake:
+//   the authenticated `?prepare=true` request rides useApiClient (shared
+//   tenant headers; trusted-gateway identity stays a deployment concern) and
+//   returns 204, then the browser's native download manager consumes the
+//   same-origin GET — no Blob buffering and no object URL in SPA memory. The
+//   download routes generate-on-demand: a QUEUED job builds + persists +
+//   streams its bytes on first request, so QUEUED and COMPLETED jobs are both
+//   downloadable (QUEUED triggers generation; COMPLETED serves the cached
+//   artifact).
 // Standards: Read-only typed boundary at the API surface; no logic here. Money
 //   is not a concern on these shapes (jobs carry currency code + month, not
 //   amounts); artifact_byte_size is an integer.

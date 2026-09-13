@@ -70,8 +70,8 @@ _NULLABLE_TEXT_FIELDS = (
 # Validation helpers below enforce typed, finite, JSON-safe ParsedSourceRow
 # inputs before any source-row insert/update reaches the database.
 
-_AMOUNT_NATIVE_SCALE = 6
-_AMOUNT_NATIVE_INTEGER_DIGITS = 14
+AMOUNT_NATIVE_SCALE = 6
+AMOUNT_NATIVE_INTEGER_DIGITS = 14
 
 
 def _require_str_keys(value: object) -> None:
@@ -136,8 +136,8 @@ def _validate_amount_native(row: ParsedSourceRow) -> None:
     precision limits.
 
     Ensures amount_native is a Decimal, is finite and >= 0, does not exceed
-    the _AMOUNT_NATIVE_SCALE fractional digits, and fits within
-    _AMOUNT_NATIVE_INTEGER_DIGITS integer digits.
+    the AMOUNT_NATIVE_SCALE fractional digits, and fits within
+    AMOUNT_NATIVE_INTEGER_DIGITS integer digits.
     """
     if not isinstance(row.amount_native, Decimal):
         raise GoogleRevenueSourceRowValidationError("amount_native must be a Decimal")
@@ -151,14 +151,14 @@ def _validate_amount_native(row: ParsedSourceRow) -> None:
     exponent = row.amount_native.as_tuple().exponent
     if not isinstance(exponent, int):
         raise GoogleRevenueSourceRowValidationError("amount_native must be a finite Decimal >= 0")
-    if exponent < -_AMOUNT_NATIVE_SCALE:
+    if exponent < -AMOUNT_NATIVE_SCALE:
         raise GoogleRevenueSourceRowValidationError(
             "amount_native must not exceed 6 fractional digits "
             f"(column is Numeric(20, 6)), got {row.amount_native}"
         )
     if (
         not row.amount_native.is_zero()
-        and row.amount_native.adjusted() >= _AMOUNT_NATIVE_INTEGER_DIGITS
+        and row.amount_native.adjusted() >= AMOUNT_NATIVE_INTEGER_DIGITS
     ):
         raise GoogleRevenueSourceRowValidationError(
             "amount_native must not exceed 14 integer digits "

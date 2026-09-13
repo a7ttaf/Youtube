@@ -17,6 +17,11 @@ from ums_smart_revenue.db.rls import (
 
 _FAKE_CROSS_BACKEND_PID = -1
 
+# FIX: Reversible migration tests must stop at the revision under test; dynamic
+# head now includes the intentionally irreversible authorization floor.
+_TENANT_RLS_REVISION = "20260608_0001"
+_TENANT_CONTEXT_CLEARER_REVISION = "20260609_0002"
+
 
 def _alembic_config(url: str) -> Config:
     """Build an Alembic config bound to the supplied database URL.
@@ -172,7 +177,8 @@ def test_rls_migration_downgrade_drops_roles_then_upgrade_restores():
     # blanket grants are not revoked, DROP ROLE fails. Leave the DB at head.
     url = require_postgres_url()
     cfg = _alembic_config(url)
-    command.upgrade(cfg, "head")
+    _drop_public_schema(url)
+    command.upgrade(cfg, _TENANT_RLS_REVISION)
     command.downgrade(cfg, "20260606_0001")
     engine = sa.create_engine(url)
     try:
@@ -182,7 +188,8 @@ def test_rls_migration_downgrade_drops_roles_then_upgrade_restores():
             assert APP_PLATFORM_ROLE not in roles
     finally:
         engine.dispose()
-    # Restore head so the rest of the PG tier sees the expected schema/roles.
+    # Re-prove this migration's upgrade before restoring current head for the PG tier.
+    command.upgrade(cfg, _TENANT_RLS_REVISION)
     command.upgrade(cfg, "head")
 
 
@@ -224,12 +231,12 @@ def test_tenant_context_clearer_is_owned_only_by_20260609_0002():
         )
     _assert_app_platform_cross_backend_delete_rejected(url)
 
-    # 2) Upgrade to head (20260609_0002): helper IS installed and GRANTed to
+    # 2) Upgrade to 20260609_0002: helper IS installed and GRANTed to
     #    app_platform.
-    command.upgrade(cfg, "head")
+    command.upgrade(cfg, _TENANT_CONTEXT_CLEARER_REVISION)
     with _db_conn(url) as conn:
         assert _function_exists(conn, TENANT_CONTEXT_CLEARER) is True, (
-            "head must expose clear_app_current_tenant_id; 20260609_0002 is its sole owner."
+            "20260609_0002 must expose clear_app_current_tenant_id as its sole owner."
         )
         grant_holder = conn.execute(
             sa.text(
@@ -265,8 +272,8 @@ def test_tenant_context_clearer_is_owned_only_by_20260609_0002():
         )
     _assert_app_platform_cross_backend_delete_rejected(url)
 
-    # 4) Re-upgrade to head: helper is reinstalled cleanly (no stale object).
-    command.upgrade(cfg, "head")
+    # 4) Re-upgrade the owning revision: helper is reinstalled cleanly.
+    command.upgrade(cfg, _TENANT_CONTEXT_CLEARER_REVISION)
     with _db_conn(url) as conn:
         assert _function_exists(conn, TENANT_CONTEXT_CLEARER) is True
         # The BEFORE DELETE guard trigger owned by 20260608_0001 and
@@ -279,3 +286,4 @@ def test_tenant_context_clearer_is_owned_only_by_20260609_0002():
         _assert_app_platform_cross_backend_delete_rejected(url)
     # Leave the DB at head for any subsequent test that depends on the
     # baseline schema/role state.
+    command.upgrade(cfg, "head")

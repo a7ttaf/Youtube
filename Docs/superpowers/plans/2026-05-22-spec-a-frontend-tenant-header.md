@@ -2314,7 +2314,6 @@ migration, no existing route change. Frontend additions are net new
 files plus minimal surgical edits to `main.tsx` and `AppShell.tsx`.
 Lockfile change is a deliberate scope addition.
 
-🤖 Generated with [Claude Code](https://claude.com/claude-code)
 EOF
 )"
 ```

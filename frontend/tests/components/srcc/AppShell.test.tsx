@@ -7,8 +7,7 @@ import AppShell, { isImportScopeSettled } from "@/components/srcc/AppShell";
 import { DEFAULT_MONTH, MONTH_OPTIONS } from "@/components/srcc/shared";
 import { SessionProvider } from "@/contexts/SessionContext";
 import { TenantProvider } from "@/contexts/TenantContext";
-import type { SessionMe } from "@/lib/api/types";
-import { monthKeyLabel } from "@/lib/months";
+import type { SessionMe, TenantRead } from "@/lib/api/types";
 import { withDisplayDigest } from "../../helpers/displayDigestFixtures";
 
 const ORIGINAL_FETCH = globalThis.fetch;
@@ -18,7 +17,12 @@ const ORIGINAL_FETCH = globalThis.fetch;
 const FULL_SESSION: SessionMe = {
   user_id: "00000000-0000-0000-0000-0000000000aa",
   email: "dev@ums.local",
-  tenant: { id: "t1", slug: "ums", display_name: "UMS" },
+  tenant: {
+    id: "t1",
+    slug: "ums",
+    display_name: "UMS",
+    primary_currency: "USD",
+  },
   roles: [],
   permissions: [],
   is_service_account: false,
@@ -102,8 +106,29 @@ const urlOf = (input: unknown): string => {
 const SESSION_ROUTE = "/session/me";
 const TENANT_ROUTE = "/tenants/me";
 
-// The one tenant every shell test resolves to; duplicated per route map before.
-const SHELL_TENANT = { id: "t1", slug: "ums", display_name: "UMS" };
+// Successful /tenants/me responses are checked against the wire DTO so a
+// fixture cannot silently omit a field that AppShell hydrates into context.
+const BOOTSTRAP_TENANT = {
+  id: "00000000-0000-0000-0000-000000000001",
+  slug: "ums",
+  display_name: "UMS",
+  primary_currency: "USD",
+} satisfies TenantRead;
+
+const ACME_TENANT = {
+  id: "00000000-0000-0000-0000-0000000000ac",
+  slug: "acme",
+  display_name: "Acme Holdings",
+  primary_currency: "EGP",
+} satisfies TenantRead;
+
+// The one tenant every shell test resolves to; typed as the complete API DTO.
+const SHELL_TENANT = {
+  id: "t1",
+  slug: "ums",
+  display_name: "UMS",
+  primary_currency: "USD",
+} satisfies TenantRead;
 
 const isTenantCall = (input: unknown): boolean => {
   return urlOf(input).includes(TENANT_ROUTE);
@@ -161,11 +186,7 @@ describe("AppShell tenant proof tag", () => {
   it("hydrates the tenant and shows UMS (ums) on the dev-only tag", async () => {
     (globalThis.fetch as ReturnType<typeof vi.fn>).mockImplementation(
       routeFetch(() =>
-        jsonResponse({
-          id: "00000000-0000-0000-0000-000000000001",
-          slug: "ums",
-          display_name: "UMS",
-        }),
+        jsonResponse(BOOTSTRAP_TENANT),
       ),
     );
     render(
@@ -224,11 +245,7 @@ describe("AppShell tenant proof tag", () => {
     const fetchMock = globalThis.fetch as ReturnType<typeof vi.fn>;
     fetchMock.mockImplementation(
       routeFetch(() =>
-        jsonResponse({
-          id: "00000000-0000-0000-0000-000000000001",
-          slug: "ums",
-          display_name: "UMS",
-        }),
+        jsonResponse(BOOTSTRAP_TENANT),
       ),
     );
     render(
@@ -256,11 +273,7 @@ describe("AppShell tenant proof tag", () => {
         tenantCallCount += 1;
         return tenantCallCount === 1
           ? jsonResponse({ detail: "transient 503" }, 503)
-          : jsonResponse({
-              id: "00000000-0000-0000-0000-000000000001",
-              slug: "ums",
-              display_name: "UMS",
-            });
+          : jsonResponse(BOOTSTRAP_TENANT);
       }),
     );
     render(
@@ -288,11 +301,7 @@ describe("AppShell tenant proof tag", () => {
   it("renders the presentation-only hint beside the role preview switcher", async () => {
     (globalThis.fetch as ReturnType<typeof vi.fn>).mockImplementation(
       routeFetch(() =>
-        jsonResponse({
-          id: "00000000-0000-0000-0000-000000000001",
-          slug: "ums",
-          display_name: "UMS",
-        }),
+        jsonResponse(BOOTSTRAP_TENANT),
       ),
     );
     render(
@@ -317,11 +326,7 @@ describe("AppShell tenant proof tag", () => {
     const fetchMock = globalThis.fetch as ReturnType<typeof vi.fn>;
     fetchMock.mockImplementation(
       routeFetch(() =>
-        jsonResponse({
-          id: "00000000-0000-0000-0000-0000000000ac",
-          slug: "acme",
-          display_name: "Acme Holdings",
-        }),
+        jsonResponse(ACME_TENANT),
       ),
     );
     render(
@@ -550,9 +555,7 @@ describe("AppShell production session hydration", () => {
     (globalThis.fetch as ReturnType<typeof vi.fn>).mockImplementation((input: unknown) => {
       if (isSessionCall(input)) return Promise.reject(new Error("network down"));
       if (isTenantCall(input)) {
-        return Promise.resolve(
-          jsonResponse({ id: "t1", slug: "ums", display_name: "UMS" }),
-        );
+        return Promise.resolve(jsonResponse(SHELL_TENANT));
       }
       return Promise.resolve(jsonResponse(NET_REVENUE_BODY));
     });
@@ -695,25 +698,130 @@ describe("AppShell production session hydration", () => {
   });
 });
 
-// ------------------------------------------------------------- month chrome
+// ---------------------------------------------------------------- de-mocked chrome
 
-describe("AppShell topbar month filter", () => {
-  it("MONTH CHROME: options and the default derive from the rolling window", async () => {
-    (globalThis.fetch as ReturnType<typeof vi.fn>).mockImplementation(
-      routeFetchWithSession(() => jsonResponse(sessionBody({ canViewRevenue: true }))),
+// The shell chrome used to be driven by lib/mock/data: NAV_GROUPS carried
+// invented badge counts, VIEW_COPY named a month/scope/currency the shell reads
+// from nowhere, and WORKFLOW_STEPS drove a close-progress rail frozen at
+// "Allocate". Five controls (Scope select, Currency select, Month, Refresh
+// reports, Create Export) had no handler at all. These tests pin the removals, because
+// nothing else fails when fabricated chrome comes back: it renders fine, it
+// just lies.
+
+/** Render the shell on its default Command view and return the sidebar. */
+const renderChrome = async (): Promise<HTMLElement> => {
+  (globalThis.fetch as ReturnType<typeof vi.fn>).mockImplementation(
+    routeFetchWithSession(() =>
+      jsonResponse(sessionBody({ canViewRevenue: true, canExportRevenue: true })),
+    ),
+  );
+  renderShell();
+  return await screen.findByRole("complementary", { name: "Primary navigation" });
+};
+
+/** Every <option> label inside every combobox under `scope`, trimmed. */
+const comboboxOptionLabels = (scope: HTMLElement): string[] => {
+  return within(scope)
+    .queryAllByRole("combobox")
+    .flatMap((box) => Array.from(box.querySelectorAll("option")))
+    .map((option) => option.textContent?.trim() ?? "");
+};
+
+describe("AppShell de-mocked chrome", () => {
+  it("CHROME: the sidebar lists the real view names and nothing else", async () => {
+    const sidebar = await renderChrome();
+    // Exact equality is the assertion: a nav button's whole text is its label.
+    // The removed count badges ("Live", "318", "CMS", "5", "SQL", "12", "2",
+    // "AA") were mock constants rendered inside these same buttons, so any of
+    // them coming back appends to the string compared here.
+    const labels = within(sidebar)
+      .getAllByRole("button")
+      .map((button) => button.textContent?.trim() ?? "");
+    expect(labels).toEqual([
+      "Command Center",
+      "Channel Registry",
+      "CMS Groups",
+      "Month Close",
+      "Trace Explorer",
+      "Exports",
+      "Connectors",
+      "Audit Log",
+    ]);
+  });
+
+  it("CHROME: the page heading and subtitle are the shell's own honest copy", async () => {
+    await renderChrome();
+    expect(
+      screen.getByRole("heading", { name: "Revenue Command Center", level: 1 }),
+    ).toBeInTheDocument();
+    // The old subtitle asserted a close month, a scope and a reporting currency
+    // — three values the shell has no source for.
+    expect(screen.queryByText(/USD reporting currency/iu)).not.toBeInTheDocument();
+    expect(screen.queryByText(/March 2026 close/iu)).not.toBeInTheDocument();
+  });
+
+  it("CHROME: no currency selector remains — single-currency by decision", async () => {
+    await renderChrome();
+    expect(screen.queryByRole("group", { name: "Report filters" })).not.toBeInTheDocument();
+    // Nothing anywhere in the mounted shell offers a non-USD code either.
+    // ExportsView owns the one REAL currency field (wired, USD-only, sent with
+    // the export request) and is not mounted on the Command view rendered here.
+    const shellOptions = comboboxOptionLabels(document.body);
+    expect(shellOptions).not.toContain("USD");
+    expect(shellOptions).not.toContain("EGP");
+    expect(shellOptions).not.toContain("AED");
+  });
+
+  it("CHROME: inert header controls are gone and real filters stay view-owned", async () => {
+    await renderChrome();
+    expect(
+      screen.queryByRole("button", { name: /create export/iu }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Refresh reports" }),
+    ).not.toBeInTheDocument();
+    // The shell cannot own a selector whose value does not drive a request.
+    // Both controls remain in CommandView, alongside the state and authorized
+    // reads they control.
+    expect(screen.queryByRole("group", { name: "Report filters" })).not.toBeInTheDocument();
+    const filters = await screen.findByRole("region", { name: "Net revenue filters" });
+    const monthSelect = within(filters).getByLabelText("Month") as HTMLSelectElement;
+    const scopeSelect = within(filters).getByLabelText("Scope") as HTMLSelectElement;
+    expect(scopeSelect).toBeInTheDocument();
+    expect(Array.from(monthSelect.options).map((option) => option.value)).toEqual(MONTH_OPTIONS);
+    expect(monthSelect.value).toBe(DEFAULT_MONTH);
+
+    const nextMonth = MONTH_OPTIONS[1];
+    if (!nextMonth) {
+      throw new Error("rolling month window must expose a second month for this test");
+    }
+    fireEvent.change(monthSelect, { target: { value: nextMonth } });
+    await waitFor(() => expect(monthSelect.value).toBe(nextMonth));
+    const fetchMock = globalThis.fetch as ReturnType<typeof vi.fn>;
+    await waitFor(() =>
+      expect(
+        fetchMock.mock.calls.some(([input]) =>
+          urlOf(input).includes(`/revenue/months/${encodeURIComponent(nextMonth)}/net-revenue`),
+        ),
+      ).toBe(true),
     );
-    renderShell();
+  });
 
-    // The wired CommandView carries its own aria-label="Month" selector, so
-    // scope to the topbar's "Report filters" control row before querying.
-    const reportFilters = await screen.findByLabelText("Report filters");
-    const monthSelect = within(reportFilters).getByLabelText("Month") as HTMLSelectElement;
-    const renderedLabels = within(monthSelect)
-      .getAllByRole("option")
-      .map((option) => option.textContent);
-    // Same source as every wired view's selector — no second hardcoded list.
-    expect(renderedLabels).toEqual(MONTH_OPTIONS.map(monthKeyLabel));
-    expect(monthSelect.value).toBe(monthKeyLabel(DEFAULT_MONTH));
+  it("CHROME: the fabricated status cues and month-close rail are gone", async () => {
+    await renderChrome();
+    expect(screen.queryByLabelText("Operational status")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Month close workflow")).not.toBeInTheDocument();
+    expect(screen.queryByText(/2 blockers before export/iu)).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /open close/iu })).not.toBeInTheDocument();
+  });
+
+  it("CHROME: the role card shows only the capability-derived finance state", async () => {
+    await renderChrome();
+    const meta = screen.getByLabelText("Role permission state");
+    expect(within(meta).getByText(/money visible/iu)).toBeInTheDocument();
+    // "Raw files gated" was a fixed amber pill that contradicted itself for any
+    // principal actually holding the raw-export grant this session carries.
+    expect(within(meta).queryByText(/raw files gated/iu)).not.toBeInTheDocument();
   });
 });
 

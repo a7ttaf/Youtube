@@ -1,0 +1,395 @@
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { useState, type ReactNode } from "react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+import ErrorBoundary, {
+  correlationIdOf,
+} from "@/components/srcc/ErrorBoundary";
+import {
+  WriteInFlightProvider,
+  useWriteInFlightControl,
+  useWriteInFlightLatch,
+} from "@/contexts/WriteInFlightContext";
+
+// ============================================================================
+// Purpose: Prove the boundary's safe category/report contract, accessible
+//   fallback, navigation reset, and reconciliation-only recovery action.
+// Database/ORM: None (frontend test coverage only).
+// Standards: Error messages and component stacks are treated as sensitive;
+//   tests inspect only the allowlisted telemetry payload and never require a
+//   child remount after a possibly committed write.
+// Blast Radius: Regression coverage for view availability, privacy, recovery,
+//   focus management, and operator guidance.
+// Connections:
+//   - File: frontend/src/components/srcc/ErrorBoundary.tsx -> implementation.
+//   - File: frontend/src/components/srcc/AppShell.tsx -> production reset key
+//     and full-document recovery callback.
+// ============================================================================
+
+let consoleErrorSpy: ReturnType<typeof vi.spyOn>;
+
+beforeEach(() => {
+  // React may print caught errors in the test environment; the boundary's own
+  // safe report is inspected below without polluting the test output.
+  consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+});
+
+afterEach(() => {
+  vi.restoreAllMocks();
+});
+
+/** Select only the boundary-owned report, excluding React's test diagnostics. */
+const boundaryReports = (): unknown[][] =>
+  consoleErrorSpy.mock.calls.filter((call) =>
+    String(call[0]).includes("[ErrorBoundary] view render failed"),
+  );
+
+/** The category the boundary reports for a thrown plain TypeError. One constant
+ * shared by the fallback and report assertions, so a category rename cannot
+ * leave one assertion describing a payload the other no longer matches. */
+const EXPECTED_TYPEERROR_CATEGORY = "TypeError";
+
+/** Build a child that throws the supplied value on every render. */
+const explodingComponent = (thrown: unknown): (() => ReactNode) => {
+  return function Exploding(): ReactNode {
+    throw thrown;
+  };
+};
+
+/** Build a child whose external control permits a later navigation reset. */
+const controlledComponent = (control: { shouldThrow: boolean }): (() => ReactNode) => {
+  return function Controlled(): ReactNode {
+    if (control.shouldThrow) {
+      throw new TypeError("controlled render failure");
+    }
+    return <p>recovered content</p>;
+  };
+};
+
+describe("ErrorBoundary", () => {
+  it("passes a healthy subtree through untouched", () => {
+    render(
+      <ErrorBoundary resetKey="command">
+        <p>healthy content</p>
+      </ErrorBoundary>,
+    );
+
+    expect(screen.getByText("healthy content")).toBeInTheDocument();
+    expect(screen.queryByTestId("view-error-fallback")).not.toBeInTheDocument();
+    expect(boundaryReports()).toHaveLength(0);
+  });
+
+  it("uses fresh injected crypto values when UUID generation is unavailable", () => {
+    const values = [
+      [0x11111111, 0x22222222, 0x33333333, 0x44444444],
+      [0xaaaaaaaa, 0xbbbbbbbb, 0xcccccccc, 0xdddddddd],
+    ];
+    const getRandomValues = vi.fn((buffer: Uint32Array): Uint32Array => {
+      const next = values.shift();
+      if (!next) {
+        throw new Error("test entropy exhausted");
+      }
+      buffer.set(next);
+      return buffer;
+    });
+
+    const first = correlationIdOf({ getRandomValues });
+    const second = correlationIdOf({ getRandomValues });
+
+    expect(getRandomValues).toHaveBeenCalledTimes(2);
+    expect(first).toBe("view-error-11111111222222223333333344444444");
+    expect(second).toBe("view-error-aaaaaaaabbbbbbbbccccccccdddddddd");
+    expect(first).not.toBe(second);
+  });
+
+  it("keeps the correlation fallback nonthrowing when every entropy source is hostile", () => {
+    const hostileSource = {
+      randomUUID: (): string => {
+        throw new Error("uuid secret");
+      },
+      getRandomValues: (): Uint32Array => {
+        throw new Error("random secret");
+      },
+    };
+    vi.spyOn(Math, "random").mockImplementation(() => {
+      throw new Error("math secret");
+    });
+
+    expect(() => correlationIdOf(hostileSource)).not.toThrow();
+    expect(correlationIdOf(hostileSource)).toMatch(
+      /^view-error-noentropy-[0-9a-z]+$/iu,
+    );
+  });
+
+  it("reports only an allowlisted category and correlation ID", async () => {
+    const sensitiveMessage = "finance row 42 amount 999.00";
+    const Exploding = explodingComponent(new TypeError(sensitiveMessage));
+    const onReport = vi.fn();
+
+    render(
+      <ErrorBoundary resetKey="groups" onReport={onReport}>
+        <Exploding />
+      </ErrorBoundary>,
+    );
+
+    const fallback = screen.getByTestId("view-error-fallback");
+    expect(within(fallback).getByText(EXPECTED_TYPEERROR_CATEGORY)).toBeInTheDocument();
+    expect(fallback.textContent).not.toContain(sensitiveMessage);
+    expect(fallback).toHaveTextContent("A write may already have committed");
+
+    const correlation = await screen.findByTestId("view-error-correlation-id");
+    expect(correlation).toHaveTextContent(/^Reference: [0-9a-f-]{36}$/iu);
+    expect(onReport).toHaveBeenCalledTimes(1);
+    expect(onReport).toHaveBeenCalledWith({
+      category: EXPECTED_TYPEERROR_CATEGORY,
+      correlationId: expect.stringMatching(/^[0-9a-f-]{36}$/iu),
+    });
+    // An approved sink receives the safe event; the boundary never logs raw
+    // Error/message/component-stack arguments on its behalf.
+    expect(boundaryReports()).toHaveLength(0);
+  });
+
+  it("logs the same safe report when no telemetry sink is supplied", () => {
+    const sensitiveMessage = "private revenue amount 123.45";
+    const Exploding = explodingComponent(new RangeError(sensitiveMessage));
+
+    render(
+      <ErrorBoundary resetKey="trace">
+        <Exploding />
+      </ErrorBoundary>,
+    );
+
+    const reports = boundaryReports();
+    expect(reports).toHaveLength(1);
+    expect(reports[0]).toHaveLength(2);
+    expect(reports[0][1]).toEqual({
+      category: "RangeError",
+      correlationId: expect.stringMatching(/^[0-9a-f-]{36}$/iu),
+    });
+    expect(JSON.stringify(reports[0])).not.toContain(sensitiveMessage);
+  });
+
+  it("survives a THROWING console sink and marks the card instead of unmounting", () => {
+    // The delivery-failure path used to call the same console.error again
+    // unprotected; a second throw escaped componentDidCatch and unmounted the
+    // shell the boundary exists to keep. Now the already-rendered card is
+    // marked as the record of the failed delivery.
+    consoleErrorSpy.mockImplementation((...args: unknown[]) => {
+      if (String(args[0]).includes("[ErrorBoundary]")) {
+        throw new Error("console sink is broken");
+      }
+    });
+    const Exploding = explodingComponent(new TypeError("crash beside a broken console"));
+
+    render(
+      <div>
+        <p>shell chrome</p>
+        <ErrorBoundary resetKey="groups">
+          <Exploding />
+        </ErrorBoundary>
+      </div>,
+    );
+
+    // The shell around the boundary survives, and the recovery card stays.
+    expect(screen.getByText("shell chrome")).toBeInTheDocument();
+    const fallback = screen.getByTestId("view-error-fallback");
+    expect(
+      within(fallback).getByRole("button", { name: /reload and reconcile/iu }),
+    ).toBeEnabled();
+    // The failed delivery is recorded on the card itself — the only channel left.
+    expect(fallback).toHaveAttribute("data-report-delivery", "failed");
+  });
+
+  it("survives a THROWING telemetry sink and reports through the console instead", () => {
+    const Exploding = explodingComponent(new TypeError("crash beside a broken sink"));
+    const onReport = vi.fn(() => {
+      throw new Error("telemetry transport rejected");
+    });
+
+    render(
+      <div>
+        <p>shell chrome</p>
+        <ErrorBoundary resetKey="registry" onReport={onReport}>
+          <Exploding />
+        </ErrorBoundary>
+      </div>,
+    );
+
+    expect(screen.getByText("shell chrome")).toBeInTheDocument();
+    const fallback = screen.getByTestId("view-error-fallback");
+    expect(within(fallback).getByText(EXPECTED_TYPEERROR_CATEGORY)).toBeInTheDocument();
+    // Delivery fell back to the console with the SAME sanitized payload, and
+    // the delivery-failure marker is NOT set — the fallback channel worked.
+    const deliveryReports = consoleErrorSpy.mock.calls.filter((call) =>
+      String(call[0]).includes("[ErrorBoundary] report delivery failed"),
+    );
+    expect(deliveryReports).toHaveLength(1);
+    expect(deliveryReports[0][1]).toEqual({
+      category: EXPECTED_TYPEERROR_CATEGORY,
+      correlationId: expect.stringMatching(/^[0-9a-f-]{36}$/iu),
+    });
+    expect(fallback).not.toHaveAttribute("data-report-delivery");
+  });
+
+  it("falls back safely for a non-string Error.name", () => {
+    const thrown = new Error("secret message");
+    Object.defineProperty(thrown, "name", { value: undefined });
+    const Exploding = explodingComponent(thrown);
+
+    render(
+      <ErrorBoundary resetKey="registry">
+        <Exploding />
+      </ErrorBoundary>,
+    );
+
+    const fallback = screen.getByTestId("view-error-fallback");
+    expect(within(fallback).getByText("Error")).toBeInTheDocument();
+    expect(fallback.textContent).not.toContain("secret message");
+  });
+
+  it("falls back safely when Error.name is a throwing getter", () => {
+    const thrown = new Error("getter secret");
+    Object.defineProperty(thrown, "name", {
+      configurable: true,
+      get: () => {
+        throw new Error("name getter secret");
+      },
+    });
+    const Exploding = explodingComponent(thrown);
+
+    render(
+      <ErrorBoundary resetKey="audit">
+        <Exploding />
+      </ErrorBoundary>,
+    );
+
+    expect(within(screen.getByTestId("view-error-fallback")).getByText("Error"))
+      .toBeInTheDocument();
+  });
+
+  it("allows only known error categories into the fallback", () => {
+    const thrown = new Error("sensitive custom name");
+    thrown.name = "RevenueRow-42";
+    const Exploding = explodingComponent(thrown);
+
+    render(
+      <ErrorBoundary resetKey="exports">
+        <Exploding />
+      </ErrorBoundary>,
+    );
+
+    const fallback = screen.getByTestId("view-error-fallback");
+    expect(within(fallback).getByText("Error")).toBeInTheDocument();
+    expect(fallback.textContent).not.toContain("RevenueRow-42");
+  });
+
+  it("focuses the fallback and delegates recovery to a full-reload callback", () => {
+    const committedWrite = vi.fn();
+    let writeHasCommitted = false;
+    const WriteThenThrow = (): ReactNode => {
+      // Model a successful POST whose response/render path fails afterward. The
+      // guard makes the simulated write itself idempotent across React retries.
+      if (!writeHasCommitted) {
+        writeHasCommitted = true;
+        committedWrite();
+      }
+      throw new TypeError("render failed after a committed write");
+    };
+    const onReload = vi.fn();
+
+    render(
+      <ErrorBoundary resetKey="close" onReload={onReload}>
+        <WriteThenThrow />
+      </ErrorBoundary>,
+    );
+
+    const fallback = screen.getByTestId("view-error-fallback");
+    expect(committedWrite).toHaveBeenCalledTimes(1);
+    expect(fallback).toHaveFocus();
+    expect(
+      within(fallback).getByRole("button", { name: "Reload and reconcile" }),
+    ).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Reload and reconcile" }));
+
+    expect(onReload).toHaveBeenCalledTimes(1);
+    // The child is not retried in place. A full reload/re-fetch owns recovery,
+    // so an already-committed write cannot be duplicated by this click.
+    expect(screen.getByTestId("view-error-fallback")).toBeInTheDocument();
+    expect(committedWrite).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps the shell write latch armed until a crashed writer's request settles", async () => {
+    let settleWrite!: () => void;
+    const pendingWrite = new Promise<void>((resolve) => {
+      settleWrite = resolve;
+    });
+
+    const PendingWriter = (): ReactNode => {
+      const navLatch = useWriteInFlightControl();
+      const [crashed, setCrashed] = useState(false);
+      if (crashed) {
+        throw new TypeError("render failed while import remained pending");
+      }
+
+      const startWriteAndCrash = (): void => {
+        navLatch.arm("The import is still running and cannot be aborted.");
+        // Deliberately detached: the promise settles only when the test
+        // resolves it, and the retained `finally` is what must free the latch.
+        pendingWrite.finally(navLatch.release);
+        setCrashed(true);
+      };
+
+      return <button onClick={startWriteAndCrash}>Start pending import</button>;
+    };
+
+    const ShellHarness = (): ReactNode => {
+      const writeLatch = useWriteInFlightLatch();
+      return (
+        <WriteInFlightProvider value={writeLatch}>
+          <output data-testid="write-latch-state">{writeLatch.reason ?? "idle"}</output>
+          <ErrorBoundary resetKey="registry">
+            <PendingWriter />
+          </ErrorBoundary>
+        </WriteInFlightProvider>
+      );
+    };
+
+    render(<ShellHarness />);
+    fireEvent.click(screen.getByRole("button", { name: "Start pending import" }));
+
+    expect(screen.getByTestId("view-error-fallback")).toBeInTheDocument();
+    expect(screen.getByTestId("write-latch-state")).toHaveTextContent(
+      "The import is still running and cannot be aborted.",
+    );
+
+    await act(async () => {
+      settleWrite();
+      await pendingWrite;
+    });
+    await waitFor(() =>
+      expect(screen.getByTestId("write-latch-state")).toHaveTextContent("idle"),
+    );
+  });
+
+  it("clears a stale fallback when the reset key changes without remounting", () => {
+    const control = { shouldThrow: true };
+    const Controlled = controlledComponent(control);
+    const { rerender } = render(
+      <ErrorBoundary resetKey="groups">
+        <Controlled />
+      </ErrorBoundary>,
+    );
+
+    expect(screen.getByTestId("view-error-fallback")).toBeInTheDocument();
+    control.shouldThrow = false;
+    rerender(
+      <ErrorBoundary resetKey="command">
+        <Controlled />
+      </ErrorBoundary>,
+    );
+
+    expect(screen.getByText("recovered content")).toBeInTheDocument();
+    expect(screen.queryByTestId("view-error-fallback")).not.toBeInTheDocument();
+  });
+});

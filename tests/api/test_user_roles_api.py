@@ -1,11 +1,13 @@
 from uuid import UUID
 
+import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
 from ums_smart_revenue.app import create_app
 from ums_smart_revenue.auth.roles import ROLE_DEFINITIONS
+from ums_smart_revenue.db.org_models import OrgBase, OrgUnitORM
 from ums_smart_revenue.db.security_models import (
     AuditLogORM,
     RoleORM,
@@ -13,13 +15,17 @@ from ums_smart_revenue.db.security_models import (
     UserORM,
     UserRoleAssignmentORM,
 )
+from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
 
 ADMIN_ID = UUID("00000000-0000-0000-0000-000000014001")
 TARGET_ID = UUID("00000000-0000-0000-0000-000000014002")
-COMPANY_ID = "company-tv-a"
+# A real org-unit UUID — the targeted access index must resolve the scope
+# against org_units, so seeded company targets can no longer be slugs.
+COMPANY_ID = str(UUID("00000000-0000-0000-0000-0000000c0a01"))
 
 
 def auth_headers(role: str, user_id: UUID = ADMIN_ID) -> dict[str, str]:
+    """Return trusted-gateway headers for one actor and tenant."""
     return {
         "x-user-id": str(user_id),
         "x-user-email": f"{role}@example.com",
@@ -30,12 +36,16 @@ def auth_headers(role: str, user_id: UUID = ADMIN_ID) -> dict[str, str]:
 
 
 def build_database_url(tmp_path) -> str:
+    """Return the disposable SQLite URL backing these API tests."""
     return f"sqlite+pysqlite:///{(tmp_path / 'user-roles.db').as_posix()}"
 
 
 def seed_database(database_url: str, *, target_is_service_account: bool = False) -> None:
+    """Seed one disposable database for the scenario under test."""
     engine = create_engine(database_url)
     SecurityBase.metadata.create_all(engine)
+    # OrgAccessIndex loader dependency reads org_units/youtube_channels.
+    OrgBase.metadata.create_all(engine)
     with Session(engine) as session:
         session.add_all(
             [
@@ -57,10 +67,22 @@ def seed_database(database_url: str, *, target_is_service_account: bool = False)
                     service_only=definition.service_only,
                 )
             )
+        # The targeted org index must resolve the company scope before an
+        # assignment write — seed the live unit the scope ids point at.
+        session.add(
+            OrgUnitORM(
+                id=UUID(COMPANY_ID),
+                tenant_id=UUID(UMS_TENANT_ID),
+                type="COMPANY",
+                name="Company TV A",
+                active=True,
+            )
+        )
         session.commit()
 
 
 def test_corporate_admin_assigns_scoped_assistant_role_with_audit(tmp_path):
+    """Corporate admin assigns scoped assistant role with audit."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -93,6 +115,7 @@ def test_corporate_admin_assigns_scoped_assistant_role_with_audit(tmp_path):
 
 
 def test_assign_role_rejects_unknown_actor_before_assignment_write(tmp_path):
+    """Assign role rejects unknown actor before assignment write."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     unknown_actor_id = UUID("00000000-0000-0000-0000-000000014999")
@@ -121,6 +144,7 @@ def test_assign_role_rejects_unknown_actor_before_assignment_write(tmp_path):
 
 
 def test_assistant_cannot_assign_roles_or_probe_users(tmp_path):
+    """Assistant cannot assign roles or probe users."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -141,6 +165,7 @@ def test_assistant_cannot_assign_roles_or_probe_users(tmp_path):
 
 
 def test_corporate_admin_assigns_company_scoped_export_operator(tmp_path):
+    """Corporate admin assigns company scoped export operator."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -163,6 +188,7 @@ def test_corporate_admin_assigns_company_scoped_export_operator(tmp_path):
 
 
 def test_corporate_admin_cannot_assign_finance_role(tmp_path):
+    """Corporate admin cannot assign finance role."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -182,7 +208,58 @@ def test_corporate_admin_cannot_assign_finance_role(tmp_path):
     assert response.json()["detail"] == "Finance roles require Finance Admin or Super Owner"
 
 
+def test_corporate_admin_cannot_assign_beta_operator(tmp_path):
+    """The beta role carries finance-control powers and stays in the finance family."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    client = TestClient(create_app(database_url=database_url))
+
+    response = client.post(
+        f"/users/{TARGET_ID}/roles",
+        headers=auth_headers("corporate_admin"),
+        json={
+            "role_key": "beta_operator",
+            "scope_type": "global",
+            "scope_id": None,
+            "reason": "Attempt beta grant without finance authority",
+        },
+    )
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Finance roles require Finance Admin or Super Owner"
+
+
+@pytest.mark.parametrize("authorized_role", ["finance_admin", "super_owner"])
+def test_finance_authority_can_assign_and_revoke_beta_operator(tmp_path, authorized_role):
+    """Finance Admin and Super Owner retain lifecycle authority for the beta role."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    client = TestClient(create_app(database_url=database_url))
+
+    created = client.post(
+        f"/users/{TARGET_ID}/roles",
+        headers=auth_headers(authorized_role),
+        json={
+            "role_key": "beta_operator",
+            "scope_type": "global",
+            "scope_id": None,
+            "reason": "Grant beta finance workflow",
+        },
+    )
+    assert created.status_code == 201, created.text
+
+    revoked = client.post(
+        f"/users/{TARGET_ID}/roles/{created.json()['id']}/revoke",
+        headers=auth_headers(authorized_role),
+        json={"reason": "End beta finance workflow"},
+    )
+
+    assert revoked.status_code == 200, revoked.text
+    assert revoked.json()["active"] is False
+
+
 def test_finance_admin_can_assign_finance_viewer_role(tmp_path):
+    """Finance admin can assign finance viewer role."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -204,6 +281,7 @@ def test_finance_admin_can_assign_finance_viewer_role(tmp_path):
 
 
 def test_corporate_admin_cannot_assign_super_owner(tmp_path):
+    """Corporate admin cannot assign super owner."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -223,6 +301,7 @@ def test_corporate_admin_cannot_assign_super_owner(tmp_path):
 
 
 def test_incompatible_scope_type_rejected_before_persisting(tmp_path):
+    """Incompatible scope type rejected before persisting."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -264,7 +343,36 @@ def test_incompatible_scope_type_rejected_before_persisting(tmp_path):
         assert session.scalars(select(AuditLogORM)).all() == []
 
 
+def test_assign_role_rejects_unresolved_company_scope(tmp_path):
+    """A company scope that resolves to no live org unit is a 404, even for
+    global authority — assign must not persist a dangling access_scopes row.
+    """
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    client = TestClient(create_app(database_url=database_url))
+
+    response = client.post(
+        f"/users/{TARGET_ID}/roles",
+        headers=auth_headers("corporate_admin"),
+        json={
+            "role_key": "assistant_analyst",
+            "scope_type": "company",
+            # Well-formed UUID but no org_units row — unresolved target.
+            "scope_id": str(UUID("00000000-0000-0000-0000-000000dead01")),
+            "reason": "Attempt assignment to a missing company",
+        },
+    )
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == "scope target not found"
+    engine = create_engine(database_url)
+    with Session(engine) as session:
+        assert session.scalars(select(UserRoleAssignmentORM)).all() == []
+        assert session.scalars(select(AuditLogORM)).all() == []
+
+
 def test_corporate_admin_revokes_role_assignment_with_audit(tmp_path):
+    """Corporate admin revokes role assignment with audit."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -304,6 +412,7 @@ def test_corporate_admin_revokes_role_assignment_with_audit(tmp_path):
 
 
 def test_corporate_admin_cannot_revoke_finance_role(tmp_path):
+    """Corporate admin cannot revoke finance role."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -330,7 +439,36 @@ def test_corporate_admin_cannot_revoke_finance_role(tmp_path):
     assert response.json()["detail"] == "Finance roles require Finance Admin or Super Owner"
 
 
+def test_corporate_admin_cannot_revoke_beta_operator(tmp_path):
+    """Revocation is finance-sensitive for the same beta role family as assignment."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    client = TestClient(create_app(database_url=database_url))
+
+    created = client.post(
+        f"/users/{TARGET_ID}/roles",
+        headers=auth_headers("finance_admin"),
+        json={
+            "role_key": "beta_operator",
+            "scope_type": "global",
+            "scope_id": None,
+            "reason": "Grant beta finance workflow",
+        },
+    )
+    assert created.status_code == 201, created.text
+
+    response = client.post(
+        f"/users/{TARGET_ID}/roles/{created.json()['id']}/revoke",
+        headers=auth_headers("corporate_admin"),
+        json={"reason": "Attempt revocation without finance authority"},
+    )
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Finance roles require Finance Admin or Super Owner"
+
+
 def test_finance_admin_can_revoke_finance_viewer_role(tmp_path):
+    """Finance admin can revoke finance viewer role."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))

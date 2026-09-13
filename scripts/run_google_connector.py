@@ -184,6 +184,7 @@ def _enforce_live_credential_smoke(
     connector_key: str,
     account_id: str,
 ) -> None:
+    """Refuse a live connector run whose credential never passed its smoke."""
     repository = SqlAlchemyConnectorCredentialRepository(session, tenant_id=tenant_id)
     credential = None
     for candidate_key in credential_key_candidates(connector_key):
@@ -231,7 +232,7 @@ def main(argv: list[str] | None = None) -> int:
     without subprocess overhead.
     """
     args = _parse_args(argv if argv is not None else sys.argv[1:])
-    settings = load_app_settings()
+    settings = load_app_settings(validate_tenant_currency=False)
     if not settings.database_url:
         # FIX: missing DB config is an operator contract error, not a downstream
         # SQLAlchemy TypeError. Keep it explicit and in the CLI's exit-2 class.

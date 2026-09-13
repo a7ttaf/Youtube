@@ -18,6 +18,10 @@ from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
+# FIX: Reversible migration tests must stop at the revision under test; dynamic
+# head can include later irreversible security floors that correctly refuse.
+DEDUCTION_COMPONENTS_REVISION = "20260529_0002"
+
 
 @pytest.fixture
 def postgres_url() -> str:
@@ -109,7 +113,7 @@ def test_upgrade_creates_table_constraints_and_indexes(alembic_config, fresh_eng
 
 def test_downgrade_drops_table(alembic_config, fresh_engine):
     """Verify downgrade removes the deduction_components table from the database."""
-    command.upgrade(alembic_config, "head")
+    command.upgrade(alembic_config, DEDUCTION_COMPONENTS_REVISION)
     command.downgrade(alembic_config, "20260529_0001")
     inspector = inspect(fresh_engine)
     assert "deduction_components" not in inspector.get_table_names()
@@ -117,9 +121,9 @@ def test_downgrade_drops_table(alembic_config, fresh_engine):
 
 def test_round_trip_idempotency(alembic_config, fresh_engine):
     """Verify upgrade, downgrade, then upgrade again maintains consistency of the schema."""
-    command.upgrade(alembic_config, "head")
+    command.upgrade(alembic_config, DEDUCTION_COMPONENTS_REVISION)
     command.downgrade(alembic_config, "20260529_0001")
-    command.upgrade(alembic_config, "head")
+    command.upgrade(alembic_config, DEDUCTION_COMPONENTS_REVISION)
     inspector = inspect(fresh_engine)
     assert "deduction_components" in inspector.get_table_names()
 

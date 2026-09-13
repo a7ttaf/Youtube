@@ -218,6 +218,17 @@ secrets/
 # Docker
 .docker/
 docker-compose.override.yml
+# Runtime bind mount created by docker compose (UMS_APP_DATA_HOST defaults
+# to ./data/ums -> /var/lib/ums): export artifacts + connector blobs. Never
+# commit — revenue payloads and large generated binaries land here as soon
+# as the stack runs. Anchored to the repo root so nested source dirs named
+# data/ elsewhere stay trackable.
+/data/
+# Backstop: the header backup command writes its archive OUTSIDE the
+# checkout; if an operator redirects it inside, never stage it either.
+/ums-app-data-*.tgz
+# Same for the roles-only dump (contains the superuser password hash).
+/ums-roles.sql
 
 # Helm
 deploy/helm/*/charts/

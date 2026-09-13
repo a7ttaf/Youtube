@@ -108,7 +108,7 @@ def main(argv: list[str] | None = None) -> int:
     """Return the CLI exit code; ``__main__`` wraps this in ``SystemExit``."""
     args = _parse_args(argv if argv is not None else sys.argv[1:])
     try:
-        settings = load_app_settings()
+        settings = load_app_settings(validate_tenant_currency=False)
     except ValueError as exc:
         # FIX: Malformed operator settings are input/configuration errors, not
         # untyped runtime failures, and must be reported before DB setup.

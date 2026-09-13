@@ -720,6 +720,85 @@ describe("RegistryImportFlow stepper (through RegistryView)", () => {
     expect(setReason).toHaveBeenLastCalledWith(null);
   });
 
+  it("releases the nav latch when apply-id generation itself throws", async () => {
+    // Structural guard for the window between `arm()` and the try whose
+    // `finally` owns the release: a setup throw there — modeled here as the
+    // apply id's entropy source failing — dispatches no request, so nothing
+    // but that `finally` can ever free the shell's navigation. Before the fix
+    // the latch stayed armed until a manual reload.
+    const setReason = vi.fn();
+    routeFetch({
+      importPost: (form) =>
+        jsonResponse(form.get("dry_run") === "true" ? DRY_RUN_PLAN : APPLY_RESULT),
+    });
+    renderRegistry({ reason: null, setReason });
+    await openImport();
+    await fillUpload();
+    fireEvent.click(within(uploadPanel()).getByRole("button", { name: /^preview$/i }));
+    await waitFor(() =>
+      expect(screen.getByRole("group", { name: "Import preview" })).toBeInTheDocument(),
+    );
+
+    const uuidSpy = vi.spyOn(globalThis.crypto, "randomUUID").mockImplementation(() => {
+      throw new Error("entropy unavailable");
+    });
+    try {
+      fireEvent.click(screen.getByRole("button", { name: /^apply$/i }));
+
+      // Armed by the click, then freed by the same handler's `finally`.
+      await waitFor(() => expect(setReason).toHaveBeenLastCalledWith(null));
+      expect(setReason.mock.calls[0][0]).toMatch(/cannot be aborted/iu);
+
+      // A pre-dispatch throw is a DEFINITE failure: no request left the
+      // browser, so nothing could have committed. The failure surfaces, the
+      // exits recover, and Apply itself re-enables for a safe retry instead
+      // of the reload-only indeterminate lockout.
+      expect(screen.getByRole("button", { name: /^cancel$/i })).toBeEnabled();
+      expect(
+        await screen.findByText(/The import request failed\./iu),
+      ).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: /^apply$/i })).toBeEnabled();
+    } finally {
+      uuidSpy.mockRestore();
+    }
+  });
+
+  it("treats a LATE pre-fetch setup throw after admission as a definite non-dispatch", async () => {
+    // The dispatch verdict belongs to the request, not to a flag flipped
+    // before it: `onDispatched` fires inside the API client immediately
+    // before `fetch`, so a throw from any LATER setup step — here FormData
+    // assembly inside the import hook, after admission already recorded the
+    // pending apply — still counts as "nothing left the browser". Before the
+    // fix the flow marked itself dispatched before calling the hook, so this
+    // exact failure was misclassified as a possibly-committed write and
+    // locked Apply behind the reload-only indeterminate contract.
+    await runDryRunToPreview(cleanImport);
+
+    const appendSpy = vi
+      .spyOn(globalThis.FormData.prototype, "append")
+      .mockImplementation(() => {
+        throw new Error("multipart assembly failed");
+      });
+    try {
+      fireEvent.click(screen.getByRole("button", { name: /^apply$/i }));
+
+      // Definite pre-dispatch treatment: the admission is retired, the
+      // failure surfaces as a retryable error, and every exit recovers.
+      expect(
+        await screen.findByText(/The import request failed\./iu),
+      ).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: /^apply$/i })).toBeEnabled();
+      expect(screen.getByRole("button", { name: /^cancel$/i })).toBeEnabled();
+
+      // And the proof of non-dispatch: fetch saw only the dry run. No apply
+      // POST was ever constructed into a request.
+      expect(importPosts()).toHaveLength(1);
+      expect(importPosts()[0].get("dry_run")).toBe("true");
+    } finally {
+      appendSpy.mockRestore();
+    }
+  });
+
   it("treats a LOST apply response as indeterminate, not as a failure", async () => {
     // The client raises ApiError only once an HTTP response exists, so a
     // rejected fetch means the POST was dispatched and never answered — the

@@ -24,9 +24,9 @@
 #   weaker guarantee; (c) documenting READ COMMITTED as accepted would leave
 #   the smart-alerts LOCKED-mispairing live. Fail LOUDLY on an active
 #   transaction — silently degrading to READ COMMITTED would be an invisible
-#   guard loss. Non-Postgres dialects no-op: SQLite lanes share one StaticPool
-#   connection (reads are already transaction-consistent) and its dialect has
-#   no REPEATABLE READ token. Documented residual: smart-alerts' audit-derived
+#   guard loss. Non-Postgres dialects no-op: SQLite lanes serialize on one
+#   QueuePool connection (reads are already transaction-consistent) and its
+#   dialect has no REPEATABLE READ token. Documented residual: smart-alerts' audit-derived
 #   signals read through the TENANT-lane session and stay READ COMMITTED
 #   relative to this snapshot — their laning is an authorization boundary
 #   (VIEW_AUDIT_LOG + tenant RLS) that must not move to the platform lane for

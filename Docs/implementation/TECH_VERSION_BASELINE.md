@@ -27,11 +27,11 @@ For this project:
 | Package | Version |
 |---|---:|
 | FastAPI | `0.136.1` |
-| Pydantic | `2.13.4` |
+| Pydantic | `2.13.5` |
 | Uvicorn | `0.47.0` |
 | SQLAlchemy | `2.0.49` |
 | Alembic | `1.18.4` |
-| psycopg | `3.3.4` |
+| psycopg | `3.3.5` |
 | Celery | `5.6.3` |
 | Redis Python client | `7.4.0` |
 | openpyxl | `3.1.5` |
@@ -89,6 +89,18 @@ httpx2 migration addendum checked on: `2026-08-22` (UTC)
   landed on `2026-08-21` (commit `ec867a1`, Africa/Cairo local date); the
   addendum date above is when the PyPI metadata was checked, not when the
   migration was made.
+
+
+Patch-refresh addendum checked on: `2026-09-07` (UTC)
+
+- PyPI release metadata for the patch-updates group bumped by PR #233:
+  pydantic `2.13.5` (refreshes `2.13.4`), psycopg `3.3.5` (refreshes
+  `3.3.4`), and ruff `0.16.6` (refreshes `0.16.4`, lint extra and dev
+  extra only). The main table rows above carry the refreshed versions;
+  this addendum records that the refresh post-dates the 2026-05-10
+  baseline sweep, per the dated-addenda policy. Pins live in
+  `pyproject.toml` / `uv.lock`; the checked-baseline test and
+  `STACK_VERSION_BASELINE` were updated in the same change.
 
 ## Local Environment Note
 The current workstation Python is `3.12`, so tests are still run against the available local interpreter. The production runtime target is `3.14.5`, and the project metadata now expresses `>=3.14,<3.15`.

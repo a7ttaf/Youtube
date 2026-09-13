@@ -10,6 +10,7 @@ SUPER_OWNER
 CORPORATE_ADMIN
 REVENUE_OPERATIONS_ADMIN
 FINANCE_ADMIN
+BETA_OPERATOR
 FINANCE_APPROVER
 FINANCE_VIEWER
 TV_SECTOR_MANAGER
@@ -46,6 +47,16 @@ DATA_STEWARD
 - Every export is logged.
 - Every manual override is logged.
 - Month unlock requires reason.
+- `BETA_OPERATOR` is a Finance Admin/Super Owner-controlled global role. Its
+  manual revenue grant applies only to `POST /revenue/facts` with the
+  exact `manual-upload` or `manual_upload` connector key paired with
+  `MANUAL_UPLOAD`; it does not imply connector execution. The submitted alias
+  is preserved as the connector scope and in the audit record.
+- Alembic revision `20260825_0002` is an irreversible authorization floor.
+  Downgrading below it would restore broad connector-job execution to
+  `BETA_OPERATOR`, even on an empty database. Rollback therefore requires a
+  reviewed database reset/redeploy plan; do not use `alembic downgrade` to
+  cross this revision.
 
 ## Authorization modes
 
@@ -67,7 +78,10 @@ LOGIN
 LOGOUT
 CHANNEL_CREATED
 CHANNEL_UPDATED
+CHANNEL_IMPORTED
+ORG_UNIT_CHANGED
 GROUP_UPDATED
+GROUPS_SYNCED
 REPORT_IMPORTED
 ADSENSE_PAYMENT_SYNCED
 DEDUCTION_COMPONENTS_INGESTED
@@ -86,6 +100,7 @@ EXCHANGE_RATE_SYNCED
 EXPORT_CREATED
 EXPORT_VIEWED
 EXPORT_DOWNLOADED
+EXPORT_TEMPLATE_CHANGED
 USER_ACCOUNT_CHANGED
 USER_ROLE_CHANGED
 USER_PERMISSION_CHANGED

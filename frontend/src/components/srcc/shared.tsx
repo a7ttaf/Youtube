@@ -1,6 +1,6 @@
 import type { ReactNode } from "react";
 
-import type { Severity, WorkflowTone } from "@/lib/mock/data";
+import type { Severity } from "@/lib/mock/data";
 import { rollingMonthWindow } from "@/lib/months";
 
 // ============================================================================
@@ -20,8 +20,8 @@ import { rollingMonthWindow } from "@/lib/months";
 export const RESTRICTED_FINANCE_VALUE = "Restricted";
 
 // ============================================================================
-// Purpose: Publish the month window every wired view and the AppShell chrome
-//   select share. Previously two frozen literals ("2026-03" and a four-entry
+// Purpose: Publish the rolling month window every wired view shares. Previously
+//   two frozen literals ("2026-03" and a four-entry
 //   list ending at "2025-12") that silently aged into a default month with no
 //   data; now a ROLLING window derived from the current calendar month.
 // Database/ORM: None — a selection default, not a stored value.
@@ -34,7 +34,8 @@ export const RESTRICTED_FINANCE_VALUE = "Restricted";
 //   currency, no write path.
 // Connections:
 //   - File: frontend/src/lib/months.ts -> rollingMonthWindow computes these.
-//   - File: frontend/src/components/srcc/AppShell.tsx -> Topbar month select.
+//   - File: frontend/src/components/srcc/AppShell.tsx -> keeps the shell chrome
+//     free of an unowned month selector; view-owned selectors consume this API.
 //   - Files: views/{Command,Close,Trace,Exports,Connectors}View.tsx -> each
 //     seeds its month state from DEFAULT_MONTH and lists MONTH_OPTIONS.
 // ============================================================================
@@ -214,11 +215,6 @@ export const TimelinePlaceholderRow = ({
       <Badge tone={tone}>{badge}</Badge>
     </>
   );
-};
-
-/** Map a workflow tone to a Dot severity; "primary" renders an untoned dot. */
-export const workflowDotTone = (tone: WorkflowTone): Severity | undefined => {
-  return tone === "primary" ? undefined : tone;
 };
 
 /** Render a list row with a tone dot, title, subtitle, and trailing slot. */

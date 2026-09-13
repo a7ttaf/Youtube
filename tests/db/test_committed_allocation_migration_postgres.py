@@ -14,6 +14,12 @@ from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
+# FIX: Reversible migration tests must stop at the revision whose behavior they
+# exercise; dynamic head can include later irreversible security floors.
+COMMITTED_ALLOCATION_REVISION = "20260602_0001"
+POST_TAX_ALLOCATION_REVISION = "20260603_0001"
+WIDENED_ALLOCATION_METHOD_REVISION = "20260606_0001"
+
 
 @pytest.fixture
 def postgres_url() -> str:
@@ -191,11 +197,11 @@ def test_upgrade_creates_tables_constraints_indexes(alembic_config, fresh_engine
 
 def test_round_trip_idempotency(alembic_config, fresh_engine):
     """upgrade -> downgrade -> upgrade keeps the schema consistent."""
-    command.upgrade(alembic_config, "head")
+    command.upgrade(alembic_config, COMMITTED_ALLOCATION_REVISION)
     command.downgrade(alembic_config, "20260531_0001")
     inspector = inspect(fresh_engine)
     assert "committed_allocation_runs" not in inspector.get_table_names()
-    command.upgrade(alembic_config, "head")
+    command.upgrade(alembic_config, COMMITTED_ALLOCATION_REVISION)
     assert "committed_allocation_runs" in inspect(fresh_engine).get_table_names()
 
 
@@ -374,12 +380,12 @@ def test_lines_amount_nan_rejected_by_finite_check(alembic_config, fresh_engine)
 
 
 def test_downgrade_blocked_by_post_tax_rows(alembic_config, fresh_engine):
-    """Downgrade from head raises RuntimeError before any DDL when post_tax rows exist.
+    """Downgrade from the post-tax revision refuses incompatible rows before DDL.
 
     The pre-check in 20260603_0001.downgrade() prevents PostgreSQL from emitting a
     cryptic constraint-violation error; the schema stays at the upgraded state.
     """
-    command.upgrade(alembic_config, "head")
+    command.upgrade(alembic_config, POST_TAX_ALLOCATION_REVISION)
     sql, params = _insert_run_sql(method="post_tax_revenue_proportional", key="pt-block")
     with fresh_engine.begin() as conn:
         conn.execute(sql, params)
@@ -392,13 +398,13 @@ def test_downgrade_blocked_by_post_tax_rows(alembic_config, fresh_engine):
 
 
 def test_downgrade_blocked_by_widened_method_rows(alembic_config, fresh_engine):
-    """Downgrade from head raises RuntimeError when widened-method rows exist.
+    """Downgrade from the widened-method revision refuses incompatible rows.
 
     The pre-check in 20260606_0001.downgrade() fails fast (explicit message)
     instead of letting PostgreSQL reject the restored two-method CHECK with a
     cryptic constraint violation; the widened CHECK stays in place.
     """
-    command.upgrade(alembic_config, "head")
+    command.upgrade(alembic_config, WIDENED_ALLOCATION_METHOD_REVISION)
     sql, params = _insert_run_sql(method="no_allocation", key="na-block")
     with fresh_engine.begin() as conn:
         conn.execute(sql, params)

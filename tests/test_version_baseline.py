@@ -16,16 +16,17 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
 def test_backend_dependencies_are_pinned_to_checked_latest_stable_versions():
+    """Pin the exact backend dependency set the reviewed baselines document."""
     pyproject = tomllib.loads((PROJECT_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     dependencies = set(pyproject["project"]["dependencies"])
     test_dependencies = set(pyproject["project"]["optional-dependencies"]["test"])
     expected_dependencies = {
         "fastapi==0.141.1",
-        "pydantic==2.13.4",
+        "pydantic==2.13.5",
         "uvicorn[standard]==0.52.4",
         "sqlalchemy==2.0.52",
         "alembic==1.19.1",
-        "psycopg[binary]==3.3.4",
+        "psycopg[binary]==3.3.5",
         # httpx2 is the successor of httpx (starlette 1.3+ deprecates the old
         # package for its testclient); migrated 2026-08-21 (backlog item 2/3).
         "httpx2==2.12.0",
@@ -53,13 +54,14 @@ def test_backend_dependencies_are_pinned_to_checked_latest_stable_versions():
 
 
 def test_stack_version_baseline_records_runtime_and_frontend_targets():
+    """Pin the runtime, backend, datastore, and frontend baseline targets."""
     assert STACK_VERSION_BASELINE["runtime"]["python"] == "3.14.5"
     assert STACK_VERSION_BASELINE["runtime"]["node_lts"] == "24.15.0"
     assert STACK_VERSION_BASELINE["backend"]["fastapi"] == "0.141.1"
-    assert STACK_VERSION_BASELINE["backend"]["pydantic"] == "2.13.4"
+    assert STACK_VERSION_BASELINE["backend"]["pydantic"] == "2.13.5"
     assert STACK_VERSION_BASELINE["backend"]["sqlalchemy"] == "2.0.52"
     assert STACK_VERSION_BASELINE["backend"]["alembic"] == "1.19.1"
-    assert STACK_VERSION_BASELINE["backend"]["psycopg"] == "3.3.4"
+    assert STACK_VERSION_BASELINE["backend"]["psycopg"] == "3.3.5"
     assert STACK_VERSION_BASELINE["backend"]["openpyxl"] == "3.1.5"
     assert STACK_VERSION_BASELINE["backend"]["reportlab"] == "5.0.1"
     assert STACK_VERSION_BASELINE["backend"]["python_pptx"] == "1.0.2"

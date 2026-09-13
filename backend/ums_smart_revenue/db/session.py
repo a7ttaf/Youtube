@@ -1,11 +1,30 @@
+# ============================================================================
+# Purpose: SQLAlchemy engine and session-factory helpers — per-URL engine
+#   caching, SQLite transaction discipline, Postgres connection bounds, and
+#   transaction statement/lock timeout application.
+# Database/ORM: Engine/Session construction for every lane (tenant, platform,
+#   audit); sets connect_timeout on PostgreSQL and applies lock/statement
+#   timeouts via set_config.
+# Standards: typed factories; SQLite serialized to a one-slot QueuePool with
+#   transactional savepoints; Postgres bounded at connect + statement level;
+#   no swallowed errors.
+# Blast Radius: Database connection topology and transaction duration for the
+#   entire backend — bounds affect every request, worker, and audit path.
+# Connections:
+#   - File: backend/ums_smart_revenue/app.py -> session factories.
+#   - File: backend/ums_smart_revenue/connectors/runs/executor.py ->
+#     apply_statement_bounds caller.
+# ============================================================================
 """SQLAlchemy engine and session-factory helpers with per-URL engine caching."""
 
 from collections.abc import Callable, Iterator
 from threading import Lock
+from typing import Any
 
-from sqlalchemy import Engine, create_engine, event
+from sqlalchemy import Connection, Engine, create_engine, event, text
+from sqlalchemy.exc import InvalidRequestError
 from sqlalchemy.orm import Session, sessionmaker
-from sqlalchemy.pool import StaticPool
+from sqlalchemy.pool import QueuePool
 
 from ums_smart_revenue.db.rls import (
     APP_PLATFORM_ROLE,
@@ -23,54 +42,204 @@ _SESSION_ROLE_KEY = "ums_db_role"
 # finance/committed_allocation.py); the fail-closed default is unchanged.
 _PLATFORM_LANE_ACTIVE_KEY = "ums_platform_lane_active"
 
+# Set on session.info to a ``(lock_timeout, statement_timeout)`` pair for
+# sessions whose every transaction must run bounded (e.g. the connector
+# executor's failure-audit writes, which must never stall shutdown). The
+# after_begin hook applies the bounds BEFORE its role/tenant-context SQL, so
+# even the first statement of a marked transaction is covered — applying them
+# from caller code afterwards would leave the hook's own writes unbounded.
+_STATEMENT_BOUNDS_KEY = "ums_statement_bounds"
+
 _engine_cache: dict[str, Engine] = {}
 _engine_cache_lock = Lock()
 
 
 # ============================================================================
-# Purpose: Build the per-URL SQLAlchemy Engine. SQLite (test-only) shares one
-#   connection via StaticPool so the request session and the audit/platform
-#   session serialize through a single writer (SQLite allows only one writer
-#   at a time). Postgres (production) keeps the normal connection pool so the
-#   dual-lane design hands the tenant lane and the privileged app_platform/
-#   audit lane DISTINCT role-switched connections.
+# Purpose: Open the request-owned physical SQLite transaction before route
+#   services can enter repository SAVEPOINTs. The engine begin hook emits the
+#   one real BEGIN when this helper forces a connection checkout.
+# Database/ORM: All SQLite-backed request writes; no table or model changes.
+# Standards: Caller-owned transaction boundary; SQLite-only compatibility;
+#   PostgreSQL keeps its implicit BEGIN plus RLS after_begin hook unchanged.
+# Blast Radius: SQLite request atomicity; authorization/audit writes roll back
+#   together on handled route errors without changing PostgreSQL behavior.
+# Connections:
+#   - File: backend/ums_smart_revenue/api/dependencies.py -> request session owner.
+#   - File: backend/ums_smart_revenue/auth/users.py -> nested account SAVEPOINTs.
+# ============================================================================
+def begin_request_transaction(session: Session) -> None:
+    """Establish the physical outer transaction for one SQLite request."""
+    if session.get_bind().dialect.name != "sqlite":
+        return
+    # FIX: The engine begin hook owns the raw BEGIN. Forcing checkout invokes
+    # it exactly once; issuing BEGIN here as well would collide with the active
+    # transaction. The one-slot QueuePool keeps other Sessions from reaching
+    # the physical connection until this request returns it.
+    session.begin()
+    session.connection()
+
+
+# ============================================================================
+# Purpose: Build the per-URL SQLAlchemy Engine. SQLite (test-only) uses a
+#   one-slot QueuePool so independent Sessions cannot overlap on one physical
+#   connection. Postgres keeps the normal pool and distinct role-switched lanes.
 # Database/ORM: All ORM models (engine is the shared connection source).
-# Standards: typed boundary; no error swallowing; pool_pre_ping retained.
+# Standards: typed boundary; no error swallowing; SQLite transaction recipe;
+#   PostgreSQL pool_pre_ping + fixed connect_timeout bound connection setup.
 # Blast Radius: DB connection topology. SQLite branch is test-only; Postgres
-#   path is intentionally unchanged so RLS role switching is not weakened.
+#   keeps pool_pre_ping and gains connect_timeout=10 — fail-fast on dead
+#   routes, RLS role switching unchanged.
 # Connections:
 #   - File: backend/ums_smart_revenue/app.py -> wires request + platform factories.
 # ============================================================================
 def build_engine(database_url: str) -> Engine:
-    """Create a SQLAlchemy Engine; SQLite shares one connection, others pool."""
+    """Create an Engine; SQLite serializes one connection, Postgres bounds it.
+
+    SQLite gets a one-slot QueuePool (serialized access incl. :memory:).
+    PostgreSQL gets ``pool_pre_ping`` plus a fixed ``connect_timeout=10`` via
+    connect_args — the driver default has no connect timeout, so a dead DB or
+    network route could otherwise stall a checkout (and any shutdown path
+    waiting on it) indefinitely.
+    """
     if database_url.startswith("sqlite"):
-        # FIX: SQLite permits only ONE writer at a time. The request session and
-        # the audit/platform session bind to the same engine but, under the
-        # default pool, would each grab a DISTINCT DBAPI connection -> the audit
-        # INSERT on connection #2 blocks on the request's open write txn on
-        # connection #1 ("database is locked"). StaticPool forces a single shared
-        # connection so both sessions serialize through one writer (file-based
-        # and in-memory SQLite alike). Postgres needs distinct connections for
-        # its two role-switched lanes, so this branch is SQLite-only.
-        return create_engine(
+        # FIX: StaticPool reissued one live DBAPI connection to overlapping
+        # Session fairies. A second request's failed BEGIN/rollback could erase
+        # the first request's write while the first later reported commit. A
+        # one-slot QueuePool retains one connection (including for :memory:)
+        # but withholds it until its current owner finishes reset/checkin.
+        engine = create_engine(
             database_url,
-            poolclass=StaticPool,
+            poolclass=QueuePool,
+            pool_size=1,
+            max_overflow=0,
             connect_args={"check_same_thread": False},
         )
-    return create_engine(database_url, pool_pre_ping=True)
+        _enable_sqlite_transactional_savepoints(engine)
+        return engine
+    # FIX: Bound the physical connect AND dead-peer detection — psycopg's
+    # default has no connect timeout, and keepalives sit at OS defaults
+    # (~hours), so a dead DB/network route or a stalled established socket
+    # (e.g. a pool_pre_ping against a silently dropped connection) could
+    # stall checkout — and any shutdown path waiting on it — indefinitely.
+    # connect_timeout=10 covers new-connection setup; keepalives detect a
+    # dead peer on a live socket within ~25s. Values match the audit
+    # statement bounds and keep failure detection prompt.
+    return create_engine(
+        database_url,
+        pool_pre_ping=True,
+        connect_args={
+            "connect_timeout": 10,
+            "keepalives": 1,
+            "keepalives_idle": 10,
+            "keepalives_interval": 5,
+            "keepalives_count": 3,
+        },
+    )
+
+
+# ============================================================================
+# Purpose: Bound lock waits and statement runtime for the caller's current
+#   transaction — used by audit paths that must never stall process shutdown
+#   (checkout is bounded separately by pool_timeout + connect_timeout).
+# Database/ORM: SET LOCAL equivalents issued via parameterized set_config;
+#   no schema or model changes. PostgreSQL-only — a no-op on other dialects.
+# Standards: adapter-layer helper so callers never issue raw SET statements;
+#   parameter binding (no SQL interpolation); must be called inside the
+#   session's open transaction (autobegin counts) since is_local=true.
+# Blast Radius: Transaction duration bounds only — applies to the caller's
+#   transaction and rolls back with it; no cross-request leakage.
+# Connections:
+#   - File: backend/ums_smart_revenue/connectors/runs/executor.py ->
+#     _audit_failed_before_start bounds its audit write at shutdown.
+# ============================================================================
+def apply_statement_bounds(
+    db: Session | Connection, *, lock_timeout: str, statement_timeout: str
+) -> None:
+    """Apply lock/statement timeouts to the caller's current transaction.
+
+    Accepts a ``Session`` or a bare ``Connection`` (Alembic binds). Uses
+    ``set_config`` — the parameterized equivalent of ``SET LOCAL`` — so
+    timeout values never enter SQL text. No-op on non-PostgreSQL dialects.
+
+    Raises:
+        sqlalchemy.exc.SQLAlchemyError: if the ``set_config`` statements
+            fail (e.g. connection loss mid-transaction). Callers that need
+            failure-classification — like the rollback-gate migration —
+            translate this into their own typed errors; other callers may
+            let it propagate.
+    """
+    dialect = db.get_bind().dialect if isinstance(db, Session) else db.dialect
+    if dialect.name != "postgresql":
+        return
+    connection = db.connection() if isinstance(db, Session) else db
+    # Three AUTOCOMMIT surfaces, any of which discards SET LOCAL at statement
+    # end: the SQLAlchemy execution option (execution_options(
+    # isolation_level="AUTOCOMMIT") — get_isolation_level() can still report
+    # the stored level such as READ COMMITTED because psycopg keeps autocommit
+    # separate from isolation_level), the dialect-reported level, and the raw
+    # DBAPI autocommit flag for connections opened autocommit=True.
+    execution_level = connection.get_execution_options().get("isolation_level")
+    autocommit = (
+        execution_level == "AUTOCOMMIT"
+        or connection.get_isolation_level() == "AUTOCOMMIT"
+        or bool(getattr(connection.connection, "autocommit", False))
+    )
+    if autocommit:
+        # set_config(..., is_local=true) is transaction-scoped: under
+        # AUTOCOMMIT each setting evaporates at the end of its own statement,
+        # leaving the target query unbounded while reporting success.
+        raise InvalidRequestError(
+            "apply_statement_bounds requires a real transaction; "
+            "AUTOCOMMIT isolation discards transaction-local settings"
+        )
+    db.execute(
+        text("SELECT set_config('lock_timeout', :value, true)"),
+        {"value": lock_timeout},
+    )
+    db.execute(
+        text("SELECT set_config('statement_timeout', :value, true)"),
+        {"value": statement_timeout},
+    )
+
+
+# ============================================================================
+# Purpose: Make SQLite SAVEPOINTs nest under a real outer transaction. sqlite3
+#   legacy mode does not BEGIN for SELECT/SAVEPOINT, so RELEASE can otherwise
+#   become an early durable commit that caller rollback cannot undo.
+# Database/ORM: Engine transaction discipline only; no table/model changes.
+# Standards: SQLAlchemy pysqlite transaction recipe; parameter-free control
+#   SQL; PostgreSQL path is untouched.
+# Blast Radius: SQLite test/dev transactions now hold their outer transaction
+#   until commit/rollback and independent Sessions serialize at pool checkout.
+# Connections:
+#   - File: backend/ums_smart_revenue/auth/users.py -> savepoint retries.
+#   - File: scripts/bootstrap_operator.py -> one-transaction bootstrap.
+# ============================================================================
+def _enable_sqlite_transactional_savepoints(engine: Engine) -> None:
+    """Emit real SQLite BEGINs so SAVEPOINT/RELEASE cannot commit early."""
+
+    @event.listens_for(engine, "connect")
+    def _disable_pysqlite_transaction_management(
+        dbapi_connection: Any, _connection_record: Any
+    ) -> None:
+        """Disable sqlite3 auto-BEGIN so the engine hook owns transaction start."""
+        dbapi_connection.isolation_level = None
+
+    @event.listens_for(engine, "begin")
+    def _emit_begin(connection: Connection) -> None:
+        """Open the physical transaction whenever SQLAlchemy begins an outer one."""
+        connection.exec_driver_sql("BEGIN")
 
 
 # ============================================================================
 # Purpose: Build the default app tenant-lane session factory. Sessions produced
 #   here opt into the Postgres RLS role hook through session.info; raw SQLAlchemy
 #   Sessions used by migrations/tests remain owner sessions unless explicitly
-#   marked. For SQLite (StaticPool) we force every new Session to open a
-#   SAVEPOINT so its commit/rollback lands on its own sub-transaction instead
-#   of the shared outer one — without this, two sessions on the same connection
-#   could clobber each other's uncommitted writes.
+#   marked. SQLite Sessions serialize at the one-slot checkout boundary; the
+#   HTTP platform/audit lane still reuses its request Session.
 # Database/ORM: SQLAlchemy Session factory metadata only.
 # Standards: explicit role marker; no ambient global role changes for unmarked
-#   sessions; SAVEPOINT isolation scoped to the SQLite engine only.
+#   sessions; SQLite checkout serialization stays engine-owned.
 # Blast Radius: Authorization/RLS role selection at the DB boundary (Postgres
 #   path); SQLite transaction-isolation discipline (test-only).
 # Connections:
@@ -87,14 +256,12 @@ def build_session_factory(database_url: str, engine: Engine | None = None) -> Se
     # NOTE: We deliberately do NOT set `join_transaction_mode` on the
     # engine-bound sessionmaker. Codex P2 review on PR #88 confirmed that
     # `join_transaction_mode="create_savepoint"` does not actually open a
-    # SAVEPOINT for engine-bound sessions on a StaticPool engine (each Session
-    # checkout gets a fresh SQLAlchemy Connection wrapper around the same DBAPI
-    # connection, so a Session's commit/rollback still acts on the shared
-    # underlying transaction). The audit / platform lane does not need a
-    # separate Session on SQLite: the app wires
+    # SAVEPOINT for these engine-bound sessions. The audit / platform lane does
+    # not need a separate Session on SQLite: the app wires
     # `_sqlite_platform_session_from_request` in `app.py` so the platform lane
     # reuses the request session (the same Session object), which removes the
     # multi-Session contention that would otherwise need SAVEPOINT isolation.
+    # Independent Sessions serialize at QueuePool checkout.
     # Postgres keeps the default ("conditional_savepoint") because each
     # Session gets a distinct pooled connection with its own outer transaction.
     return sessionmaker(
@@ -160,6 +327,16 @@ def _apply_tenant_isolation(session, _transaction, connection):
     """Set transaction role + trusted tenant context for Postgres sessions."""
     if connection.dialect.name != "postgresql":
         return
+    # Apply marked statement bounds FIRST: the role/tenant-context statements
+    # below can block on locks (context-row write) or stall on a degraded
+    # socket, so a bounded session must establish its deadlines before the
+    # hook's own SQL — a caller-side apply_statement_bounds would run after
+    # all of this. Independent of the role marker on purpose.
+    bounds = session.info.get(_STATEMENT_BOUNDS_KEY)
+    if bounds is not None:
+        apply_statement_bounds(
+            connection, lock_timeout=bounds[0], statement_timeout=bounds[1]
+        )
     role = session.info.get(_SESSION_ROLE_KEY)
     if role is None:
         return
@@ -217,6 +394,7 @@ def session_dependency(
         """Yield one session, committing on success and rolling back on any error."""
         with session_factory() as session:
             try:
+                begin_request_transaction(session)
                 yield session
                 session.commit()
             except Exception:

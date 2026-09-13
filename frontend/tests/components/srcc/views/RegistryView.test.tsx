@@ -210,6 +210,18 @@ const renderRegistry = (
   );
 };
 
+/** Render the registry with a routed fetch, returning the render result. */
+const renderRegistryWith = (route: ReturnType<typeof routeRegistry>) => {
+  fetchMock().mockImplementation(route);
+  return renderRegistry();
+};
+
+/** The summary-tile elements the registry header rendered, in DOM order. */
+const summaryTilesIn = (container: HTMLElement): Element[] =>
+  Array.from(
+    container.querySelectorAll('[aria-label="Registry summary"] article'),
+  );
+
 const callsTo = (predicate: (url: string, init?: RequestInit) => boolean) => {
   return fetchMock().mock.calls.filter((args: unknown[]) =>
     predicate(urlOf(args[0]), args[1] as RequestInit | undefined),
@@ -351,6 +363,40 @@ describe("RegistryView wired to GET /channels", () => {
     expect(screen.queryByText(/300\+ target registry/)).not.toBeInTheDocument();
     expect(screen.queryByText(/Allocation requires explicit source mapping/)).not.toBeInTheDocument();
     expect(screen.queryByText("318")).not.toBeInTheDocument();
+  });
+
+  it("renders neither the mock Registry Controls panel nor the sourceless tiles", async () => {
+    fetchMock().mockImplementation(routeChannels());
+    renderRegistry();
+
+    await waitFor(() =>
+      expect(screen.getByText("UMS Drama")).toBeInTheDocument(),
+    );
+    // The deleted REGISTRY_CONTROLS panel: title and its distinctive rows.
+    expect(screen.queryByText("Registry Controls")).not.toBeInTheDocument();
+    expect(screen.queryByText("Company scope enforced")).not.toBeInTheDocument();
+    expect(screen.queryByText("Finance month impact")).not.toBeInTheDocument();
+    // The two REGISTRY_SUMMARY tiles that had no live source are gone (they
+    // stood permanently at "—" rather than showing anything real).
+    expect(screen.queryByText("Unmapped revenue")).not.toBeInTheDocument();
+    expect(screen.queryByText("Scoped changes")).not.toBeInTheDocument();
+    // The two that survive are the ones derived from the fetched rows.
+    expect(screen.getByText("Active channels")).toBeInTheDocument();
+  });
+
+  it("renders exactly the two derived tiles when the registry is empty", async () => {
+    const { container } = renderRegistryWith(routeChannels([]));
+
+    await waitFor(() =>
+      expect(screen.getByText(/No channels in registry/i)).toBeInTheDocument(),
+    );
+    // Exactly two tiles: the sourceless pair is gone, so an empty registry can
+    // no longer render a tile stuck at "—" beside the real zero counts.
+    expect(summaryTilesIn(container)).toHaveLength(2);
+    // Zero is a real derived count, not a placeholder or a mock number.
+    expect(screen.getAllByText("0")).toHaveLength(2);
+    expect(screen.queryByText("318")).not.toBeInTheDocument();
+    expect(screen.queryByText("70")).not.toBeInTheDocument();
   });
 
   it("fires exactly one /channels and one /org-units fetch per mount", async () => {

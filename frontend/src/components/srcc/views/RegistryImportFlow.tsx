@@ -61,8 +61,8 @@ import {
 //   abandoned import that the backend went on to commit. The guard keys off
 //   `applying`, not `busy`: only the apply commits, so a read-only dry-run
 //   stays abandonable. `applying` clears in the request's `finally` on success
-//   and failure alike, and the latch also releases on unmount, so nothing
-//   traps the operator or strands the shell.
+//   and failure alike. That same `finally` owns latch release even if a render
+//   crash unmounts this flow while the shell survives.
 //   An apply whose response never arrived is INDETERMINATE, not failed: Apply
 //   is disabled (a blind retry would append a second unconditional
 //   CHANNEL_IMPORTED), Back is frozen (Upload owns the inputs the check
@@ -140,6 +140,11 @@ const describeImportError = (err: unknown): string => {
  */
 const PLAN_BEARING_STATUSES = new Set([409, 422]);
 
+/**
+ * Extract the refreshed plan a plan-bearing apply rejection carries, or null
+ * for every other failure. Only 409 (fingerprint divergence) and 422
+ * (re-planned roster now holds ERROR rows) ship the full plan as `detail`.
+ */
 const planBearingDetail = (err: unknown): unknown | null => {
   if (!(err instanceof ApiError) || !PLAN_BEARING_STATUSES.has(err.status)) {
     return null;
@@ -1305,8 +1310,8 @@ export const RegistryImportFlow = ({
   // sidebar sits outside this tree and would unmount the flow regardless
   // (review #184). Armed IMPERATIVELY from the apply handler rather than from
   // an effect — an effect arms a commit late, leaving a window in which the
-  // request is already running but the nav is still live. It also releases on
-  // unmount, so a teardown mid-request cannot strand the shell.
+  // request is already running but the nav is still live. Release belongs to
+  // the request's `finally`, which still runs if a boundary unmounts this flow.
   const navLatch = useWriteInFlightControl();
   // Raised BEFORE the apply is dispatched and cleared only once the response
   // establishes an outcome. The nav latch lives in this document; this one
@@ -1521,8 +1526,9 @@ export const RegistryImportFlow = ({
   // ==========================================================================
   // Purpose: Translate an apply failure into the THREE things it can mean, and
   //   settle the durable pending-apply record accordingly. Every failure lands
-  //   in exactly one branch: a plan-bearing rejection, an indeterminate
-  //   outcome, or a definite rejection.
+  //   in exactly one branch: a pre-dispatch setup failure (nothing left the
+  //   browser, so it is definite and safely retryable), a plan-bearing
+  //   rejection, an indeterminate outcome, or a definite rejection.
   // Database/ORM: None (frontend). It writes no request; what it settles is
   //   the client-side duplicate-import guard over a write already answered.
   // Standards: BOTH plan-bearing statuses take the first branch, not just the
@@ -1552,7 +1558,16 @@ export const RegistryImportFlow = ({
   //   - File: backend/ums_smart_revenue/api/channels.py -> the route emitting
   //       the 409/422 whose `detail` carries the refreshed plan.
   // ==========================================================================
-  const handleApplyFailure = async (caught: unknown) => {
+  const handleApplyFailure = async (caught: unknown, dispatched: boolean) => {
+    // A pre-dispatch throw never left the browser: nothing could have
+    // committed, so retire this apply's admission, surface the failure, and
+    // leave Preview ready for a safe retry — not the reload-only
+    // indeterminate lockout that owns everything from the request onward.
+    if (!dispatched) {
+      settleThisApply();
+      setError(describeImportError(caught));
+      return;
+    }
     const race = await applyRaceDetail(caught, ownerId);
     if (race) {
       // Replacing the preview also re-binds the fingerprint: the next Apply
@@ -1738,14 +1753,26 @@ export const RegistryImportFlow = ({
     // and this flow's exits disable in ONE commit, leaving no window in which
     // the request is running but navigation is still live.
     navLatch.arm(APPLY_IN_FLIGHT_NOTE);
-    // BEFORE the request leaves. From here the outcome is unknown by default,
-    // and it stays unknown until something establishes otherwise — including
-    // across a tab close or a reload, which discards this document's fetch
-    // handler while the backend goes on committing.
-    const applyId = newApplyId();
-    applyIdRef.current = applyId;
-    setError(null);
+    // Flips ONLY inside the request's own dispatch boundary — the
+    // `onDispatched` callback the API client fires immediately before
+    // `fetch`. Until that callback runs, every failure is a DEFINITE
+    // non-dispatch: no bytes left the browser, the roster cannot have
+    // changed, and a retry is safe — the catch then treats it as a plain
+    // failure instead of the indeterminate contract that owns everything
+    // from the actual request onward.
+    let dispatched = false;
     try {
+      // FIX: id generation lives INSIDE the try whose finally releases the
+      // latch. Between arming and this point nothing may run that can throw
+      // outside that guard — a failed apply id (or any later setup step)
+      // would otherwise strand the shell's navigation disabled until reload.
+      // BEFORE the request leaves. From here the outcome is unknown by default,
+      // and it stays unknown until something establishes otherwise — including
+      // across a tab close or a reload, which discards this document's fetch
+      // handler while the backend goes on committing.
+      const applyId = newApplyId();
+      applyIdRef.current = applyId;
+      setError(null);
       // ATOMIC admission, not the render-time `unsettled` read. That read and
       // the record were two steps, so two tabs could both see "nothing
       // pending" and both dispatch; this checks and records under one
@@ -1774,6 +1801,17 @@ export const RegistryImportFlow = ({
         // independently by the route. Both tokens come from the SAME approved
         // plan object, so they can never bind to two different previews.
         expectedDisplayDigest: approved.plan.display_digest,
+        // FIX: the dispatch verdict now comes from the request itself, not
+        // from a flag flipped before it. The client fires `onDispatched`
+        // immediately before `fetch`, so EVERY throw before that point —
+        // FormData assembly, URL resolution, header building — keeps
+        // `dispatched` false and lands in handleApplyFailure's definite
+        // pre-dispatch branch (retryable), instead of being misread as a
+        // possibly-committed write that locks Apply until a reload. From the
+        // callback onward the conservative indeterminate contract applies.
+        onDispatched: () => {
+          dispatched = true;
+        },
       });
       // A 2xx settles THIS apply: the write committed and the flow can say so.
       settleThisApply();
@@ -1781,7 +1819,7 @@ export const RegistryImportFlow = ({
       setStep("applied");
     } catch (caught) {
       // Stay on Preview; the Apply button re-enables in finally for a retry.
-      await handleApplyFailure(caught);
+      await handleApplyFailure(caught, dispatched);
     } finally {
       setBusy(false);
       setApplying(false);
@@ -1790,6 +1828,7 @@ export const RegistryImportFlow = ({
     }
   };
 
+  /** Return to the Upload step, clearing any error; entered from Preview's Back. */
   const backToUpload = () => {
     setError(null);
     setStep("upload");

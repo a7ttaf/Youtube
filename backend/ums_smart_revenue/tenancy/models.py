@@ -33,6 +33,18 @@ PLACEHOLDER_TENANT_EPOCH: datetime = datetime(1970, 1, 1, tzinfo=UTC)
 # having to know the schema default. Promoted to a module constant so a future
 # schema-default change (or a test that needs a non-USD placeholder) does not
 # have to edit the factory body.
+#
+# SOURCE OF TRUTH, and what this constant is NOT: this mirrors the SQL
+# ``server_default`` only. It is deliberately NOT the platform's declared
+# primary currency, which has two real sources depending on the auth mode:
+#   * database mode  -> the ``tenants.primary_currency`` column, read per
+#     request by the resolver;
+#   * headers mode   -> ``AppSettings.tenant_primary_currency``
+#     (``UMS_TENANT_PRIMARY_CURRENCY``), stamped by ``app._bootstrap_tenant``.
+# Placeholder tenants are never persisted and the RLS hook reads only
+# ``Tenant.id``, so this value must keep tracking the schema default rather
+# than following an operator's currency decision. Read the active tenant's
+# currency through ``tenancy.currency.get_tenant_primary_currency()``.
 DEFAULT_PRIMARY_CURRENCY: str = "USD"
 
 

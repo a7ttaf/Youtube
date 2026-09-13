@@ -30,6 +30,8 @@
 # ============================================================================
 """Shared API-boundary permission gates: uniform HTTP 403 on denial."""
 
+from typing import NoReturn
+
 from fastapi import HTTPException, status
 
 from ums_smart_revenue.auth.models import UserPrincipal
@@ -69,6 +71,35 @@ def require_permission(
 
 
 # ============================================================================
+# Purpose: Gate connector-execution ingestion surfaces to persisted service
+#   principals only.
+# Database/ORM: None; pure policy evaluation over the loaded principal.
+# Standards: Fail closed. RUN_CONNECTOR_JOBS is also granted to human Revenue
+#   Operations and Connector Admin roles; treating it as an ingestion fallback
+#   let those users forge raw-file metadata. Only a service principal may use
+#   the connector path here; humans fail closed with the same uniform 403
+#   shape and message as a plain missing permission. Every other
+#   connector-backed write keeps its own RUN_CONNECTOR_JOBS or narrower gate
+#   and cannot inherit this restriction.
+# Blast Radius: Raw-file registration route only; no connector job,
+#   exchange-rate, AdSense, credential, or connector-settings write changes.
+# Connections:
+#   - File: backend/ums_smart_revenue/api/reports.py -> raw-file registration.
+# ============================================================================
+def require_service_connector_jobs(
+    user: UserPrincipal,
+    scope: AccessScope,
+    org_index: OrgAccessIndex | None = None,
+) -> None:
+    """Allow connector execution only for a service principal or raise 403."""
+    if user.is_service_account and has_permission(
+        user, Permission.RUN_CONNECTOR_JOBS, scope, org_index
+    ):
+        return
+    raise_missing_permission(Permission.RUN_CONNECTOR_JOBS)
+
+
+# ============================================================================
 # Purpose: Unconditional HTTP 403 for gates that decide denial themselves
 #   (guards that already evaluated scope coverage before raising).
 # Database/ORM: None.
@@ -82,7 +113,7 @@ def require_permission(
 #   - File: backend/ums_smart_revenue/api/finance_close.py -> the
 #     finance-month read guard's denial path.
 # ============================================================================
-def raise_missing_permission(permission: Permission) -> None:
+def raise_missing_permission(permission: Permission) -> NoReturn:
     """Unconditionally raise HTTP 403 for a missing permission without revealing caller details."""
     raise HTTPException(
         status_code=status.HTTP_403_FORBIDDEN,

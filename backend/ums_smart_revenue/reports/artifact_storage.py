@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import stat
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -17,6 +18,8 @@ DEFAULT_MAX_ARTIFACT_SIZE_BYTES = 500 * 1024 * 1024
 
 @dataclass(frozen=True)
 class ExportArtifactMetadata:
+    """Immutable descriptor of one persisted export artifact on disk."""
+
     file_url: str
     filename: str
     content_type: str
@@ -25,7 +28,7 @@ class ExportArtifactMetadata:
 
 
 class ExportArtifactStorageError(RuntimeError):
-    pass
+    """Raised when an artifact cannot be stored, read, or removed safely."""
 
 
 class FileSystemExportArtifactStore:
@@ -37,6 +40,20 @@ class FileSystemExportArtifactStore:
         *,
         max_artifact_size_bytes: int = DEFAULT_MAX_ARTIFACT_SIZE_BYTES,
     ):
+        """Bind the store to ``root_dir`` (or the default) and a size cap.
+
+        Args:
+            root_dir: Root directory for artifact persistence; defaults to
+                the platform default root when ``None``.
+            max_artifact_size_bytes: Upper bound accepted for one artifact.
+
+        Returns:
+            ``None``. Instance attributes are bound directly.
+
+        Raises:
+            ExportArtifactStorageError: ``max_artifact_size_bytes`` is not
+                positive.
+        """
         self._root_dir = Path(root_dir) if root_dir is not None else _default_root_dir()
         if max_artifact_size_bytes < 1:
             raise ExportArtifactStorageError("max_artifact_size_bytes must be positive")
@@ -44,6 +61,12 @@ class FileSystemExportArtifactStore:
 
     @classmethod
     def from_environment(cls) -> FileSystemExportArtifactStore:
+        """Build a store rooted at ``UMS_EXPORT_ARTIFACT_DIR`` or the default.
+
+        Returns:
+            A :class:`FileSystemExportArtifactStore` rooted at the trimmed
+            environment value, or at the default root when unset/blank.
+        """
         configured_root = os.environ.get(EXPORT_ARTIFACT_DIR_ENV)
         if configured_root and configured_root.strip():
             return cls(configured_root.strip())
@@ -57,6 +80,29 @@ class FileSystemExportArtifactStore:
         content_type: str,
         content: bytes,
     ) -> ExportArtifactMetadata:
+        """Persist one export artifact atomically and return its metadata.
+
+        Args:
+            export_id: Owning export job id (validated, becomes one path
+                segment under ``exports/``).
+            filename: Operator-visible artifact filename (validated, becomes
+                the final path segment).
+            content_type: Declared MIME type recorded in the metadata.
+            content: Non-empty artifact bytes within the configured size cap.
+
+        Returns:
+            Metadata describing the artifact actually on disk: its
+            ``file-store://`` URI, filename, content type, byte size, and
+            sha256 checksum. Under a concurrent second writer, the metadata
+            reflects the first-writer's persisted bytes, not the caller's
+            input.
+
+        Raises:
+            ExportArtifactStorageError: Empty content, a size-cap violation,
+                or any filesystem failure; a partial artifact is never left
+                at the target path (first-writer-wins persistence via
+                ``os.link`` from a private temp file).
+        """
         normalized_export_id = _normalize_export_id(export_id)
         normalized_filename = _normalize_filename(filename)
         normalized_content_type = _normalize_content_type(content_type)
@@ -83,8 +129,32 @@ class FileSystemExportArtifactStore:
         # ================================================================
         first_writer_wins = True
         try:
-            target_path.parent.mkdir(parents=True, exist_ok=True)
+            # FIX: every directory level must end up with no group/world write —
+            # the Compose launcher's storage preflight rejects any such bit
+            # inside the bind tree, so umask-derived 0755 intermediates
+            # (exports/, the export-id dir) made the launcher reject its own
+            # populated store on the next start. Resolved-root containment
+            # stops the walk at this store's root; POSIX only, since Windows
+            # maps non-writable modes onto the read-only attribute and the
+            # Windows preflight enforces ACLs instead of mode bits.
+            target_path.parent.mkdir(parents=True, exist_ok=True, mode=0o750)
             temp_path.write_bytes(content)
+            if os.name != "nt":
+                private_dirs = stat.S_IRWXU | stat.S_IRGRP | stat.S_IXGRP
+                root = self._root_dir.resolve(strict=False)
+                for directory in target_path.parents:
+                    resolved = directory.resolve(strict=False)
+                    try:
+                        resolved.relative_to(root)
+                    except ValueError:
+                        break
+                    if resolved == root:
+                        # The configured root's own mode belongs to the
+                        # operator and the provisioning policy, not to this
+                        # write.
+                        break
+                    os.chmod(resolved, private_dirs)
+                temp_path.chmod(stat.S_IRUSR | stat.S_IWUSR | stat.S_IRGRP)
             try:
                 os.link(temp_path, target_path)
             except FileExistsError:
@@ -117,6 +187,20 @@ class FileSystemExportArtifactStore:
         )
 
     def delete(self, *, file_url: str) -> None:
+        """Remove one persisted artifact identified by its ``file-store://`` URL.
+
+        Args:
+            file_url: ``file-store://`` URL previously returned by
+                :meth:`save`.
+
+        Returns:
+            ``None``. A missing artifact is treated as already deleted.
+
+        Raises:
+            ExportArtifactStorageError: ``file_url`` fails the scheme/escape
+                validation in :meth:`_relative_path_from_file_url`, or the
+                host unlink fails.
+        """
         relative_path = _relative_path_from_file_url(file_url)
         target_path = self._root_dir / relative_path
         try:
@@ -125,6 +209,20 @@ class FileSystemExportArtifactStore:
             raise ExportArtifactStorageError("artifact cleanup unavailable") from exc
 
     def read(self, *, file_url: str) -> bytes:
+        """Return the exact bytes of one persisted artifact.
+
+        Args:
+            file_url: ``file-store://`` URL previously returned by
+                :meth:`save`.
+
+        Returns:
+            The stored bytes, unmodified.
+
+        Raises:
+            ExportArtifactStorageError: ``file_url`` fails the scheme/escape
+                validation in :meth:`_relative_path_from_file_url`, the
+                artifact is missing, or the host read fails.
+        """
         relative_path = _relative_path_from_file_url(file_url)
         target_path = self._root_dir / relative_path
         try:
@@ -136,10 +234,26 @@ class FileSystemExportArtifactStore:
 
 
 def _default_root_dir() -> Path:
+    """Return the default on-disk artifact root directory.
+
+    Returns:
+        The platform default root directory for persisted artifacts.
+    """
     return DEFAULT_EXPORT_ARTIFACT_DIR
 
 
 def _normalize_export_id(value: str) -> str:
+    """Normalize ``value`` into a canonical UUID string.
+
+    Args:
+        value: Caller-supplied export id in any UUID form.
+
+    Returns:
+        The canonical lowercase UUID string.
+
+    Raises:
+        ExportArtifactStorageError: ``value`` is not a valid UUID.
+    """
     try:
         return str(UUID(value))
     except ValueError as exc:
@@ -147,6 +261,18 @@ def _normalize_export_id(value: str) -> str:
 
 
 def _normalize_filename(value: str) -> str:
+    """Validate and return one safe artifact filename segment.
+
+    Args:
+        value: Caller-supplied filename candidate.
+
+    Returns:
+        The trimmed, validated filename (single path segment).
+
+    Raises:
+        ExportArtifactStorageError: The name is blank, a dot segment, or
+            carries a path separator.
+    """
     normalized = value.strip()
     if not normalized or normalized in {".", ".."} or "/" in normalized or "\\" in normalized:
         raise ExportArtifactStorageError("artifact filename is invalid")
@@ -154,6 +280,17 @@ def _normalize_filename(value: str) -> str:
 
 
 def _normalize_content_type(value: str) -> str:
+    """Validate and return one non-blank artifact content type.
+
+    Args:
+        value: Caller-supplied MIME type candidate.
+
+    Returns:
+        The trimmed, non-empty content type string.
+
+    Raises:
+        ExportArtifactStorageError: The content type is blank.
+    """
     normalized = value.strip()
     if not normalized:
         raise ExportArtifactStorageError("artifact content_type is required")
@@ -161,6 +298,18 @@ def _normalize_content_type(value: str) -> str:
 
 
 def _relative_path_from_file_url(value: str) -> Path:
+    """Map one ``file-store://`` URL to its contained store-relative path.
+
+    Args:
+        value: ``file-store://`` URL previously produced by :meth:`save`.
+
+    Returns:
+        The store-relative path beginning under ``exports/``.
+
+    Raises:
+        ExportArtifactStorageError: The URL uses a foreign scheme, escapes
+            the store, or does not start under ``exports/``.
+    """
     if not value.startswith(EXPORT_ARTIFACT_URI_PREFIX):
         raise ExportArtifactStorageError("artifact file_url is invalid")
     relative = value[len(EXPORT_ARTIFACT_URI_PREFIX) :].strip()
@@ -176,6 +325,15 @@ def _relative_path_from_file_url(value: str) -> Path:
 
 
 def _discard_temp_file(path: Path) -> None:
+    """Best-effort unlink of one temp file; cleanup failures are ignored.
+
+    Args:
+        path: Temporary file to remove; a missing file is success.
+
+    Returns:
+        ``None``. Any OSError during removal is deliberately swallowed so
+        cleanup never masks the original save failure.
+    """
     try:
         path.unlink(missing_ok=True)
     except OSError:

@@ -21,6 +21,11 @@ from ums_smart_revenue.app import (
     create_app,
 )
 from ums_smart_revenue.auth.models import UserPrincipal
+from ums_smart_revenue.config.settings import (
+    AUTHZ_SOURCE_ENV,
+    TENANT_PRIMARY_CURRENCY_ENV,
+    load_app_settings,
+)
 from ums_smart_revenue.db.security_models import (
     AccessScopeORM,
     RoleORM,
@@ -38,6 +43,7 @@ BOOTSTRAP_DISPLAY = "UMS"
 
 
 def _gateway_headers(user_id: UUID = TEST_USER_ID) -> dict[str, str]:
+    """Return the minimal trusted-gateway headers used by database-mode tests."""
     return {
         "X-User-ID": str(user_id),
         "X-UMS-Trusted-Gateway-Token": os.environ["UMS_TRUSTED_GATEWAY_TOKEN"],
@@ -65,12 +71,14 @@ def _full_principal_headers(user_id: UUID = TEST_USER_ID) -> dict[str, str]:
 
 @pytest.fixture
 def db_engine_url(tmp_path):
+    """Return an isolated SQLite URL for the tenant API fixtures."""
     db_path = tmp_path / "spec_a.sqlite"
     return f"sqlite:///{db_path}"
 
 
 @pytest.fixture
 def seeded_engine(db_engine_url):
+    """Create and seed an SQLite database for tenant API integration tests."""
     engine = create_engine(db_engine_url, future=True)
     TenantBase.metadata.create_all(engine)
     SecurityBase.metadata.create_all(engine)
@@ -84,6 +92,7 @@ def seeded_engine(db_engine_url):
 
 
 def _seed_bootstrap_tenant(session: Session) -> None:
+    """Insert the active bootstrap tenant used by resolver tests."""
     now = datetime.now(UTC)
     session.add(
         TenantORM(
@@ -153,12 +162,14 @@ def _seed_enabled_user(session: Session) -> None:
 
 @pytest.fixture
 def app_db_mode(seeded_engine):
+    """Build the database-auth app against the seeded SQLite engine."""
     app = create_app(database_url=str(seeded_engine.url), authz_source="database")
     return app
 
 
 @pytest.fixture
 def client_db_mode(app_db_mode):
+    """Yield a database-auth TestClient for tenant endpoint cases."""
     with TestClient(app_db_mode) as client:
         yield client
 
@@ -171,6 +182,7 @@ def client_db_mode(app_db_mode):
 def test_tenants_me_returns_bootstrap_tenant_for_resolved_slug(
     client_db_mode,
 ):
+    """Return the resolved tenant identity and its database currency label."""
     response = client_db_mode.get(
         "/tenants/me",
         headers={"X-UMS-Tenant": "ums", **_gateway_headers()},
@@ -181,8 +193,32 @@ def test_tenants_me_returns_bootstrap_tenant_for_resolved_slug(
         "id": str(BOOTSTRAP_TENANT_ID),
         "slug": "ums",
         "display_name": BOOTSTRAP_DISPLAY,
+        "primary_currency": "USD",
     }
     assert response.headers.get("Vary") and "X-UMS-Tenant" in response.headers["Vary"]
+
+
+def test_openapi_documents_primary_currency_on_both_hydration_responses(
+    client_db_mode,
+):
+    """The published OpenAPI contract carries ``primary_currency`` on BOTH hydration endpoints.
+
+    The SPA hydrates from whichever of GET /tenants/me or GET /session/me
+    answers first, so a schema-generated client must see the field on both
+    response models — an undocumented field is a contract regression even
+    when the runtime response carries it.
+    """
+    schema = client_db_mode.get("/openapi.json").json()
+
+    tenant_properties = schema["components"]["schemas"]["TenantRead"]["properties"]
+    assert "primary_currency" in tenant_properties, (
+        "GET /tenants/me must document primary_currency"
+    )
+
+    session_properties = schema["components"]["schemas"]["SessionTenant"]["properties"]
+    assert "primary_currency" in session_properties, (
+        "GET /session/me must document primary_currency on its nested tenant"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -191,6 +227,7 @@ def test_tenants_me_returns_bootstrap_tenant_for_resolved_slug(
 
 
 def test_tenants_me_rejects_missing_tenant_header(client_db_mode):
+    """Reject a request that does not identify a tenant slug."""
     response = client_db_mode.get("/tenants/me", headers=_gateway_headers())
     assert response.status_code == 400
     assert response.json()["detail"] == "Tenant slug must not be blank"
@@ -203,6 +240,7 @@ def test_tenants_me_rejects_missing_tenant_header(client_db_mode):
 
 
 def test_tenants_me_rejects_whitespace_tenant_header(client_db_mode):
+    """Reject a tenant header containing only whitespace."""
     response = client_db_mode.get(
         "/tenants/me",
         headers={"X-UMS-Tenant": "   ", **_gateway_headers()},
@@ -212,6 +250,7 @@ def test_tenants_me_rejects_whitespace_tenant_header(client_db_mode):
 
 
 def test_tenants_me_rejects_overlong_tenant_header(client_db_mode):
+    """Reject a tenant slug longer than the repository limit."""
     response = client_db_mode.get(
         "/tenants/me",
         headers={"X-UMS-Tenant": "a" * 256, **_gateway_headers()},
@@ -226,6 +265,7 @@ def test_tenants_me_rejects_overlong_tenant_header(client_db_mode):
 
 
 def test_tenants_me_rejects_duplicate_tenant_headers(client_db_mode):
+    """Reject duplicate tenant headers before selecting either value."""
     request = client_db_mode.build_request(
         "GET",
         "/tenants/me",
@@ -267,6 +307,7 @@ def test_tenants_me_rejects_mismatched_duplicate_tenant_headers(client_db_mode):
 
 
 def test_tenants_me_returns_404_for_unknown_slug(client_db_mode):
+    """Return not-found when the requested slug is absent from the registry."""
     response = client_db_mode.get(
         "/tenants/me",
         headers={"X-UMS-Tenant": "not-a-tenant", **_gateway_headers()},
@@ -307,6 +348,7 @@ def client_deny_authz(seeded_engine):
     # Blast Radius: Test fixture only; no production path affected.
     # ============================================================================
     def _stub_principal() -> UserPrincipal:
+        """Return a minimal principal so the denial path reaches authorization."""
         return UserPrincipal(
             user_id=str(TEST_USER_ID),
             email="spec-a-deny@example.invalid",
@@ -324,6 +366,7 @@ def client_deny_authz(seeded_engine):
 
 
 def test_tenants_me_returns_403_when_authorizer_denies(client_deny_authz):
+    """Return forbidden when the tenant authorizer denies an active tenant."""
     response = client_deny_authz.get(
         "/tenants/me",
         headers={"X-UMS-Tenant": "ums", **_gateway_headers()},
@@ -344,6 +387,7 @@ def test_tenants_me_returns_403_when_authorizer_denies(client_deny_authz):
 
 
 def test_tenants_me_returns_401_when_gateway_user_id_missing(client_db_mode):
+    """Reject a request with no trusted gateway user identity."""
     headers = _gateway_headers()
     headers.pop("X-User-ID")
     headers["X-UMS-Tenant"] = "ums"
@@ -352,6 +396,7 @@ def test_tenants_me_returns_401_when_gateway_user_id_missing(client_db_mode):
 
 
 def test_tenants_me_returns_401_when_gateway_token_invalid(client_db_mode):
+    """Reject a request carrying an invalid trusted gateway token."""
     response = client_db_mode.get(
         "/tenants/me",
         headers={
@@ -376,6 +421,7 @@ def test_tenants_me_returns_401_when_gateway_token_invalid(client_db_mode):
 
 @pytest.fixture
 def client_headers_mode(seeded_engine):
+    """Yield a headers-auth TestClient using the seeded SQLite engine."""
     app = create_app(database_url=str(seeded_engine.url), authz_source="headers")
     with TestClient(app) as client:
         yield client
@@ -414,6 +460,133 @@ def test_tenants_me_headers_mode_returns_bootstrap_after_gateway_auth(
 
 
 # ---------------------------------------------------------------------------
+# EGP program Phase 1 — the bootstrap tenant's declared currency is CONFIGURED
+# ---------------------------------------------------------------------------
+# Headers mode fabricates its tenant instead of reading the `tenants` row, so
+# UMS_TENANT_PRIMARY_CURRENCY is the only thing that can decide the declared
+# currency there. These two tests pin both halves of that contract: the
+# configured code reaches the wire, and the unset default is still "USD" so
+# Phase 1 flips nothing. Nothing here converts an amount — UMS never does.
+# ---------------------------------------------------------------------------
+
+
+def _headers_mode_primary_currency(seeded_engine) -> str:
+    """Return the primary_currency GET /tenants/me reports in headers mode."""
+    app = create_app(database_url=str(seeded_engine.url), authz_source="headers")
+    with TestClient(app) as client:
+        response = client.get("/tenants/me", headers=_full_principal_headers())
+    assert response.status_code == 200, response.text
+    currency = response.json()["primary_currency"]
+    assert isinstance(currency, str)
+    return currency
+
+
+def test_tenants_me_headers_mode_carries_the_configured_primary_currency(
+    seeded_engine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The bootstrap tenant declares UMS_TENANT_PRIMARY_CURRENCY, not a literal.
+
+    Deliberately asserts a NON-USD code: a regression that re-hardcodes "USD"
+    in ``app._bootstrap_tenant`` fails here, which a USD-valued assertion
+    could not detect.
+    """
+    monkeypatch.setenv(TENANT_PRIMARY_CURRENCY_ENV, "EGP")
+    load_app_settings.cache_clear()
+    assert _headers_mode_primary_currency(seeded_engine) == "EGP"
+
+
+def test_tenants_me_headers_mode_primary_currency_defaults_to_usd(
+    seeded_engine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With the env unset the declared currency stays USD — Phase 1 flips nothing."""
+    monkeypatch.delenv(TENANT_PRIMARY_CURRENCY_ENV, raising=False)
+    load_app_settings.cache_clear()
+    assert _headers_mode_primary_currency(seeded_engine) == "USD"
+
+
+def test_tenants_me_db_mode_reports_the_tenant_row_currency_not_the_setting(
+    seeded_engine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Database mode reads ``tenants.primary_currency``; the env must not leak in.
+
+    The row declares AED while the env declares EGP, so neither the setting nor
+    the USD fallback can accidentally satisfy the assertion.
+    """
+    monkeypatch.setenv(TENANT_PRIMARY_CURRENCY_ENV, "EGP")
+    load_app_settings.cache_clear()
+    with Session(seeded_engine) as session:
+        tenant = session.get(TenantORM, BOOTSTRAP_TENANT_ID)
+        assert tenant is not None
+        tenant.primary_currency = "AED"
+        session.commit()
+
+    app = create_app(database_url=str(seeded_engine.url), authz_source="database")
+    with TestClient(app) as client:
+        response = client.get(
+            "/tenants/me",
+            headers={"X-UMS-Tenant": "ums", **_gateway_headers()},
+        )
+    assert response.status_code == 200, response.text
+    assert response.json()["primary_currency"] == "AED"
+
+
+def test_tenants_me_db_override_ignores_invalid_headers_currency_setting(
+    seeded_engine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An explicit database-mode app starts despite invalid headers-only config."""
+    monkeypatch.setenv(AUTHZ_SOURCE_ENV, "headers")
+    monkeypatch.setenv(TENANT_PRIMARY_CURRENCY_ENV, "not-a-currency")
+    load_app_settings.cache_clear()
+
+    app = create_app(database_url=str(seeded_engine.url), authz_source="database")
+    with TestClient(app) as client:
+        response = client.get(
+            "/tenants/me",
+            headers={"X-UMS-Tenant": "ums", **_gateway_headers()},
+        )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["primary_currency"] == "USD"
+
+
+def test_tenants_me_configured_db_mode_ignores_invalid_headers_currency_setting(
+    seeded_engine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Environment-selected database mode also skips the unused currency setting."""
+    monkeypatch.setenv(AUTHZ_SOURCE_ENV, "database")
+    monkeypatch.setenv(TENANT_PRIMARY_CURRENCY_ENV, "not-a-currency")
+    load_app_settings.cache_clear()
+
+    app = create_app(database_url=str(seeded_engine.url))
+    with TestClient(app) as client:
+        response = client.get(
+            "/tenants/me",
+            headers={"X-UMS-Tenant": "ums", **_gateway_headers()},
+        )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["primary_currency"] == "USD"
+
+
+def test_tenants_me_headers_override_rejects_invalid_currency_setting(
+    seeded_engine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An explicit headers-mode app keeps strict currency validation."""
+    monkeypatch.setenv(AUTHZ_SOURCE_ENV, "database")
+    monkeypatch.setenv(TENANT_PRIMARY_CURRENCY_ENV, "not-a-currency")
+    load_app_settings.cache_clear()
+
+    with pytest.raises(ValueError, match=TENANT_PRIMARY_CURRENCY_ENV):
+        create_app(database_url=str(seeded_engine.url), authz_source="headers")
+
+
+# ---------------------------------------------------------------------------
 # Case 10 — no tenant middleware installed → controlled 503 (not 500)
 # ---------------------------------------------------------------------------
 # create_app(database_url=None) does NOT install TenantResolverMiddleware nor
@@ -436,6 +609,7 @@ def client_no_tenant_middleware():
 def test_tenants_me_returns_503_when_tenant_middleware_missing(
     client_no_tenant_middleware,
 ):
+    """Map missing tenant middleware to the controlled fail-closed 503 response."""
     response = client_no_tenant_middleware.get(
         "/tenants/me",
         headers=_full_principal_headers(),

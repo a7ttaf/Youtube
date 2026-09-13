@@ -42,6 +42,15 @@ Confidence levels table are the domain-level tier tokens; the net-revenue API
 emit the bare tier code string (e.g. `B_RECONCILED`, `D_ESTIMATED`, `E_MISSING`),
 whereas the explain endpoint reports the `{label, score}` object shown above.
 
+For `adjusted_gross_revenue_usd`, the label bands the primary fact's
+`confidence_score` at `>= 0.9000` (HIGH) and `>= 0.7000` (MEDIUM), and a warned
+explanation can never be HIGH: when `warnings` is non-empty the score is capped
+at `0.9000` **and** the label is capped at MEDIUM. The returned `label` is
+authoritative for display; clients must not derive a replacement label from
+`score`, because a warned score of `0.9000` intentionally carries MEDIUM. This
+rule guarantees only `warnings => label != HIGH`: clean and warned explanations
+can still share MEDIUM or LOW, so warning presence must be read from `warnings`.
+
 ## UI rules
 
 - Every money number has an **Explain** action.

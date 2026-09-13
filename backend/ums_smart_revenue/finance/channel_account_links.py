@@ -51,7 +51,7 @@ def _is_unique_violation(exc: IntegrityError) -> bool:
     orig = getattr(exc, "orig", None)
     if orig is None:
         return False
-    # FIX: this project pins psycopg3 (psycopg[binary]==3.3.4), which exposes
+    # FIX: this project pins psycopg3 (psycopg[binary]==3.3.5), which exposes
     # SQLSTATE via `sqlstate`, not the psycopg2 `pgcode`. Checking only `pgcode`
     # let a real PostgreSQL duplicate fall through to the SQLite-message branch
     # and return False, so the duplicate POST bubbled as an unhandled

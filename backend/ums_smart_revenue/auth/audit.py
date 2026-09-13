@@ -23,6 +23,7 @@ class AuditEventType(StrEnum):
     CHANNEL_CREATED = "CHANNEL_CREATED"
     CHANNEL_UPDATED = "CHANNEL_UPDATED"
     CHANNEL_IMPORTED = "CHANNEL_IMPORTED"
+    ORG_UNIT_CHANGED = "ORG_UNIT_CHANGED"
     GROUP_UPDATED = "GROUP_UPDATED"
     GROUPS_SYNCED = "GROUPS_SYNCED"
     REPORT_IMPORTED = "REPORT_IMPORTED"
@@ -86,6 +87,11 @@ AUDIT_EVENT_DEFINITIONS: dict[AuditEventType, AuditEventDefinition] = {
         AuditEventType.CHANNEL_IMPORTED,
         reason_required=True,
         permission=Permission.MANAGE_CHANNELS,
+    ),
+    AuditEventType.ORG_UNIT_CHANGED: AuditEventDefinition(
+        AuditEventType.ORG_UNIT_CHANGED,
+        reason_required=True,
+        permission=Permission.MANAGE_ORG_MAPPING,
     ),
     AuditEventType.GROUP_UPDATED: AuditEventDefinition(
         AuditEventType.GROUP_UPDATED,

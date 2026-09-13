@@ -5,23 +5,30 @@ from datetime import UTC, date, datetime
 from decimal import Decimal
 from io import BytesIO
 from types import SimpleNamespace
-from typing import NoReturn
+from typing import NoReturn, cast
 from uuid import UUID, uuid4
 
 import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from openpyxl import load_workbook
 from pptx import Presentation
 from pypdf import PdfReader
 from sqlalchemy import create_engine, select
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
+from starlette.responses import Response as StarletteResponse
 
+from ums_smart_revenue.api.dependencies_audit import current_audit_sink
 from ums_smart_revenue.api.exports import (
+    _artifact_download_headers,
     _artifact_metadata_audit_details,
     _persist_generated_export_artifact,
+    _prepared_artifact_response,
     _require_persisted_artifact_bytes,
 )
 from ums_smart_revenue.app import create_app
+from ums_smart_revenue.auth.audit_service import InMemoryAuditSink
 from ums_smart_revenue.db.finance_models import (
     AdSensePaymentORM,
     BankReconciliationEntryORM,
@@ -44,6 +51,7 @@ from ums_smart_revenue.reports.exports import (
     ExportJobEntry,
     ExportJobTerminalStateError,
     ExportJobValidationError,
+    SqlAlchemyExportJobRepository,
 )
 
 SECTOR_ID = UUID("00000000-0000-0000-0000-000000023001")
@@ -53,6 +61,37 @@ USER_ID = UUID("00000000-0000-0000-0000-000000023301")
 EXPORT_ID = UUID("00000000-0000-0000-0000-000000023401")
 GROUP_ID = UUID("00000000-0000-0000-0000-000000023501")
 OTHER_USER_ID = UUID("00000000-0000-0000-0000-000000023601")
+
+
+class _FailingAuditCommitUnitOfWork:
+    """SQL-like audit unit of work that fails at the durability boundary."""
+
+    def __init__(self) -> None:
+        self.commit_attempted = False
+        self.rollback_attempted = False
+        self.expunge_attempted = False
+
+    def commit(self) -> None:
+        """Raise as a SQL audit commit would after audit rows were appended."""
+        self.commit_attempted = True
+        raise SQLAlchemyError("audit commit failed")
+
+    def rollback(self) -> None:
+        """Record rollback after a failed audit commit."""
+        self.rollback_attempted = True
+
+    def expunge_all(self) -> None:
+        """Record identity-map cleanup after rollback."""
+        self.expunge_attempted = True
+
+
+class _FailingAuditCommitSink(InMemoryAuditSink):
+    """Capture requested audit rows, then fail when the route commits them."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.unit_of_work = _FailingAuditCommitUnitOfWork()
+        self.sql_unit_of_work = self.unit_of_work
 
 
 def _utc_timestamp(value: datetime) -> float:
@@ -533,6 +572,346 @@ def test_finance_admin_downloads_generated_finance_workbook_with_audit(tmp_path)
     assert all(event.sensitive for event in audit_events)
 
 
+def test_finance_workbook_prepare_is_bodyless_and_real_get_reauthorizes(
+    tmp_path,
+    monkeypatch,
+):
+    """Prepare without a download audit, then independently authorize the native GET."""
+    artifact_dir = tmp_path / "export-artifacts"
+    monkeypatch.setenv("UMS_EXPORT_ARTIFACT_DIR", str(artifact_dir))
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    client = TestClient(create_app(database_url=database_url))
+    route = f"/exports/{EXPORT_ID}/finance-workbook.xlsx"
+    engine = create_engine(database_url)
+    original_response_call = StarletteResponse.__call__
+    status_when_prepare_response_started: list[str] = []
+
+    async def observe_prepare_commit(response, scope, receive, send):
+        """Record the durable-metadata state when the prepare 204 starts."""
+        if response.status_code == 204 and scope.get("path") == route:
+            with Session(engine) as observation_session:
+                observed_job = observation_session.get(ExportJobORM, EXPORT_ID)
+                assert observed_job is not None
+                status_when_prepare_response_started.append(observed_job.status)
+        await original_response_call(response, scope, receive, send)
+
+    monkeypatch.setattr(StarletteResponse, "__call__", observe_prepare_commit)
+
+    denied_prepare = client.get(
+        f"{route}?prepare=true",
+        headers=auth_headers("export_operator"),
+    )
+    with Session(engine) as session:
+        denied_job = session.get(ExportJobORM, EXPORT_ID)
+
+    assert denied_prepare.status_code == 403
+    assert denied_prepare.json()["detail"] == "Missing permission: exports.revenue"
+    assert denied_job is not None
+    assert denied_job.status == "QUEUED"
+
+    prepared = client.get(
+        f"{route}?prepare=true",
+        headers=auth_headers("finance_admin"),
+    )
+
+    with Session(engine) as session:
+        prepared_job = session.get(ExportJobORM, EXPORT_ID)
+        preparation_audits = session.scalars(select(AuditLogORM)).all()
+
+    assert prepared.status_code == 204
+    assert prepared.content == b""
+    assert prepared.headers["cache-control"] == "no-store"
+    assert status_when_prepare_response_started == ["COMPLETED"]
+    assert prepared_job is not None
+    assert prepared_job.status == "COMPLETED"
+    assert prepared_job.file_url is not None
+    assert prepared_job.artifact_checksum_sha256 is not None
+    # FIX (review: prepare generates artifact with no audit trail): the
+    # prepare leg READS sensitive finance source data, so it now records its
+    # read audit trail — but never EXPORT_DOWNLOADED, which only the
+    # delivering GET may claim.
+    assert {event.event_type for event in preparation_audits} == {
+        "BANK_RECONCILIATION_VIEWED",
+        "PAYMENT_VIEWED",
+        "REVENUE_VIEWED",
+    }
+
+    # The bodyless prepare response is not a bearer grant: the ordinary GET
+    # enters the complete route authorization again and still denies a role
+    # without finance-export visibility.
+    denied = client.get(route, headers=auth_headers("export_operator"))
+    assert denied.status_code == 403
+    assert denied.json()["detail"] == "Missing permission: exports.revenue"
+
+    downloaded = client.get(route, headers=auth_headers("finance_admin"))
+    with Session(engine) as session:
+        download_audits = session.scalars(
+            select(AuditLogORM).order_by(AuditLogORM.event_type)
+        ).all()
+
+    assert downloaded.status_code == 200
+    assert downloaded.headers["cache-control"] == "no-store"
+    assert "ums-finance-2026-03-global.xlsx" in downloaded.headers["content-disposition"]
+    assert hashlib.sha256(downloaded.content).hexdigest() == (prepared_job.artifact_checksum_sha256)
+    assert {event.event_type for event in download_audits} == {
+        "BANK_RECONCILIATION_VIEWED",
+        "EXPORT_DOWNLOADED",
+        "PAYMENT_VIEWED",
+        "REVENUE_VIEWED",
+    }
+
+
+def test_prepared_artifact_response_fails_closed_when_commit_fails():
+    """Do not expose the 204 start signal when artifact metadata is not durable."""
+
+    class FailingCommitRepository:
+        """Repository stand-in whose unit-of-work commit always fails."""
+
+        @staticmethod
+        def commit_unit_of_work() -> NoReturn:
+            """Raise, simulating a durability failure at metadata commit."""
+            raise SQLAlchemyError("commit failed")
+
+    with pytest.raises(HTTPException) as raised:
+        _prepared_artifact_response(
+            repository=cast(SqlAlchemyExportJobRepository, FailingCommitRepository()),
+            filename="ums-finance.xlsx",
+        )
+
+    assert raised.value.status_code == 503
+    assert raised.value.detail == "Export artifact persistence unavailable"
+
+
+def test_prepared_artifact_response_rejects_unsafe_filename_before_committing():
+    """The 204 must not announce a download whose filename would fail the header.
+
+    Validation precedes the metadata commit, so an unsafe persisted name
+    fails the prepare leg closed without touching the repository — the
+    download leg can never reach its post-audit header failure.
+    """
+    commits: list[str] = []
+
+    class RecordingRepository:
+        """Repository stand-in recording its unit-of-work commits."""
+
+        @staticmethod
+        def commit_unit_of_work() -> None:
+            """Record that the prepare leg reached its metadata commit."""
+            commits.append("commit")
+
+    with pytest.raises(HTTPException) as raised:
+        _prepared_artifact_response(
+            repository=cast(SqlAlchemyExportJobRepository, RecordingRepository()),
+            filename='ums-finance-2026-03".xlsx',
+        )
+
+    assert raised.value.status_code == 500
+    assert raised.value.detail == "Export artifact filename is unsafe"
+    assert commits == [], "filename validation must run before the metadata commit"
+
+
+@pytest.mark.parametrize(
+    "poisoned",
+    [
+        'ums-finance-2026-03".xlsx',
+        "ums-finance-2026-03\\.xlsx",
+        "ums-finance-2026-03\x00.xlsx",
+        "ums-finance-2026-03/../../../etc.xlsx",
+        ".",
+        "..",
+        "  ",
+    ],
+)
+def test_artifact_download_headers_fail_closed_on_unsafe_persisted_filename(poisoned):
+    """A persisted filename that could inject or split Content-Disposition fails closed.
+
+    Today's generators write fixed machine names, but the header builder is the
+    last choke point every artifact passes through; a future writer must not be
+    able to smuggle a quote, backslash, forward slash (a path-shaped name is a
+    traversal attempt), control character, or dot-only name into the header.
+    """
+    with pytest.raises(HTTPException) as raised:
+        _artifact_download_headers(poisoned)
+
+    assert raised.value.status_code == 500
+    assert raised.value.detail == "Export artifact filename is unsafe"
+
+
+def test_openapi_documents_the_prepare_parameter_on_every_artifact_route():
+    """All four artifact GETs must publish the ``prepare`` handshake parameter."""
+    app = create_app(database_url="sqlite+pysqlite:///:memory:")
+    with TestClient(app) as client:
+        schema = client.get("/openapi.json").json()
+
+    artifact_paths = [
+        path
+        for path in schema["paths"]
+        if path.startswith("/exports/{export_id}/")
+        and (
+            path.endswith((".csv", ".xlsx", ".pdf", ".pptx"))
+        )
+    ]
+    assert len(artifact_paths) == 4, artifact_paths
+    for path in artifact_paths:
+        parameters = schema["paths"][path]["get"].get("parameters", [])
+        assert any(p.get("name") == "prepare" for p in parameters), (
+            f"{path} must document the prepare parameter"
+        )
+
+
+@pytest.mark.parametrize(
+    ("export_type", "route", "artifact_prefix"),
+    [
+        ("FINANCE_EXCEL", f"/exports/{EXPORT_ID}/finance-workbook.xlsx", b"PK"),
+        ("EXECUTIVE_PDF", f"/exports/{EXPORT_ID}/executive.pdf", b"%PDF-"),
+        ("BRANDED_SLIDE_PACK", f"/exports/{EXPORT_ID}/branded-slide-pack.pptx", b"PK"),
+    ],
+)
+def test_finance_artifact_download_fails_closed_when_audit_commit_fails(
+    tmp_path,
+    monkeypatch,
+    export_type,
+    route,
+    artifact_prefix,
+):
+    """Return 503 before finance artifact bytes start when audit commit fails."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url, export_type=export_type)
+    app = create_app(database_url=database_url)
+    audit_sink = _FailingAuditCommitSink()
+    app.dependency_overrides[current_audit_sink] = lambda: audit_sink
+    engine = create_engine(database_url)
+    original_response_call = StarletteResponse.__call__
+    response_starts: list[int] = []
+    response_bodies: list[bytes] = []
+
+    async def observe_response_start(response, scope, receive, send):
+        """Wrap ASGI send to capture response starts and body chunks."""
+        async def observe_send(message):
+            """Forward one ASGI message, recording starts and body chunks."""
+            if message["type"] == "http.response.start":
+                response_starts.append(message["status"])
+            if message["type"] == "http.response.body":
+                response_bodies.append(message.get("body", b""))
+            await send(message)
+
+        await original_response_call(response, scope, receive, observe_send)
+
+    monkeypatch.setattr(StarletteResponse, "__call__", observe_response_start)
+
+    response = TestClient(app).get(route, headers=auth_headers("finance_admin"))
+
+    with Session(engine) as session:
+        export_job = session.get(ExportJobORM, EXPORT_ID)
+        audit_events = session.scalars(select(AuditLogORM)).all()
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == "Export artifact audit unavailable"
+    assert response_starts == [503]
+    assert not any(body.startswith(artifact_prefix) for body in response_bodies)
+    assert audit_sink.unit_of_work.commit_attempted is True
+    assert audit_sink.unit_of_work.rollback_attempted is True
+    assert audit_sink.unit_of_work.expunge_attempted is True
+    assert {record.event_type for record in audit_sink.records} >= {"EXPORT_DOWNLOADED"}
+    assert export_job is not None
+    # The tenant session commits BEFORE the audit boundary, so a failed audit
+    # commit leaves the job durably COMPLETED over its persisted artifact —
+    # a retry serves it and records a real download, and no false
+    # EXPORT_DOWNLOADED exists in the durable audit trail.
+    assert export_job.status == "COMPLETED"
+    assert audit_events == []
+
+
+class _ValueErrorAuditSink(InMemoryAuditSink):
+    """Sink whose transaction context raises a plain ValueError, not a SQL error.
+
+    record_audit_event's own normalization can raise ValueError (a required
+    reason, or a downgraded sensitive permission_override); the route's audit
+    boundary must contain those exactly like SQLAlchemyError — rollback plus a
+    controlled 503 — instead of leaking a raw 500 with a dirty sink session.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.unit_of_work = _FailingAuditCommitUnitOfWork()
+        self.sql_unit_of_work = self.unit_of_work
+
+    def transaction(self) -> NoReturn:
+        """Raise a non-SQLAlchemy exception before the audit block is entered."""
+        raise ValueError("audit reason normalization failed")
+
+
+@pytest.mark.parametrize(
+    ("export_type", "route"),
+    [
+        ("FINANCE_EXCEL", f"/exports/{EXPORT_ID}/finance-workbook.xlsx"),
+        ("EXECUTIVE_PDF", f"/exports/{EXPORT_ID}/executive.pdf"),
+        ("BRANDED_SLIDE_PACK", f"/exports/{EXPORT_ID}/branded-slide-pack.pptx"),
+    ],
+)
+def test_finance_artifact_download_fails_closed_when_audit_record_raises_non_sql(
+    tmp_path,
+    monkeypatch,
+    export_type,
+    route,
+):
+    """A non-SQLAlchemy audit exception gets the same rollback + 503 treatment."""
+    artifact_dir = tmp_path / "export-artifacts"
+    monkeypatch.setenv("UMS_EXPORT_ARTIFACT_DIR", str(artifact_dir))
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url, export_type=export_type)
+    app = create_app(database_url=database_url)
+    audit_sink = _ValueErrorAuditSink()
+    app.dependency_overrides[current_audit_sink] = lambda: audit_sink
+
+    response = TestClient(app).get(route, headers=auth_headers("finance_admin"))
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == "Export artifact audit unavailable"
+    # The non-SQL failure still rolled the sink unit of work back explicitly.
+    assert audit_sink.unit_of_work.rollback_attempted is True
+    assert audit_sink.unit_of_work.expunge_attempted is True
+
+
+def test_finance_artifact_download_rejects_unsafe_filename_before_audit(tmp_path, monkeypatch):
+    """A poisoned persisted filename fails closed BEFORE any download audit row.
+
+    EXPORT_DOWNLOADED means bytes were delivered. Validating the filename only
+    at the header builder — after the audit commit — recorded that event for a
+    download that then failed with a raw 500. Validation now runs first.
+    """
+    artifact_dir = tmp_path / "export-artifacts"
+    poisoned_name = "ums-finance-2026-03-global/../../../etc.xlsx"
+    monkeypatch.setenv("UMS_EXPORT_ARTIFACT_DIR", str(artifact_dir))
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    client = TestClient(create_app(database_url=database_url))
+    route = f"/exports/{EXPORT_ID}/finance-workbook.xlsx"
+
+    prepared = client.get(f"{route}?prepare=true", headers=auth_headers("finance_admin"))
+    assert prepared.status_code == 204
+
+    # Poison the persisted filename behind storage's back, simulating a row
+    # written before the storage boundary's separator/traversal rule existed.
+    engine = create_engine(database_url)
+    with Session(engine) as session:
+        job = session.get(ExportJobORM, EXPORT_ID)
+        assert job is not None
+        job.artifact_filename = poisoned_name
+        session.commit()
+
+    response = client.get(route, headers=auth_headers("finance_admin"))
+
+    with Session(engine) as session:
+        audit_events = session.scalars(select(AuditLogORM)).all()
+
+    assert response.status_code == 500
+    assert response.json()["detail"] == "Export artifact filename is unsafe"
+    # Only the prepare leg's READ audits exist; the GET audited nothing.
+    assert "EXPORT_DOWNLOADED" not in {event.event_type for event in audit_events}
+
+
 def test_finance_workbook_download_persists_artifact_and_completes_job(
     tmp_path,
     monkeypatch,
@@ -543,6 +922,30 @@ def test_finance_workbook_download_persists_artifact_and_completes_job(
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
+
+    # The tenant session's completion metadata must be DURABLE before the
+    # artifact bytes start: a failed yield-dependency teardown commit after
+    # the response would leave served bytes over unpersisted job state.
+    status_when_response_started: list[str | None] = []
+    engine_hook = create_engine(database_url)
+    original_response_call = StarletteResponse.__call__
+
+    async def observe_response_start(response, scope, receive, send):
+        """Record the persisted job status at the moment bytes first start."""
+
+        async def observe_send(message):
+            """Capture the job status once, at http.response.start."""
+            if message["type"] == "http.response.start" and not status_when_response_started:
+                with Session(engine_hook) as snapshot_session:
+                    snapshot_job = snapshot_session.get(ExportJobORM, EXPORT_ID)
+                status_when_response_started.append(
+                    snapshot_job.status if snapshot_job is not None else None
+                )
+            await send(message)
+
+        await original_response_call(response, scope, receive, observe_send)
+
+    monkeypatch.setattr(StarletteResponse, "__call__", observe_response_start)
 
     response = client.get(
         f"/exports/{EXPORT_ID}/finance-workbook.xlsx",
@@ -557,6 +960,7 @@ def test_finance_workbook_download_persists_artifact_and_completes_job(
     expected_uri = f"file-store://exports/{EXPORT_ID}/{expected_filename}"
     persisted_file = artifact_dir / "exports" / str(EXPORT_ID) / expected_filename
     assert response.status_code == 200
+    assert status_when_response_started == ["COMPLETED"]
     assert export_job is not None
     assert export_job.status == "COMPLETED"
     assert export_job.completed_at is not None
@@ -943,17 +1347,38 @@ def test_finance_admin_downloads_generated_executive_pdf_with_audit(
     database_url = build_database_url(tmp_path)
     seed_database(database_url, export_type="EXECUTIVE_PDF")
     client = TestClient(create_app(database_url=database_url))
+    route = f"/exports/{EXPORT_ID}/executive.pdf"
 
-    response = client.get(
-        f"/exports/{EXPORT_ID}/executive.pdf",
+    prepared = client.get(
+        f"{route}?prepare=true",
         headers=auth_headers("finance_admin"),
     )
 
     engine = create_engine(database_url)
     with Session(engine) as session:
+        preparation_audits = session.scalars(select(AuditLogORM)).all()
+
+    assert prepared.status_code == 204
+    assert prepared.content == b""
+    assert prepared.headers["cache-control"] == "no-store"
+    # The prepare leg reads sensitive finance source data, so it records its
+    # read audit trail without EXPORT_DOWNLOADED (the delivering GET's event).
+    assert {event.event_type for event in preparation_audits} == {
+        "BANK_RECONCILIATION_VIEWED",
+        "PAYMENT_VIEWED",
+        "REVENUE_VIEWED",
+    }
+
+    response = client.get(
+        route,
+        headers=auth_headers("finance_admin"),
+    )
+
+    with Session(engine) as session:
         audit_events = session.scalars(select(AuditLogORM).order_by(AuditLogORM.event_type)).all()
 
     assert response.status_code == 200
+    assert response.headers["cache-control"] == "no-store"
     assert response.headers["content-type"] == "application/pdf"
     assert "ums-executive-2026-03-global.pdf" in response.headers["content-disposition"]
     assert response.content.startswith(b"%PDF-")
@@ -1012,17 +1437,38 @@ def test_finance_admin_downloads_generated_branded_slide_pack_with_audit(
     database_url = build_database_url(tmp_path)
     seed_database(database_url, export_type="BRANDED_SLIDE_PACK")
     client = TestClient(create_app(database_url=database_url))
+    route = f"/exports/{EXPORT_ID}/branded-slide-pack.pptx"
 
-    response = client.get(
-        f"/exports/{EXPORT_ID}/branded-slide-pack.pptx",
+    prepared = client.get(
+        f"{route}?prepare=true",
         headers=auth_headers("finance_admin"),
     )
 
     engine = create_engine(database_url)
     with Session(engine) as session:
+        preparation_audits = session.scalars(select(AuditLogORM)).all()
+
+    assert prepared.status_code == 204
+    assert prepared.content == b""
+    assert prepared.headers["cache-control"] == "no-store"
+    # The prepare leg reads sensitive finance source data, so it records its
+    # read audit trail without EXPORT_DOWNLOADED (the delivering GET's event).
+    assert {event.event_type for event in preparation_audits} == {
+        "BANK_RECONCILIATION_VIEWED",
+        "PAYMENT_VIEWED",
+        "REVENUE_VIEWED",
+    }
+
+    response = client.get(
+        route,
+        headers=auth_headers("finance_admin"),
+    )
+
+    with Session(engine) as session:
         audit_events = session.scalars(select(AuditLogORM).order_by(AuditLogORM.event_type)).all()
 
     assert response.status_code == 200
+    assert response.headers["cache-control"] == "no-store"
     assert response.headers["content-type"] == (
         "application/vnd.openxmlformats-officedocument.presentationml.presentation"
     )

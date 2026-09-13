@@ -207,7 +207,10 @@ describe("SmartAlertsPanel in CommandView", () => {
 
     // The panel itself shows the no-permission message (header badge + body row).
     expect(screen.getAllByText("No permission").length).toBeGreaterThan(0);
-    expect(screen.getAllByText(/cannot view net revenue/i).length).toBeGreaterThan(0);
+    expect(
+      screen.getByText("Your role cannot view smart alerts for this month."),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/cannot view net revenue/i)).not.toBeInTheDocument();
     // The panel header still renders (title present), proving the card survives.
     expect(screen.getByText("Smart Alerts / Problem Panel")).toBeInTheDocument();
   });

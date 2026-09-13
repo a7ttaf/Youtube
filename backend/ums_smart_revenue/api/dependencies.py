@@ -32,7 +32,7 @@ from ums_smart_revenue.auth.principals import (
 from ums_smart_revenue.auth.roles import RoleKey
 from ums_smart_revenue.auth.scopes import AccessScope, ScopeType
 from ums_smart_revenue.config.settings import load_app_settings
-from ums_smart_revenue.db.session import SessionFactory
+from ums_smart_revenue.db.session import SessionFactory, begin_request_transaction
 from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
 from ums_smart_revenue.tenancy.context import (
     TenantContextMissing,
@@ -185,9 +185,16 @@ def current_principal_from_database(
     """Load a request principal from SQL after trusted gateway validation."""
     try:
         tenant = require_current_tenant()
-        return _load_database_principal_with_retries(
+        principal = _load_database_principal_with_retries(
             session, identity.user_id, tenant_id=str(tenant.id)
         )
+        # FIX: The principal loader owns and closes its isolated read
+        # transaction first. Only then can SQLite open the request write
+        # envelope that keeps repository SAVEPOINTs subordinate to the final
+        # dependency commit/rollback. PostgreSQL is a no-op here and retains
+        # its normal implicit BEGIN plus RLS hook behavior.
+        begin_request_transaction(session)
+        return principal
     except TenantContextMissing as exc:
         logger.error("Database principal lookup missing tenant context")
         raise HTTPException(
@@ -276,9 +283,22 @@ def _is_retryable_principal_storage_error(exc: SQLAlchemyError) -> bool:
     return isinstance(exc, DBAPIError) and exc.connection_invalidated
 
 
+# ============================================================================
+# Purpose: Validate the trusted-gateway token without reparsing the unrelated
+#   headers-only tenant currency after the app has resolved its authz mode.
+# Database/ORM: None.
+# Standards: Constant-time token comparison; missing configuration and invalid
+#   input fail closed; only currency validation is explicitly deferred.
+# Blast Radius: Trusted-gateway authentication availability in both authz modes.
+# Connections:
+#   - File: backend/ums_smart_revenue/config/settings.py -> strict-by-default
+#     loader with an explicit mode-independent deferral.
+#   - File: backend/ums_smart_revenue/app.py -> validates headers currency once
+#     while constructing the effective authz-mode middleware.
+# ============================================================================
 def _require_trusted_gateway_token(provided_token: str | None) -> None:
     """Require the configured trusted-gateway token to match the request token."""
-    configured_token = load_app_settings().trusted_gateway_token
+    configured_token = load_app_settings(validate_tenant_currency=False).trusted_gateway_token
     if not configured_token:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,

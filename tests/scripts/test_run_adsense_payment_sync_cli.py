@@ -116,7 +116,7 @@ def _patch_common(monkeypatch, module, *, session, service, settings=None):
     monkeypatch.setattr(
         module,
         "load_app_settings",
-        lambda: settings if settings is not None else _FakeSettings(),
+        lambda **_kwargs: settings if settings is not None else _FakeSettings(),
     )
     monkeypatch.setattr(module, "build_session_factory", lambda _url: lambda: session)
     monkeypatch.setattr(module, "build_connector_service_principal", _build_fake_actor)
@@ -177,7 +177,7 @@ def test_cli_malformed_settings_returns_2_before_db_session(monkeypatch, capsys)
     """Treat settings validation failures as operator input errors."""
     module = _load_cli()
 
-    def _bad_settings():
+    def _bad_settings(**_kwargs):
         """Raise the same ValueError shape used by malformed UUID settings."""
         raise ValueError("UMS_GOOGLE_CONNECTOR_SERVICE_ACTOR_ID must be a valid UUID")
 

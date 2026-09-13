@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 from ums_smart_revenue.app import create_app
 from ums_smart_revenue.auth.permissions import PERMISSION_DEFINITIONS
 from ums_smart_revenue.auth.roles import ROLE_DEFINITIONS
+from ums_smart_revenue.db.org_models import OrgBase, OrgUnitORM
 from ums_smart_revenue.db.security_models import (
     AuditLogORM,
     PermissionORM,
@@ -15,13 +16,17 @@ from ums_smart_revenue.db.security_models import (
     UserORM,
     UserPermissionGrantORM,
 )
+from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
 
 ADMIN_ID = UUID("00000000-0000-0000-0000-000000015001")
 TARGET_ID = UUID("00000000-0000-0000-0000-000000015002")
-COMPANY_ID = "company-tv-a"
+# A real org-unit UUID — the targeted access index must resolve the scope
+# against org_units, so seeded company targets can no longer be slugs.
+COMPANY_ID = str(UUID("00000000-0000-0000-0000-0000000c0b01"))
 
 
 def auth_headers(role: str, user_id: UUID = ADMIN_ID) -> dict[str, str]:
+    """Return trusted-gateway headers for one actor and tenant."""
     return {
         "x-user-id": str(user_id),
         "x-user-email": f"{role}@example.com",
@@ -32,12 +37,16 @@ def auth_headers(role: str, user_id: UUID = ADMIN_ID) -> dict[str, str]:
 
 
 def build_database_url(tmp_path) -> str:
+    """Return the disposable SQLite URL backing these API tests."""
     return f"sqlite+pysqlite:///{(tmp_path / 'user-permissions.db').as_posix()}"
 
 
 def seed_database(database_url: str) -> None:
+    """Seed one disposable database for the scenario under test."""
     engine = create_engine(database_url)
     SecurityBase.metadata.create_all(engine)
+    # OrgAccessIndex loader dependency reads org_units/youtube_channels.
+    OrgBase.metadata.create_all(engine)
     with Session(engine) as session:
         session.add_all(
             [
@@ -63,10 +72,22 @@ def seed_database(database_url: str) -> None:
                     audit_on_use=definition.audit_on_use,
                 )
             )
+        # The targeted org index must resolve the company scope before a
+        # grant write — seed the live unit the scope ids point at.
+        session.add(
+            OrgUnitORM(
+                id=UUID(COMPANY_ID),
+                tenant_id=UUID(UMS_TENANT_ID),
+                type="COMPANY",
+                name="Company TV A",
+                active=True,
+            )
+        )
         session.commit()
 
 
 def test_finance_admin_grants_scoped_revenue_permission_with_audit(tmp_path):
+    """Finance admin grants scoped revenue permission with audit."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -100,6 +121,7 @@ def test_finance_admin_grants_scoped_revenue_permission_with_audit(tmp_path):
 
 
 def test_corporate_admin_can_grant_non_finance_permission(tmp_path):
+    """Corporate admin can grant non finance permission."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -121,6 +143,7 @@ def test_corporate_admin_can_grant_non_finance_permission(tmp_path):
 
 
 def test_corporate_admin_cannot_grant_finance_permission(tmp_path):
+    """Corporate admin cannot grant finance permission."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -140,7 +163,58 @@ def test_corporate_admin_cannot_grant_finance_permission(tmp_path):
     assert response.json()["detail"] == "Finance permissions require Finance Admin or Super Owner"
 
 
+def test_manual_revenue_permission_is_global_and_finance_admin_controlled(tmp_path):
+    """Manual revenue grants must stay global and finance-admin controlled."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    client = TestClient(create_app(database_url=database_url))
+    payload = {
+        "permission_key": "finance.import_manual_revenue",
+        "scope_type": "global",
+        "scope_id": None,
+        "reason": "Grant bounded beta upload workflow",
+    }
+
+    denied = client.post(
+        f"/users/{TARGET_ID}/permissions",
+        headers=auth_headers("corporate_admin"),
+        json=payload,
+    )
+    allowed = client.post(
+        f"/users/{TARGET_ID}/permissions",
+        headers=auth_headers("finance_admin"),
+        json=payload,
+    )
+
+    assert denied.status_code == 403
+    assert denied.json()["detail"] == "Finance permissions require Finance Admin or Super Owner"
+    assert allowed.status_code == 201, allowed.text
+    assert allowed.json()["scope_type"] == "global"
+
+
+def test_manual_revenue_permission_rejects_non_global_scope(tmp_path):
+    """Manual revenue grants reject any tenant-scoped assignment."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    client = TestClient(create_app(database_url=database_url))
+
+    response = client.post(
+        f"/users/{TARGET_ID}/permissions",
+        headers=auth_headers("finance_admin"),
+        json={
+            "permission_key": "finance.import_manual_revenue",
+            "scope_type": "company",
+            "scope_id": COMPANY_ID,
+            "reason": "Attempt unusable scoped manual upload grant",
+        },
+    )
+
+    assert response.status_code == 422
+    assert "allowed: global" in response.json()["detail"]
+
+
 def test_finalized_payment_permission_rejects_org_scope_grant(tmp_path):
+    """Finalized payment permission rejects org scope grant."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -161,6 +235,7 @@ def test_finalized_payment_permission_rejects_org_scope_grant(tmp_path):
 
 
 def test_finalized_payment_permission_allows_finance_month_grant(tmp_path):
+    """Finalized payment permission allows finance month grant."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -182,6 +257,7 @@ def test_finalized_payment_permission_allows_finance_month_grant(tmp_path):
 
 
 def test_assistant_cannot_grant_permissions_or_probe_users(tmp_path):
+    """Assistant cannot grant permissions or probe users."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -202,6 +278,7 @@ def test_assistant_cannot_grant_permissions_or_probe_users(tmp_path):
 
 
 def test_finance_admin_revokes_finance_permission_with_audit(tmp_path):
+    """Finance admin revokes finance permission with audit."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -240,6 +317,7 @@ def test_finance_admin_revokes_finance_permission_with_audit(tmp_path):
 
 
 def test_corporate_admin_cannot_revoke_finance_permission(tmp_path):
+    """Corporate admin cannot revoke finance permission."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -267,6 +345,7 @@ def test_corporate_admin_cannot_revoke_finance_permission(tmp_path):
 
 
 def test_duplicate_active_permission_grant_is_rejected(tmp_path):
+    """Duplicate active permission grant is rejected."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -291,3 +370,58 @@ def test_duplicate_active_permission_grant_is_rejected(tmp_path):
     assert first.status_code == 201
     assert second.status_code == 409
     assert second.json()["detail"] == "Active permission grant already exists"
+
+
+def test_scoped_role_check_uses_the_request_org_index() -> None:
+    """A scoped authority assignment contains only targets inside its scope."""
+    import ums_smart_revenue.api.users as users_api
+    from ums_smart_revenue.auth.models import RoleAssignment, UserPrincipal
+    from ums_smart_revenue.auth.roles import RoleKey
+    from ums_smart_revenue.auth.scopes import AccessScope, OrgAccessIndex
+
+    index = OrgAccessIndex(company_sector={"company-a": "sector-1"})
+    admin = UserPrincipal(
+        user_id=str(ADMIN_ID),
+        email="admin@example.com",
+        role_assignments=(
+            RoleAssignment(role=RoleKey.FINANCE_ADMIN, scope=AccessScope.sector("sector-1")),
+        ),
+    )
+
+    assert users_api._has_scoped_role(
+        admin, RoleKey.FINANCE_ADMIN, AccessScope.company("company-a"), index
+    )
+    assert not users_api._has_scoped_role(
+        admin, RoleKey.FINANCE_ADMIN, AccessScope.company("company-b"), index
+    )
+    assert not users_api._has_scoped_role(
+        admin, RoleKey.FINANCE_ADMIN, AccessScope.sector("sector-2"), index
+    )
+
+
+def test_grant_permission_rejects_unresolved_company_scope(tmp_path):
+    """A company scope that resolves to no live org unit is a 404, even for
+    global authority — grant must not persist a dangling access_scopes row.
+    """
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    client = TestClient(create_app(database_url=database_url))
+
+    response = client.post(
+        f"/users/{TARGET_ID}/permissions",
+        headers=auth_headers("corporate_admin"),
+        json={
+            "permission_key": "finance.view_revenue",
+            "scope_type": "company",
+            # Well-formed UUID but no org_units row — unresolved target.
+            "scope_id": str(UUID("00000000-0000-0000-0000-000000dead01")),
+            "reason": "Attempt grant against a missing company",
+        },
+    )
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == "scope target not found"
+    engine = create_engine(database_url)
+    with Session(engine) as session:
+        assert session.scalars(select(UserPermissionGrantORM)).all() == []
+        assert session.scalars(select(AuditLogORM)).all() == []

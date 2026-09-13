@@ -47,6 +47,7 @@ TOKEN_EXPIRY = datetime(2026, 6, 21, 12, 30, tzinfo=UTC)
 
 
 def _run(args: list[str]) -> subprocess.CompletedProcess[str]:
+    """Helper for the run scenario."""
     return subprocess.run(
         [sys.executable, str(CLI_PATH), *args],
         capture_output=True,
@@ -57,6 +58,7 @@ def _run(args: list[str]) -> subprocess.CompletedProcess[str]:
 
 
 def _load_cli_module() -> ModuleType:
+    """Helper for the load cli module scenario."""
     spec = importlib.util.spec_from_file_location("ums_google_credential_smoke_cli", CLI_PATH)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
@@ -66,6 +68,7 @@ def _load_cli_module() -> ModuleType:
 
 @pytest.fixture
 def engine() -> Iterator[Engine]:
+    """Engine."""
     db_engine = create_engine(
         "sqlite+pysqlite://",
         connect_args={"check_same_thread": False},
@@ -105,12 +108,17 @@ def engine() -> Iterator[Engine]:
 
 
 def _session_context_factory(db_engine: Engine) -> type:
+    """Helper for the session context factory scenario."""
     class _SessionCtx:
+        """Connection-context stub whose cursor answers one canned row."""
+
         def __enter__(self) -> Session:
+            """Helper for the enter scenario."""
             self._session = Session(db_engine)
             return self._session
 
         def __exit__(self, *_exc_info: object) -> None:
+            """Helper for the exit scenario."""
             self._session.close()
 
     return _SessionCtx
@@ -119,13 +127,18 @@ def _session_context_factory(db_engine: Engine) -> type:
 def _patch_settings_and_session(
     module: ModuleType, monkeypatch: pytest.MonkeyPatch, db_engine: Engine
 ) -> None:
+    """Helper for the patch settings and session scenario."""
     class _StubSettings:
+        """Settings double carrying only the fields the CLI reads."""
+
         database_url = "sqlite+pysqlite://"
 
-    def _load_settings() -> _StubSettings:
+    def _load_settings(**_kwargs) -> _StubSettings:
+        """Return the stub settings the CLI under test reads."""
         return _StubSettings()
 
     def _build_factory(_url: str):
+        """Helper for the build factory scenario."""
         return _session_context_factory(db_engine)
 
     monkeypatch.setattr(module, "load_app_settings", _load_settings)
@@ -133,18 +146,24 @@ def _patch_settings_and_session(
 
 
 class _RaiseOnTenantEnterCtx:
+    """Connection context that raises on tenant set, proving fail-closed."""
+
     def __enter__(self) -> None:
+        """Helper for the enter scenario."""
         raise TenantLifecycleError(tenant_id=TENANT_ID, status="SUSPENDED")
 
     def __exit__(self, *_exc_info: object) -> None:
+        """Helper for the exit scenario."""
         return None
 
 
 def _connector_tenant_context_raises(*_args: object, **_kwargs: object) -> _RaiseOnTenantEnterCtx:
+    """Helper for the connector tenant context raises scenario."""
     return _RaiseOnTenantEnterCtx()
 
 
 def test_credential_smoke_rejects_unknown_connector() -> None:
+    """Credential smoke rejects unknown connector."""
     out = _run(
         [
             "--tenant",
@@ -162,12 +181,16 @@ def test_credential_smoke_rejects_unknown_connector() -> None:
 def test_credential_smoke_returns_2_when_database_url_missing(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
+    """Credential smoke returns 2 when database url missing."""
     module = _load_cli_module()
 
     class _StubSettings:
+        """Settings double carrying only the fields the CLI reads."""
+
         database_url = ""
 
-    def _load_empty_settings() -> _StubSettings:
+    def _load_empty_settings(**_kwargs) -> _StubSettings:
+        """Return empty stub settings for the not-found path."""
         return _StubSettings()
 
     monkeypatch.setattr(module, "load_app_settings", _load_empty_settings)
@@ -191,6 +214,7 @@ def test_credential_smoke_returns_2_when_database_url_missing(
 def test_credential_smoke_commits_refresh_telemetry_without_connector_run(
     engine, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
+    """Credential smoke commits refresh telemetry without connector run."""
     module = _load_cli_module()
     _patch_settings_and_session(module, monkeypatch, engine)
 
@@ -201,6 +225,7 @@ def test_credential_smoke_commits_refresh_telemetry_without_connector_run(
         connector_key: str,
         account_id: str,
     ) -> SimpleNamespace:
+        """Helper for the fake resolver scenario."""
         assert tenant_id == TENANT_ID
         assert connector_key == CONNECTOR_KEY
         assert account_id == ACCOUNT_ID
@@ -239,6 +264,7 @@ def test_credential_smoke_commits_refresh_telemetry_without_connector_run(
 def test_credential_smoke_returns_2_for_tenant_lifecycle_error(
     engine, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
+    """Credential smoke returns 2 for tenant lifecycle error."""
     module = _load_cli_module()
     _patch_settings_and_session(module, monkeypatch, engine)
 
@@ -263,6 +289,7 @@ def test_credential_smoke_returns_2_for_tenant_lifecycle_error(
 def test_credential_smoke_redacts_oauth_refresh_inner_error(
     engine, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
+    """Credential smoke redacts oauth refresh inner error."""
     module = _load_cli_module()
     _patch_settings_and_session(module, monkeypatch, engine)
 
@@ -273,6 +300,7 @@ def test_credential_smoke_redacts_oauth_refresh_inner_error(
         connector_key: str,
         account_id: str,
     ) -> None:
+        """Helper for the raise oauth refresh error scenario."""
         _ = (session, tenant_id, connector_key, account_id)
         raise OAuthRefreshError(inner=RuntimeError("inner-refresh-secret-marker"))
 

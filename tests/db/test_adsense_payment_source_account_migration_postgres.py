@@ -16,6 +16,10 @@ from sqlalchemy import create_engine, inspect, text
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
+# FIX: Reversible migration tests must stop at the revision under test; dynamic
+# head can include later irreversible security floors that correctly refuse.
+SOURCE_ACCOUNT_REVISION = "20260529_0001"
+
 
 @pytest.fixture
 def postgres_url() -> str:
@@ -183,7 +187,7 @@ def test_source_account_migration_backfills_legacy_null_rows(alembic_config, fre
 
 def test_source_account_migration_downgrade_reverses(alembic_config, fresh_engine) -> None:
     """Downgrading to the prior revision removes source-account schema changes."""
-    command.upgrade(alembic_config, "head")
+    command.upgrade(alembic_config, SOURCE_ACCOUNT_REVISION)
     command.downgrade(alembic_config, "20260527_0001")
     inspector = inspect(fresh_engine)
     cols = {c["name"] for c in inspector.get_columns("adsense_payments")}
@@ -201,7 +205,7 @@ def test_source_account_migration_downgrade_fails_on_account_collisions(
     alembic_config, fresh_engine
 ) -> None:
     """Downgrade reports account-scoped duplicates before restoring old key."""
-    command.upgrade(alembic_config, "head")
+    command.upgrade(alembic_config, SOURCE_ACCOUNT_REVISION)
     with fresh_engine.begin() as conn:
         for source_account_id in ("pub-1", "pub-2"):
             conn.execute(

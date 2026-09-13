@@ -14,11 +14,11 @@ STACK_VERSION_BASELINE: dict[str, dict[str, str]] = {
     },
     "backend": {
         "fastapi": "0.141.1",
-        "pydantic": "2.13.4",
+        "pydantic": "2.13.5",
         "uvicorn": "0.52.4",
         "sqlalchemy": "2.0.52",
         "alembic": "1.19.1",
-        "psycopg": "3.3.4",
+        "psycopg": "3.3.5",
         "celery": "5.6.3",
         "redis": "8.1.0",
         "openpyxl": "3.1.5",

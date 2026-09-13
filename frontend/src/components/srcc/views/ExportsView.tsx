@@ -1,6 +1,6 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 
-import { ApiError, resolveUrl } from "@/lib/api/client";
+import { ApiError, useApiClient } from "@/lib/api/client";
 import type {
   ExportJob,
   ExportRequestBody,
@@ -9,14 +9,12 @@ import type {
 } from "@/lib/api/types";
 import { useExportActions } from "@/lib/api/useExportActions";
 import { useExports } from "@/lib/api/useExports";
-import { EXPORTS_GUARDRAILS } from "@/lib/mock/data";
 import type { Severity } from "@/lib/mock/data";
 import {
   Badge,
   DEFAULT_MONTH,
   Dot,
   formatTimestamp,
-  ItemRow,
   MONTH_OPTIONS,
 } from "../shared";
 import { describeError } from "./CommandView";
@@ -25,22 +23,25 @@ import { describeError } from "./CommandView";
 // Purpose: The REAL-data Exports screen, extracted from AppShell. The operator
 //   fills a request form (report type + scope + month + currency + reason),
 //   "Generate" POSTs to /exports (creating a QUEUED job + audit event), and the
-//   jobs table reloads from GET /exports. Each COMPLETED job exposes a DOWNLOAD
-//   link — a plain browser anchor whose href is resolved against the same API
-//   origin the JSON client uses (resolveUrl): relative (proxied) when no base is
-//   configured so the Vite dev proxy injects the trusted-gateway + X-UMS-Tenant
-//   headers, or the configured VITE_API_BASE_URL origin otherwise — because the
-//   JSON-strict useApiClient cannot fetch binary. Loading / error / 403 states
-//   mirror CommandView and TraceView. The Export Guardrails side panel stays as
-//   static role context (it is descriptive, not API data).
+//   jobs table reloads from GET /exports. Each QUEUED or COMPLETED job exposes a
+//   two-step download: the shared API client authenticates a prepare request so
+//   typed generation/auth/storage failures stay visible, then a same-origin
+//   native GET re-enters the protected route through the trusted gateway. The
+//   browser download manager consumes that response without buffering the whole
+//   artifact in the SPA heap. Loading / error / 403 states mirror CommandView
+//   and TraceView. The mock Export Guardrails side panel was
+//   DELETED in P1.4: its three rows carried fabricated On/Open/Blocked statuses
+//   that no endpoint reports, and the exports API exposes no guardrail state to
+//   derive them from — the per-job status column is the honest signal.
 // Database/ORM: None (frontend) — consumes GET /exports (list), POST /exports
-//   (create, server-side insert + audit), and links to the binary download
-//   routes; downloads are served by the backend, never fetched client-side.
+//   (create, server-side insert + audit), and protected prepare/native artifact
+//   GETs; downloads are served by the backend.
 // Standards: No client-side export authorization is invented — the backend gate
 //   (EXPORT_REVENUE/ANALYTICS_REPORT + VIEW_* @scope, plus VIEW_FINALIZED_PAYMENTS
 //   @finance_month for finance exports) is authoritative; a 403 surfaces as
-//   no-permission copy. The browser never holds the gateway secret; downloads
-//   ride the same proxied, header-injected path as every other call.
+//   no-permission copy. The browser never holds the gateway secret. Native file
+//   transfer deliberately uses the same-origin /exports reverse-proxy contract
+//   so both dev and production gateways inject authoritative identity again.
 // Blast Radius: Export create (write path) + artifact download — both via the
 //   backend's own guarded, audited routes only. No source-of-truth finance
 //   number is computed or mutated client-side.
@@ -69,6 +70,11 @@ type DownloadRoute = {
   readonly requiresRevenueVisibility?: boolean;
 };
 
+type ResolvedDownload = {
+  readonly path: string;
+  readonly format: string;
+};
+
 const DOWNLOAD_ROUTES: Partial<Record<ExportType, DownloadRoute>> = {
   FINANCE_EXCEL: {
     path: (id) => `/exports/${id}/finance-workbook.xlsx`,
@@ -89,6 +95,7 @@ const DOWNLOAD_ROUTES: Partial<Record<ExportType, DownloadRoute>> = {
   },
 };
 
+/** Return whether the export type has a known binary download route. */
 const hasDownloadRoute = (
   exportType: string,
 ): exportType is ExportType =>
@@ -139,6 +146,7 @@ const SCOPE_TYPE_OPTIONS: Array<{ value: ExportScopeType; label: string }> = [
   { value: "group", label: "Group" },
 ];
 
+/** Return whether the viewer holds the capability required by this report type. */
 const hasReportCapability = (
   option: ReportTypeOption,
   permissions: ReportTypePermissions,
@@ -148,6 +156,7 @@ const hasReportCapability = (
     : permissions.canExportFinance;
 };
 
+/** Return whether the viewer may create a report with its revenue visibility requirement. */
 const hasCreateRevenueVisibility = (
   option: ReportTypeOption,
   permissions: ReportTypePermissions,
@@ -155,6 +164,7 @@ const hasCreateRevenueVisibility = (
   return !option.requiresRevenueVisibility || permissions.canViewRevenue;
 };
 
+/** Return whether a report type may be offered by the create form. */
 const canOfferReportType = (
   option: ReportTypeOption,
   permissions: ReportTypePermissions,
@@ -211,23 +221,20 @@ const effectiveReportType = (
 //   Only one route is valid per type (the backend 422s a mismatched type). The
 //   action verb (Download vs Generate) is derived from job status by the caller;
 //   this returns the route and the format suffix only.
-// Standards: The href is resolved through the SAME base-URL logic the JSON
-//   client uses (resolveUrl), so when VITE_API_BASE_URL points at a separate API
-//   origin the download anchor targets that origin instead of the frontend's.
-//   With no base configured the href stays relative (byte-identical to before),
-//   so the Vite dev proxy still injects the trusted-gateway + X-UMS-Tenant
-//   headers and a plain <a download> works without the browser ever holding the
-//   gateway secret. Never fetched through useApiClient (JSON-strict; cannot read
-//   binary).
+// Standards: The API client resolves the authenticated `?prepare=true` request
+//   through its configured base URL. The subsequent binary GET intentionally
+//   stays relative and same-origin so the production/dev reverse proxy injects
+//   trusted identity and tenant headers while the browser streams to its native
+//   download manager. No secret or bearer grant enters the URL.
 // ============================================================================
 /**
- * Returns the binary download route (resolved against the configured API origin)
- * and artifact format for a job, or null if the type has no GET route.
+ * Returns the API-relative binary download route and artifact format for a job,
+ * or null if the type has no GET route or its revenue gate is absent.
  */
 const downloadFor = (
   job: ExportJob,
   canViewRevenue: boolean,
-): { href: string; format: string } | null => {
+): ResolvedDownload | null => {
   const route = hasDownloadRoute(job.export_type)
     ? DOWNLOAD_ROUTES[job.export_type]
     : null;
@@ -237,11 +244,169 @@ const downloadFor = (
     return null;
   }
   const id = encodeURIComponent(job.id);
-  return { href: resolveUrl(route.path(id)), format: route.format };
+  return { path: route.path(id), format: route.format };
+};
+
+/**
+ * Start a prepared artifact through the protected same-origin download route.
+ *
+ * Deliberately NOT resolved through the API-origin helper: the anchor GET
+ * cannot carry the trusted-gateway headers, so it must ride the same-origin
+ * gateway that injects them — only the prepare leg (a client fetch with
+ * headers) uses the configured API origin. The pinned test
+ * "uses the configured API origin only for preparation and keeps the real
+ * GET same-origin" holds this contract. The server's Content-Disposition
+ * filename stays authoritative in every deployment shape.
+ */
+const startNativeDownload = (path: string, filename: string): void => {
+  const anchor = document.createElement("a");
+  try {
+    anchor.href = path;
+    anchor.download = filename;
+    document.body.appendChild(anchor);
+    anchor.click();
+  } finally {
+    anchor.remove();
+  }
 };
 
 // ============================================================================
-// Purpose: The action verb for a downloadable job's link. A QUEUED job triggers
+// Purpose: Select a safe local fallback filename from persisted artifact
+//   metadata or a deterministic job-id/format value. The protected GET's
+//   Content-Disposition remains authoritative when the browser receives it.
+// Database/ORM: None (frontend) — reads only typed ExportJob metadata.
+// Standards: Reject control/path characters and normalize Windows-invalid
+//   filename characters before a value reaches an anchor download attribute.
+//   Never use metadata as a path.
+// Blast Radius: Export artifact presentation only — no finance value,
+//   authorization decision, or backend state is calculated client-side.
+// Connections:
+//   - File: backend/ums_smart_revenue/api/exports.py -> download routes emit
+//     Content-Disposition and persist artifact_filename during preparation.
+// ============================================================================
+const REJECTED_DOWNLOAD_FILENAMES = new Set(["", ".", ".."]) as ReadonlySet<string>;
+
+// FIX: Classify code units explicitly so C0, DEL, and the complete C1 range
+// are rejected without embedding control characters in a regular expression.
+const isUnsafeFilenameControl = (character: string): boolean => {
+  const codeUnit = character.charCodeAt(0);
+  if (codeUnit <= 0x1f) return true;
+  return codeUnit >= 0x7f && codeUnit <= 0x9f;
+};
+
+/** Return whether a filename contains a C0, DEL, or C1 control code unit. */
+const hasUnsafeFilenameControl = (value: string): boolean => {
+  return Array.from(value).some(isUnsafeFilenameControl);
+};
+
+/** Return whether a filename could be interpreted as a path. */
+const hasFilenamePathSeparator = (value: string): boolean => {
+  return value.includes("/") || value.includes("\\");
+};
+
+/** Reject empty/dot names and path-shaped filename input. */
+const hasUnsafeFilenameShape = (value: string): boolean => {
+  return (
+    REJECTED_DOWNLOAD_FILENAMES.has(value) || hasFilenamePathSeparator(value)
+  );
+};
+
+// ============================================================================
+// Purpose: Hold the Windows reserved device names a persisted artifact
+//   filename must never be handed to an anchor download as. Windows refuses
+//   these names for local files REGARDLESS of extension ("CON.txt" is as
+//   unusable as "CON"), so a backend value equal to one of them has to fall
+//   back to the deterministic job-id filename instead.
+// Database/ORM: None (frontend) — a static name set over typed job metadata.
+// Standards: Comparison is case-insensitive on the extension-stripped base,
+//   because Windows reserves the base name; the set is fixed by the platform,
+//   not by this app, so it is deliberately exhaustive and literal.
+//   FIX: This guard was missing entirely — a persisted "CON"/"con.txt" passed
+//   through unchanged and became the local download filename.
+// Blast Radius: Local download presentation only — which name the browser
+//   suggests when saving. No finance value, authorization, or backend state.
+// Connections:
+//   - Function: safeDownloadFilename -> rejects reserved bases before the
+//     value reaches an anchor download attribute.
+//   - File: backend/ums_smart_revenue/api/exports.py -> the persisted
+//     artifact_filename this guards at the UI's half of the handshake.
+// ============================================================================
+const WINDOWS_RESERVED_DEVICE_NAMES = new Set([
+  "CON",
+  "PRN",
+  "AUX",
+  "NUL",
+  "COM1",
+  "COM2",
+  "COM3",
+  "COM4",
+  "COM5",
+  "COM6",
+  "COM7",
+  "COM8",
+  "COM9",
+  "LPT1",
+  "LPT2",
+  "LPT3",
+  "LPT4",
+  "LPT5",
+  "LPT6",
+  "LPT7",
+  "LPT8",
+  "LPT9",
+]) as ReadonlySet<string>;
+
+/** Return whether a filename's extension-stripped base is a reserved device. */
+const isWindowsReservedDeviceName = (value: string): boolean => {
+  const base = value.split(".", 1)[0];
+  return WINDOWS_RESERVED_DEVICE_NAMES.has(base.toUpperCase());
+};
+
+/** Normalize characters that Windows forbids in a local filename. */
+const normalizeDownloadFilename = (value: string): string => {
+  return value.replace(/[<>:"|?*]/g, "_").replace(/[. ]+$/g, "");
+};
+
+/** Every reason a persisted-filename value is unsafe for an anchor download:
+ * control codes, empty/dot or path-shaped input, and reserved device names. */
+const isUnsafeDownloadFilename = (value: string): boolean => {
+  return (
+    hasUnsafeFilenameControl(value) ||
+    hasUnsafeFilenameShape(value) ||
+    isWindowsReservedDeviceName(value)
+  );
+};
+
+/** Select a safe local filename or reject unsafe backend and metadata input. */
+const safeDownloadFilename = (
+  value: string | null | undefined,
+): string | null => {
+  if (typeof value !== "string") {
+    return null;
+  }
+  const trimmed = value.trim();
+  if (isUnsafeDownloadFilename(trimmed)) {
+    return null;
+  }
+  const sanitized = normalizeDownloadFilename(trimmed);
+  if (isUnsafeDownloadFilename(sanitized)) {
+    return null;
+  }
+  return sanitized;
+};
+
+/** Prefer persisted metadata, then a deterministic safe anchor fallback. */
+const downloadFilenameFor = (
+  job: ExportJob,
+  format: string,
+): string => {
+  const artifactFilename = safeDownloadFilename(job.artifact_filename);
+  const safeId = job.id.replace(/[^A-Za-z0-9_-]/g, "_");
+  return artifactFilename ?? `export-${safeId}.${format.toLowerCase()}`;
+};
+
+// ============================================================================
+// Purpose: The action verb for a downloadable job's action. A QUEUED job triggers
 //   server-side generation on first click; a COMPLETED job serves cached bytes.
 // ============================================================================
 /** Returns "Generate" for QUEUED jobs (generate-on-demand) and "Download" otherwise. */
@@ -340,41 +505,6 @@ const ExportCenterHeader = () => {
       </div>
       <Badge tone="violet">Audited export</Badge>
     </div>
-  );
-};
-
-/** Header for the export guardrails side panel (title, description, policy badge). */
-const GuardrailsHeader = () => {
-  return (
-    <div className="panel-header">
-      <div className="panel-title">
-        <strong>Export Guardrails</strong>
-        <span>Every package records scope, filters, checksum, and actor</span>
-      </div>
-      <Badge tone="amber">Policy</Badge>
-    </div>
-  );
-};
-
-/** Static side panel listing the export guardrails (descriptive role context). */
-const ExportGuardrailsPanel = () => {
-  return (
-    <aside className="view-stack">
-      <section className="panel">
-        <GuardrailsHeader />
-        <div className="issue-list" role="list">
-          {EXPORTS_GUARDRAILS.map((g) => (
-            <ItemRow
-              key={g.title}
-              tone={g.tone}
-              title={g.title}
-              sub={g.sub}
-              trailing={<Badge tone={g.badge.tone}>{g.badge.text}</Badge>}
-            />
-          ))}
-        </div>
-      </section>
-    </aside>
   );
 };
 
@@ -557,7 +687,10 @@ const RequestExportForm = ({
 
 /** Inline alert banner shown when an export request POST fails. */
 const RequestError = ({ error }: { error: ApiError | Error }) => {
-  const { title, detail } = describeError(error);
+  const { title, detail } = describeError(
+    error,
+    "Your role cannot create this export.",
+  );
   return (
     <div className="permission-band" role="alert" style={{ margin: 13 }}>
       <Dot tone="red" />
@@ -601,38 +734,143 @@ const ExportJobsTableHead = () => {
   );
 };
 
+// Downloads ride a security boundary: a failed prepare or anchor dispatch
+// must show stable, high-level copy only. The backend's error body and any
+// raw Error.message can carry internal diagnostics, so neither is ever
+// rendered — the failure class (denied vs. failed) is all an operator needs.
+const DOWNLOAD_PREPARE_FORBIDDEN_DETAIL = "Your role cannot download this export.";
+const DOWNLOAD_PREPARE_FAILED_DETAIL =
+  "The export could not be prepared. Try again, or contact an operator if it keeps failing.";
+
+/** Normalize an unknown artifact-download failure into safe UI detail. */
+const exportDownloadErrorDetail = (caught: unknown): string => {
+  if (caught instanceof ApiError && caught.status === 403) {
+    return DOWNLOAD_PREPARE_FORBIDDEN_DETAIL;
+  }
+  return DOWNLOAD_PREPARE_FAILED_DETAIL;
+};
+
+// ============================================================================
+// Purpose: Prepare one authenticated, tenant-scoped artifact, dispatch its
+//   same-origin native download, and reload authoritative job metadata.
+// Database/ORM: None (frontend) — invokes protected backend export routes only.
+// Standards: Shared API client owns prepare auth/base URL/tenant headers; the
+//   native GET re-enters the production gateway and backend authorization.
+//   Prepare failures and synchronous anchor-dispatch failures become safe UI
+//   detail; the browser owns the independent GET result after dispatch.
+// Blast Radius: Export artifact download only; no finance or auth decision is
+//   calculated client-side; no artifact bytes are materialized in JavaScript.
+// Connections:
+//   - File: frontend/src/lib/api/client.ts -> get performs the guarded prepare.
+//   - File: backend/ums_smart_revenue/api/exports.py -> prepare + download.
+// ============================================================================
+const ExportDownloadAction = ({
+  job,
+  download,
+  onArtifactPrepared,
+}: {
+  job: ExportJob;
+  download: ResolvedDownload;
+  onArtifactPrepared: () => void;
+}) => {
+  const client = useApiClient();
+  const [busy, setBusy] = useState(false);
+  const [errorDetail, setErrorDetail] = useState<string | null>(null);
+  const inFlightRef = useRef(false);
+
+  /** Prepare, dispatch one download, and retain the latch until reload settles. */
+  const startDownload = (): void => {
+    // State updates are asynchronous; the ref closes the same-tick window
+    // where two click handlers could otherwise both observe busy === false.
+    if (inFlightRef.current) return;
+    inFlightRef.current = true;
+    setBusy(true);
+    setErrorDetail(null);
+
+    /** Prepare, dispatch the native transfer, then reload authoritative metadata. */
+    const prepareAndDownload = async (): Promise<void> => {
+      // FIX: Response.blob() retained the complete artifact (up to the backend's
+      // 500 MiB limit) in the SPA heap. Preparation returns no bytes; the actual
+      // protected GET is consumed by the browser's native download manager.
+      // Typed as undefined, not void: the prepare leg answers 204 and the
+      // client's parseBody maps bodyless statuses to undefined.
+      await client.get<undefined>(`${download.path}?prepare=true`, {
+        // A cached 204 would skip generation and authorization on a later click.
+        // The backend also marks both handshake legs no-store; request cache mode
+        // makes the browser-side half of that contract explicit.
+        cache: "no-store",
+      });
+      startNativeDownload(
+        download.path,
+        downloadFilenameFor(job, download.format),
+      );
+      onArtifactPrepared();
+    };
+
+    prepareAndDownload()
+      .catch((caught: unknown) => {
+        setErrorDetail(exportDownloadErrorDetail(caught));
+      })
+      .finally(() => {
+        inFlightRef.current = false;
+        setBusy(false);
+      });
+  };
+
+  return (
+    <>
+      <button
+        className="mini-button"
+        type="button"
+        disabled={busy}
+        onClick={startDownload}
+      >
+        {busy
+          ? `Preparing ${download.format}`
+          : `${downloadVerb(job)} ${download.format}`}
+      </button>
+      {errorDetail ? (
+        <span className="form-error" role="alert">
+          {errorDetail}
+        </span>
+      ) : null}
+    </>
+  );
+};
+
+/** Return the honest unavailable state for a non-downloadable export job. */
+const unavailableDownloadLabel = (job: ExportJob): string => {
+  return job.status.toUpperCase() === "FAILED"
+    ? job.failure_reason ?? "Failed"
+    : "Not ready";
+};
+
 /**
- * The download cell for a job: a link (Generate for QUEUED, Download for
- * COMPLETED) when the type has a route, otherwise a failure reason or
- * not-ready note.
+ * Render a download action only for a ready/generatable job with an allowed
+ * route; otherwise render the job's failure or not-ready state.
  */
 const ExportDownloadCell = ({
   job,
   canViewRevenue,
+  onArtifactPrepared,
 }: {
   job: ExportJob;
   canViewRevenue: boolean;
+  onArtifactPrepared: () => void;
 }) => {
+  if (!isDownloadable(job)) {
+    return <span className="muted">{unavailableDownloadLabel(job)}</span>;
+  }
   const download = downloadFor(job, canViewRevenue);
-  if (isDownloadable(job) && download) {
-    // Plain anchor: the href is resolved against the configured API origin
-    // (resolveUrl). When no base is set it stays relative so the dev proxy
-    // injects the trusted-gateway + X-UMS-Tenant headers; with VITE_API_BASE_URL
-    // it targets that API origin. NOT fetched via useApiClient (which is
-    // JSON-strict and cannot read binary). A QUEUED job triggers server-side
-    // generation on the first click.
-    return (
-      <a className="mini-button" href={download.href} download>
-        {`${downloadVerb(job)} ${download.format}`}
-      </a>
-    );
+  if (!download) {
+    return <span className="muted">{unavailableDownloadLabel(job)}</span>;
   }
   return (
-    <span className="muted">
-      {job.status.toUpperCase() === "FAILED"
-        ? job.failure_reason ?? "Failed"
-        : "Not ready"}
-    </span>
+    <ExportDownloadAction
+      job={job}
+      download={download}
+      onArtifactPrepared={onArtifactPrepared}
+    />
   );
 };
 
@@ -640,9 +878,11 @@ const ExportDownloadCell = ({
 const ExportJobRow = ({
   job,
   canViewRevenue,
+  onArtifactPrepared,
 }: {
   job: ExportJob;
   canViewRevenue: boolean;
+  onArtifactPrepared: () => void;
 }) => {
   return (
     <tr>
@@ -655,7 +895,11 @@ const ExportJobRow = ({
       <td>{formatTimestamp(job.created_at)}</td>
       <td>{formatTimestamp(job.completed_at)}</td>
       <td>
-        <ExportDownloadCell job={job} canViewRevenue={canViewRevenue} />
+        <ExportDownloadCell
+          job={job}
+          canViewRevenue={canViewRevenue}
+          onArtifactPrepared={onArtifactPrepared}
+        />
       </td>
     </tr>
   );
@@ -667,14 +911,19 @@ const ExportJobsTableBody = ({
   loading,
   error,
   canViewRevenue,
+  onArtifactPrepared,
 }: {
   jobs: ExportJob[];
   loading: boolean;
   error: ApiError | Error | null;
   canViewRevenue: boolean;
+  onArtifactPrepared: () => void;
 }) => {
   if (error) {
-    const { title, detail } = describeError(error);
+    const { title, detail } = describeError(
+      error,
+      "Your role cannot view export jobs.",
+    );
     return (
       <div className="table-wrap" role="alert">
         <div style={{ padding: 16 }}>
@@ -715,6 +964,7 @@ const ExportJobsTableBody = ({
               key={job.id}
               job={job}
               canViewRevenue={canViewRevenue}
+              onArtifactPrepared={onArtifactPrepared}
             />
           ))}
         </tbody>
@@ -730,12 +980,14 @@ const ExportJobsTable = ({
   error,
   onRefresh,
   canViewRevenue,
+  onArtifactPrepared,
 }: {
   jobs: ExportJob[];
   loading: boolean;
   error: ApiError | Error | null;
   onRefresh: () => void;
   canViewRevenue: boolean;
+  onArtifactPrepared: () => void;
 }) => {
   return (
     <>
@@ -759,6 +1011,7 @@ const ExportJobsTable = ({
         loading={loading}
         error={error}
         canViewRevenue={canViewRevenue}
+        onArtifactPrepared={onArtifactPrepared}
       />
     </>
   );
@@ -863,46 +1116,45 @@ const ExportsView = ({
 
   return (
     <section className="view-page" aria-labelledby="exportsTitle">
-      <div className="view-grid wide-side">
-        <section className="panel">
-          <ExportCenterHeader />
+      {/* Single-column since P1.4 removed the mock guardrails aside: a
+          `view-grid wide-side` wrapper would reserve an empty 390px column. */}
+      <section className="panel">
+        <ExportCenterHeader />
 
-          <RequestExportForm
-            exportType={effectiveExportType}
-            onExportType={setExportType}
-            reportTypeOptions={reportTypeOptions}
-            hasCreatableType={hasCreatableType}
-            scopeType={scopeType}
-            onScopeType={setScopeType}
-            scopeId={scopeId}
-            onScopeId={setScopeId}
-            requiresScopeId={requiresScopeId}
-            month={month}
-            onMonth={setMonth}
-            currency={currency}
-            onCurrency={setCurrency}
-            reason={reason}
-            onReason={setReason}
-            canCreateExport={canCreateExport}
-            canSubmit={canSubmit}
-            submitting={actions.loading}
-            onGenerate={onGenerate}
-          />
+        <RequestExportForm
+          exportType={effectiveExportType}
+          onExportType={setExportType}
+          reportTypeOptions={reportTypeOptions}
+          hasCreatableType={hasCreatableType}
+          scopeType={scopeType}
+          onScopeType={setScopeType}
+          scopeId={scopeId}
+          onScopeId={setScopeId}
+          requiresScopeId={requiresScopeId}
+          month={month}
+          onMonth={setMonth}
+          currency={currency}
+          onCurrency={setCurrency}
+          reason={reason}
+          onReason={setReason}
+          canCreateExport={canCreateExport}
+          canSubmit={canSubmit}
+          submitting={actions.loading}
+          onGenerate={onGenerate}
+        />
 
-          {actions.error ? <RequestError error={actions.error} /> : null}
-          {actions.data ? <RequestSuccess job={actions.data} /> : null}
+        {actions.error ? <RequestError error={actions.error} /> : null}
+        {actions.data ? <RequestSuccess job={actions.data} /> : null}
 
-          <ExportJobsTable
-            jobs={jobs}
-            loading={loading}
-            error={error}
-            onRefresh={reload}
-            canViewRevenue={canViewRevenue}
-          />
-        </section>
-
-        <ExportGuardrailsPanel />
-      </div>
+        <ExportJobsTable
+          jobs={jobs}
+          loading={loading}
+          error={error}
+          onRefresh={reload}
+          canViewRevenue={canViewRevenue}
+          onArtifactPrepared={reload}
+        />
+      </section>
     </section>
   );
 };

@@ -12,6 +12,7 @@ from ums_smart_revenue.tenancy.context import (
     get_current_tenant,
     require_current_tenant,
 )
+from ums_smart_revenue.tenancy.currency import get_tenant_primary_currency
 from ums_smart_revenue.tenancy.models import (
     DEFAULT_PRIMARY_CURRENCY,
     PLACEHOLDER_TENANT_EPOCH,
@@ -47,6 +48,7 @@ __all__ = [
     "TenantStatus",
     "TenantValidationError",
     "get_current_tenant",
+    "get_tenant_primary_currency",
     "make_placeholder_tenant",
     "normalise_slug",
     "require_current_tenant",

@@ -18,7 +18,9 @@ from uuid import UUID, uuid4
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, func, select
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
+from starlette.responses import Response as StarletteResponse
 
 from ums_smart_revenue.api.dependencies import current_principal_from_headers
 from ums_smart_revenue.api.dependencies_audit import current_audit_sink
@@ -54,6 +56,37 @@ CHANNEL_A_ROW_ID = UUID("00000000-0000-0000-0000-000000012201")
 CHANNEL_B_ROW_ID = UUID("00000000-0000-0000-0000-000000012202")
 GROUP_ID = UUID("00000000-0000-0000-0000-000000012301")
 USER_ID = UUID("00000000-0000-0000-0000-000000012401")
+
+
+class _FailingAuditCommitUnitOfWork:
+    """SQL-like audit unit of work that fails at the durability boundary."""
+
+    def __init__(self) -> None:
+        self.commit_attempted = False
+        self.rollback_attempted = False
+        self.expunge_attempted = False
+
+    def commit(self) -> None:
+        """Raise as a SQL audit commit would after audit rows were appended."""
+        self.commit_attempted = True
+        raise SQLAlchemyError("audit commit failed")
+
+    def rollback(self) -> None:
+        """Record rollback after a failed audit commit."""
+        self.rollback_attempted = True
+
+    def expunge_all(self) -> None:
+        """Record identity-map cleanup after rollback."""
+        self.expunge_attempted = True
+
+
+class _FailingAuditCommitSink(InMemoryAuditSink):
+    """Capture requested audit rows, then fail when the route commits them."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.unit_of_work = _FailingAuditCommitUnitOfWork()
+        self.sql_unit_of_work = self.unit_of_work
 
 
 def auth_headers(
@@ -1805,8 +1838,30 @@ def test_finance_admin_downloads_scoped_analytics_summary_csv(tmp_path, monkeypa
         )
         session.commit()
 
+    route = f"/exports/{export_id}/analytics-summary.csv"
+    prepared = client.get(
+        f"{route}?prepare=true",
+        headers=auth_headers("finance_admin", "company", str(COMPANY_A_ID)),
+    )
+
+    with Session(engine) as session:
+        prepared_job = session.get(ExportJobORM, UUID(export_id))
+        preparation_audits = session.scalars(select(AuditLogORM)).all()
+
+    assert prepared.status_code == 204
+    assert prepared.content == b""
+    assert prepared.headers["cache-control"] == "no-store"
+    assert prepared_job is not None
+    assert prepared_job.status == "COMPLETED"
+    # The prepare leg reads the scoped revenue source rows, so it records its
+    # REVENUE_VIEWED read trail (EXPORT_DOWNLOADED waits for the real GET).
+    assert {event.event_type for event in preparation_audits} == {
+        "EXPORT_CREATED",
+        "REVENUE_VIEWED",
+    }
+
     response = client.get(
-        f"/exports/{export_id}/analytics-summary.csv",
+        route,
         headers=auth_headers("finance_admin", "company", str(COMPANY_A_ID)),
     )
 
@@ -1816,6 +1871,7 @@ def test_finance_admin_downloads_scoped_analytics_summary_csv(tmp_path, monkeypa
 
     assert create_response.status_code == 202
     assert response.status_code == 200
+    assert response.headers["cache-control"] == "no-store"
     assert response.headers["content-type"].startswith("text/csv")
     assert (
         response.headers["content-disposition"]
@@ -1872,7 +1928,9 @@ def test_finance_admin_downloads_scoped_analytics_summary_csv(tmp_path, monkeypa
         "EXPORT_DOWNLOADED",
     }
     revenue_events = [event for event in audit_events if event.event_type == "REVENUE_VIEWED"]
-    assert len(revenue_events) == 1
+    # One REVENUE_VIEWED from the prepare leg's read trail and one from the
+    # delivering GET — both audited reads of the same scoped revenue rows.
+    assert len(revenue_events) == 2
     revenue_event = revenue_events[0]
     assert revenue_event.scope_type == "channel"
     assert revenue_event.scope_id == "channel-a"
@@ -1889,6 +1947,76 @@ def test_finance_admin_downloads_scoped_analytics_summary_csv(tmp_path, monkeypa
     assert downloaded_event.details["artifact_type"] == "analytics_summary_csv"
     assert downloaded_event.details["artifact_metadata_complete"] is True
     assert downloaded_event.details["artifact_content_type"] == "text/csv"
+
+
+def test_analytics_summary_csv_download_fails_closed_when_audit_commit_fails(
+    tmp_path,
+    monkeypatch,
+):
+    """Return 503 before CSV bytes start when the download audit commit fails."""
+    artifact_dir = tmp_path / "export-artifacts"
+    monkeypatch.setenv("UMS_EXPORT_ARTIFACT_DIR", str(artifact_dir))
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    export_id = _seed_analytics_csv_export_job(database_url)
+    engine = create_engine(database_url)
+    with Session(engine) as session:
+        session.add(
+            _analytics_source_row(
+                channel_id="channel-a",
+                amount=Decimal("12.500000"),
+            )
+        )
+        session.commit()
+    app = create_app(database_url=database_url)
+    audit_sink = _FailingAuditCommitSink()
+    app.dependency_overrides[current_audit_sink] = lambda: audit_sink
+    original_response_call = StarletteResponse.__call__
+    response_starts: list[int] = []
+    response_bodies: list[bytes] = []
+
+    async def observe_response_start(response, scope, receive, send):
+        """Wrap ASGI send to capture response starts and body chunks."""
+
+        async def observe_send(message):
+            """Forward one ASGI message, recording starts and body chunks."""
+            if message["type"] == "http.response.start":
+                response_starts.append(message["status"])
+            if message["type"] == "http.response.body":
+                response_bodies.append(message.get("body", b""))
+            await send(message)
+
+        await original_response_call(response, scope, receive, observe_send)
+
+    monkeypatch.setattr(StarletteResponse, "__call__", observe_response_start)
+
+    response = TestClient(app).get(
+        f"/exports/{export_id}/analytics-summary.csv",
+        headers=auth_headers("finance_admin", "company", str(COMPANY_A_ID)),
+    )
+
+    with Session(engine) as session:
+        export_job = session.get(ExportJobORM, export_id)
+        audit_events = session.scalars(select(AuditLogORM)).all()
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == "Export artifact audit unavailable"
+    assert response_starts == [503]
+    assert not any(body.startswith(b"report_month,") for body in response_bodies)
+    assert audit_sink.unit_of_work.commit_attempted is True
+    assert audit_sink.unit_of_work.rollback_attempted is True
+    assert audit_sink.unit_of_work.expunge_attempted is True
+    assert {record.event_type for record in audit_sink.records} == {
+        "EXPORT_DOWNLOADED",
+        "REVENUE_VIEWED",
+    }
+    assert export_job is not None
+    # The tenant session commits BEFORE the audit boundary, so a failed audit
+    # commit leaves the job durably COMPLETED over its persisted artifact —
+    # a retry serves it and records a real download, and the durable audit
+    # trail (empty here) never claims a delivery that did not happen.
+    assert export_job.status == "COMPLETED"
+    assert audit_events == []
 
 
 def test_analytics_summary_csv_download_filters_blank_channel_ids(tmp_path, monkeypatch):

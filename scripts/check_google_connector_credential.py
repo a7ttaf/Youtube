@@ -60,6 +60,7 @@ from ums_smart_revenue.db.session import build_session_factory  # noqa: E402
 
 
 def _parse_args(argv: list[str]) -> argparse.Namespace:
+    """Parse the smoke-check CLI arguments into a namespace."""
     parser = argparse.ArgumentParser(
         description="Smoke-check a Google connector credential without running ingestion.",
     )
@@ -75,12 +76,14 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
 
 
 def _format_expiry(value: object) -> str:
+    """Render one credential expiry as ISO text or ``unknown``."""
     if isinstance(value, datetime):
         return value.isoformat()
     return "unknown"
 
 
 def _safe_error_line(exc: GoogleConnectorError) -> str:
+    """Map one typed connector failure to a safe operator-facing line."""
     if isinstance(exc, CredentialNotFoundError):
         message = "connector credential not found"
     elif isinstance(exc, InactiveCredentialError):
@@ -121,9 +124,10 @@ def _safe_error_line(exc: GoogleConnectorError) -> str:
 #     ``build_session_factory``.
 # ============================================================================
 def main(argv: list[str] | None = None) -> int:
+    """Run the credential smoke check and return the process exit code."""
     args = _parse_args(argv if argv is not None else sys.argv[1:])
     try:
-        settings = load_app_settings()
+        settings = load_app_settings(validate_tenant_currency=False)
     except ValueError as exc:
         print(f"{type(exc).__name__}: {exc}", file=sys.stderr)
         return 2

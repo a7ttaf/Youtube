@@ -7,6 +7,8 @@ Define initial API endpoints for the UMS Smart Revenue Control Center.
 
 ```text
 /auth
+/session
+/tenants
 /users
 /org-units
 /channels
@@ -36,6 +38,29 @@ The trusted gateway still supplies identity headers, but authorization can run i
 Database authorization rejects unknown users and disabled users before route code executes.
 
 ## Example endpoints
+
+### Session and tenant context
+
+```http
+GET /session/me
+GET /tenants/me
+```
+
+Both authenticated responses expose the resolved tenant's additive
+`primary_currency` field as a three-letter uppercase ISO-4217 code. In
+`GET /tenants/me`, it appears beside `id`, `slug`, and `display_name`; in
+`GET /session/me`, it appears inside the optional `tenant` object beside the
+same identity fields. The field is the tenant's declared reporting **label**,
+not an exchange rate or proof that every stored amount uses that currency. UMS
+does not convert finance values from this field.
+
+The source is authorization-mode specific. `headers` mode fabricates the
+bootstrap tenant from the strictly validated `UMS_TENANT_PRIMARY_CURRENCY`
+setting (default `USD`). `database` mode ignores that setting and resolves
+`tenants.primary_currency` from PostgreSQL, the source of truth. Therefore a
+future database-mode EGP flip requires a reviewed, tenant-scoped data
+migration/backfill with captured prior values for rollback; changing the
+environment setting alone cannot alter the database response.
 
 ### Channels
 
@@ -496,10 +521,19 @@ GET /revenue/source-rows?month=2026-03&cursor_ingested_at=2026-05-10T12:00:00Z&c
 GET /revenue/source-rows/{id}
 ```
 
-`POST /revenue/facts` is an implemented connector-controlled import endpoint
-for monthly channel revenue facts. It requires `connectors.run_jobs` for the
-connector scope, validates connector/source-kind compatibility, rejects locked
-finance months, and audits `REPORT_IMPORTED`. The payload accepts optional
+`POST /revenue/facts` is an implemented import endpoint for monthly channel
+revenue facts. Connector/service callers require `connectors.run_jobs` for the
+connector scope. The Google-free beta path instead accepts the global
+`finance.import_manual_revenue` permission only when `connector_key` is
+the exact, case-sensitive `manual-upload` or `manual_upload` value and
+`source_kind` is `MANUAL_UPLOAD`. The submitted alias is preserved as the
+connector scope and in the audit record; the route does not canonicalize one
+alias to the other. That narrow permission does not authorize connector jobs,
+raw-file registration, AdSense/payment sync, exchange-rate sync, or other
+source kinds. The `REPORT_IMPORTED` audit row records whichever permission
+actually authorized the write. The route validates connector/source-kind
+compatibility, rejects locked finance months, and audits every accepted write.
+The payload accepts optional
 official `shorts_revenue_usd`, `longform_revenue_usd`, and
 `subscription_revenue_usd` values when supplied by YouTube/AdSense reports.
 Each component must be a finite non-negative USD decimal and the known component
@@ -744,9 +778,9 @@ alter previously requested data — the recorded export-determinism rule,
 distinct from the dashboard reads' snapshot-side attribution).
 Responses over OPEN months remain living
 data — two consecutive requests may differ — but within one response the money
-numbers always coexisted in the database. On SQLite (test tier) every lane
-shares one StaticPool connection, so reads are already transaction-consistent
-and the snapshot helper is a no-op there.
+numbers always coexisted in the database. On SQLite (test tier), independent
+sessions serialize checkout through a one-slot QueuePool that retains one
+physical connection; the snapshot helper remains a no-op there.
 
 `GET /revenue/months/{month}/net-revenue` is an implemented read-only net
 revenue foundation for `global`, `sector`, `company`, and `channel` scopes. It
@@ -1028,7 +1062,7 @@ GET /reports/raw-files?source=youtube_reporting&report_month=2026-03&limit=50&of
 GET /reports/raw-files/{raw_file_id}
 ```
 
-Raw report metadata records the immutable file reference before parsing. `POST /reports/raw-files` requires `source`, `report_type`, `report_month`, `storage_uri`, `checksum`, `parse_status`, and `reason`; responses include `id`, `source`, `report_type`, `report_month`, `storage_uri`, `checksum`, `parse_status`, `downloaded_by`, `downloaded_at`, and `audit_event`. `GET /reports/raw-files` is offset-paginated with `limit` capped at `100`, optional `source`, `report_type`, and `report_month` filters, and returns `items` plus `pagination.limit`, `pagination.offset`, `pagination.returned`, and `pagination.has_more`.
+Raw report metadata records the immutable file reference before parsing. `POST /reports/raw-files` requires `source`, `report_type`, `report_month`, `storage_uri`, `checksum`, `parse_status`, and `reason`; it is a connector-execution surface gated to **persisted service principals** holding `connectors.run_jobs` at `connector(source)` — human roles that carry the permission (Revenue Operations Admin, Connector Admin) fail closed with the uniform `Missing permission: connectors.run_jobs` 403. Responses include `id`, `source`, `report_type`, `report_month`, `storage_uri`, `checksum`, `parse_status`, `downloaded_by`, `downloaded_at`, and `audit_event`. `GET /reports/raw-files` is offset-paginated with `limit` capped at `100`, optional `source`, `report_type`, and `report_month` filters, and returns `items` plus `pagination.limit`, `pagination.offset`, `pagination.returned`, and `pagination.has_more`.
 
 Google source-ingestion is live. The connector run path upserts
 `google_revenue_source_rows` linked to these raw files, preserving
@@ -1149,6 +1183,22 @@ the generated workbook through the configured export artifact store, records a
 byte size, SHA-256 checksum, and marks the export job `COMPLETED`. If artifact
 storage fails before completion, the job remains non-terminal and retryable, the
 endpoint returns `503`, and does not emit `EXPORT_DOWNLOADED`.
+
+All four artifact routes (`analytics-summary.csv`, `finance-workbook.xlsx`,
+`executive.pdf`, and `branded-slide-pack.pptx`) also accept `prepare=true` for
+the dashboard's bounded-memory download handshake. Preparation executes the
+same trusted-gateway principal load, tenant/owner lookup, per-type permission
+checks, generation, persistence, and storage validation as the ordinary GET,
+durably commits the artifact metadata before returning `204`, includes
+`Cache-Control: no-store`, carries no artifact body, and does not emit
+`EXPORT_DOWNLOADED`. The browser then performs an ordinary same-origin GET;
+that second request is independently authenticated and authorized, returns the
+persisted artifact with its existing `Content-Disposition` plus
+`Cache-Control: no-store`, and emits the normal sensitive-read and download
+audit records. Preventing both responses from being cached is part of the
+authorization/audit contract: neither leg may be reused without re-entering the
+gateway. No tenant, principal, bearer grant, or gateway secret is accepted in
+the URL.
 
 `GET /exports/{export_id}/executive.pdf` supports `EXECUTIVE_PDF` export jobs.
 It uses the same finance export, revenue visibility, finalized-payment, and
