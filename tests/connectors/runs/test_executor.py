@@ -900,6 +900,7 @@ def test_close_keeps_audit_gate_open_for_hook_past_reservation_removal(tmp_path)
     real_submit = executor._audit_executor.submit
 
     def _spy_submit(fn, *args, **kwargs):
+        """Record each audit callable the executor submits through its pool."""
         submitted.append(fn)
         return real_submit(fn, *args, **kwargs)
 

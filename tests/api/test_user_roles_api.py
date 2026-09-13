@@ -345,7 +345,8 @@ def test_incompatible_scope_type_rejected_before_persisting(tmp_path):
 
 def test_assign_role_rejects_unresolved_company_scope(tmp_path):
     """A company scope that resolves to no live org unit is a 404, even for
-    global authority — assign must not persist a dangling access_scopes row."""
+    global authority — assign must not persist a dangling access_scopes row.
+    """
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
