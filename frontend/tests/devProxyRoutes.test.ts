@@ -2189,6 +2189,7 @@ const applicationProgramSourceFiles = (program: ts.Program): ts.SourceFile[] =>
 //   - File: frontend/vite.config.ts -> TENANT_SCOPED_ROUTES.
 //   - File: frontend/src/lib/api -> request call sites.
 // ============================================================================
+// skipcq: JS-R1005
 export const discoverRequestedPrefixes = (): string[] => {
   const configPath = path.join(FRONTEND_ROOT, "tsconfig.json");
   const config = ts.readConfigFile(configPath, ts.sys.readFile);

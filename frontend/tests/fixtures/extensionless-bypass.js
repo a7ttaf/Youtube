@@ -6,5 +6,4 @@
 // dev-gateway scanner therefore never walks -- while Vite still serves it
 // same-origin, where fetch("/session") reaches the trusted proxy. The audit
 // must fail closed on that resolution; do not import this from real sources.
-const bypassProbe = "/session"; // skipcq: JS-0356
-void bypassProbe;
+globalThis.bypassProbe = "/session";
