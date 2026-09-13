@@ -14,7 +14,10 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
+from concurrent.futures import Future
 from datetime import UTC, datetime
+from typing import Any, TypeVar
 from unittest.mock import patch
 from uuid import UUID, uuid4
 
@@ -899,7 +902,9 @@ def test_close_keeps_audit_gate_open_for_hook_past_reservation_removal(tmp_path)
     submitted: list[object] = []
     real_submit = executor._audit_executor.submit
 
-    def _spy_submit(fn, *args, **kwargs):
+    _T = TypeVar("_T")
+
+    def _spy_submit(fn: Callable[..., _T], *args: Any, **kwargs: Any) -> Future[_T]:
         """Record each audit callable the executor submits through its pool."""
         submitted.append(fn)
         return real_submit(fn, *args, **kwargs)

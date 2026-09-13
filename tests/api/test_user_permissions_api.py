@@ -397,3 +397,31 @@ def test_scoped_role_check_uses_the_request_org_index() -> None:
     assert not users_api._has_scoped_role(
         admin, RoleKey.FINANCE_ADMIN, AccessScope.sector("sector-2"), index
     )
+
+
+def test_grant_permission_rejects_unresolved_company_scope(tmp_path):
+    """A company scope that resolves to no live org unit is a 404, even for
+    global authority — grant must not persist a dangling access_scopes row.
+    """
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    client = TestClient(create_app(database_url=database_url))
+
+    response = client.post(
+        f"/users/{TARGET_ID}/permissions",
+        headers=auth_headers("corporate_admin"),
+        json={
+            "permission_key": "finance.view_revenue",
+            "scope_type": "company",
+            # Well-formed UUID but no org_units row — unresolved target.
+            "scope_id": str(UUID("00000000-0000-0000-0000-000000dead01")),
+            "reason": "Attempt grant against a missing company",
+        },
+    )
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == "scope target not found"
+    engine = create_engine(database_url)
+    with Session(engine) as session:
+        assert session.scalars(select(UserPermissionGrantORM)).all() == []
+        assert session.scalars(select(AuditLogORM)).all() == []
