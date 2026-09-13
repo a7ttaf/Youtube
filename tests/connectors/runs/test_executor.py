@@ -45,6 +45,8 @@ from ums_smart_revenue.tenancy.models import TenantStatus
 TENANT = UUID(UMS_TENANT_ID)
 ACTOR = ConnectorJobActor(user_id=str(uuid4()), email="ops@example.com")
 
+_T = TypeVar("_T")
+
 
 def _factory(tmp_path) -> sessionmaker:
     """Create a file-backed sessionmaker with the executor's schema seeded."""
@@ -901,8 +903,6 @@ def test_close_keeps_audit_gate_open_for_hook_past_reservation_removal(tmp_path)
     # was submitted through it — not the post-close last-chance writer.
     submitted: list[object] = []
     real_submit = executor._audit_executor.submit
-
-    _T = TypeVar("_T")
 
     def _spy_submit(fn: Callable[..., _T], *args: Any, **kwargs: Any) -> Future[_T]:
         """Record each audit callable the executor submits through its pool."""
