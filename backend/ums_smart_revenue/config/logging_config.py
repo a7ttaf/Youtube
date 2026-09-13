@@ -643,7 +643,7 @@ def _redact_record_arguments(record: logging.LogRecord, *, rendered: str) -> Non
         record.args = ()
 
 
-class _RedactionFilter(logging.Filter):
+class _RedactionFilter(logging.Filter):  # skipcq: PY-A6006 - this file IS the logging setup
     """Sanitize the shared record before every configured handler formats it."""
 
     _ums_smart_revenue_filter_id = _REDACTION_FILTER_ID
@@ -744,7 +744,7 @@ def _remove_process_redaction_dispatch() -> None:
         setattr(logging.Logger, "callHandlers", original_dispatch)
 
 
-class _ThirdPartyFloorFilter(logging.Filter):
+class _ThirdPartyFloorFilter(logging.Filter):  # skipcq: PY-A6006 - intentional logger gate
     """Allow first-party/Uvicorn records and gate other loggers at a floor."""
 
     _ums_smart_revenue_filter_id = _FLOOR_FILTER_ID

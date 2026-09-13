@@ -1416,7 +1416,7 @@ def test_public_handler_name_collision_preserves_foreign_registration() -> None:
 def test_foreign_filter_marker_collision_is_removed_only_by_identity() -> None:
     """A lookalike operator filter survives UMS safety-filter teardown."""
 
-    class _ForeignFilter(logging.Filter):
+    class _ForeignFilter(logging.Filter):  # skipcq: PY-A6006 - test-only filter fixture
         """Foreign filter that only mimics the operator marker attribute."""
 
         _ums_smart_revenue_filter_id = "redaction-v2"
