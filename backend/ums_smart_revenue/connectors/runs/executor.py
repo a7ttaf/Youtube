@@ -16,7 +16,7 @@
 #   worker. No finance math.
 # Connections:
 #   - File: backend/ums_smart_revenue/api/connectors.py -> the route's
-#     submit_if_absent + after_commit.activate / after_rollback.cancel flow.
+#     submit_if_absent + outer-transaction activation/cancellation flow.
 #   - File: backend/ums_smart_revenue/connectors/runs/scheduler.py -> the only
 #     scheduled submitter of the group-sync job kind.
 #   - File: backend/ums_smart_revenue/app.py -> lifespan close() wiring.
@@ -28,11 +28,14 @@ from __future__ import annotations
 import logging
 import threading
 import time
-import warnings
 import weakref
-from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass
-from uuid import UUID
+from typing import Any
+from uuid import UUID, uuid4
+
+from sqlalchemy import select
+from sqlalchemy.orm import Session, aliased
 
 from ums_smart_revenue.auth.audit import AuditEventType
 from ums_smart_revenue.auth.audit_service import AuditSink, record_audit_event
@@ -60,11 +63,13 @@ from ums_smart_revenue.connectors.runs.tenant_context import (
     connector_tenant_context,
 )
 from ums_smart_revenue.db.lane import platform_lane
+from ums_smart_revenue.db.security_models import AuditLogORM
 from ums_smart_revenue.db.session import (
     _STATEMENT_BOUNDS_KEY,
     SessionFactory,
     apply_statement_bounds,
 )
+from ums_smart_revenue.db.tenant_models import TenantORM
 from ums_smart_revenue.org.channel_group_sync import GroupSyncOutcome
 from ums_smart_revenue.org.channel_groups import (
     ChannelGroupConflictError,
@@ -76,6 +81,38 @@ from ums_smart_revenue.tenancy.context import TENANT_CTX
 from ums_smart_revenue.tenancy.models import make_placeholder_tenant
 
 logger = logging.getLogger(__name__)
+
+# ============================================================================
+# Purpose: Bound ConnectorJobExecutor.close() so FastAPI lifespan teardown
+#   cannot hang past Compose's explicit 120s stop_grace_period. A stalled
+#   connector worker must not block graceful shutdown forever; 90s bounds the
+#   WHOLE close() — the shutdown-audit join and the drain wait share ONE
+#   deadline — leaving headroom for GroupSyncScheduler.close() and logging
+#   restore before SIGKILL.
+# Database/ORM: None.
+# Standards: concurrent.futures.wait timeout only; no unbounded future.result().
+# Blast Radius: Shutdown durability — timed-out workers may still be running
+#   when the process exits; queued-job shutdown audit already ran before drain.
+# Connections:
+#   - File: docker-compose.yml -> explicit 120s stop_grace_period.
+#   - File: backend/ums_smart_revenue/app.py -> lifespan calls close().
+# ============================================================================
+CLOSE_DRAIN_TIMEOUT_SECONDS = 90.0
+# FIX(codex round-23 P2): the cancelled-job audits used to run synchronously
+# before close() ever reached the bounded drain, so a single audit write
+# blocked on the shared SQLite one-slot QueuePool connection -- held by the very
+# worker being drained -- could stall shutdown unboundedly until Docker
+# SIGKILLed the process. The audit phase now runs on a daemon thread joined
+# with this budget; audits that fit inside it land durably, and the ones
+# that do not are logged and abandoned rather than taking the drain budget
+# hostage.
+# FIX(codex round-28 P1): this budget is a CAP inside close()'s single
+# deadline, not an additive phase. Previously the audit join (30s) and the
+# drain wait (90s) ran back-to-back for up to 120s -- the entire Compose
+# stop_grace_period -- before GroupSyncScheduler.close() could even start.
+# close() now captures one monotonic deadline of CLOSE_DRAIN_TIMEOUT_SECONDS
+# and both phases draw from it.
+SHUTDOWN_AUDIT_BUDGET_SECONDS = 30.0
 
 _JobKey = tuple[UUID, str, str, str]
 
@@ -96,11 +133,62 @@ GROUP_SYNC_JOB_MONTH = "-"
 _JOB_KIND_PULL = "pull"
 _JOB_KIND_GROUP_SYNC = "group_sync"
 
-# Bounded grace close() gives still-pending _SlotReservation hooks to run
-# before the audit pool stops accepting submissions. A reservation that
-# survives past this window belongs to a request that died before its
-# post-commit hook fired; close() audits it itself as ExecutorShutdown.
-_PENDING_HOOK_GRACE_SECONDS = 15.0
+# Durable audit-intent actions. ``job_submitted`` is committed before a worker
+# can be activated; startup reconciliation treats an intent without either of
+# the terminal dispatch edges as a job the previous process abandoned while
+# still queued. The stable UUID prevents tuple/time heuristics and lets two
+# startup processes coordinate without misclassifying an older run.
+_JOB_ACTION_SUBMITTED = "job_submitted"
+_JOB_ACTION_DISPATCH_STARTED = "job_dispatch_started"
+_JOB_ACTION_FAILED_BEFORE_START = "job_failed_before_start"
+# ``group_sync_job_failed`` is written for every typed failure a scheduled
+# group-sync worker records — INCLUDING pre-dispatch ones (tenant-context
+# entry, service-actor construction) where no ``job_dispatch_started`` edge
+# exists yet. Recovery must treat it as terminal so that row is the ONE
+# failure record; otherwise the next startup would append a second
+# ``job_failed_before_start`` for the same submission job id.
+_JOB_ACTION_GROUP_SYNC_FAILED = "group_sync_job_failed"
+_JOB_RECOVERY_TERMINAL_ACTIONS = frozenset(
+    {
+        _JOB_ACTION_DISPATCH_STARTED,
+        _JOB_ACTION_FAILED_BEFORE_START,
+        _JOB_ACTION_GROUP_SYNC_FAILED,
+    }
+)
+_JOB_RECOVERY_BATCH_SIZE = 100
+
+# Expected failures are mapped to this source-controlled allowlist before they
+# reach logs. Exception messages and subclass names are deliberately excluded:
+# Google HTTP error strings can contain signed URLs, credentials, and headers.
+_EXPECTED_GOOGLE_FAILURE_CATEGORY = "google_connector_failure"
+_EXPECTED_GROUP_SYNC_FETCH_CATEGORY = "group_sync_fetch_failure"
+_EXPECTED_GROUP_SYNC_CONFLICT_CATEGORY = "group_sync_conflict"
+_EXPECTED_GROUP_OWNER_CATEGORY = "group_owner_conflict"
+
+
+# ============================================================================
+# Purpose: Collapse expected connector/group-sync exception families into a
+#   fixed safe logging taxonomy without rendering exception text or subclass
+#   names that can carry signed request material.
+# Database/ORM: None.
+# Standards: Total over the typed expected-failure tuple; no dynamic values.
+# Blast Radius: Log categories only; audit error_class remains unchanged.
+# Connections:
+#   - File: backend/ums_smart_revenue/config/logging_config.py -> defense-in-depth
+#     formatter redaction for unexpected tracebacks that still need diagnostics.
+# ============================================================================
+def _expected_failure_category(exc: Exception) -> str:
+    """Return a bounded category for a typed expected connector failure."""
+    if isinstance(exc, GoogleConnectorError):
+        return _EXPECTED_GOOGLE_FAILURE_CATEGORY
+    if isinstance(exc, GroupSyncFetchError):
+        return _EXPECTED_GROUP_SYNC_FETCH_CATEGORY
+    if isinstance(exc, (GroupSyncConflictRefusedError, ChannelGroupConflictError)):
+        return _EXPECTED_GROUP_SYNC_CONFLICT_CATEGORY
+    if isinstance(exc, ChannelGroupOwnerReassignmentError):
+        return _EXPECTED_GROUP_OWNER_CATEGORY
+    raise TypeError("expected connector failure category requested for unsupported exception")
+
 
 # (lock_timeout, statement_timeout) stamped on session.info for every
 # standalone failure-audit write. The after_begin hook applies them before
@@ -144,6 +232,7 @@ class _SlotReservation:
     dry_run: bool
     triggered_by_user_id: UUID | None
     actor_identity: ConnectorJobActor
+    job_id: UUID
     # Which worker body ``activate`` dispatches this reservation to. Defaults to
     # the report-pull worker so every existing caller is unchanged; a group-sync
     # reservation sets ``_JOB_KIND_GROUP_SYNC``. Chosen over branching on the
@@ -158,6 +247,15 @@ class _ActiveJob:
 
     future: Future
     actor_identity: ConnectorJobActor
+    job_id: UUID
+
+
+@dataclass(frozen=True)
+class _ShutdownAuditTask:
+    """A shutdown-audit thread plus its post-join durability result."""
+
+    thread: threading.Thread
+    result: dict[str, bool]
 
 
 # ============================================================================
@@ -194,13 +292,6 @@ class _ActiveJob:
 #   Failures fold into one ``group_sync_job_failed`` row via the fresh-session
 #   ``_audit_group_sync_failure`` sibling.
 #
-#   A dedicated single-worker ``_audit_executor`` carries the route's
-#   post-commit activation-failure audits (``queue_failed_start_audit``):
-#   inside ``after_commit`` the request session still holds its pooled
-#   connection, so a synchronous fresh-session audit would block on
-#   ``pool_timeout`` and drop the row; ``close()`` drains this worker with
-#   ``wait=True`` so the audit outlives the shutdown that triggered it.
-#
 # Database/ORM: opens its own Session via session_factory; run_one writes
 #   connector_runs + audit_logs; the Bucket-A catch writes one CONNECTOR_JOB_RUN
 #   audit row via SqlAlchemyAuditSink on a fresh own session, wrapped in
@@ -225,7 +316,7 @@ class _ActiveJob:
 #     HTTP-free sync core the group-sync worker drives (Sched 1).
 #   - File: scripts/run_google_connector.py -> the CLI pattern this reuses.
 #   - File: backend/ums_smart_revenue/api/connectors.py -> the route uses
-#     submit_if_absent + after_commit.activate / after_rollback.cancel_reservation.
+#     submit_if_absent + outer-transaction finalization for activate/cancel.
 # ============================================================================
 class ConnectorJobExecutor:
     """Bounded in-process runner for connector pull jobs with a dup registry.
@@ -254,248 +345,147 @@ class ConnectorJobExecutor:
         self._stale_running_hours = stale_running_hours
         self._group_sync_client_factory = group_sync_client_factory
         self._lock = threading.Lock()
+        self._close_lock = threading.Lock()
         self._registry: dict[_JobKey, Future | _SlotReservation | _ActiveJob] = {}
+        self._shutdown_pending_futures: set[Future] = set()
+        self._shutdown_audit_tasks: list[_ShutdownAuditTask] = []
+        self._shutdown_audit_failed = False
         self._executor = ThreadPoolExecutor(
             max_workers=max_workers,
             thread_name_prefix="ums-connector-job",
         )
-        # A dedicated single-worker pool for the route's post-commit failure
-        # audits. Queueing there removes the audit's session checkout from the
-        # request lifecycle: on SQLite (one-slot engine pool) a synchronous
-        # audit inside after_commit would wait out pool_timeout while the
-        # committing session still holds the connection, and a bare daemon
-        # thread could die mid-write during the very shutdown that made
-        # activate() fail. This worker is tracked and drained by close().
-        self._audit_executor = ThreadPoolExecutor(
-            max_workers=1,
-            thread_name_prefix="ums-connector-audit",
-        )
-        # Serialization between queue_failed_start_audit and close(): a submit
-        # that entered before close() flipped _audit_accepting is guaranteed to
-        # land in the pool before shutdown() is invoked, so it is drained —
-        # never silently rejected mid-teardown.
-        self._audit_lock = threading.Lock()
-        self._audit_accepting = True
-        # _committed: key -> the reservation instance whose after_commit hook
-        # entered (proof the request transaction committed). Instance-keyed so
-        # a stale hook's cleanup can never strip a same-key retry's mark.
-        # _shutdown_audited keys: jobs the shutdown sweep (or post-close
-        # fallback) already wrote a failure row for, so a late hook queue call
-        # can never double-audit one job. Deliberately NOT populated on a
-        # normal queued submit — the same job key may legitimately fail
-        # activation again on a later attempt, and each failure needs its own
-        # audit row.
-        self._committed: dict[_JobKey, _SlotReservation] = {}
-        self._shutdown_audited: set[_JobKey] = set()
         # Reservation admission gate: flipped to False by close() under
-        # _lock BEFORE the pools stop, so a submission admitted before the
-        # flip always has its post-commit path covered by the grace/drain
-        # logic — and nothing new can be reserved mid-teardown.
+        # _lock BEFORE the pool stops, so a submission admitted before the
+        # flip always has its lifecycle covered by the bounded drain — and
+        # nothing new can be reserved mid-teardown.
         self._accepting_reservations = True
-        # Last-chance audit writers spawned for post-close submissions —
-        # tracked so close()/_shutdown_pools can join any already started;
-        # non-daemon, so the interpreter also waits for stragglers at exit.
-        self._last_chance_writers: set[threading.Thread] = set()
-        # In-flight post-commit hooks: a hook that called
-        # begin_post_commit but not yet end_post_commit. close() waits on
-        # this AND pending reservations because activate() pops the registry
-        # slot BEFORE the hook queues its failure audit — the registry alone
-        # cannot see that window.
-        self._inflight_hooks = 0
-        # Set by close()/_shutdown_pools once the worker pool has stopped —
-        # the seam tests use to reach the post-shutdown interleaving without
-        # racing the shutdown call itself.
-        self._worker_pool_stopped = threading.Event()
         self._finalizer = weakref.finalize(
             self,
-            self._shutdown_pools,
-            self._executor,
-            self._audit_executor,
-            self._last_chance_writers,
-            self._worker_pool_stopped,
+            self._executor.shutdown,
+            wait=False,
+            cancel_futures=True,
         )
 
-    # ========================================================================
-    # Purpose: Record that a reservation's request transaction committed — the
-    #   after_commit hook can only run post-commit, so the mark is the proof
-    #   close() uses to audit leftovers vs drop uncommitted ones.
-    # Database/ORM: None — in-memory marker on the executor.
-    # Standards: lock-guarded set keyed by the reservation's job key; keys are
-    #   discarded on activate/cancel/queue transitions so the set stays bounded.
-    # Blast Radius: Audit correctness — drives which leftover reservations get
-    #   a job_failed_before_start row at shutdown.
-    # Connections:
-    #   - File: backend/ums_smart_revenue/api/connectors.py -> hook caller.
-    # ========================================================================
-    # ========================================================================
-    # Purpose: Bracket a post-commit hook — begin marks the reservation
-    #   committed and registers the hook as in-flight; end clears both. The
-    #   pair keeps close()'s audit gate open across the whole hook, covering
-    #   the window where activate() has already popped the registry slot but
-    #   the failure audit has not yet been queued.
-    # Database/ORM: None — in-memory lifecycle tracking only.
-    # Standards: end_post_commit runs from the hook's finally so a raised
-    #   hook can never wedge close(); counts stay balanced per reservation.
-    # Blast Radius: Audit completeness — drives close()'s grace loop.
-    # Connections:
-    #   - File: backend/ums_smart_revenue/api/connectors.py -> hook caller.
-    # ========================================================================
-    def begin_post_commit(self, reservation: _SlotReservation) -> None:
-        """Mark the reservation committed and register its hook as in-flight."""
-        with self._lock:
-            self._committed[reservation.key] = reservation
-            self._inflight_hooks += 1
-
-    # ========================================================================
-    # Purpose: Complete a post-commit hook — drop the in-flight count and the
-    #   committed mark, but ONLY the mark belonging to THIS reservation
-    #   instance; a same-key retry's mark must survive a stale cleanup.
-    # Database/ORM: None — in-memory lifecycle tracking under _lock.
-    # Standards: called from the hook's finally so every code path balances
-    #   its begin_post_commit; identity-checked removal keeps the counter and
-    #   the committed map consistent under concurrent same-key submissions.
-    # Blast Radius: Audit correctness — the committed map decides which
-    #   leftover reservations close() audits as ExecutorShutdown.
-    # Connections:
-    #   - File: backend/ums_smart_revenue/api/connectors.py -> hook caller.
-    #   - File: backend/ums_smart_revenue/connectors/runs/executor.py ->
-    #     begin_post_commit is the required pairing.
-    # ========================================================================
-    def end_post_commit(self, reservation: _SlotReservation) -> None:
-        """Unregister the hook; release only this reservation's committed mark."""
-        with self._lock:
-            self._inflight_hooks = max(0, self._inflight_hooks - 1)
-            if self._committed.get(reservation.key) is reservation:
-                del self._committed[reservation.key]
-
-    # ========================================================================
-    # Purpose: Count unresolved post-commit work — _SlotReservation registry
-    #   slots PLUS hooks currently inside begin/end_post_commit — so close()
-    #   holds its audit gate across the whole hook, including the window where
-    #   activate() already popped the slot but the failure audit is not yet
-    #   queued.
-    # Database/ORM: None — reads the in-memory registry + counter under _lock.
-    # Standards: read-only; used by close()'s bounded grace loop.
-    # Blast Radius: None detected.
-    # Connections:
-    #   - File: backend/ums_smart_revenue/connectors/runs/executor.py ->
-    #     close() grace loop + _audit_pending_on_shutdown.
-    # ========================================================================
-    def _outstanding_post_commit(self) -> int:
-        """Count pending reservations plus in-flight post-commit hooks."""
-        with self._lock:
-            pending = sum(
-                1
-                for entry in self._registry.values()
-                if isinstance(entry, _SlotReservation)
-            )
-            return pending + self._inflight_hooks
-
-    # ========================================================================
-    # Purpose: GC backstop — stop the worker and audit pools if close() was
-    #   never invoked so neither pool keeps interpreter threads alive.
-    # Database/ORM: None — thread-pool lifecycle only.
-    # Standards: non-blocking shutdown (wait=False, cancel queued futures);
-    #   deterministic drain semantics live in close(), not here.
-    # Blast Radius: Process lifecycle; a bypassed close() can drop queued
-    #   audits — exactly why close() is the real contract.
-    # Connections:
-    #   - File: backend/ums_smart_revenue/connectors/runs/executor.py ->
-    #     close() is the ordered drain; this is the fallback only.
-    # ========================================================================
-    @staticmethod
-    def _shutdown_pools(
-        executor: ThreadPoolExecutor,
-        audit_executor: ThreadPoolExecutor,
-        last_chance_writers: set[threading.Thread],
-        worker_pool_stopped: threading.Event,
-    ) -> None:
-        """GC backstop: stop both pools if ``close()`` never ran."""
-        executor.shutdown(wait=False, cancel_futures=True)
-        worker_pool_stopped.set()
-        audit_executor.shutdown(wait=False)
-        # Best-effort join on last-chance audit writers — each write is
-        # bounded by pool_timeout + statement/lock timeouts inside
-        # _audit_failed_before_start; is_alive() skips not-yet-started
-        # threads (join() on them raises RuntimeError).
-        for writer in list(last_chance_writers):
-            if writer.is_alive():
-                writer.join(timeout=30)
-
-    # ========================================================================
-    # Purpose: Deterministic executor shutdown from the app lifespan — cancel
-    #   queued work, audit cancelled futures, then drain the audit pool.
-    # Database/ORM: audit_logs writes via _audit_pending_on_shutdown (tracked
-    #   last-chance writers, joined below) plus queued queue_failed_start_audit
-    #   tasks before close returns.
-    # Standards: ordered teardown — worker pool stops, pending audits write,
-    #   audit pool drains with wait=True under the _audit_accepting lock; the
-    #   weakref finalizer is the GC fallback only.
-    # Blast Radius: Audit completeness — anything not drained here loses its
-    #   job_failed_before_start row.
-    # Connections:
-    #   - File: backend/ums_smart_revenue/app.py -> lifespan calls close().
-    #   - File: tests/connectors/runs/test_executor.py -> drain interleavings.
-    # ========================================================================
-    def close(self) -> None:
+    def close(self) -> bool:
         """Shut the pool down deterministically (called from the app lifespan).
 
-        First cancels all queued futures via ``shutdown(cancel_futures=True)``,
-        then audits any futures that were definitively cancelled as
-        ``job_failed_before_start`` with ``error_class="ExecutorShutdown"``.
-        Running futures are allowed to finish and deregister themselves; they
-        are never audited as pre-start failures. The weakref finalizer remains
-        as a GC backstop for paths that bypass ``close()``.
+        Cancel queued futures first (``cancel_futures=True``), audit those
+        cancelled jobs immediately as ``job_failed_before_start`` /
+        ``ExecutorShutdown``, then wait for every future that remained
+        non-cancelled after shutdown so a job that transitioned from queued to
+        running between the pre-shutdown snapshot and ``shutdown()`` cannot
+        escape the drain. The immediate audit is an optimization; the already-
+        committed ``job_submitted`` intent is the durable handoff if Docker
+        later SIGKILLs the process at ``stop_grace_period``. On drain timeout,
+        log which futures remain and
+        return ``False`` and retain their futures for a repeated ``close()`` or
+        :meth:`wait_for_shutdown_completion`. Running futures that finish in
+        time deregister themselves; they are never audited as pre-start
+        failures. The weakref finalizer remains as a GC backstop for paths that
+        bypass ``close()``.
 
-        The audit pool is shut down LAST with ``wait=True`` so route-queued
-        activation-failure audits — accepted jobs whose ``activate()`` failed
-        during this very shutdown — are drained and committed before the
-        process exits instead of dying on an untracked thread. Last-chance
-        writers spawned by post-close queue calls are joined here when
-        already started; any spawned after close() returns are non-daemon,
-        so interpreter teardown itself waits for their commits.
+        FIX(codex round-28 P1): the shutdown-audit join and the drain wait
+        share ONE monotonic deadline of ``CLOSE_DRAIN_TIMEOUT_SECONDS``
+        captured at the top of this method. The audit join gets at most
+        ``min(SHUTDOWN_AUDIT_BUDGET_SECONDS, remaining)``, and the drain wait
+        gets whatever budget is left, so total close() waits stay bounded by
+        CLOSE_DRAIN_TIMEOUT_SECONDS instead of the two phases' budgets
+        summing to the full Compose stop_grace_period.
+
+        Returns:
+            True when every retained worker and shutdown-audit task finished
+            durably (or none existed). False while work remains outstanding or
+            an audit write has failed.
         """
-        # Stop new reservations first — under _lock, so a submit_if_absent
-        # that already entered lands before the flip and is covered by the
-        # grace/drain below; anything later is refused (None -> route 409 /
-        # scheduler skip) instead of reserving a slot nobody will activate.
-        with self._lock:
-            self._accepting_reservations = False
-        self._executor.shutdown(wait=False, cancel_futures=True)
-        self._worker_pool_stopped.set()
-        # A request can commit and still have its after_commit hook pending
-        # when shutdown begins, and activate() pops the registry slot before
-        # the hook queues its failure audit — the grace wait must cover both
-        # pending reservations and hooks in flight. Anything still unresolved
-        # at the deadline is audited as ExecutorShutdown below.
-        deadline = time.monotonic() + _PENDING_HOOK_GRACE_SECONDS
-        while self._outstanding_post_commit() and time.monotonic() < deadline:
-            time.sleep(0.05)
-        if self._outstanding_post_commit():
-            logger.error(
-                "close() grace expired with %d unresolved post-commit units; "
-                "auditing committed leftovers as ExecutorShutdown",
-                self._outstanding_post_commit(),
-            )
-        self._audit_pending_on_shutdown()
-        # Flip the accepting flag under the lock BEFORE shutdown() so a
-        # queue_failed_start_audit call that already entered submits into a
-        # live pool and is drained by wait=True — never rejected mid-teardown.
-        with self._audit_lock:
-            self._audit_accepting = False
-        self._audit_executor.shutdown(wait=True)
-        # Join last-chance writers already spawned by post-close queue calls —
-        # each write is bounded by pool_timeout inside _audit_failed_before_
-        # start, and the non-daemon threads also hold the interpreter open
-        # even if this join raced a still-running write.
-        with self._lock:
-            writers = list(self._last_chance_writers)
-        for writer in writers:
-            # is_alive() also skips a thread registered but not yet started —
-            # join() on an unstarted thread raises RuntimeError.
-            if writer.is_alive():
-                writer.join(timeout=30)
-        self._finalizer.detach()
+        # FIX: Serialize close/wait state transitions and retain timed-out
+        # futures. Clearing the dedup registry previously made a second close()
+        # falsely report success while the first call's worker was still hung.
+        with self._close_lock:
+            deadline = time.monotonic() + CLOSE_DRAIN_TIMEOUT_SECONDS
+            # Close the admission gate under the registry lock BEFORE the pool
+            # stops: a submit admitted before this flip is guaranteed to find
+            # its registry slot here (or reach the audit/recovery paths), and
+            # nothing new can be reserved mid-teardown.
+            with self._lock:
+                self._accepting_reservations = False
+            self._executor.shutdown(wait=False, cancel_futures=True)
+            running_futures, current_audits_durable = self._audit_pending_on_shutdown(deadline)
+            self._shutdown_pending_futures.update(running_futures)
+
+            pending = set(self._shutdown_pending_futures)
+            if pending:
+                drain_timeout = max(0.0, deadline - time.monotonic())
+                done, not_done = wait(pending, timeout=drain_timeout)
+                self._consume_shutdown_futures(done)
+                if not_done:
+                    logger.error(
+                        "Executor close drain timed out after %.0fs; "
+                        "%d worker future(s) still running: %s",
+                        drain_timeout,
+                        len(not_done),
+                        list(not_done),
+                    )
+                    return False
+
+            audits_durable = current_audits_durable and self._shutdown_audits_complete_and_durable()
+            self._finalizer.detach()
+            return audits_durable
+
+    def wait_for_shutdown_completion(self) -> None:
+        """Block until every retained worker and shutdown-audit task settles.
+
+        This is the unbounded, idempotent counterpart to :meth:`close`. The app
+        can honor its bounded graceful-stop contract first, then use this API to
+        keep the executor object and its late audit thread state reachable until
+        they actually finish. Repeated or concurrent close/wait calls are
+        serialized by ``_close_lock``.
+
+        Unbounded applies to the settle loop: the first audit join still runs
+        under the shared 30-second budget (``_audit_cancelled_within_budget``
+        caps ``deadline``), and durability is then guaranteed by the re-join
+        loop below rather than by the first phase.
+        """
+        with self._close_lock:
+            with self._lock:
+                self._accepting_reservations = False
+            self._executor.shutdown(wait=False, cancel_futures=True)
+            running_futures, _ = self._audit_pending_on_shutdown(float("inf"))
+            self._shutdown_pending_futures.update(running_futures)
+            if self._shutdown_pending_futures:
+                done, _ = wait(set(self._shutdown_pending_futures))
+                self._consume_shutdown_futures(done)
+
+            while self._shutdown_audit_tasks:
+                tasks = tuple(self._shutdown_audit_tasks)
+                for task in tasks:
+                    task.thread.join()
+                self._shutdown_audits_complete_and_durable()
+
+            self._finalizer.detach()
+
+    def _consume_shutdown_futures(self, futures: set[Future]) -> None:
+        """Observe settled worker results exactly once and release retention."""
+        for future in futures:
+            try:
+                future.result()
+            except Exception:
+                # FIX: Surface worker failures that completed during drain;
+                # the previous bare ``except Exception: pass`` hid them.
+                logger.exception("Connector job worker raised during executor close drain")
+        self._shutdown_pending_futures.difference_update(futures)
+
+    def _shutdown_audits_complete_and_durable(self) -> bool:
+        """Reap finished audit tasks and report their cumulative durability."""
+        still_running: list[_ShutdownAuditTask] = []
+        for task in self._shutdown_audit_tasks:
+            if task.thread.is_alive():
+                still_running.append(task)
+                continue
+            task.thread.join()
+            if not task.result["durable"]:
+                self._shutdown_audit_failed = True
+        self._shutdown_audit_tasks = still_running
+        return not still_running and not self._shutdown_audit_failed
 
     def has_active_job(
         self,
@@ -528,10 +518,10 @@ class ConnectorJobExecutor:
         """Reserve a slot for the scope; return None if a slot is already held.
 
         The reservation is NOT yet a Future -- the worker is enqueued only
-        after the caller invokes :meth:`activate` (typically from an
-        SQLAlchemy ``after_commit`` hook). A failed commit drops the
-        reservation via :meth:`cancel_reservation`, so the registry can
-        never deadlock on a half-committed submission.
+        after the caller invokes :meth:`activate` (the HTTP route does so only
+        after the committed outer transaction releases its checkout). A failed
+        commit drops the reservation via :meth:`cancel_reservation`, so the
+        registry can never deadlock on a half-committed submission.
 
         Returns ``None`` when the scope is already held (either a pending
         reservation or an active Future). Holding the lock across the
@@ -550,6 +540,7 @@ class ConnectorJobExecutor:
             dry_run=dry_run,
             triggered_by_user_id=triggered_by_user_id,
             actor_identity=actor_identity,
+            job_id=uuid4(),
         )
         with self._lock:
             if not self._accepting_reservations or key in self._registry:
@@ -591,15 +582,12 @@ class ConnectorJobExecutor:
                 # the real failure instead of a phantom in-flight slot.
                 if self._registry.get(key) is reservation:
                     del self._registry[key]
-                if self._committed.get(key) is reservation:
-                    del self._committed[key]
                 raise
-            if self._committed.get(key) is reservation:
-                del self._committed[key]
             self._stash_and_register(
                 future=future,
                 key=key,
                 actor_identity=reservation.actor_identity,
+                job_id=reservation.job_id,
             )
         return future
 
@@ -618,6 +606,7 @@ class ConnectorJobExecutor:
                 tenant_id=reservation.tenant_id,
                 content_owner_id=reservation.account_id,
                 actor_identity=reservation.actor_identity,
+                job_id=reservation.job_id,
             )
         return self._executor.submit(
             self._run_job,
@@ -628,6 +617,7 @@ class ConnectorJobExecutor:
             dry_run=reservation.dry_run,
             triggered_by_user_id=reservation.triggered_by_user_id,
             actor_identity=reservation.actor_identity,
+            job_id=reservation.job_id,
         )
 
     def submit_group_sync_if_absent(
@@ -657,6 +647,7 @@ class ConnectorJobExecutor:
             dry_run=False,
             triggered_by_user_id=None,
             actor_identity=actor_identity,
+            job_id=uuid4(),
             job_kind=_JOB_KIND_GROUP_SYNC,
         )
         with self._lock:
@@ -677,8 +668,6 @@ class ConnectorJobExecutor:
             current = self._registry.get(reservation.key)
             if current is reservation:
                 self._registry.pop(reservation.key, None)
-                if self._committed.get(reservation.key) is reservation:
-                    del self._committed[reservation.key]
                 return True
         return False
 
@@ -724,6 +713,7 @@ class ConnectorJobExecutor:
         # .submit only enqueues (never blocks on a full pool), so holding the
         # lock across it is brief and deadlock-free.
         with self._lock:
+            job_id = uuid4()
             future = self._executor.submit(
                 self._run_job,
                 tenant_id=tenant_id,
@@ -733,11 +723,13 @@ class ConnectorJobExecutor:
                 dry_run=dry_run,
                 triggered_by_user_id=triggered_by_user_id,
                 actor_identity=actor_identity,
+                job_id=job_id,
             )
             self._stash_and_register(
                 future=future,
                 key=key,
                 actor_identity=actor_identity,
+                job_id=job_id,
             )
         return future
 
@@ -746,91 +738,436 @@ class ConnectorJobExecutor:
         future: Future,
         key: _JobKey,
         actor_identity: ConnectorJobActor,
+        job_id: UUID,
     ) -> None:
         """Stash shutdown-audit metadata on *future* and insert into the registry.
 
         Must be called while holding ``self._lock``.
         """
-        self._registry[key] = _ActiveJob(future=future, actor_identity=actor_identity)
+        self._registry[key] = _ActiveJob(
+            future=future,
+            actor_identity=actor_identity,
+            job_id=job_id,
+        )
 
-    def _audit_pending_on_shutdown(self) -> None:
-        """Audit every accepted job that was cancelled before it started.
+    # ========================================================================
+    # Purpose: Persist the scheduler's submission intent in audit_logs before
+    #   activation, using the same stable request_id handoff as the HTTP route.
+    # Database/ORM: AuditLogORM write on the caller's tenant transaction.
+    # Standards: Caller owns commit/rollback; PlatformLaneAuditSink preserves
+    #   the existing app_platform write grant and tenant RLS context.
+    # Blast Radius: Additive connector audit row only; no finance/domain write.
+    # Connections:
+    #   - File: backend/ums_smart_revenue/connectors/runs/scheduler.py -> commits
+    #     this intent before calling activate().
+    #   - File: backend/ums_smart_revenue/connectors/runs/executor.py -> startup
+    #     recovery consumes unmatched intents after an unclean process exit.
+    # ========================================================================
+    def persist_submission_intent(
+        self,
+        *,
+        session: Session,
+        reservation: _SlotReservation,
+        reason: str,
+    ) -> None:
+        """Append one durable pre-activation intent to the caller's transaction."""
+        actor = self._build_audit_actor(
+            tenant_id=reservation.tenant_id,
+            actor_identity=reservation.actor_identity,
+        )
+        sink = PlatformLaneAuditSink(session, tenant_id=reservation.tenant_id)
+        record_audit_event(
+            sink=sink,
+            actor=actor,
+            event_type=AuditEventType.CONNECTOR_JOB_RUN,
+            entity_type="api_connector",
+            entity_id=f"{reservation.connector_key}:{reservation.account_id}",
+            scope=AccessScope.connector(reservation.connector_key),
+            reason=reason,
+            request_id=str(reservation.job_id),
+            details={
+                "action": _JOB_ACTION_SUBMITTED,
+                "job_kind": reservation.job_kind,
+                "connector_key": reservation.connector_key,
+                "account_id": reservation.account_id,
+                "report_month": reservation.report_month,
+                "dry_run": reservation.dry_run,
+            },
+        )
+
+    def _record_dispatch_started(
+        self,
+        *,
+        session: Session,
+        tenant_id: UUID,
+        connector_key: str,
+        account_id: str,
+        report_month: str,
+        actor_identity: ConnectorJobActor,
+        job_id: UUID,
+    ) -> bool:
+        """Claim and append the durable edge proving a worker entered dispatch."""
+        existing_actions = self._lock_job_lifecycle_actions(
+            session=session,
+            tenant_id=tenant_id,
+            job_id=job_id,
+        )
+        if existing_actions & _JOB_RECOVERY_TERMINAL_ACTIONS:
+            # FIX: Startup recovery and dispatch can race in multi-process
+            # deployments. Both lock the same submitted intent; if recovery
+            # already won, this worker must not mutate domain state afterward.
+            return False
+        actor = self._build_audit_actor(
+            tenant_id=tenant_id,
+            actor_identity=actor_identity,
+        )
+        sink = PlatformLaneAuditSink(session, tenant_id=tenant_id)
+        record_audit_event(
+            sink=sink,
+            actor=actor,
+            event_type=AuditEventType.CONNECTOR_JOB_RUN,
+            entity_type="api_connector",
+            entity_id=f"{connector_key}:{account_id}",
+            scope=AccessScope.connector(connector_key),
+            reason="connector job dispatch started",
+            request_id=str(job_id),
+            details={
+                "action": _JOB_ACTION_DISPATCH_STARTED,
+                "connector_key": connector_key,
+                "account_id": account_id,
+                "report_month": report_month,
+            },
+        )
+        return True
+
+    @staticmethod
+    def _lock_job_lifecycle_actions(
+        *,
+        session: Session,
+        tenant_id: UUID,
+        job_id: UUID,
+    ) -> set[str]:
+        """Lock one request's lifecycle rows and return their bounded actions."""
+        # The lifecycle predicate — (tenant_id, event_type, request_id) — is
+        # served by ``ix_audit_logs_tenant_event_request`` (migration
+        # 20260913_0001), so this FOR UPDATE lock acquisition and recovery's
+        # request_id anti-join do not scan the tenant's whole audit history.
+        action = AuditLogORM.details["action"].as_string()
+        statement = select(AuditLogORM).where(
+            AuditLogORM.tenant_id == tenant_id,
+            AuditLogORM.event_type == AuditEventType.CONNECTOR_JOB_RUN.value,
+            AuditLogORM.request_id == str(job_id),
+            action.in_(
+                {_JOB_ACTION_SUBMITTED, *_JOB_RECOVERY_TERMINAL_ACTIONS}
+            ),
+        )
+        if session.get_bind().dialect.name == "postgresql":
+            statement = statement.with_for_update(of=AuditLogORM)
+        with platform_lane(session):
+            rows = list(session.scalars(statement).all())
+        return {
+            str((row.details or {}).get("action"))
+            for row in rows
+            if (row.details or {}).get("action") is not None
+        }
+
+    # ========================================================================
+    # Purpose: Reconcile a prior process's committed submission intents that
+    #   never reached dispatch into exactly one durable pre-start failure edge.
+    # Database/ORM: TenantORM read; batched AuditLogORM NOT EXISTS anti-query,
+    #   SELECT FOR UPDATE SKIP LOCKED, and INSERT.
+    # Standards: Runs before scheduler start/request acceptance. PostgreSQL
+    #   locks only the bounded unmatched batch and rechecks terminal request_id
+    #   edges server-side in the same statement; SQLite is the documented
+    #   single-process test/dev deployment. Existing rows with NULL request_id
+    #   are ignored because they cannot be correlated.
+    # Blast Radius: Additive audit recovery only. RLS remains fail-closed via a
+    #   per-tenant placeholder TENANT_CTX plus the existing platform lane.
+    # Connections:
+    #   - File: backend/ums_smart_revenue/app.py -> lifespan startup invokes it.
+    #   - File: backend/ums_smart_revenue/api/connectors.py -> route intent.
+    #   - File: backend/ums_smart_revenue/connectors/runs/scheduler.py ->
+    #     scheduler intent.
+    # ========================================================================
+    def recover_abandoned_submission_intents(self) -> int:
+        """Persist recovery failures for unmatched durable intents; return count."""
+        with self._session_factory() as session:
+            tenant_ids = list(session.scalars(select(TenantORM.id)).all())
+            session.rollback()
+
+        recovered = 0
+        for tenant_id in tenant_ids:
+            recovered += self._recover_tenant_submission_intents(tenant_id=tenant_id)
+        return recovered
+
+    @staticmethod
+    def _recovery_intent_statement(
+        *,
+        tenant_id: UUID,
+        intent: Any,
+        terminal_exists: Any,
+        dialect: str,
+    ):
+        """Build the bounded anti-join batch of unrecovered submission intents."""
+        statement = (
+            select(intent)
+            .where(
+                intent.tenant_id == tenant_id,
+                intent.event_type == AuditEventType.CONNECTOR_JOB_RUN.value,
+                intent.request_id.is_not(None),
+                intent.details["action"].as_string() == _JOB_ACTION_SUBMITTED,
+                ~terminal_exists,
+            )
+            .order_by(intent.created_at, intent.id)
+            .limit(_JOB_RECOVERY_BATCH_SIZE)
+        )
+        if dialect == "postgresql":
+            statement = statement.with_for_update(of=intent, skip_locked=True)
+        return statement
+
+    def _record_recovered_intent(
+        self,
+        *,
+        sink: PlatformLaneAuditSink,
+        tenant_id: UUID,
+        intent_row: AuditLogORM,
+        request_id: str,
+    ) -> None:
+        """Append the durable failed-before-start edge for one recovered intent."""
+        details = dict(intent_row.details or {})
+        actor_user_id = intent_row.user_id or details.get("actor_user_id")
+        if actor_user_id is None:
+            raise RuntimeError(
+                "connector job intent is missing its durable actor identity"
+            )
+        connector_key = str(details.get("connector_key") or intent_row.scope_id or "")
+        account_id = str(details.get("account_id") or "")
+        report_month = str(details.get("report_month") or "")
+        if not connector_key or not account_id or not report_month:
+            raise RuntimeError(
+                "connector job intent is missing recovery scope metadata"
+            )
+        actor = self._build_audit_actor(
+            tenant_id=tenant_id,
+            actor_identity=ConnectorJobActor(
+                user_id=str(actor_user_id),
+                email="connector-job-recovery@service.ums.local",
+            ),
+        )
+        record_audit_event(
+            sink=sink,
+            actor=actor,
+            event_type=AuditEventType.CONNECTOR_JOB_RUN,
+            entity_type="api_connector",
+            entity_id=f"{connector_key}:{account_id}",
+            scope=AccessScope.connector(connector_key),
+            reason="recovered abandoned connector job submission",
+            request_id=request_id,
+            details={
+                "action": _JOB_ACTION_FAILED_BEFORE_START,
+                "report_month": report_month,
+                "error_class": "ExecutorShutdownRecovery",
+            },
+        )
+
+    def _recover_tenant_submission_intents(self, *, tenant_id: UUID) -> int:
+        """Reconcile one tenant's unmatched request_ids in bounded batches."""
+        placeholder = make_placeholder_tenant(
+            tenant_id=tenant_id,
+            slug=f"connector-job-recovery:{tenant_id}",
+            display_name="connector job recovery",
+        )
+        token = TENANT_CTX.set(placeholder)
+        try:
+            recovered = 0
+            # KNOWN crash-window (recorded, deliberately not widened here):
+            # ``dispatch_started`` sits in ``_JOB_RECOVERY_TERMINAL_ACTIONS``,
+            # so a process death between the ``dispatch_started`` commit and
+            # the later ``start_run`` commit leaves this anti-join excluding
+            # the intent — no run row is ever created, the client already
+            # holds its 202, and the job silently never runs. The same set
+            # means a crash after ``start_run`` leaves a RUNNING row with no
+            # time-based sweeper (``stale_running_hours`` only feeds
+            # new-submission supersede). Narrowing the terminal set trades a
+            # missed run for a potential double run and needs its own
+            # recovery-contract PR with idempotency proof; it must not be a
+            # tail-end edit of this hardening branch.
+            while True:
+                with self._session_factory() as session:
+                    intent = aliased(AuditLogORM, name="connector_job_intent")
+                    terminal = aliased(AuditLogORM, name="connector_job_terminal")
+                    terminal_action = terminal.details["action"].as_string()
+                    terminal_exists = (
+                        select(terminal.id)
+                        .where(
+                            terminal.tenant_id == intent.tenant_id,
+                            terminal.event_type == AuditEventType.CONNECTOR_JOB_RUN.value,
+                            terminal.request_id == intent.request_id,
+                            terminal_action.in_(_JOB_RECOVERY_TERMINAL_ACTIONS),
+                        )
+                        .exists()
+                    )
+                    intent_statement = self._recovery_intent_statement(
+                        tenant_id=tenant_id,
+                        intent=intent,
+                        terminal_exists=terminal_exists,
+                        dialect=session.get_bind().dialect.name,
+                    )
+                    # app_tenant cannot lock audit_logs; use the sanctioned
+                    # platform lane for the bounded lock acquisition, then
+                    # retain those exact locks through the batch commit.
+                    with platform_lane(session):
+                        intents = list(session.scalars(intent_statement).all())
+                    if not intents:
+                        session.rollback()
+                        return recovered
+
+                    sink = PlatformLaneAuditSink(session, tenant_id=tenant_id)
+                    recovered_request_ids: set[str] = set()
+                    for intent_row in intents:
+                        request_id = intent_row.request_id
+                        if request_id is None:
+                            # Defensive parity with the SQL predicate: a row
+                            # without correlation cannot be recovered safely.
+                            continue
+                        if request_id in recovered_request_ids:
+                            # FIX: Historical audit rows predate the stable
+                            # lifecycle contract and may contain duplicate
+                            # submissions. Reconcile one logical request once;
+                            # the committed terminal edge excludes every copy
+                            # from subsequent batches without deleting audit.
+                            continue
+                        recovered_request_ids.add(request_id)
+                        self._record_recovered_intent(
+                            sink=sink,
+                            tenant_id=tenant_id,
+                            intent_row=intent_row,
+                            request_id=request_id,
+                        )
+                    session.commit()
+                    recovered += len(recovered_request_ids)
+        finally:
+            TENANT_CTX.reset(token)
+
+    def _audit_pending_on_shutdown(self, deadline: float) -> tuple[list[Future], bool]:
+        """Audit cancelled queued jobs; return non-cancelled futures still draining.
 
         Called deterministically from :meth:`close` *after*
-        ``ThreadPoolExecutor.shutdown(cancel_futures=True)`` has run. A
-        future that is ``cancelled()`` was queued but never started; it will
-        never run and therefore never writes its own lifecycle audit. A
-        running or completed future is left alone -- it (or its worker) owns
-        the audit trail.
-
-        A ``_SlotReservation`` still live when this runs is audited only if
-        its ``after_commit`` hook already marked it committed — proof the
-        request transaction committed and the client holds (or held) a 202.
-        An UNMARKED leftover belongs to a transaction that is still open or
-        was rolled back; auditing it would write a phantom failure row for a
-        job that was never accepted, so it is dropped without a row. If a
-        marked reservation's hook fires after this sweep, its queue call is
-        skipped by the ``_shutdown_audited`` dedupe — one job, one failure
-        row.
-
-        Delivery goes through the same tracked last-chance writers as the
-        post-close queue path, NOT a synchronous call: a pausing hook can
-        still be holding the committing request's pooled connection (SQLite's
-        one-slot pool makes a synchronous write here a guaranteed
-        pool_timeout), and a writer's checkout simply waits for the release.
-        A delivery that still fails releases its claim so a late same-key
-        submission can retry rather than being deduped into silence.
+        ``ThreadPoolExecutor.shutdown(cancel_futures=True)`` has run, with the
+        close deadline (a ``time.monotonic()`` instant) this phase must
+        respect. A future that is ``cancelled()`` was queued but never
+        started; it will never run and therefore never writes its own
+        lifecycle audit. Futures that remain non-cancelled after shutdown
+        (including ones that started between a pre-shutdown snapshot and
+        ``shutdown()``) are returned so ``close()`` can wait on them. Any
+        ``_SlotReservation`` is dropped from memory; if its acceptance commit
+        already landed, startup recovery closes its durable intent rather than
+        relying on this in-process registry.
 
         The registry is cleared because no new work can be accepted after
         shutdown; running futures will deregister harmlessly when they finish.
         """
-        # The registry clear, the committed check, and the audited-mark all
-        # happen inside one critical section (self._lock -> self._audit_lock;
-        # the queue path only ever takes _audit_lock, so there is no cycle).
-        # A late after_commit queue call either ran before this (its own row
-        # is the only one) or runs after (the key is already marked and the
-        # call is skipped) — never two failure rows for one job.
         with self._lock:
             entries = list(self._registry.items())
             self._registry.clear()
-            cancelled: list[tuple[_JobKey, ConnectorJobActor]] = []
-            for job_key, entry in entries:
-                if isinstance(entry, _SlotReservation):
-                    if job_key in self._committed:
-                        cancelled.append((job_key, entry.actor_identity))
-                    continue
-                if not isinstance(entry, _ActiveJob):
-                    continue
-                if not entry.future.cancelled():
-                    continue
-                cancelled.append((job_key, entry.actor_identity))
-            with self._audit_lock:
-                for job_key, _actor in cancelled:
-                    self._shutdown_audited.add(job_key)
 
-        for job_key, actor_identity in cancelled:
+        cancelled: list[tuple[_JobKey, ConnectorJobActor, UUID]] = []
+        running_futures: list[Future] = []
+        for job_key, entry in entries:
+            if not isinstance(entry, _ActiveJob):
+                continue
+            if entry.future.cancelled():
+                cancelled.append((job_key, entry.actor_identity, entry.job_id))
+            elif not entry.future.done():
+                running_futures.append(entry.future)
+
+        # FIX(codex round-23 P2): bounded, on a daemon thread -- see
+        # _audit_cancelled_within_budget. A cancelled-at-shutdown GROUP-SYNC
+        # job is audited by this same pull-shaped path, on purpose: its key
+        # carries connector_key ``cms_group_sync`` and report_month ``-``,
+        # so the row stays fully attributable, and ``job_failed_before_start``
+        # + ``ExecutorShutdown`` honestly describe a job that never ran.
+        audits_durable = self._audit_cancelled_within_budget(cancelled, deadline=deadline)
+        return running_futures, audits_durable
+
+    def _write_shutdown_audits(
+        self, cancelled: list[tuple[_JobKey, ConnectorJobActor, UUID]]
+    ) -> bool:
+        """Write every cancelled-job audit; runs on the bounded audit thread.
+
+        Each row keeps the shared ``job_failed_before_start`` /
+        ``ExecutorShutdown`` taxonomy: a job the pool cancelled before it ran
+        never started, so re-tagging it with a run-time failure class would
+        mislabel it.
+        """
+        durable = True
+        for job_key, actor_identity, job_id in cancelled:
             tenant_id, connector_key, account_id, report_month = job_key
-            # A cancelled-at-shutdown GROUP-SYNC job is audited by this SAME
-            # pull-shaped path, on purpose. Its key carries connector_key
-            # ``cms_group_sync`` and report_month ``-``, so the emitted row is
-            # fully attributable to the sync job via its connector-key-bearing
-            # entity_id + scope and the month sentinel; and
-            # ``action="job_failed_before_start"`` + ``error_class="ExecutorShutdown"``
-            # honestly describes a job the pool cancelled before it ran. It is
-            # NOT a run-time failure, so re-tagging it with the sync taxonomy's
-            # ``group_sync_job_failed`` (credential/fetch/conflict) would
-            # mislabel a job that never started. Kind-awareness here would fork a
-            # near-identical audit for zero governance gain, so the shared row
-            # stays.
-            self._start_last_chance_writer(
-                key=job_key,
-                tenant_id=tenant_id,
-                connector_key=connector_key,
-                account_id=account_id,
-                report_month=report_month,
-                error_class="ExecutorShutdown",
-                actor_identity=actor_identity,
+            durable = (
+                self._audit_failed_before_start(
+                    tenant_id=tenant_id,
+                    connector_key=connector_key,
+                    account_id=account_id,
+                    report_month=report_month,
+                    error_class="ExecutorShutdown",
+                    actor_identity=actor_identity,
+                    job_id=job_id,
+                )
+                and durable
             )
+        return durable
+
+    def _audit_cancelled_within_budget(
+        self, cancelled: list[tuple[_JobKey, ConnectorJobActor, UUID]], *, deadline: float
+    ) -> bool:
+        """Audit cancelled jobs under a hard budget (codex round-23 P2).
+
+        The writes run on a daemon thread joined for at most
+        ``min(SHUTDOWN_AUDIT_BUDGET_SECONDS, deadline - now)`` seconds, where
+        ``deadline`` is the single close() deadline (round-28 P1: the audit
+        join can never push the total close past CLOSE_DRAIN_TIMEOUT_SECONDS,
+        and the timeout is floored at zero once the deadline is spent). A
+        write blocked on the shared connection -- e.g. a hung SQLite worker
+        still holds the one-slot QueuePool connection -- therefore delays
+        shutdown by at most the remaining budget instead of unboundedly; the
+        drain's own bounded wait is reached either way, and abandoned audits
+        are logged loudly rather than silently skipped.
+        """
+        if not cancelled:
+            return True
+        audit_budget = min(
+            SHUTDOWN_AUDIT_BUDGET_SECONDS,
+            max(0.0, deadline - time.monotonic()),
+        )
+        result = {"durable": False}
+
+        def _write_and_capture() -> None:
+            """Capture whether every immediate audit transaction committed."""
+            result["durable"] = self._write_shutdown_audits(cancelled)
+
+        audit_thread = threading.Thread(
+            target=_write_and_capture,
+            name="executor-shutdown-audits",
+            daemon=True,
+        )
+        # FIX: Retain the daemon thread and its result after the bounded join.
+        # The previous local-only reference let a timed-out close forget an
+        # in-flight audit and falsely report a later close as clean.
+        self._shutdown_audit_tasks.append(_ShutdownAuditTask(thread=audit_thread, result=result))
+        audit_thread.start()
+        audit_thread.join(timeout=audit_budget)
+        if audit_thread.is_alive():
+            logger.error(
+                "Executor shutdown audit writes did not finish within %.0fs; "
+                "%d cancelled job(s) lack an immediate ExecutorShutdown audit "
+                "row; their durable submission intents will be reconciled at "
+                "next startup (a blocked audit session cannot hold the close "
+                "deadline hostage).",
+                audit_budget,
+                len(cancelled),
+            )
+            return False
+        return result["durable"]
 
     def _run_job(
         self,
@@ -842,6 +1179,7 @@ class ConnectorJobExecutor:
         dry_run: bool,
         triggered_by_user_id: UUID | None,
         actor_identity: ConnectorJobActor,
+        job_id: UUID | None = None,
     ) -> None:
         """Worker body: own session -> tenant context -> run_one; fail-closed."""
         key = (tenant_id, connector_key, account_id, report_month)
@@ -851,6 +1189,20 @@ class ConnectorJobExecutor:
                 self._session_factory() as session,
                 connector_tenant_context(tenant_id, session=session),
             ):
+                if job_id is not None:
+                    dispatch_claimed = self._record_dispatch_started(
+                        session=session,
+                        tenant_id=tenant_id,
+                        connector_key=connector_key,
+                        account_id=account_id,
+                        report_month=report_month,
+                        actor_identity=actor_identity,
+                        job_id=job_id,
+                    )
+                    if not dispatch_claimed:
+                        session.rollback()
+                        return
+                    session.commit()
                 outcome = run_one(
                     session,
                     tenant_id=tenant_id,
@@ -874,6 +1226,7 @@ class ConnectorJobExecutor:
                     report_month=report_month,
                     outcome=outcome,
                     actor_identity=actor_identity,
+                    job_id=job_id,
                 )
         except GoogleConnectorError as exc:
             # FIX: ConnectorServicePrincipalUnavailableError is a
@@ -882,10 +1235,14 @@ class ConnectorJobExecutor:
             # path raised ValueError and was swallowed by the catch-all
             # branch below, leaving a 202 with no run row, no failure
             # audit, and no operator-visible reason the job never started.
-            logger.exception(
-                "Connector job failed before start (tenant=%s connector=%s)",
+            # FIX: Expected Google failures are operational outcomes, not
+            # programming faults. Their text/tracebacks can contain signed
+            # URLs and credential headers, so log only a fixed category.
+            logger.error(
+                "Connector job failed (tenant=%s connector=%s failure_category=%s)",
                 tenant_id,
                 connector_key,
+                _expected_failure_category(exc),
             )
             self._audit_failed_before_start(
                 tenant_id=tenant_id,
@@ -894,6 +1251,7 @@ class ConnectorJobExecutor:
                 report_month=report_month,
                 error_class=type(exc).__name__,
                 actor_identity=actor_identity,
+                job_id=job_id,
             )
         except Exception:  # noqa: BLE001 — fail-closed: never escape the thread
             logger.exception(
@@ -910,6 +1268,7 @@ class ConnectorJobExecutor:
         tenant_id: UUID,
         content_owner_id: str,
         actor_identity: ConnectorJobActor,
+        job_id: UUID | None = None,
     ) -> None:
         """Worker body for a scheduled CMS group sync: own session -> tenant -> sync.
 
@@ -939,6 +1298,20 @@ class ConnectorJobExecutor:
                 # GoogleConnectorError), which the failure catch below audits as
                 # a pre-start failure -- never a swallowed ValueError.
                 actor = self._build_group_sync_actor(tenant_id=tenant_id)
+                if job_id is not None:
+                    dispatch_claimed = self._record_dispatch_started(
+                        session=session,
+                        tenant_id=tenant_id,
+                        connector_key=GROUP_SYNC_JOB_CONNECTOR_SLUG,
+                        account_id=content_owner_id,
+                        report_month=GROUP_SYNC_JOB_MONTH,
+                        actor_identity=actor_identity,
+                        job_id=job_id,
+                    )
+                    if not dispatch_claimed:
+                        session.rollback()
+                        return
+                    session.commit()
                 # The SAME SQL stores + atomic sink the api dependencies build,
                 # imported directly (connectors.runs must never import api.*). One
                 # sink on this one session so the per-group GROUP_UPDATED rows and
@@ -977,22 +1350,28 @@ class ConnectorJobExecutor:
             ChannelGroupConflictError,
             ChannelGroupOwnerReassignmentError,
         ) as exc:
-            logger.exception(
-                "Scheduled group sync failed (tenant=%s owner=%s)",
+            # FIX: Do not render typed upstream failures or their chained
+            # causes. GroupSyncFetchError preserves the Google HTTP cause,
+            # which can contain X-Goog-Credential/X-Goog-Signature values.
+            logger.error(
+                "Scheduled group sync failed (tenant=%s failure_category=%s)",
                 tenant_id,
-                content_owner_id,
+                _expected_failure_category(exc),
             )
             self._audit_group_sync_failure(
                 tenant_id=tenant_id,
                 content_owner_id=content_owner_id,
                 error_class=type(exc).__name__,
                 actor_identity=actor_identity,
+                job_id=job_id,
             )
-        except Exception:  # noqa: BLE001 — fail-closed: never escape the thread
+        except Exception as unexpected_error:
+            # Worker boundary: typed Google/group failures are handled above;
+            # anything else must stay inside the thread so the pool keeps running.
             logger.exception(
-                "Scheduled group sync worker raised (tenant=%s owner=%s)",
+                "Scheduled group sync worker raised (tenant=%s error_class=%s)",
                 tenant_id,
-                content_owner_id,
+                type(unexpected_error).__name__,
             )
         finally:
             self._deregister(key)
@@ -1028,9 +1407,9 @@ class ConnectorJobExecutor:
             if outcome != GroupSyncOutcome.UNCHANGED.value
         )
         if not changed:
-            logger.info(
-                "Scheduled group sync converged with no changes (owner=%s)", content_owner_id
-            )
+            # FIX: Do not log raw content_owner_id at INFO (retained Docker logs);
+            # audit details still carry the identifier when the apply changes state.
+            logger.info("Scheduled group sync converged with no changes")
             return
         record_audit_event(
             sink=sink,
@@ -1093,7 +1472,8 @@ class ConnectorJobExecutor:
         content_owner_id: str,
         error_class: str,
         actor_identity: ConnectorJobActor,
-    ) -> None:
+        job_id: UUID | None = None,
+    ) -> bool:
         """Write ONE CONNECTOR_JOB_RUN group_sync_job_failed row, fresh session.
 
         A sibling of :meth:`_audit_failed_before_start` with the SAME mechanics
@@ -1139,125 +1519,42 @@ class ConnectorJobExecutor:
                         entity_id=f"{GROUP_SYNC_JOB_CONNECTOR_SLUG}:{content_owner_id}",
                         scope=AccessScope.connector(GROUP_SYNC_JOB_CONNECTOR_SLUG),
                         reason="scheduled group sync failed",
+                        request_id=str(job_id) if job_id is not None else None,
                         details={
-                            "action": "group_sync_job_failed",
+                            "action": _JOB_ACTION_GROUP_SYNC_FAILED,
                             "content_owner_id": content_owner_id,
                             "error_class": error_class,
                         },
                     )
                     session.commit()
+            return True
         except Exception:  # noqa: BLE001 — best-effort audit, never escape
             logger.exception(
                 "Failed to persist group_sync_job_failed audit (tenant=%s)",
                 tenant_id,
             )
+            return False
         finally:
             if token is not None:
                 TENANT_CTX.reset(token)
 
     # ========================================================================
-    # Purpose: Queue a route-level activation-failure audit on the tracked
-    #   single-worker pool so the committing request never waits on a session
-    #   checkout inside after_commit.
-    # Database/ORM: audit_logs write deferred to _audit_failed_before_start on
-    #   the audit worker's own session (platform_lane elevation).
-    # Standards: accepting-flag + lock serialize submissions against close();
-    #   submissions already claimed by the shutdown sweep are skipped; a
-    #   refused submit or post-close submission is handed to a tracked
-    #   last-chance non-daemon writer — never raised into the request
-    #   lifecycle, and a failed delivery releases the claim for retry.
+    # Purpose: Public entry point for a connector job's activation-failure
+    #   audit — writes ONE ``job_failed_before_start`` row on a fresh session
+    #   so the failed dispatch is durable even when the worker never ran.
+    # Database/ORM: delegates to _audit_failed_before_start (audit_logs INSERT
+    #   via SqlAlchemyAuditSink under platform_lane + statement bounds).
+    # Standards: synchronous by design — every caller invokes it only AFTER
+    #   the request/scheduler session released its checkout (route hooks run
+    #   on after_transaction_end; the scheduler calls it post-commit), so the
+    #   fresh-session write can never block on a held pooled connection.
     # Blast Radius: Audit completeness for accepted connector jobs only.
     # Connections:
-    #   - File: backend/ums_smart_revenue/api/connectors.py -> after_commit
-    #     hook is the sole caller.
-    # ========================================================================
-    def queue_failed_start_audit(
-        self,
-        *,
-        tenant_id: UUID,
-        connector_key: str,
-        account_id: str,
-        report_month: str,
-        error_class: str,
-        actor_identity: ConnectorJobActor,
-    ) -> None:
-        """Deliver a ``job_failed_before_start`` audit through the live path.
-
-        Called from the route's ``after_commit`` hook when ``activate()``
-        raises. Three distinct delivery paths, in order:
-
-        1. While ``close()`` is still accepting, the audit is queued on the
-           tracked audit worker whose session checkout happens OFF the
-           request lifecycle — on SQLite the committing request session
-           still holds the engine's only pooled connection inside
-           ``after_commit``, so a synchronous audit would wait out
-           ``pool_timeout`` and drop the row; on PostgreSQL a saturated pool
-           produces the same stall under concurrent failures. ``close()``
-           drains this pool with ``wait=True`` so an in-flight audit
-           outlives the shutdown that triggered it. If the submit itself is
-           refused (a pool rejecting mid-teardown), the call falls through
-           to the last-chance writer — a lost schedule never means a lost
-           row.
-        2. If the shutdown sweep already claimed this job's failure row, the
-           call is skipped — one job, one row. A claim whose delivery failed
-           is released by the writer, so this dedupe never strands a retry.
-        3. After the audit pool closed (a request that committed past the
-           grace window), a tracked NON-daemon writer runs the write itself:
-           its checkout is not bound to this hook, so it simply waits for
-           the request session's release and persists the row.
-        """
-        key = (tenant_id, connector_key, account_id, report_month)
-        with self._audit_lock:
-            if key in self._shutdown_audited:
-                # close() already claimed this job's failure row.
-                return
-            if self._audit_accepting:
-                try:
-                    self._audit_executor.submit(
-                        self._audit_failed_before_start,
-                        tenant_id=tenant_id,
-                        connector_key=connector_key,
-                        account_id=account_id,
-                        report_month=report_month,
-                        error_class=error_class,
-                        actor_identity=actor_identity,
-                    )
-                    return
-                except Exception:  # noqa: BLE001 — best-effort, never escape
-                    # The reservation is already deregistered, so no sweep can
-                    # recover this job — claim it and fall through to the
-                    # last-chance writer rather than dropping the only
-                    # lifecycle edge.
-                    logger.exception(
-                        "Failed to queue job_failed_before_start audit "
-                        "(tenant=%s); falling back to last-chance writer",
-                        tenant_id,
-                    )
-            # Claim the fallback inside the lock so a second call for this
-            # job cannot double-write; the writer releases the claim if its
-            # delivery fails.
-            self._shutdown_audited.add(key)
-        self._start_last_chance_writer(
-            key=key,
-            tenant_id=tenant_id,
-            connector_key=connector_key,
-            account_id=account_id,
-            report_month=report_month,
-            error_class=error_class,
-            actor_identity=actor_identity,
-        )
-
-    # ========================================================================
-    # Purpose: Backward-compatible alias for the published public hook —
-    #   external callers and the documented contract keep working while the
-    #   queued delivery path owns the semantics.
-    # Database/ORM: None — delegates to queue_failed_start_audit.
-    # Standards: emits DeprecationWarning; same signature as
-    #   queue_failed_start_audit so call sites migrate by rename only.
-    # Blast Radius: Audit completeness — deprecated path preserves delivery.
-    # Connections:
+    #   - File: backend/ums_smart_revenue/api/connectors.py -> lifecycle hook.
+    #   - File: backend/ums_smart_revenue/connectors/runs/scheduler.py ->
+    #     activation-failure path.
     #   - File: backend/ums_smart_revenue/connectors/runs/executor.py ->
-    #     queue_failed_start_audit is the live entry point.
+    #     _write_shutdown_audits + recovery reuse it for the shared taxonomy.
     # ========================================================================
     def audit_failed_before_start(
         self,
@@ -1268,134 +1565,18 @@ class ConnectorJobExecutor:
         report_month: str,
         error_class: str,
         actor_identity: ConnectorJobActor,
-    ) -> None:
-        """Deprecated alias for :meth:`queue_failed_start_audit`.
-
-        .. deprecated:: Use ``queue_failed_start_audit`` — the audit is
-           delivered through the tracked pool (or the last-chance writer
-           after close), never synchronously on the caller's thread.
-        """
-        warnings.warn(
-            "audit_failed_before_start is deprecated; use "
-            "queue_failed_start_audit",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        self.queue_failed_start_audit(
+        job_id: UUID | None = None,
+    ) -> bool:
+        """Public hook for post-checkout activation-failure audits."""
+        return self._audit_failed_before_start(
             tenant_id=tenant_id,
             connector_key=connector_key,
             account_id=account_id,
             report_month=report_month,
             error_class=error_class,
             actor_identity=actor_identity,
+            job_id=job_id,
         )
-
-    # ========================================================================
-    # Purpose: Spawn+track one non-daemon last-chance writer for a failure
-    #   audit whose claim is already recorded in _shutdown_audited.
-    # Database/ORM: the writer's own session writes audit_logs; this helper
-    #   only manages thread lifecycle.
-    # Standards: register + start are atomic under _lock (an unstarted thread
-    #   in the set would make a joining close() raise RuntimeError); a failed
-    #   start releases the claim so the row stays retryable instead of being
-    #   recorded as delivered.
-    # Blast Radius: Audit completeness for accepted jobs at shutdown.
-    # Connections:
-    #   - File: backend/ums_smart_revenue/connectors/runs/executor.py ->
-    #     queue_failed_start_audit + the shutdown sweep are the callers.
-    # ========================================================================
-    def _start_last_chance_writer(
-        self,
-        *,
-        key: _JobKey,
-        tenant_id: UUID,
-        connector_key: str,
-        account_id: str,
-        report_month: str,
-        error_class: str,
-        actor_identity: ConnectorJobActor,
-    ) -> None:
-        """Register and start a tracked non-daemon writer for a claimed key."""
-        writer = threading.Thread(
-            target=self._last_chance_write,
-            kwargs={
-                "tenant_id": tenant_id,
-                "connector_key": connector_key,
-                "account_id": account_id,
-                "report_month": report_month,
-                "error_class": error_class,
-                "actor_identity": actor_identity,
-            },
-            daemon=False,
-        )
-        # Register + start atomically under _lock: close()/_shutdown_pools
-        # snapshot the set and join, and a thread present but unstarted
-        # would make join() raise RuntimeError mid-teardown.
-        with self._lock:
-            self._last_chance_writers.add(writer)
-            try:
-                writer.start()
-            except Exception:  # noqa: BLE001 — best-effort, never escape
-                self._last_chance_writers.discard(writer)
-                # Nothing is in flight for this key — release the claim so a
-                # later same-key submission can still deliver the row
-                # (_lock -> _audit_lock matches the sweep's order).
-                with self._audit_lock:
-                    self._shutdown_audited.discard(key)
-                logger.exception(
-                    "Failed to spawn last-chance job_failed_before_start "
-                    "audit writer (tenant=%s)",
-                    tenant_id,
-                )
-
-    # ========================================================================
-    # Purpose: Run one post-close failure audit on a tracked non-daemon
-    #   thread — the last-chance path for hooks that outlive close().
-    # Database/ORM: audit_logs via _audit_failed_before_start's own session.
-    # Standards: bounded by pool_timeout on its session checkout; always
-    #   removes itself from _last_chance_writers so close()/finalizer joins
-    #   see only live writers.
-    # Blast Radius: Audit completeness for accepted jobs at shutdown.
-    # Connections:
-    #   - File: backend/ums_smart_revenue/connectors/runs/executor.py ->
-    #     queue_failed_start_audit spawns it; close()/_shutdown_pools join it.
-    # ========================================================================
-    def _last_chance_write(
-        self,
-        *,
-        tenant_id: UUID,
-        connector_key: str,
-        account_id: str,
-        report_month: str,
-        error_class: str,
-        actor_identity: ConnectorJobActor,
-    ) -> None:
-        """Write one post-close audit, then release the tracking entry."""
-        try:
-            # The claim is released inside the write itself on failure —
-            # release_claim tells _audit_failed_before_start which
-            # _shutdown_audited key this delivery is responsible for.
-            self._audit_failed_before_start(
-                tenant_id=tenant_id,
-                connector_key=connector_key,
-                account_id=account_id,
-                report_month=report_month,
-                error_class=error_class,
-                actor_identity=actor_identity,
-                release_claim=(
-                    tenant_id,
-                    connector_key,
-                    account_id,
-                    report_month,
-                ),
-            )
-        except Exception:  # noqa: BLE001 — best-effort audit, never escape
-            logger.exception(
-                "Last-chance job_failed_before_start audit write failed"
-            )
-        finally:
-            with self._lock:
-                self._last_chance_writers.discard(threading.current_thread())
 
     # ========================================================================
     # Purpose: Write ONE CONNECTOR_JOB_RUN job_failed_before_start row through
@@ -1411,6 +1592,8 @@ class ConnectorJobExecutor:
     # Blast Radius: Audit completeness for accepted connector jobs.
     # Connections:
     #   - File: backend/ums_smart_revenue/api/connectors.py -> hook path.
+    #   - File: backend/ums_smart_revenue/connectors/runs/scheduler.py ->
+    #     activation-failure + recovery callers.
     #   - File: backend/ums_smart_revenue/db/session.py -> bounds adapter.
     # ========================================================================
     def _audit_failed_before_start(
@@ -1422,15 +1605,9 @@ class ConnectorJobExecutor:
         report_month: str,
         error_class: str,
         actor_identity: ConnectorJobActor,
-        release_claim: _JobKey | None = None,
-    ) -> None:
+        job_id: UUID | None = None,
+    ) -> bool:
         """Write ONE CONNECTOR_JOB_RUN job_failed_before_start row, fresh session.
-
-        When ``release_claim`` names a key already recorded in
-        ``_shutdown_audited`` (the sweep and last-chance writer paths claim
-        before delivering), a failed write discards that claim so a later
-        same-key submission stays retryable instead of being deduped into a
-        lost row. A successful write keeps the claim as the dedupe mark.
 
         Intentionally does NOT re-enter ``connector_tenant_context()``: a
         pre-start failure can be caused by an inactive/suspended/deleted tenant,
@@ -1485,18 +1662,27 @@ class ConnectorJobExecutor:
                 # those. The explicit call below re-asserts the same values
                 # for session factories that do not carry the hook.
                 session.info[_STATEMENT_BOUNDS_KEY] = _AUDIT_STATEMENT_BOUNDS
+                if job_id is not None:
+                    existing_actions = self._lock_job_lifecycle_actions(
+                        session=session,
+                        tenant_id=tenant_id,
+                        job_id=job_id,
+                    )
+                    if existing_actions & _JOB_RECOVERY_TERMINAL_ACTIONS:
+                        # FIX: Any committed terminal edge — dispatch_started,
+                        # a group_sync_job_failed pre-dispatch row, or an
+                        # earlier failed_before_start — already closed this
+                        # submission; a second failure row would double-audit
+                        # one job.
+                        session.rollback()
+                        return True
+                # audit_logs is platform-only-write: elevate to app_platform for
+                # this standalone audit (run_one does its own elevation; this
+                # audit runs OUTSIDE run_one). No-op off Postgres.
                 with platform_lane(session):
-                    # Bound every blocking point so a last-chance writer can
-                    # never stall interpreter exit — checkout is bounded by
-                    # pool_timeout + keepalive dead-peer detection on the
-                    # engine; these cap lock waits and statement runtime
-                    # inside the transaction.
                     apply_statement_bounds(
                         session, lock_timeout="10s", statement_timeout="10s"
                     )
-                    # audit_logs is platform-only-write: elevate to app_platform
-                    # for this standalone audit (run_one does its own elevation;
-                    # this audit runs OUTSIDE run_one). No-op off Postgres.
                     sink = SqlAlchemyAuditSink(session, tenant_id=tenant_id)
                     record_audit_event(
                         sink=sink,
@@ -1506,24 +1692,21 @@ class ConnectorJobExecutor:
                         entity_id=f"{connector_key}:{account_id}",
                         scope=AccessScope.connector(connector_key),
                         reason="connector job failed before start",
+                        request_id=str(job_id) if job_id is not None else None,
                         details={
-                            "action": "job_failed_before_start",
+                            "action": _JOB_ACTION_FAILED_BEFORE_START,
                             "report_month": report_month,
                             "error_class": error_class,
                         },
                     )
                     session.commit()
+            return True
         except Exception:  # noqa: BLE001 — best-effort audit, never escape
             logger.exception(
                 "Failed to persist job_failed_before_start audit (tenant=%s)",
                 tenant_id,
             )
-            if release_claim is not None:
-                # The claim must not outlive a failed delivery: release it
-                # so a later same-key submission is not deduped into a lost
-                # row.
-                with self._audit_lock:
-                    self._shutdown_audited.discard(release_claim)
+            return False
         finally:
             if token is not None:
                 TENANT_CTX.reset(token)
@@ -1537,6 +1720,7 @@ class ConnectorJobExecutor:
         report_month: str,
         outcome: ConnectorRunOutcome,
         actor_identity: ConnectorJobActor,
+        job_id: UUID | None = None,
     ) -> None:
         """Write ONE CONNECTOR_JOB_RUN job_dry_run_completed row, fresh session.
 
@@ -1570,6 +1754,7 @@ class ConnectorJobExecutor:
                     entity_id=f"{connector_key}:{account_id}",
                     scope=AccessScope.connector(connector_key),
                     reason="connector dry-run completed",
+                    request_id=str(job_id) if job_id is not None else None,
                     details={
                         "action": "job_dry_run_completed",
                         "report_month": report_month,

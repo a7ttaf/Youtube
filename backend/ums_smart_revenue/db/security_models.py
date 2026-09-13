@@ -24,8 +24,6 @@ from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
 class SecurityBase(DeclarativeBase):
     """Declarative base for authorization and audit SQL tables."""
 
-    pass
-
 
 # Shared ``server_default`` text expression for the ``tenant_id`` column
 # added by migration 20260517_0001. Sourcing it from a single constant
@@ -382,6 +380,15 @@ class AuditLogORM(SecurityBase):
         Index("ix_audit_logs_event_created", "event_type", "created_at"),
         Index("ix_audit_logs_entity", "entity_type", "entity_id"),
         Index("ix_audit_logs_tenant_id", "tenant_id"),
+        # Connector-job lifecycle lookups (dispatch claim, dedupe, startup
+        # recovery) filter on exactly this predicate tuple; without it each
+        # check scans the tenant's full audit history.
+        Index(
+            "ix_audit_logs_tenant_event_request",
+            "tenant_id",
+            "event_type",
+            "request_id",
+        ),
     )
 
 

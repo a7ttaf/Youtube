@@ -12,6 +12,7 @@ import sqlalchemy as sa
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from ums_smart_revenue.config.logging_config import redact_sensitive_text
 from ums_smart_revenue.db.connector_models import (
     ConnectorRunORM,
     ConnectorRunRawFileORM,
@@ -62,8 +63,8 @@ class ConnectorRunEntry:
             "finished_at": (self.finished_at.isoformat() if self.finished_at is not None else None),
             "status": self.status,
             "counts": dict(self.counts),
-            # FIX: Keep the raw DB value internal and redact locators before
-            # exposing run-history summaries through the API boundary.
+            # FIX: Keep any legacy raw DB value internal and redact secrets,
+            # locators, and control characters at the API boundary.
             "error_summary": _sanitize_error_summary(self.error_summary),
         }
 
@@ -173,9 +174,11 @@ def link_raw_file(
 
 # ============================================================================
 # Purpose: Transition a RUNNING connector run to a terminal status with final
-#          fixed-shape counts and a bounded operator-safe error summary.
+#          fixed-shape counts and a bounded, redacted operator-safe summary.
 # Database/ORM: ConnectorRunORM.
-# Standards: Only terminal statuses accepted; no commit ownership.
+# Standards: Only terminal statuses accepted; summary secrets/control
+#            characters/locators are scrubbed before persistence; no commit
+#            ownership.
 # Blast Radius: Audit/operator run tracking only. Finance facts untouched.
 # Connections:
 #   - File: backend/ums_smart_revenue/connectors/runs/orchestrator.py -> future caller.
@@ -207,7 +210,7 @@ def finish_run(
     row.finished_at = datetime.now(UTC)
     row.counts_json = normalized_counts
     row.error_summary = (
-        error_summary[:ERROR_SUMMARY_MAX_CHARS] if error_summary is not None else None
+        _sanitize_error_summary(error_summary) if error_summary is not None else None
     )
     session.flush()
     return _to_entry(row)
@@ -222,9 +225,9 @@ def finish_run(
 #          emitted at finish_run time; the projection failure is recorded
 #          on the run row itself, not as a duplicate FINISHED edge).
 # Database/ORM: ConnectorRunORM (UPDATE status/error_summary only).
-# Standards: Tenant-scoped, run must be terminal, error_summary truncated to
-#            the schema's 500-char check. Preserves finished_at, counts_json,
-#            and the original FINISHED audit edge.
+# Standards: Tenant-scoped, run must be terminal, error_summary is redacted
+#            and truncated to the schema's 500-char check. Preserves
+#            finished_at, counts_json, and the original FINISHED audit edge.
 # Blast Radius: Connector run history (read surface only). Finance tables
 #               untouched; this does NOT roll back any already-written
 #               source rows. The downstream normalize stage will re-raise the
@@ -253,7 +256,7 @@ def record_projection_failure(
     if row.status == "RUNNING":
         raise ConnectorRunValidationError("connector run is still RUNNING; use finish_run instead")
     row.status = "FAILED"
-    row.error_summary = error_summary.strip()[:ERROR_SUMMARY_MAX_CHARS]
+    row.error_summary = _sanitize_error_summary(error_summary.strip())
     session.flush()
     return _to_entry(row)
 
@@ -577,19 +580,24 @@ def _to_entry(row: ConnectorRunORM) -> ConnectorRunEntry:
         finished_at=row.finished_at,
         status=row.status,
         counts=_normalize_counts_for_read(row.counts_json),
-        error_summary=row.error_summary,
+        error_summary=_sanitize_error_summary(row.error_summary),
     )
 
 
 def _sanitize_error_summary(error_summary: str | None) -> str | None:
-    """Redact internal locators from operator-facing connector error summaries."""
+    """Redact secrets, control characters, and internal locators from summaries."""
     if error_summary is None:
         return None
 
+    # FIX: Sanitize before persisting, not only when ``to_api`` is called. A
+    # connector exception can contain a bearer token or forged newline; the
+    # previous write path stored that raw text in connector_runs and relied on
+    # the API serializer to hide only URI/path-shaped fragments.
+    sanitized = redact_sensitive_text(error_summary)
     sanitized = re.sub(
         r"\bstorage_uri(?:=|: )\S+",
         "storage_uri=[redacted]",
-        error_summary,
+        sanitized,
     )
     sanitized = re.sub(
         r"\b[a-zA-Z][a-zA-Z0-9+.-]*://[^\s'\"<>]+",

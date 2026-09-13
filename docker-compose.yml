@@ -248,16 +248,13 @@ x-app-env: &app-env
   #     `app` then restart-loops, and the successful migration is a red
   #     herring pointing away from the actual cause.
   #
-  #     UMS_LOG_LEVEL is deliberately NOT forwarded and is not a setting of
-  #     this stack: nothing under backend/ reads it — no settings loader, no
-  #     logging-config consumer, `grep -rn UMS_LOG_LEVEL backend/` is empty.
-  #     An earlier revision of this comment described a process log-level
-  #     setting that is not implemented; forwarding the variable here would
-  #     advertise an ineffective configuration contract. The only log controls
-  #     that exist are UMS_LOG_MAX_SIZE / UMS_LOG_MAX_FILE in the x-logging anchor
-  #     at the top of this file, which size docker's json-file ROTATION (how
-  #     much log is kept on disk). If process-log verbosity is ever wanted,
-  #     implement the settings consumer first, then re-add the pass-through.
+  #     UMS_LOG_LEVEL IS forwarded as of P0-d: settings.py has a real
+  #     `_load_log_level()` parser and config/logging_config.py applies it as
+  #     the application verbosity knob (the earlier "nothing reads it" comment
+  #     described this exact gap). Docker's json-file ROTATION (UMS_LOG_MAX_SIZE
+  #     / UMS_LOG_MAX_FILE in the x-logging anchor above) remains a separate
+  #     control: verbosity is what gets written; rotation is what stays on disk.
+  UMS_LOG_LEVEL: ${UMS_LOG_LEVEL:-INFO}
   UMS_CONNECTOR_JOB_EXECUTOR_ENABLED:
   UMS_GOOGLE_CONNECTOR_SERVICE_ACTOR_ID:
   UMS_CONNECTOR_JOB_MAX_WORKERS:
@@ -443,7 +440,7 @@ services:
         bind:
           create_host_path: false
     healthcheck:
-      test: ["CMD", "curl", "--fail", "--silent", "http://localhost:8000/livez"]
+      test: ["CMD", "curl", "--fail", "--silent", "http://localhost:8000/readyz"]
       interval: 15s
       timeout: 4s
       retries: 5
@@ -525,6 +522,8 @@ services:
       - "0.0.0.0"
       - "--port"
       - "8000"
+      - "--timeout-graceful-shutdown"
+      - "10"
       - "--reload"
     # Same reasoning as `app` above — app-dev runs the same executor and
     # the same export path, so it needs the same window to finish a write.
