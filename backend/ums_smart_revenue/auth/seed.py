@@ -1,3 +1,18 @@
+# ============================================================================
+# Purpose: Canonical Python registry of role -> permission assignments used to
+#   seed the authorization catalog (ROLE_PERMISSIONS + row builders).
+# Database/ORM: Source-of-truth data consumed by migrations, security_seed.sql,
+#   and the frozen snapshot modules; no statements are emitted here.
+# Standards: Must stay synchronized with db/security_seed.sql and the current
+#   frozen snapshot; role keys restricted to each RoleDefinition's
+#   allowed_scope_types.
+# Blast Radius: Authorization catalog — a wrong pair grants or denies real
+#   access after the next seed/repair.
+# Connections:
+#   - File: backend/ums_smart_revenue/db/security_seed.sql -> raw SQL twin.
+#   - File: backend/ums_smart_revenue/db/frozen_security_catalog_20260825_0002.py
+#     -> current frozen snapshot.
+# ============================================================================
 from ums_smart_revenue.auth.permissions import Permission
 from ums_smart_revenue.auth.roles import RoleKey
 

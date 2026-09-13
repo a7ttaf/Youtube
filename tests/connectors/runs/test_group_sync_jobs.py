@@ -200,6 +200,7 @@ def resolves_ok(monkeypatch: pytest.MonkeyPatch) -> None:
     """
 
     def _resolver(**_kwargs: object) -> object:
+        """Stand-in credential resolver returning an opaque object."""
         return object()
 
     assert run_group_sync.__kwdefaults__ is not None
@@ -360,6 +361,7 @@ def test_worker_rolls_back_domain_and_audit_together_on_summary_failure(
     )
 
     def _boom_on_summary(*, event_type: AuditEventType, **kwargs: object) -> object:
+        """Raise on the summary audit event; pass all other events through."""
         if event_type is AuditEventType.GROUPS_SYNCED:
             raise RuntimeError("summary audit boom")
         return _real_record(event_type=event_type, **kwargs)  # type: ignore[arg-type]
@@ -569,6 +571,7 @@ def test_close_audits_queued_sync_job_with_before_start_row(
     started = threading.Event()
 
     def _slow_run_one(session: object, **kwargs: object) -> ConnectorRunOutcome:
+        """Simulate a slow per-report run so the sweep can be observed mid-flight."""
         started.set()
         time.sleep(0.5)
         return ConnectorRunOutcome(run=None, counts={}, per_report_failures=[])
@@ -680,8 +683,11 @@ def test_failure_audits_swallow_actor_construction_error(tmp_path: Path) -> None
                 error_class="GroupSyncFetchError",
                 actor_identity=ACTOR,
             )
-            # ... its pull-job sibling via the public after_commit hook ...
-            executor.audit_failed_before_start(
+            # ... its pull-job sibling via the live after_commit queue path:
+            # the audit task runs on the tracked pool and must swallow the
+            # same construction failure — drain the pool so the task has
+            # executed before asserting zero rows.
+            executor.queue_failed_start_audit(
                 tenant_id=TENANT,
                 connector_key="youtube_reporting",
                 account_id="acct-1",
@@ -689,6 +695,7 @@ def test_failure_audits_swallow_actor_construction_error(tmp_path: Path) -> None
                 error_class="ExecutorShutdown",
                 actor_identity=ACTOR,
             )
+            executor._audit_executor.shutdown(wait=True)
             # ... and the dry-run outcome writer: none may raise.
             executor._audit_dry_run_outcome(
                 tenant_id=TENANT,

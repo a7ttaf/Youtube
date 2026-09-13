@@ -90,7 +90,7 @@ def _make_database(tmp_path: Path, *, with_org_schema: bool = True) -> str:
     """Create a fresh SQLite database carrying the tenant/security/org schema.
 
     ``with_org_schema=False`` leaves ``org_units`` absent, which is how the
-    direct-ORM write in ``_ensure_org_unit`` is made to raise a real
+    repository write behind ``_ensure_org_unit`` is made to raise a real
     ``SQLAlchemyError`` without stubbing anything.
     """
     database_url = f"sqlite+pysqlite:///{(tmp_path / f'{uuid4()}.db').as_posix()}"
@@ -151,6 +151,13 @@ def _users(database_url: str) -> list[UserORM]:
             return list(session.scalars(select(UserORM).order_by(UserORM.email)).all())
     finally:
         engine.dispose()
+
+
+def _org_unit_deps() -> dict[str, Any]:
+    """Assemble the dependency map ``_ensure_org_unit`` needs for direct calls."""
+    from ums_smart_revenue.org.sql_org_units import ensure_org_unit_row
+
+    return {"ensure_org_unit_row": ensure_org_unit_row}
 
 
 def _org_units(database_url: str) -> list[OrgUnitORM]:
@@ -717,7 +724,7 @@ def test_org_unit_outcome_is_read_back_from_the_row_not_the_arguments(tmp_path, 
         with Session(engine) as session:
             outcome = module._ensure_org_unit(
                 session,
-                OrgUnitORM,
+                _org_unit_deps(),
                 unit_id=sector.id,
                 tenant_id=_TENANT_ID,
                 parent_id=uuid4(),
@@ -1598,7 +1605,7 @@ def test_ensure_org_unit_recovers_from_a_concurrent_deterministic_insert(tmp_pat
 
             outcome = module._ensure_org_unit(
                 session,
-                OrgUnitORM,
+                _org_unit_deps(),
                 unit_id=unit_id,
                 tenant_id=_TENANT_ID,
                 parent_id=None,
@@ -1668,7 +1675,7 @@ def test_ensure_org_unit_still_fails_closed_when_the_race_winner_is_drifted(tmp_
             with pytest.raises(ValueError) as raised:
                 module._ensure_org_unit(
                     session,
-                    OrgUnitORM,
+                    _org_unit_deps(),
                     unit_id=unit_id,
                     tenant_id=_TENANT_ID,
                     parent_id=None,

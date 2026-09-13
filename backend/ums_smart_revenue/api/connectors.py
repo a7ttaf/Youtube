@@ -1204,6 +1204,12 @@ def _reject_connector_job(
 # ============================================================================
 _AFTER_COMMIT_FLAG_KEY = object()
 _AFTER_ROLLBACK_FLAG_KEY = object()
+# Set on session.info once the reservation's OUTER transaction resolved —
+# SQLAlchemy fires after_commit/after_rollback for nested SAVEPOINT
+# transitions too, so the handlers below must (a) skip nested events and
+# (b) run their lifecycle action at most once across every transaction the
+# request session opens.
+_LIFECYCLE_RESOLVED_KEY = object()
 
 
 def _attach_after_rollback_hook(
@@ -1245,6 +1251,20 @@ def _enqueue_after_commit(
         session.info[_AFTER_COMMIT_FLAG_KEY] = True
 
 
+# ============================================================================
+# Purpose: Activate the reserved executor slot only after the route's audit
+#   commit lands; on activation failure, queue the job_failed_before_start
+#   audit on the executor's tracked audit worker.
+# Database/ORM: Reads nothing directly; the queued audit writes audit_logs on
+#   the audit worker's own session after the request connection releases.
+# Standards: best-effort — failures are cancelled, logged, and audited but
+#   never raised into the request lifecycle; audit submission happens off the
+#   committing session's pool slot.
+# Blast Radius: Connector run lifecycle + audit completeness for accepted 202s.
+# Connections:
+#   - File: backend/ums_smart_revenue/connectors/runs/executor.py ->
+#     activate / cancel_reservation / queue_failed_start_audit.
+# ============================================================================
 def _make_after_commit_handler(executor: ConnectorJobExecutor, reservation: _SlotReservation):
     """Return a hook that activates the reservation after the session commits.
 
@@ -1259,19 +1279,42 @@ def _make_after_commit_handler(executor: ConnectorJobExecutor, reservation: _Slo
 
     def _after_commit(_session: Session) -> None:
         """Activate the reservation, auditing a failure if activation raises."""
+        # after_commit fires for nested SAVEPOINT releases too — only the
+        # outermost commit may activate, and only once: a nested commit must
+        # not start the job while the outer transaction can still roll back,
+        # and a second outer commit must not re-enter activate() (which would
+        # raise into the failure-audit path and mint a phantom failure row
+        # for a job that is already running).
+        if _session.in_nested_transaction() or _session.info.get(
+            _LIFECYCLE_RESOLVED_KEY
+        ):
+            return
+        _session.info[_LIFECYCLE_RESOLVED_KEY] = True
+        # Bracket the whole hook: begin_post_commit proves the transaction
+        # committed (this hook can only run post-commit) and keeps close()'s
+        # audit gate open until the failure audit is queued — activate() pops
+        # the registry slot before the queue call, so the registry alone
+        # cannot cover that window. end_post_commit runs from finally so a
+        # raised path can never wedge the shutdown gate.
+        executor.begin_post_commit(reservation)
         try:
             executor.activate(reservation)
         except Exception as exc:  # noqa: BLE001 — best-effort, never raise
             executor.cancel_reservation(reservation)
             logger.exception("Failed to activate connector job reservation after commit")
             # Persist a job_failed_before_start audit row so the accepted
-            # 202 has a matching failure row. The original request session
-            # is already committed/closed, so this opens a fresh session
-            # via the executor's own Bucket-A helper. The audit is
-            # best-effort: any error here is logged and never raised
-            # into the request lifecycle.
+            # 202 has a matching failure row. Queue it on the executor's
+            # tracked audit worker rather than writing synchronously: inside
+            # after_commit the request session still holds its pooled
+            # connection, so a fresh-session audit here would block on
+            # pool_timeout (always on the one-slot SQLite engine, and under
+            # pool saturation on PostgreSQL) and then discard the row. The
+            # queued audit's checkout only waits for this session's imminent
+            # release, and executor.close() holds the pool open while any
+            # post-commit hook is in flight, then drains it — so the row is
+            # never lost on an untracked thread.
             try:
-                executor.audit_failed_before_start(
+                executor.queue_failed_start_audit(
                     tenant_id=reservation.tenant_id,
                     connector_key=reservation.connector_key,
                     account_id=reservation.account_id,
@@ -1280,7 +1323,11 @@ def _make_after_commit_handler(executor: ConnectorJobExecutor, reservation: _Slo
                     actor_identity=reservation.actor_identity,
                 )
             except Exception:  # noqa: BLE001 — best-effort audit
-                logger.exception("Failed to persist activation-failure audit for reservation")
+                logger.exception(
+                    "Failed to persist activation-failure audit for reservation"
+                )
+        finally:
+            executor.end_post_commit(reservation)
 
     return _after_commit
 
@@ -1290,6 +1337,14 @@ def _make_after_rollback_handler(executor: ConnectorJobExecutor, reservation: _S
 
     def _after_rollback(_session: Session) -> None:
         """Cancel the reservation so its slot is released."""
+        # Same guards as the commit side: a nested SAVEPOINT rollback must
+        # not cancel a reservation whose outer transaction can still commit,
+        # and the resolved flag keeps this strictly once-per-reservation.
+        if _session.in_nested_transaction() or _session.info.get(
+            _LIFECYCLE_RESOLVED_KEY
+        ):
+            return
+        _session.info[_LIFECYCLE_RESOLVED_KEY] = True
         executor.cancel_reservation(reservation)
 
     return _after_rollback

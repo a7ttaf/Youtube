@@ -21,6 +21,7 @@
 import hashlib
 import importlib.util
 import json
+import re
 from collections.abc import Iterable
 from pathlib import Path
 from types import ModuleType
@@ -86,14 +87,22 @@ REPAIR_MIGRATION_PATH = (
     / "20260825_0002_beta_operator_authorization_repair.py"
 )
 HISTORICAL_SNAPSHOT_PATH = PROJECT_ROOT / "backend/ums_smart_revenue/db/frozen_security_catalog.py"
+GATE_MIGRATION_PATH = (
+    PROJECT_ROOT
+    / "backend/ums_smart_revenue/db/alembic/versions/"
+    / "20260911_0001_beta_operator_rollback_gate.py"
+)
 SEED_SQL_PATH = PROJECT_ROOT / "backend/ums_smart_revenue/db/security_seed.sql"
 
-_HISTORICAL_MIGRATION_GIT_BLOB = "9df02500cdc0508da211ad51e5d3e0306a67771b"
-_HISTORICAL_MIGRATION_SHA256 = "01a93d377fa9b5c296daffbc0cc600a6949021fa53bddeae546ce7cb6b7766c5"
 # Repinned 2026-09-03: whitespace-only reformat of the frozen literal rows
 # (one key per line, <=100 cols) to clear analyzer line-length findings
 # pre-merge; the parsed catalog data is byte-for-data identical (verified
 # by ast comparison and the semantic digest assertions below).
+# Published history stays byte-pinned: the live-beta_operator downgrade guard
+# lives in the follow-up 20260911_0001 rollback-gate revision, never in an
+# in-place edit of these files.
+_HISTORICAL_MIGRATION_GIT_BLOB = "9df02500cdc0508da211ad51e5d3e0306a67771b"
+_HISTORICAL_MIGRATION_SHA256 = "01a93d377fa9b5c296daffbc0cc600a6949021fa53bddeae546ce7cb6b7766c5"
 _HISTORICAL_SNAPSHOT_GIT_BLOB = "0f7defa1748ebe1a0406bd59dc96567416be0297"
 _HISTORICAL_SNAPSHOT_SHA256 = "afe311d65396b0cdef58dbd73d907b58593ebd7eee28bb3970fe0db89faafef1"
 _HISTORICAL_SNAPSHOT_SEMANTIC_SHA256 = (
@@ -353,6 +362,11 @@ def _historical_migration_module() -> ModuleType:
 def _repair_migration_module() -> ModuleType:
     """Load the 20260825_0002 repair migration module without running it."""
     return _migration_module(REPAIR_MIGRATION_PATH, "m_20260825_0002")
+
+
+def _gate_migration_module() -> ModuleType:
+    """Load the 20260911_0001 rollback-gate migration module without running it."""
+    return _migration_module(GATE_MIGRATION_PATH, "m_20260911_0001")
 
 
 def _bind_operations(module: ModuleType, connection: Connection) -> None:
@@ -751,6 +765,98 @@ def test_migration_downgrade_keeps_rows_a_live_assignment_still_needs() -> None:
         assert ("finance_admin", "finance.view_revenue") in _stored_pairs(connection)
 
 
+def _seed_beta_assignment(engine: Engine, *, active: bool) -> None:
+    """Persist one beta_operator assignment row for downgrade-guard tests."""
+    from datetime import UTC, datetime
+
+    user_id = uuid4()
+    scope_id = uuid4()
+    with Session(engine) as session:
+        session.add(UserORM(id=user_id, email="beta@example.com", display_name="Beta"))
+        session.add(AccessScopeORM(id=scope_id, scope_type="global", scope_id=None, label="Global"))
+        session.add(
+            UserRoleAssignmentORM(
+                id=uuid4(),
+                user_id=user_id,
+                role_key="beta_operator",
+                scope_id=scope_id,
+                active=active,
+                # ck_user_role_assignments_revocation: an inactive row must
+                # carry its revocation fields.
+                revoked_by=None if active else user_id,
+                revoked_at=None if active else datetime.now(UTC),
+            )
+        )
+        session.commit()
+
+
+def test_gate_downgrade_refuses_while_beta_assignment_is_live() -> None:
+    """A live beta_operator assignment blocks the gate's downgrade."""
+    historical = _historical_migration_module()
+    gate = _gate_migration_module()
+    engine = _security_engine()
+
+    with engine.begin() as connection:
+        _bind_operations(historical, connection)
+        historical.upgrade()
+        catalog_before = (
+            _stored_roles(connection),
+            _stored_permissions(connection),
+            _stored_pairs(connection),
+        )
+    _seed_beta_assignment(engine, active=True)
+
+    with engine.begin() as connection:
+        _bind_operations(gate, connection)
+        with pytest.raises(
+            gate.LiveBetaOperatorAssignmentError,
+            match="active beta_operator assignment",
+        ):
+            gate.downgrade()
+
+        # The refusal leaves the catalog and the assignment itself untouched.
+        assert (
+            _stored_roles(connection),
+            _stored_permissions(connection),
+            _stored_pairs(connection),
+        ) == catalog_before
+        remaining = connection.scalar(
+            text("SELECT count(*) FROM user_role_assignments WHERE role_key = 'beta_operator'")
+        )
+        assert remaining == 1
+
+
+def test_gate_downgrade_ignores_a_revoked_beta_assignment() -> None:
+    """Only ACTIVE rows strand a rollback.
+
+    A revoked assignment cannot be parsed by the principal loader, so it does
+    not block the gate's downgrade.
+    """
+    historical = _historical_migration_module()
+    gate = _gate_migration_module()
+    engine = _security_engine()
+
+    with engine.begin() as connection:
+        _bind_operations(historical, connection)
+        historical.upgrade()
+        catalog_before = (
+            _stored_roles(connection),
+            _stored_permissions(connection),
+            _stored_pairs(connection),
+        )
+    _seed_beta_assignment(engine, active=False)
+
+    with engine.begin() as connection:
+        _bind_operations(gate, connection)
+        gate.downgrade()
+
+        assert (
+            _stored_roles(connection),
+            _stored_permissions(connection),
+            _stored_pairs(connection),
+        ) == catalog_before
+
+
 def test_repair_downgrade_is_unconditionally_irreversible() -> None:
     """Even an empty assignment state cannot restore the unsafe beta contract."""
     repair = _repair_migration_module()
@@ -996,7 +1102,23 @@ def test_security_seed_sql_matches_the_python_registries() -> None:
     explicit_pairs = set(raw_explicit_pairs)
     assert len(explicit_pairs) == len(raw_explicit_pairs)
     # The SQL file grants super_owner every permission with a SELECT rather than
-    # an explicit tuple per permission, so re-add that implicit fan-out here.
+    # an explicit tuple per permission. Prove the fan-out statement really
+    # exists in the raw seed — without this, dropping or narrowing the SELECT
+    # would still pass here because the expected pairs were fabricated from
+    # PERMISSION_DEFINITIONS rather than read from the SQL text — then re-add
+    # that implicit fan-out so the pair sets can be compared.
+    super_owner_fanout = re.search(
+        r"INSERT\s+INTO\s+role_permission_assignments\s*\(role_key,\s*permission_key\)\s*"
+        r"SELECT\s+'super_owner'\s+AS\s+role_key\s*,\s*key\s+AS\s+permission_key\s*"
+        r"FROM\s+permissions\s+ON\s+CONFLICT\s+DO\s+NOTHING",
+        sql,
+        re.IGNORECASE,
+    )
+    assert super_owner_fanout is not None, (
+        "security_seed.sql no longer fans out every permission row to "
+        "super_owner via INSERT ... SELECT; the manual reseed path would "
+        "silently drop owner access"
+    )
     super_owner_pairs = {
         (RoleKey.SUPER_OWNER.value, permission.value) for permission in PERMISSION_DEFINITIONS
     }

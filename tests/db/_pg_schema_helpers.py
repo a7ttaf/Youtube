@@ -1,3 +1,17 @@
+# ============================================================================
+# Purpose: Shared schema-reset helper for the PostgreSQL migration round-trip
+#   fixtures — drops and recreates the public schema inside one transaction
+#   with a bounded lock_timeout, then disposes the engine.
+# Database/ORM: Executes DROP SCHEMA public CASCADE + CREATE SCHEMA public on
+#   disposable test databases only; no ORM models.
+# Standards: lock_timeout='30s' so a contended drop fails fast instead of
+#   hanging; engine disposal via try/finally; test-only code.
+# Blast Radius: Destructive to the public schema of the database named by
+#   UMS_TEST_DATABASE_URL — guarded by the test_/ _test database-name rule in
+#   _postgres_helpers; never runs against an application database.
+# Connections:
+#   - File: tests/db/_postgres_helpers.py -> require_postgres_url + name guard.
+# ============================================================================
 """Shared helper for the PostgreSQL migration round-trip test fixtures.
 
 The migration ``fresh_engine`` / ``_drop_public_schema`` fixtures all need the
