@@ -37,9 +37,11 @@ DATABASE_ACCESS_TOKENS: Final = (
     "psycopg." + "connect(",
 )
 
-EXPECTED_FAST_ITEM_COUNT: Final = 3117
+# Updated deliberately after merging main with #225 (P0-e dev gateway):
+# its four new fast-lane tests grew the collected manifest 3117 -> 3121.
+EXPECTED_FAST_ITEM_COUNT: Final = 3121
 EXPECTED_FAST_NODEID_SHA256: Final = (
-    "20856cae7973f57f67b981009cafeb7881f22191864de44ead34270e19224c54"
+    "184ecdf6fb59ebb7d803c3d6141574401883545ed7fc1223dcccb9b69744a8ae"
 )
 EXPECTED_DATABASE_ITEM_COUNT: Final = 454
 EXPECTED_DATABASE_NODEID_SHA256: Final = (
