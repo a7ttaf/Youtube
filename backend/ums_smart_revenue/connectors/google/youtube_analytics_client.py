@@ -43,6 +43,7 @@ _REPORT_MONTH_PATTERN = re.compile(r"^[0-9]{4}-(0[1-9]|1[0-2])$")
 _BASE = "https://youtubeanalytics.googleapis.com/v2/reports"
 # Locked metric set; matches what YouTubeAnalyticsParser consumes.
 _METRICS = "estimatedRevenue,estimatedAdRevenue,grossRevenue"
+_COUNTRY_EVIDENCE_METRICS = "estimatedRevenue"
 # Single-channel content-owner reports use the time dimension only (see module
 # docstring). The orchestrator runner re-introduces the `channel` dimension into
 # the parser payload from the known filter so YouTubeAnalyticsParser keeps its
@@ -56,6 +57,7 @@ _METRICS = "estimatedRevenue,estimatedAdRevenue,grossRevenue"
 # YouTubeAnalyticsRunner._synthesise_analytics_channel_dimension so the parser
 # contract is preserved.
 _DIMENSIONS = "month"
+_COUNTRY_EVIDENCE_DIMENSIONS = "country"
 
 
 # ============================================================================
@@ -112,6 +114,40 @@ def _build_query_request(
         "endDate": first_day,
         "metrics": _METRICS,
         "dimensions": _DIMENSIONS,
+    }
+
+
+# ============================================================================
+# Purpose: Build a country-dimensional Analytics request whose rows are stored
+#          only as U2 provenance and are forbidden from finance projection.
+# Database/ORM: None.
+# Standards: Reuses the canonical account/channel/month validation boundary;
+#            deterministic request parameters; no withholding calculation.
+# Blast Radius: Google API volume and source-row evidence only. Official
+#               finance facts, totals, exports, and reconciliation are fenced.
+# Connections:
+#   - File: backend/ums_smart_revenue/connectors/runs/orchestrator.py -> Opt-in
+#     runner lane persists the response under source_system youtube_analytics.
+#   - File: backend/ums_smart_revenue/finance/google_source_normalizer.py ->
+#     Rejects these rows from canonical projection before bucketing.
+# ============================================================================
+def _build_country_evidence_query_request(
+    *,
+    account_id: str,
+    channel_id: str,
+    report_month: str,
+) -> dict[str, str]:
+    """Return one channel-month country evidence reports.query request."""
+    base = _build_query_request(
+        account_id=account_id,
+        channel_id=channel_id,
+        report_month=report_month,
+    )
+    return {
+        **base,
+        "endDate": calendar_month_end_iso(report_month),
+        "metrics": _COUNTRY_EVIDENCE_METRICS,
+        "dimensions": _COUNTRY_EVIDENCE_DIMENSIONS,
     }
 
 
@@ -238,6 +274,33 @@ class YouTubeAnalyticsClient:
     ) -> dict[str, object]:
         """Fetch one CMS-owned channel's monthly reports.query JSON body."""
         params = _build_query_request(
+            account_id=account_id,
+            channel_id=channel_id,
+            report_month=report_month,
+        )
+        return self._http.request(method="GET", url=_BASE, params=params)
+
+    # ========================================================================
+    # Purpose: Fetch the full country breakdown for one CMS channel-month as
+    #          evidence-only U2 input.
+    # Database/ORM: None.
+    # Standards: Same authenticated/retrying HTTP boundary as monthly fetch;
+    #            typed selector/month errors; no local finance math.
+    # Blast Radius: Read-only Google API request. Downstream persistence is
+    #               explicitly NON_PROJECTING_EVIDENCE.
+    # Connections:
+    #   - File: backend/ums_smart_revenue/connectors/runs/orchestrator.py ->
+    #     YouTubeAnalyticsRunner invokes this only behind the opt-in gate.
+    # ========================================================================
+    def fetch_channel_country_evidence(
+        self,
+        *,
+        account_id: str,
+        channel_id: str,
+        report_month: str,
+    ) -> dict[str, object]:
+        """Fetch one channel's country-dimensional revenue evidence."""
+        params = _build_country_evidence_query_request(
             account_id=account_id,
             channel_id=channel_id,
             report_month=report_month,

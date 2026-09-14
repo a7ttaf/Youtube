@@ -39,9 +39,11 @@ DATABASE_ACCESS_TOKENS: Final = (
 
 # Updated deliberately after merging main with #225 (P0-e dev gateway):
 # its four new fast-lane tests grew the collected manifest 3117 -> 3121.
-EXPECTED_FAST_ITEM_COUNT: Final = 3121
+# Updated deliberately after merging main with #227 (U2 country evidence):
+# two new fast-lane modules plus expanded normalizer suites 3121 -> 3204.
+EXPECTED_FAST_ITEM_COUNT: Final = 3204
 EXPECTED_FAST_NODEID_SHA256: Final = (
-    "184ecdf6fb59ebb7d803c3d6141574401883545ed7fc1223dcccb9b69744a8ae"
+    "9be11f8ca7a121c4d3fb9a64fc3687c9380f555c0ce324894c420a6695bb7dc9"
 )
 EXPECTED_DATABASE_ITEM_COUNT: Final = 454
 EXPECTED_DATABASE_NODEID_SHA256: Final = (
