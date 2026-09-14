@@ -176,6 +176,47 @@ def test_role_without_view_analytics_is_forbidden(tmp_path):
     assert response.json()["detail"] == "Missing permission: analytics.view"
 
 
+def test_missing_gateway_token_is_unauthorized(tmp_path):
+    """The route rejects a request with no trusted gateway token."""
+    database_url = build_database_url(tmp_path)
+    seed(database_url)
+    client = TestClient(create_app(database_url=database_url))
+    headers = auth_headers("super_owner")
+    headers.pop("x-ums-trusted-gateway-token")
+
+    response = client.get("/org-units", headers=headers)
+
+    assert response.status_code == 401
+    assert response.json()["detail"] == "Invalid trusted gateway token"
+
+
+def test_invalid_gateway_token_is_unauthorized(tmp_path):
+    """The route rejects a caller whose gateway token does not match."""
+    database_url = build_database_url(tmp_path)
+    seed(database_url)
+    client = TestClient(create_app(database_url=database_url))
+    headers = auth_headers("super_owner")
+    headers["x-ums-trusted-gateway-token"] = "wrong-token"
+
+    response = client.get("/org-units", headers=headers)
+
+    assert response.status_code == 401
+    assert response.json()["detail"] == "Invalid trusted gateway token"
+
+
+def test_unknown_gateway_role_is_rejected_before_route_access(tmp_path):
+    """An unknown role cannot be smuggled through the proxy header contract."""
+    database_url = build_database_url(tmp_path)
+    seed(database_url)
+    client = TestClient(create_app(database_url=database_url))
+    headers = auth_headers("not-a-real-role")
+
+    response = client.get("/org-units", headers=headers)
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "Unknown role: not-a-real-role"
+
+
 def test_disabled_principal_is_forbidden_despite_grant(tmp_path):
     """A disabled principal is rejected fail-closed even WITH a VIEW_ANALYTICS grant.
 
