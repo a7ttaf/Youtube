@@ -1,11 +1,13 @@
 """Map source-of-truth finance evidence into deduction-component records."""
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from decimal import Decimal
 
 from ums_smart_revenue.connectors.google_source_rows.dataclasses import (
+    YOUTUBE_ANALYTICS_PROJECTING_REPORT_TYPE,
     GoogleRevenueSourceRowEntry,
+    SourceRowProjectionDisposition,
 )
 from ums_smart_revenue.finance.adsense_payments import AdSensePaymentEntry
 from ums_smart_revenue.finance.bank_reconciliation import BankReconciliationEntry
@@ -25,6 +27,37 @@ _SETTLED_VALUE_KIND = "settled"
 _PAID_STATUS = "PAID"
 _ADSENSE_SYSTEM = "adsense_management"
 _GAP_SOURCE_SYSTEM = "adsense_payment_gap"
+
+
+# ============================================================================
+# Purpose: Independently fence Analytics evidence before the direct deduction
+#          consumer interprets tax/deduction value kinds.
+# Database/ORM: None (pure over persisted source-row provenance).
+# Standards: Exact report/disposition/dimension contract; malformed or unknown
+#            Analytics provenance fails closed and cannot reduce net revenue.
+# Blast Radius: Deduction ingestion and official net-revenue calculations.
+# Connections:
+#   - File: backend/ums_smart_revenue/connectors/google_source_parsers/
+#     youtube_analytics.py -> Emits the projecting provenance contract.
+#   - File: backend/ums_smart_revenue/finance/deduction_ingestion.py -> Calls
+#     map_source_rows_to_components over month-wide source rows.
+# ============================================================================
+def _is_projecting_deduction_source_row(row: GoogleRevenueSourceRowEntry) -> bool:
+    """Return whether a direct source-row deduction consumer may read the row."""
+    if row.source_system != "youtube_analytics":
+        return True
+    dimensions = row.raw_payload.get("dimensions")
+    disposition = row.raw_payload.get("projection_disposition")
+    return (
+        row.report_type == YOUTUBE_ANALYTICS_PROJECTING_REPORT_TYPE
+        and isinstance(dimensions, Mapping)
+        and "country" not in dimensions
+        and disposition
+        in {
+            None,
+            SourceRowProjectionDisposition.PROJECTING.value,
+        }
+    )
 
 
 @dataclass(frozen=True)
@@ -103,6 +136,8 @@ def map_source_rows_to_components(
     components: list[DeductionComponentInput] = []
     skipped_non_usd = 0
     for row in rows:
+        if not _is_projecting_deduction_source_row(row):
+            continue
         if row.value_kind not in _TAX_DEDUCTION_VALUE_KINDS:
             continue
         if row.currency_code != USD:

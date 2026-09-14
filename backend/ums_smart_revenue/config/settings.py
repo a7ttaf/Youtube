@@ -12,7 +12,9 @@
 #   URL values. Callers consume load_app_settings(), never os.environ
 #   directly.
 # Blast Radius: App startup and the settings reads used by authorization and
-#   connector execution. The primary-currency setting is a headers-mode
+#   connector execution, plus opt-in YouTube Analytics country-evidence API
+#   volume. The country flag does not authorize finance projection, math,
+#   exports, or UI consumption. The primary-currency setting is a headers-mode
 #   DECLARED label only: it never converts an amount and never reaches a fact
 #   row; database-mode tenant currency remains PostgreSQL-backed.
 # Connections:
@@ -22,6 +24,8 @@
 #     bootstrap tenant.
 #   - File: backend/ums_smart_revenue/config/logging_config.py ->
 #     configure_logging consumes AppSettings.log_level.
+#   - File: backend/ums_smart_revenue/connectors/runs/orchestrator.py -> gates
+#     the second, non-projecting country-evidence request.
 #   - File: backend/ums_smart_revenue/db/iso_4217_2026_05.py -> immutable
 #     repository snapshot used as the currency-code membership authority.
 # ============================================================================
@@ -91,6 +95,7 @@ GROUP_SYNC_SCHEDULE_ENABLED_ENV = "UMS_GROUP_SYNC_SCHEDULE_ENABLED"
 GROUP_SYNC_INTERVAL_HOURS_ENV = "UMS_GROUP_SYNC_INTERVAL_HOURS"
 LOG_LEVEL_ENV = "UMS_LOG_LEVEL"
 TENANT_PRIMARY_CURRENCY_ENV = "UMS_TENANT_PRIMARY_CURRENCY"
+YOUTUBE_ANALYTICS_COUNTRY_EVIDENCE_ENABLED_ENV = "UMS_YOUTUBE_ANALYTICS_COUNTRY_EVIDENCE_ENABLED"
 
 _TRUTHY_TOKENS = frozenset({"1", "true", "yes", "on"})
 _FALSY_TOKENS = frozenset({"0", "false", "no", "off", ""})
@@ -170,6 +175,11 @@ class AppSettings:
     # so turning the knob down also quiets dependencies.
     log_level: str = DEFAULT_LOG_LEVEL
 
+    # U2 country rows are evidence-only and deliberately opt-in. Keeping the
+    # collection gate OFF by default prevents an uncoordinated API-volume and
+    # source-row-key change while the EGP currency cutover is still pending.
+    youtube_analytics_country_evidence_enabled: bool = False
+
     # Snapshot the raw headers-only value without validating it in the
     # dataclass constructor. load_app_settings() validates it strictly by
     # default; create_app defers parsing until its explicit authz override has
@@ -233,6 +243,10 @@ def load_app_settings(*, validate_tenant_currency: bool = True) -> AppSettings:
         group_sync_interval_hours=_load_int(GROUP_SYNC_INTERVAL_HOURS_ENV, default=24),
         log_level=_load_log_level(),
         _tenant_primary_currency_raw=environ.get(TENANT_PRIMARY_CURRENCY_ENV),
+        youtube_analytics_country_evidence_enabled=_load_bool(
+            YOUTUBE_ANALYTICS_COUNTRY_EVIDENCE_ENABLED_ENV,
+            default=False,
+        ),
     )
     if validate_tenant_currency:
         # Preserve the public loader's historical unconditional fail-fast
