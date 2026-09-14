@@ -40,7 +40,7 @@ afterEach(() => {
 
 /** Select only the boundary-owned report, excluding React's test diagnostics. */
 const boundaryReports = (): unknown[][] =>
-  consoleErrorSpy.mock.calls.filter((call) =>
+  consoleErrorSpy.mock.calls.filter((call: unknown[]) =>
     String(call[0]).includes("[ErrorBoundary] view render failed"),
   );
 
@@ -220,7 +220,7 @@ describe("ErrorBoundary", () => {
     expect(within(fallback).getByText(EXPECTED_TYPEERROR_CATEGORY)).toBeInTheDocument();
     // Delivery fell back to the console with the SAME sanitized payload, and
     // the delivery-failure marker is NOT set — the fallback channel worked.
-    const deliveryReports = consoleErrorSpy.mock.calls.filter((call) =>
+    const deliveryReports = consoleErrorSpy.mock.calls.filter((call: unknown[]) =>
       String(call[0]).includes("[ErrorBoundary] report delivery failed"),
     );
     expect(deliveryReports).toHaveLength(1);

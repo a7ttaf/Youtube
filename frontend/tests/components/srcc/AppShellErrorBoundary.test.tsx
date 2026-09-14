@@ -225,7 +225,7 @@ const navButton = (label: string): HTMLElement => {
 };
 
 const boundaryReports = (): unknown[][] =>
-  consoleErrorSpy.mock.calls.filter((call) => call[0] === SAFE_DIAGNOSTIC);
+  consoleErrorSpy.mock.calls.filter((call: unknown[]) => call[0] === SAFE_DIAGNOSTIC);
 
 const comboboxOptionLabels = (scope: HTMLElement): string[] =>
   within(scope)
