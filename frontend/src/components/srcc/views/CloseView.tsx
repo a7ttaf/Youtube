@@ -12,7 +12,7 @@ import {
   useMonthCloseActions,
   useMonthCloseReadiness,
 } from "@/lib/api/useMonthClose";
-import type { Severity } from "@/lib/mock/data";
+import type { Severity } from "@/types/domain";
 import {
   Badge,
   DEFAULT_MONTH,
@@ -171,10 +171,10 @@ const describeApiActionError = (error: ApiError): string => {
   if (error.status === 409) {
     return describeConflictBody(error.body);
   }
-  if (error.status === 403) {
-    return "Your role cannot lock or unlock this finance month.";
-  }
-  const { detail } = describeError(error);
+  const { detail } = describeError(
+    error,
+    "Your role cannot lock or unlock this finance month.",
+  );
   return detail;
 };
 
@@ -187,6 +187,38 @@ const describeActionError = (error: unknown): string => {
   if (error instanceof ApiError) return describeApiActionError(error);
   if (error instanceof Error) return error.message;
   return "Could not reach the finance-close service.";
+};
+
+// ============================================================================
+// Purpose: Translate finance-close status/readiness failures with copy for the
+//   actual domain instead of reusing CommandView's net-revenue 403 message.
+// Database/ORM: None (frontend error presentation only).
+// Standards: 403 and non-permission API errors use fixed safe copy; arbitrary
+//   backend detail is not reflected into the close controls.
+// Blast Radius: Close read UX only; no request or state transition.
+// Connections:
+//   - File: frontend/src/lib/api/useMonthClose.ts -> supplies these errors.
+// ============================================================================
+const describeCloseReadError = (
+  error: ApiError | Error,
+  surface: "status" | "readiness",
+): { title: string; detail: string } => {
+  const label = surface === "status" ? "month-close status" : "month-close readiness";
+  if (error instanceof ApiError) {
+    if (error.status === 403) {
+      // FIX: Reuse the shared fixed 403 contract with copy that names the
+      // actual close read instead of net revenue.
+      return describeError(error, `Your role cannot view ${label} for this month.`);
+    }
+    return {
+      title: `Request failed (${error.status})`,
+      detail: `Could not load ${label} for this finance month.`,
+    };
+  }
+  return {
+    title: "Network error",
+    detail: `Could not reach the ${label} service.`,
+  };
 };
 
 /**
@@ -651,9 +683,9 @@ const CloseStatusSummary = ({
   if (mode === "error") {
     // closeSummaryMode's contract: "error" is only reachable when error is
     // non-null, but a string mode cannot narrow the type — assert it here.
-    const { title, detail } = describeError(
+    const { title, detail } = describeCloseReadError(
       error as ApiError | Error,
-      "Your role cannot view month-close status for this month.",
+      "status",
     );
     return (
       <div className="view-summary" aria-label="Month close summary" role="alert">
@@ -701,10 +733,7 @@ const ReadinessChecklist = ({
   error: ApiError | Error | null;
 }) => {
   if (error) {
-    const { title, detail } = describeError(
-      error,
-      "Your role cannot view month-close readiness for this month.",
-    );
+    const { title, detail } = describeCloseReadError(error, "readiness");
     return (
       <div className="table-wrap" role="alert">
         <div style={{ padding: 16 }}>
@@ -869,17 +898,132 @@ const useSettledStatusMonth = (
   return settledStatusMonth;
 };
 
-/**
- * The real-data Month-Close screen: status summary, readiness checklist, and the
- * inline reason + arm/confirm lock/unlock workflow wired to the finance-close API.
- */
-const CloseView = ({
-  permissions,
+// ============================================================================
+// Purpose: Translate raw status/readiness query results into the trust verdicts
+//   that gate the lock/unlock affordances. A null status only means "no close
+//   record" once a read for the SELECTED month settled on it, and an error only
+//   applies to the month it was raised for (see useSettledStatusMonth). Lock
+//   requires the privileged readiness verdict, but unlock does not — Finance
+//   Approver owns UNLOCK_FINANCE_MONTH without LOCK_FINANCE_MONTH, so requiring
+//   readiness for both made that shipped role permanently unable to unlock.
+// Database/ORM: None (frontend derivation over API responses).
+// Standards: Fail-closed — loading, error, stale-month, or unknown-verdict
+//   responses all resolve to "not known" and disable the affordance.
+// Blast Radius: Month lock/unlock affordance gating; no finance math.
+// Connections:
+//   - File: frontend/src/lib/api/useMonthClose.ts -> status/readiness queries.
+// ============================================================================
+/** A status row only trusts a verdict for the selected month in a known state. */
+const statusRowMatchesMonth = (
+  status: FinanceMonthCloseStatus | null,
+  month: string,
+  normalizedStatus: string | undefined,
+): boolean =>
+  status === null ||
+  (status.month === month &&
+    (normalizedStatus === "OPEN" || normalizedStatus === "LOCKED"));
+
+/** A settled status read is trusted only when it covers the selected month. */
+const statusVerdictIsTrusted = ({
+  status,
+  statusLoading,
+  statusError,
+  settledStatusMonth,
+  month,
+  normalizedStatus,
 }: {
-  permissions: AccessPermissions;
+  status: FinanceMonthCloseStatus | null;
+  statusLoading: boolean;
+  statusError: ApiError | Error | null;
+  settledStatusMonth: string | null;
+  month: string;
+  normalizedStatus: string | undefined;
+}): boolean =>
+  !statusLoading &&
+  statusError === null &&
+  settledStatusMonth === month &&
+  statusRowMatchesMonth(status, month, normalizedStatus);
+
+/** Readiness has the same stale-month window; require a matching settled row. */
+const readinessVerdictIsTrusted = ({
+  readiness,
+  readinessLoading,
+  readinessError,
+  settledReadinessMonth,
+  month,
+}: {
+  readiness: FinanceCloseReadinessResponse | null;
+  readinessLoading: boolean;
+  readinessError: ApiError | Error | null;
+  settledReadinessMonth: string | null;
+  month: string;
+}): boolean =>
+  !readinessLoading &&
+  readinessError === null &&
+  settledReadinessMonth === month &&
+  readiness !== null &&
+  readiness.month === month;
+
+// ============================================================================
+// Purpose: Own the audited lock/unlock workflow — free-text reason, two-step
+//   arm latch, in-flight dedupe, and the POST + reload-on-success contract —
+//   so the view component only composes query state and renders panels.
+// Database/ORM: None (frontend); the POST lands through useMonthCloseActions.
+// Standards: Same-tick duplicate confirms are dropped on a synchronous ref
+//   latch (state `busy` cannot see the second click in the same frame). Every
+//   failure is captured into lockState for inline display; the workflow never
+//   rejects outward.
+// Blast Radius: Month lock/unlock actions (finance workflow); no finance math.
+// Connections:
+//   - File: frontend/src/lib/api/useMonthClose.ts -> lock/unlock POST actions.
+// ============================================================================
+/** Lock needs a trusted OPEN verdict plus a ready readiness read. */
+const lockAffordance = (
+  canCloseMonth: boolean,
+  statusKnown: boolean,
+  isOpen: boolean,
+  readinessReady: boolean,
+): boolean => canCloseMonth && statusKnown && isOpen && readinessReady;
+
+/** Unlock needs a trusted LOCKED verdict — Approver holds UNLOCK without LOCK. */
+const unlockAffordance = (
+  canUnlockMonth: boolean,
+  statusKnown: boolean,
+  isLocked: boolean,
+): boolean => canUnlockMonth && statusKnown && isLocked;
+
+/** Compose the per-action affordances for the selected month. */
+const closeAffordances = ({
+  canCloseMonth,
+  canUnlockMonth,
+  statusKnown,
+  isOpen,
+  isLocked,
+  readinessReady,
+}: {
+  canCloseMonth: boolean;
+  canUnlockMonth: boolean;
+  statusKnown: boolean;
+  isOpen: boolean;
+  isLocked: boolean;
+  readinessReady: boolean;
+}): { canLock: boolean; canUnlock: boolean } => ({
+  canLock: lockAffordance(canCloseMonth, statusKnown, isOpen, readinessReady),
+  canUnlock: unlockAffordance(canUnlockMonth, statusKnown, isLocked),
+});
+
+/** Owns the audited lock/unlock write workflow described by the block above. */
+const useCloseWorkflow = ({
+  actions,
+  canLockSelectedMonth,
+  canUnlockSelectedMonth,
+  onSettled,
+}: {
+  actions: ReturnType<typeof useMonthCloseActions>;
+  canLockSelectedMonth: boolean;
+  canUnlockSelectedMonth: boolean;
+  onSettled: () => void;
 }) => {
-  const { canCloseMonth, canUnlockMonth } = permissions;
-  const [month, setMonth] = useState<string>(DEFAULT_MONTH);
   const [lockState, setLockState] = useState<LockState>({
     busy: false,
     error: null,
@@ -892,51 +1036,27 @@ const CloseView = ({
   // the second click in time — both read the same stale busy=false render).
   const runInFlightRef = useRef(false);
 
-  const {
-    data: status,
-    loading: statusLoading,
-    error: statusError,
-    reload: reloadStatus,
-  } = useMonthClose({ month });
-  const {
-    data: readiness,
-    loading: readinessLoading,
-    error: readinessError,
-    reload: reloadReadiness,
-  } = useMonthCloseReadiness({ month });
-  const actions = useMonthCloseActions({ month });
+  // Pre-POST gate: untrusted month state blocks the action, an empty reason
+  // blocks it, and the in-flight ref latch drops same-tick duplicate confirms.
+  const blockedActionError = (kind: LockAction): string | null => {
+    const actionAllowed =
+      kind === "lock" ? canLockSelectedMonth : canUnlockSelectedMonth;
+    if (!actionAllowed) {
+      return "Lock controls are unavailable until the selected month state is trustworthy.";
+    }
+    if (!reason.trim()) return "A reason is required.";
+    return null;
+  };
 
-  const isLocked = status?.status?.toUpperCase() === "LOCKED";
-
-  // FIX (PR #211 review): a null status only means "no close record" once a
-  // read for the SELECTED month settled on it, and an ERROR only renders once
-  // it belongs to the selected month — see useSettledStatusMonth above for why
-  // the (status/error, loading=false) pair alone cannot tell the current
-  // month's verdict from the previous month's in the frame right after a
-  // month switch.
-  const settledStatusMonth = useSettledStatusMonth(month, statusLoading);
-  const statusKnown =
-    !statusLoading && statusError === null && settledStatusMonth === month;
-
-  // ==========================================================================
-  // Purpose: POST a lock/unlock action using the trimmed, audited reason already
-  //   captured in component state (no native prompt/confirm — the arm/confirm UI
-  //   gates the call). On success it clears the reason + armed latch and refetches
-  //   both status and readiness so the UI reflects the new state; on failure it
-  //   surfaces the typed 409/403/other message inline and leaves the data and the
-  //   armed action untouched so the operator can retry.
-  // Dedupe: a synchronous runInFlightRef latch drops a same-tick double-click on
-  //   the armed Confirm button BEFORE a second POST fires. Without it both clicks
-  //   read the same stale busy=false render and enter runAction, so the first
-  //   POST succeeds and the second 409s — surfacing a misleading "Action failed"
-  //   banner for what was really a duplicate click. The ref clears in finally so
-  //   a later, non-overlapping action proceeds.
-  // ==========================================================================
+  // POST a lock/unlock action using the trimmed, audited reason already captured
+  // in state. On success it clears reason + armed latch and refetches; on
+  // failure it surfaces the typed 409/403/other message inline and leaves the
+  // armed action untouched so the operator can retry.
   const runAction = useCallback(
     async (kind: LockAction) => {
-      const trimmed = reason.trim();
-      if (!trimmed) {
-        setLockState({ busy: false, error: "A reason is required." });
+      const blocked = blockedActionError(kind);
+      if (blocked !== null) {
+        setLockState({ busy: false, error: blocked });
         return;
       }
       // FIX: drop a same-tick duplicate confirm click before the POST fires; the
@@ -946,27 +1066,22 @@ const CloseView = ({
       runInFlightRef.current = true;
       setLockState({ busy: true, error: null });
       try {
-        await actions[kind](trimmed);
+        await actions[kind](reason.trim());
         setLockState({ busy: false, error: null });
         setReason("");
         setArmed(null);
-        reloadStatus();
-        reloadReadiness();
+        onSettled();
       } catch (caught) {
         setLockState({ busy: false, error: describeActionError(caught) });
       } finally {
         runInFlightRef.current = false;
       }
     },
-    [actions, reason, reloadReadiness, reloadStatus],
+    [actions, canLockSelectedMonth, canUnlockSelectedMonth, onSettled, reason],
   );
 
-  // ==========================================================================
-  // Purpose: Drive the two-step lock/unlock latch. The first click arms the
-  //   action (revealing the Confirm/Cancel affordances); a second click on the
-  //   same action executes it with the captured reason. Switching months or
-  //   clicking Cancel disarms via resetWorkflow.
-  // ==========================================================================
+  // Two-step latch: first click arms the action (revealing Confirm/Cancel); a
+  // second click on the same action executes it with the captured reason.
   const handleActionClick = useCallback(
     (kind: LockAction) => {
       if (armed === kind) {
@@ -992,6 +1107,79 @@ const CloseView = ({
     setArmed(null);
     setLockState({ busy: false, error: null });
   }, []);
+
+  return { armed, handleActionClick, lockState, reason, resetWorkflow, setReason };
+};
+
+/**
+ * The real-data Month-Close screen: status summary, readiness checklist, and the
+ * inline reason + arm/confirm lock/unlock workflow wired to the finance-close API.
+ */
+const CloseView = ({
+  permissions,
+}: {
+  permissions: AccessPermissions;
+}) => {
+  const { canCloseMonth, canUnlockMonth } = permissions;
+  const [month, setMonth] = useState<string>(DEFAULT_MONTH);
+
+  const {
+    data: status,
+    loading: statusLoading,
+    error: statusError,
+    reload: reloadStatus,
+  } = useMonthClose({ month });
+  const {
+    data: readiness,
+    loading: readinessLoading,
+    error: readinessError,
+    reload: reloadReadiness,
+  } = useMonthCloseReadiness({ month });
+  const actions = useMonthCloseActions({ month });
+
+  const normalizedStatus = status?.status?.toUpperCase();
+  const isLocked = normalizedStatus === "LOCKED";
+  const isOpen = status === null || normalizedStatus === "OPEN";
+
+  const settledStatusMonth = useSettledStatusMonth(month, statusLoading);
+  const settledReadinessMonth = useSettledStatusMonth(month, readinessLoading);
+  const statusKnown = statusVerdictIsTrusted({
+    status,
+    statusLoading,
+    statusError,
+    settledStatusMonth,
+    month,
+    normalizedStatus,
+  });
+  const readinessKnown = readinessVerdictIsTrusted({
+    readiness,
+    readinessLoading,
+    readinessError,
+    settledReadinessMonth,
+    month,
+  });
+  const { canLock: canLockSelectedMonth, canUnlock: canUnlockSelectedMonth } =
+    closeAffordances({
+      canCloseMonth,
+      canUnlockMonth,
+      statusKnown,
+      isOpen,
+      isLocked,
+      readinessReady: readinessKnown && readiness?.ready === true,
+    });
+
+  const reloadAll = useCallback(() => {
+    reloadStatus();
+    reloadReadiness();
+  }, [reloadReadiness, reloadStatus]);
+
+  const { armed, handleActionClick, lockState, reason, resetWorkflow, setReason } =
+    useCloseWorkflow({
+      actions,
+      canLockSelectedMonth,
+      canUnlockSelectedMonth,
+      onSettled: reloadAll,
+    });
 
   return (
     <section className="view-page" aria-labelledby="closeViewTitle">
@@ -1026,8 +1214,8 @@ const CloseView = ({
             status={status}
             statusKnown={statusKnown}
             month={month}
-            canCloseMonth={canCloseMonth}
-            canUnlockMonth={canUnlockMonth}
+            canCloseMonth={canLockSelectedMonth}
+            canUnlockMonth={canUnlockSelectedMonth}
             isLocked={isLocked}
             lockState={lockState}
             reason={reason}

@@ -38,6 +38,9 @@ export default defineConfig({
   resolve: {
     alias: {
       "@": fileURLToPath(new URL("./src", import.meta.url)),
+      "@ums/design-system": fileURLToPath(
+        new URL("./packages/design-system/src/index.tsx", import.meta.url),
+      ),
     },
   },
 });

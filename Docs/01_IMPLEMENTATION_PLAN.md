@@ -1143,9 +1143,10 @@ now wired to `GET /audit/events` (see below).
   OPERATOR_ASSERTED link (verification stays the dual-gated admin flow);
   "Review" → navigates to Trace preselected on the channel (AppShell
   `onOpenTrace` + TraceView `presetChannelId`). Mock Save-Draft/effective-month
-  controls removed (no backend concept). Remaining (definition-blocked):
-  bulk channel inventory import; "Scoped changes" tile; month-lock enforcement
-  on the mapping route (pre-existing backend gap, named follow-up).
+  controls removed (no backend concept). Bulk channel inventory import and
+  month-lock enforcement shipped in later work. The unsupported "Scoped
+  changes" tile is closed as removed mock UI; it is not an implementation
+  backlog item unless a future domain/API contract explicitly defines it.
 
 ---
 

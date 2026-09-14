@@ -1,42 +1,60 @@
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import type { ReactNode } from "react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { useState, type ReactNode } from "react";
+import { createMemoryRouter, RouterProvider } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import AppShell from "@/components/srcc/AppShell";
 import { SessionProvider } from "@/contexts/SessionContext";
 import { TenantProvider } from "@/contexts/TenantContext";
+import { useWriteInFlightControl } from "@/contexts/WriteInFlightContext";
 import type { SessionMe } from "@/lib/api/types";
 
-// ============================================================================
-// Purpose: Prove the boundary is actually WIRED into the shell, which the
-//   component's own unit tests cannot show. Before this, a view that threw
-//   during render tore down the entire React root — React 19 unmounts the tree
-//   — leaving a blank page with no sidebar and no route back. These assert the
-//   degraded shape instead: the crashed view becomes one card, the shell chrome
-//   around it stays mounted, recovery is reconciliation-only, and navigation
-//   clears the caught error without a keyed child remount.
-// Standards: The crash is injected by MOCKING one view to throw rather than by
-//   feeding a real view malformed data — the point under test is the shell's
-//   containment, and a data-shaped crash would silently stop reproducing the
-//   moment that view grew a guard of its own.
-// Blast Radius: Test-only. Lives in its own file because the module mock is
-//   hoisted per file and would break every other AppShell case.
-// ============================================================================
+const { SENSITIVE_ERROR, WRITE_CRASH, WRITE_GATE } = vi.hoisted(() => {
+  const error = new Error("groups-message-secret");
+  error.name = "GroupsTenantSecretError";
+  error.stack = "groups-stack-secret at /private/groups.tsx:44";
+  const writeCrash = new Error("apply-result-secret");
+  writeCrash.name = "ApplyRenderSecretError";
+  return {
+    SENSITIVE_ERROR: error,
+    WRITE_CRASH: writeCrash,
+    WRITE_GATE: {
+      pending: Promise.resolve(),
+      // Same shape as the real WriteInFlightControl.release: () => void.
+      release: (() => undefined) as () => void,
+    },
+  };
+});
 
-// The crashing view. GroupsView is chosen because it is a plain named export
-// with a single boolean prop, so the stub needs no fixture of its own.
 vi.mock("@/components/srcc/views/GroupsView", () => ({
   GroupsView: (): ReactNode => {
-    throw new TypeError("groups view exploded during render");
+    throw SENSITIVE_ERROR;
   },
 }));
 
-const ORIGINAL_FETCH = globalThis.fetch;
+vi.mock("@/components/srcc/views/RegistryView", () => {
+  // Capitalized (and a component-shaped function) so the hooks below read as
+  // a React component to the analyzer, matching the hook rules the real view
+  // follows — identical render behavior to the previous inline arrow.
+  const MockRegistryView = (): ReactNode => {
+    const write = useWriteInFlightControl();
+    const [crashed, setCrashed] = useState(false);
+    if (crashed) throw WRITE_CRASH;
+    const startWrite = () => {
+      write.arm("An import apply is running and cannot be aborted.");
+      WRITE_GATE.pending.then(write.release, write.release);
+      setCrashed(true);
+    };
+    return <button onClick={startWrite}>Start pending apply and crash</button>;
+  };
+  return { default: MockRegistryView };
+});
 
+const ORIGINAL_FETCH = globalThis.fetch;
+const SAFE_DIAGNOSTIC = "[ErrorBoundary] view render failed";
 let consoleErrorSpy: ReturnType<typeof vi.spyOn>;
 
-// A full-capability session so every nav item renders and these tests are about
-// containment rather than permission gating.
 const FULL_SESSION: SessionMe = {
   user_id: "00000000-0000-0000-0000-0000000000aa",
   email: "dev@ums.local",
@@ -69,10 +87,8 @@ const FULL_SESSION: SessionMe = {
   },
 };
 
-// Minimal real-shaped net-revenue body so the wired CommandView renders without
-// an error state of its own confusing the "healthy view" assertions.
 const NET_REVENUE_BODY = {
-  month: "2026-03",
+  month: "2026-08",
   status: "CALCULATED",
   channel_count: 0,
   calculated_channel_count: 0,
@@ -92,46 +108,69 @@ const NET_REVENUE_BODY = {
   audit_events: [],
 };
 
-/** Wrap a body in a JSON Response, mirroring the other shell test harnesses. */
 const jsonResponse = (body: unknown, status = 200): Response =>
   new Response(JSON.stringify(body), {
     status,
     headers: { "Content-Type": "application/json" },
   });
 
-/** Normalize a fetch input (string | URL | Request) to its URL string. */
-const urlOf = (input: unknown): string => {
-  if (typeof input === "string") {
-    return input;
-  }
-  if (input instanceof URL) {
-    return input.toString();
-  }
-  if (input instanceof Request) {
-    return input.url;
-  }
-  return String(input);
-};
+/** URL-suffix → response table; the first matching suffix wins. */
+const SHELL_ROUTES: ReadonlyArray<readonly [string, () => Response]> = [
+  ["/session/me", () => jsonResponse(FULL_SESSION)],
+  [
+    "/tenants/me",
+    () => jsonResponse({ id: "t1", slug: "ums", display_name: "UMS" }),
+  ],
+  [
+    "/revenue/scopes",
+    () =>
+      jsonResponse({
+        scopes: [{ scope_type: "global", scope_id: null, label: "Global" }],
+      }),
+  ],
+  [
+    "/rankings",
+    () =>
+      jsonResponse({
+        month: "2026-08",
+        metric: "gross",
+        channels: [],
+        companies: [],
+        sectors: [],
+        committed_run: null,
+      }),
+  ],
+  [
+    "/smart-alerts",
+    () =>
+      jsonResponse({
+        month: "2026-08",
+        status: "CLEAR",
+        highest_severity: null,
+        alert_count: 0,
+        alerts: [],
+        audit_events: [],
+      }),
+  ],
+  ["/net-revenue", () => jsonResponse(NET_REVENUE_BODY)],
+];
 
-/** Route the shell's two bootstrap reads; everything else gets net-revenue. */
-const routeShellFetch = (input: unknown): Promise<Response> => {
-  const url = urlOf(input);
-  if (url.includes("/session/me")) {
-    return Promise.resolve(jsonResponse(FULL_SESSION));
-  }
-  if (url.includes("/tenants/me")) {
-    return Promise.resolve(
-      jsonResponse({ id: "t1", slug: "ums", display_name: "UMS" }),
-    );
-  }
-  return Promise.resolve(jsonResponse(NET_REVENUE_BODY));
+/** Route a fetch call through SHELL_ROUTES; unlisted paths 404. */
+const routeShellFetch = (input: RequestInfo | URL): Promise<Response> => {
+  const url = String(input);
+  const route = SHELL_ROUTES.find(([path]) => url.includes(path));
+  return Promise.resolve(
+    route ? route[1]() : jsonResponse({ detail: "not under test" }, 404),
+  );
 };
 
 beforeEach(() => {
+  WRITE_GATE.pending = new Promise<void>((resolve) => {
+    // Wrapped in a zero-arg closure to match release's () => void shape.
+    WRITE_GATE.release = () => resolve();
+  });
   vi.stubGlobal("fetch", vi.fn(routeShellFetch));
   globalThis.localStorage.clear();
-  // React logs every caught error plus its component stack; the crash injected
-  // here would otherwise bury the real assertion output.
   consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
 });
 
@@ -140,79 +179,157 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-/** True when the boundary's own componentDidCatch line reached the console. */
-const boundaryLogged = (): boolean =>
-  consoleErrorSpy.mock.calls.some((call) =>
-    String(call[0]).includes("[ErrorBoundary]"),
+const renderShell = () => {
+  // Base PR 229 foundation: SessionContext reads the shared QueryClient and
+  // AppShell arms a router transition blocker, so the shell must mount inside
+  // a QueryClientProvider and a data router, exactly like production main.tsx.
+  const queryClient = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  });
+  const router = createMemoryRouter(
+    [
+      {
+        path: "*",
+        element: (
+          <SessionProvider>
+            <TenantProvider initialSlug="ums">
+              <AppShell />
+            </TenantProvider>
+          </SessionProvider>
+        ),
+      },
+    ],
+    { initialEntries: ["/command"] },
   );
-
-/** Render the shell inside the providers it needs, as the other suites do. */
-const renderShell = () =>
-  render(
-    <SessionProvider>
-      <TenantProvider initialSlug="ums">
-        <AppShell />
-      </TenantProvider>
-    </SessionProvider>,
+  const rendered = render(
+    <QueryClientProvider client={queryClient}>
+      <RouterProvider router={router} />
+    </QueryClientProvider>,
+    { onCaughtError: () => undefined },
   );
+  return {
+    ...rendered,
+    router,
+    unmount: () => {
+      rendered.unmount();
+      router.dispose();
+    },
+  };
+};
 
-/**
- * The SIDEBAR button carrying this label. Scoped to the landmark because view
- * titles repeat the nav labels in the topbar heading.
- */
 const navButton = (label: string): HTMLElement => {
   const sidebar = screen.getByRole("complementary", { name: "Primary navigation" });
   const button = within(sidebar).getByText(label).closest("button");
-  if (button === null) {
-    throw new Error(`no nav button for ${label}`);
-  }
+  if (!button) throw new Error(`no nav button for ${label}`);
   return button;
 };
 
+const boundaryReports = (): unknown[][] =>
+  consoleErrorSpy.mock.calls.filter((call) => call[0] === SAFE_DIAGNOSTIC);
+
+const comboboxOptionLabels = (scope: HTMLElement): string[] =>
+  within(scope)
+    .queryAllByRole("combobox")
+    .flatMap((box) => Array.from(box.querySelectorAll("option")))
+    .map((option) => option.textContent?.trim() ?? "");
+
+describe("AppShell factual chrome", () => {
+  it("lists exact view labels without fabricated count badges", async () => {
+    renderShell();
+    const sidebar = await screen.findByRole("complementary", {
+      name: "Primary navigation",
+    });
+
+    expect(
+      within(sidebar)
+        .getAllByRole("button")
+        .map((button) => button.textContent?.trim()),
+    ).toEqual([
+      "Command Center",
+      "Channel Registry",
+      "CMS Groups",
+      "Month Close",
+      "Trace Explorer",
+      "Exports",
+      "Connectors",
+      "Audit Log",
+    ]);
+  });
+
+  it("removes inert global report controls while the wired view keeps its own Month", async () => {
+    renderShell();
+    const viewFilters = await screen.findByLabelText("Net revenue filters");
+
+    expect(screen.queryByRole("group", { name: "Report filters" }))
+      .not.toBeInTheDocument();
+    expect(within(viewFilters).getByLabelText("Month")).toBeInTheDocument();
+    expect(within(viewFilters).getByLabelText("Scope")).toBeInTheDocument();
+    expect(within(viewFilters).queryByLabelText(/currency/iu)).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Refresh reports" }))
+      .not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /create export/iu }))
+      .not.toBeInTheDocument();
+    expect(comboboxOptionLabels(document.body)).not.toEqual(
+      expect.arrayContaining(["EGP", "AED"]),
+    );
+  });
+
+  it("removes fabricated operational cues, workflow rail, and raw-file status", async () => {
+    renderShell();
+    await screen.findByRole("complementary", { name: "Primary navigation" });
+
+    expect(screen.queryByLabelText("Operational status")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Month close workflow")).not.toBeInTheDocument();
+    expect(screen.queryByText(/2 blockers before export/iu)).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /open close/iu }))
+      .not.toBeInTheDocument();
+    expect(within(screen.getByLabelText("Role permission state"))
+      .queryByText(/raw files gated/iu)).not.toBeInTheDocument();
+  });
+});
+
 describe("AppShell view error boundary", () => {
-  it("renders a healthy view normally, with no fallback card", async () => {
+  it("renders a healthy view without a fallback", async () => {
     renderShell();
 
     expect(
       await screen.findByRole("heading", { name: "Revenue Command Center", level: 1 }),
     ).toBeInTheDocument();
     expect(screen.queryByTestId("view-error-fallback")).not.toBeInTheDocument();
-    expect(boundaryLogged()).toBe(false);
+    expect(consoleErrorSpy).not.toHaveBeenCalled();
   });
 
-  it("degrades a crashing view to a card and leaves the shell mounted", async () => {
+  it("contains a crashing view without exposing its payload or unmounting chrome", async () => {
     renderShell();
     await screen.findByRole("complementary", { name: "Primary navigation" });
 
     fireEvent.click(navButton("CMS Groups"));
 
-    // The crashed view is one card...
     const fallback = await screen.findByTestId("view-error-fallback");
-    expect(within(fallback).getByText("TypeError")).toBeInTheDocument();
-    expect(
-      within(fallback).getByRole("button", { name: "Reload and reconcile" }),
-    ).toBeInTheDocument();
-
-    // ...and everything around it survived: the sidebar is still there, its
-    // nav is still usable, and the topbar still names where the operator is.
-    // Without the boundary this is a blank page — React unmounts the root.
-    expect(
-      screen.getByRole("complementary", { name: "Primary navigation" }),
-    ).toBeInTheDocument();
+    expect(fallback).toHaveFocus();
+    expect(within(fallback).getByText("Error")).toBeInTheDocument();
+    expect(screen.getByTestId("view-error-correlation-id")).toHaveTextContent(
+      /^Reference: (?:[0-9a-f-]{36}|view-error-[0-9a-z-]+)$/iu,
+    );
+    expect(fallback.textContent).not.toMatch(
+      /GroupsTenantSecretError|groups-message-secret|groups-stack-secret/u,
+    );
+    expect(screen.getByRole("complementary", { name: "Primary navigation" }))
+      .toBeInTheDocument();
     expect(navButton("Command Center")).toBeEnabled();
-    expect(
-      screen.getByRole("heading", { name: "CMS Groups", level: 1 }),
-    ).toBeInTheDocument();
-    expect(boundaryLogged()).toBe(true);
+    expect(boundaryReports()).toHaveLength(1);
+    expect(boundaryReports()[0]?.[1]).toEqual({
+      category: "Error",
+      correlationId: expect.any(String),
+    });
+    expect(JSON.stringify(boundaryReports())).not.toMatch(
+      /GroupsTenantSecretError|groups-message-secret|groups-stack-secret/u,
+    );
   });
 
-  it("clears the caught error when the operator navigates to another view", async () => {
-    // The boundary instance is retained across view changes; resetKey clears
-    // its stale error through getDerivedStateFromProps before the next view
-    // renders, so one crash cannot pin the fallback over later views.
+  it("clears the caught state when navigation remounts the keyed boundary", async () => {
     renderShell();
     await screen.findByRole("complementary", { name: "Primary navigation" });
-
     fireEvent.click(navButton("CMS Groups"));
     await screen.findByTestId("view-error-fallback");
 
@@ -221,8 +338,37 @@ describe("AppShell view error boundary", () => {
     await waitFor(() =>
       expect(screen.queryByTestId("view-error-fallback")).not.toBeInTheDocument(),
     );
-    expect(
-      await screen.findByRole("heading", { name: "Revenue Command Center", level: 1 }),
-    ).toBeInTheDocument();
+  });
+
+  it("keeps recovery and navigation latched when a view crashes during an unabortable apply", async () => {
+    renderShell();
+    await screen.findByRole("complementary", { name: "Primary navigation" });
+    fireEvent.click(navButton("Channel Registry"));
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Start pending apply and crash" }),
+    );
+
+    const fallback = await screen.findByTestId("view-error-fallback");
+    expect(fallback.textContent).not.toMatch(/apply-result-secret/iu);
+    expect(boundaryReports()).toHaveLength(1);
+    expect(boundaryReports()[0]?.[1]).toEqual({
+      category: "Error",
+      correlationId: expect.any(String),
+    });
+    expect(JSON.stringify(boundaryReports())).not.toMatch(/apply-result-secret/iu);
+    expect(navButton("Command Center")).toBeDisabled();
+    const reconcile = screen.getByRole("button", { name: "Reload and reconcile" });
+    expect(reconcile).toBeDisabled();
+    expect(fallback).toHaveTextContent(/wait for the active write to finish/iu);
+
+    await act(async () => {
+      WRITE_GATE.release();
+      await WRITE_GATE.pending;
+    });
+    await waitFor(() => expect(navButton("Command Center")).toBeEnabled());
+    expect(reconcile).toBeEnabled();
+    // The crashed write-capable subtree stays unmounted. Recovery is now a
+    // post-settlement full-document reconciliation, never an in-place retry.
+    expect(screen.getByTestId("view-error-fallback")).toBeInTheDocument();
   });
 });

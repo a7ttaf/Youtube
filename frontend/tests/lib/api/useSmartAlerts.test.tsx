@@ -67,6 +67,16 @@ const requireFetchArgs = () => {
 };
 
 describe("useSmartAlerts", () => {
+  it("does not fetch when the caller has not established the required grants", () => {
+    const { result } = renderHook(
+      () => useSmartAlerts({ month: "2026-03", enabled: false }),
+      { wrapper },
+    );
+
+    expect(globalThis.fetch).not.toHaveBeenCalled();
+    expect(result.current).toMatchObject({ data: null, loading: true, error: null });
+  });
+
   it("requests the smart-alerts endpoint with the encoded month path", async () => {
     (globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
       jsonResponse(SMART_ALERTS_BODY),

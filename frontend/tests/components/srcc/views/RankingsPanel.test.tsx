@@ -120,18 +120,22 @@ const DEFAULT_RANKINGS: () => Response = () => jsonResponse(RANKINGS_BODY);
 // test can assert the query param changed across renders.
 const routeFetch = (opts: { rankings?: () => Response } = {}) => {
   const fetchMock = globalThis.fetch as ReturnType<typeof vi.fn>;
+  const routes: ReadonlyArray<readonly [string, () => Response]> = [
+    ["/rankings", opts.rankings ?? DEFAULT_RANKINGS],
+    ["/smart-alerts", () => jsonResponse(SMART_ALERTS_CLEAR)],
+    ["/net-revenue", () => jsonResponse(NET_REVENUE_BODY)],
+    [
+      "/revenue/scopes",
+      () =>
+        jsonResponse({
+          scopes: [{ scope_type: "global", scope_id: null, label: "Global" }],
+        }),
+    ],
+  ];
   fetchMock.mockImplementation((input: RequestInfo | URL) => {
     const url = String(input);
-    if (url.includes("/rankings")) {
-      return Promise.resolve((opts.rankings ?? DEFAULT_RANKINGS)());
-    }
-    if (url.includes("/smart-alerts")) {
-      return Promise.resolve(jsonResponse(SMART_ALERTS_CLEAR));
-    }
-    if (url.includes("/net-revenue")) {
-      return Promise.resolve(jsonResponse(NET_REVENUE_BODY));
-    }
-    return Promise.resolve(jsonResponse({}, 404));
+    const route = routes.find(([path]) => url.includes(path));
+    return Promise.resolve(route ? route[1]() : jsonResponse({}, 404));
   });
   return fetchMock;
 };
@@ -168,14 +172,10 @@ describe("RankingsPanel in CommandView", () => {
     const fetchMock = routeFetch({});
     renderCommandView({ canViewFinance: false });
 
-    // Wait for the net-revenue read so the render settles.
-    await waitFor(() =>
-      expect(screen.getAllByText("UC-DRAMA-01").length).toBeGreaterThan(0),
-    );
-    // The RankingsRestrictedBand renders for a non-finance viewer (positive
-    // assertion that the Restricted copy/band is shown, not just absent money).
-    expect(screen.getByText("Rankings restricted")).toBeInTheDocument();
-    expect(screen.getAllByText(/Restricted/i).length).toBeGreaterThan(0);
+    await screen.findByText("Revenue access unavailable");
+    // Scope discovery itself is withheld, so the finance-bearing rankings
+    // panel is not mounted at all.
+    expect(screen.queryByText("Rankings")).not.toBeInTheDocument();
     // No rankings request fires for a non-finance viewer (panel shows money).
     const calledUrls = fetchMock.mock.calls.map((c) => String(c[0]));
     expect(calledUrls.some((u) => u.includes("/rankings"))).toBe(false);
@@ -210,8 +210,13 @@ describe("RankingsPanel in CommandView", () => {
     await waitFor(() =>
       expect(screen.getAllByText("UC-DRAMA-01").length).toBeGreaterThan(0),
     );
-    // The panel surfaces a no-permission state.
+    // The panel surfaces domain-specific no-permission copy, never the shared
+    // net-revenue default.
     expect(screen.getAllByText(/no permission/i).length).toBeGreaterThan(0);
+    expect(
+      screen.getByText("Your role cannot view rankings for this month or scope."),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/cannot view net revenue/i)).not.toBeInTheDocument();
   });
 
   it("fails independently: a rankings 500 stays contained to the panel", async () => {

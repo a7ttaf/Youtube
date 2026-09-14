@@ -392,4 +392,32 @@ describe("ErrorBoundary", () => {
     expect(screen.getByText("recovered content")).toBeInTheDocument();
     expect(screen.queryByTestId("view-error-fallback")).not.toBeInTheDocument();
   });
+
+  it("withholds reconciliation until the unabortable-write latch settles", () => {
+    const Exploding = explodingComponent(new Error("write-result-secret"));
+    const onReload = vi.fn();
+    const { rerender } = render(
+      <ErrorBoundary recoveryDisabled onReload={onReload}>
+        <Exploding />
+      </ErrorBoundary>,
+      { onCaughtError: () => undefined },
+    );
+
+    const button = screen.getByRole("button", { name: "Reload and reconcile" });
+    expect(button).toBeDisabled();
+    expect(button).toHaveAttribute("title", expect.stringMatching(/active write/iu));
+    fireEvent.click(button);
+    expect(onReload).not.toHaveBeenCalled();
+
+    rerender(
+      <ErrorBoundary recoveryDisabled={false} onReload={onReload}>
+        <Exploding />
+      </ErrorBoundary>,
+    );
+    expect(button).toBeEnabled();
+    fireEvent.click(button);
+
+    expect(onReload).toHaveBeenCalledTimes(1);
+    expect(screen.getByTestId("view-error-fallback")).toBeInTheDocument();
+  });
 });

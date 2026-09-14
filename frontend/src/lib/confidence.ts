@@ -11,7 +11,7 @@
 //   confidenceTone default).
 // Blast Radius: Display only — no finance math, no authorization, no audit.
 // Connections:
-//   - File: frontend/src/lib/mock/data.ts -> Severity tone union.
+//   - File: frontend/src/types/domain.ts -> Severity tone union.
 //   - File: frontend/src/components/srcc/views/TraceView.tsx -> shared HIGH/
 //     MEDIUM/LOW tone mapping (confidenceTone).
 //   - File: frontend/src/components/srcc/views/CommandView.tsx -> confidence

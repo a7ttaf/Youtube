@@ -9,7 +9,7 @@ import type {
 } from "@/lib/api/types";
 import { useExportActions } from "@/lib/api/useExportActions";
 import { useExports } from "@/lib/api/useExports";
-import type { Severity } from "@/lib/mock/data";
+import type { Severity } from "@/types/domain";
 import {
   Badge,
   DEFAULT_MONTH,

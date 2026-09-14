@@ -174,6 +174,10 @@ export default defineConfig(({ command, mode, isPreview }) => {
     resolve: {
       alias: {
         "@": path.resolve(FRONTEND_ROOT, "src"),
+        "@ums/design-system": path.resolve(
+          FRONTEND_ROOT,
+          "packages/design-system/src/index.tsx",
+        ),
       },
     },
     server: {

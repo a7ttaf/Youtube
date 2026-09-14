@@ -6,6 +6,8 @@ import { useAsync, type AsyncState } from "@/lib/api/useAsync";
 
 export type SmartAlertsQuery = {
   month: string;
+  /** False withholds the request until every endpoint grant can be proven. */
+  enabled?: boolean;
 };
 
 // ============================================================================
@@ -31,7 +33,7 @@ export const useSmartAlerts = (
   query: SmartAlertsQuery,
 ): AsyncState<SmartAlertsSummary> => {
   const client = useApiClient();
-  const { month } = query;
+  const { month, enabled = true } = query;
 
   const run = useCallback(
     () =>
@@ -41,5 +43,5 @@ export const useSmartAlerts = (
     [client, month],
   );
 
-  return useAsync(run);
+  return useAsync(run, enabled);
 };

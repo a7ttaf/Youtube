@@ -25,7 +25,8 @@ Edited in [`ci/config/checks.yml`](config/checks.yml):
 | **commit-hygiene** / **branch-protection** | enabled | conventional commits, no direct main pushes |
 | **typecheck-js** | enabled | `tsc --noEmit` in `frontend/`, via the `node` lane |
 | **tests-js** | enabled | `vitest run` in `frontend/`, via the `node` lane |
-| **lint-js / format-js** | **disabled** | `frontend/` has no eslint or prettier config, and no `lint` / `format:check` script |
+| **lint-js** | enabled | `frontend/` has an ESM ESLint config and `bun run lint`; the package script covers `src/` and `packages/design-system/` |
+| **format-js** | **disabled** | `frontend/` has no formatter or `format:check` script |
 | **lint-go / typecheck-go / format-go / tests-go** | **disabled** | No Go in the project |
 | **lint-rust / typecheck-rust / format-rust / tests-rust** | **disabled** | No Rust in the project |
 | **container** | **disabled** | Re-enable once Dockerfile lint (`hadolint`) is wanted in the gate |
