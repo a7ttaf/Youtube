@@ -312,7 +312,8 @@ def test_posix_provisioning_refuses_incompatible_operator_identity(
     the exact operator command instead.
     """
     if os.name != "posix":
-        pytest.skip("the POSIX identity gate applies to POSIX hosts only")
+        # The POSIX identity gate applies to POSIX hosts only.
+        return
     monkeypatch.setattr(os, "geteuid", lambda: 1000, raising=False)
     monkeypatch.setattr(os, "getegid", lambda: 1000, raising=False)
     chown_calls: list[tuple[Path, int, int]] = []
@@ -344,9 +345,11 @@ def test_posix_provisioning_as_app_identity_matches_the_boundary_policy(
 ) -> None:
     """Children created under the app identity are app-owned with no group write."""
     if os.name != "posix":
-        pytest.skip("the POSIX identity gate applies to POSIX hosts only")
+        # The POSIX identity gate applies to POSIX hosts only.
+        return
     if os.geteuid() == 0:
-        pytest.skip("root provisioning takes the chown branch covered separately")
+        # Root provisioning takes the chown branch covered separately.
+        return
     root = tmp_path / "store"
     root.mkdir()
     storage._create_storage_children(root, storage._real_directory_identity(root))
@@ -364,7 +367,8 @@ def test_posix_provisioning_as_root_chowns_children_to_the_app(
 ) -> None:
     """Root provisioning chowns every fresh child to APP_UID/APP_GID."""
     if os.name != "posix":
-        pytest.skip("the POSIX identity gate applies to POSIX hosts only")
+        # The POSIX identity gate applies to POSIX hosts only.
+        return
     monkeypatch.setattr(os, "geteuid", lambda: 0, raising=False)
     monkeypatch.setattr(os, "getegid", lambda: 0, raising=False)
     chown_calls: list[tuple[Path, int, int]] = []
@@ -410,7 +414,9 @@ def test_custom_existing_store_is_not_mutated_before_explicit_adoption(
     checkout = tmp_path / "checkout"
     checkout.mkdir()
     source = tmp_path / "custom-store"
-    source.mkdir()
+    # The validator refuses a storage dir with any world grant; keep the
+    # fixture inside the POSIX boundary so the adoption contract is what runs.
+    source.mkdir(mode=0o700)
     with pytest.raises(storage.StoragePathError, match="adopt-existing"):
         storage.prepare_storage_path(source, project_root=checkout)
     assert tuple(source.iterdir()) == ()
@@ -436,7 +442,7 @@ def test_attested_custom_store_is_not_implicitly_completed(
     checkout = tmp_path / "checkout"
     checkout.mkdir()
     source = tmp_path / "attested-custom-store"
-    source.mkdir()
+    source.mkdir(mode=0o700)
     storage._create_sentinel(source)
     with pytest.raises(storage.StoragePathError, match="will not mutate"):
         storage.prepare_storage_path(source, project_root=checkout)

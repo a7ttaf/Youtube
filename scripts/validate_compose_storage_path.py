@@ -1377,9 +1377,7 @@ def _create_storage_children(canonical: Path, root_identity: tuple[int, int]) ->
     The root identity is rechecked immediately before and after each write so a
     junction/root replacement cannot redirect later writes.
     """
-    current_identity = (
-        (os.geteuid(), os.getegid()) if os.name == "posix" else None
-    )
+    current_identity = (os.geteuid(), os.getegid()) if os.name == "posix" else None
     for child_name in STORAGE_CHILDREN:
         child = canonical / child_name
         if not child.exists():

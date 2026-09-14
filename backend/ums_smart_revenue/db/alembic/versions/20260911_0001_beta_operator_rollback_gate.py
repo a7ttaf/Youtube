@@ -116,9 +116,7 @@ def downgrade() -> None:
         if bind.dialect.name == "postgresql":
             # Bound every blocking point first: a conflicting write lock must
             # fail with an actionable refusal, not hang the migration.
-            apply_statement_bounds(
-                bind, lock_timeout="10s", statement_timeout="10s"
-            )
+            apply_statement_bounds(bind, lock_timeout="10s", statement_timeout="10s")
             # An operator-visible login may be row-security-bounded; disable
             # RLS for this read so the guard can prove the absence of live
             # rows rather than trusting a filtered count.
@@ -126,11 +124,7 @@ def downgrade() -> None:
             # Serialise the check against concurrent writers for the rest of
             # this transaction — a snapshot-only count would otherwise let a
             # role assignment slip in behind the downgrade.
-            bind.execute(
-                sa.text(
-                    "LOCK TABLE user_role_assignments IN SHARE ROW EXCLUSIVE MODE"
-                )
-            )
+            bind.execute(sa.text("LOCK TABLE user_role_assignments IN SHARE ROW EXCLUSIVE MODE"))
         live = bind.execute(
             sa.select(sa.func.count())
             .select_from(_USER_ROLE_ASSIGNMENTS)

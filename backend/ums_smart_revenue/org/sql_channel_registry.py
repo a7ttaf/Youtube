@@ -376,8 +376,7 @@ class SqlAlchemyChannelRegistry:
                 # until the boundary's rollback-to, so classification there
                 # rests on the dialect string matcher above alone and an
                 # unmatched error re-raises into the boundary rollback.
-                not self._txn_active
-                and self._get_row(youtube_channel_id) is not None
+                not self._txn_active and self._get_row(youtube_channel_id) is not None
             ):
                 raise ChannelRegistryConflictError(
                     f"Channel already exists: {youtube_channel_id}"
@@ -388,6 +387,7 @@ class SqlAlchemyChannelRegistry:
     def update_mapping(
         self, *, youtube_channel_id: str, primary_company_id: str | None
     ) -> ChannelRegistryEntry:
+        """Update a channel's org mapping under tenant isolation."""
         # ====================================================================
         # Purpose: Re-parent a channel's primary org unit, but first reject the
         #   change when the channel has any revenue fact in a LOCKED finance
@@ -479,6 +479,7 @@ class SqlAlchemyChannelRegistry:
     def update_content_owner(
         self, *, youtube_channel_id: str, content_owner_id: str | None
     ) -> ChannelRegistryEntry:
+        """Update a channel's content owner under tenant isolation."""
         row = self._get_row(youtube_channel_id)
         if row is None:
             raise KeyError(f"Channel not found: {youtube_channel_id}")
@@ -712,6 +713,7 @@ class SqlAlchemyChannelRegistry:
 
     @staticmethod
     def _to_entry(row: YouTubeChannelORM) -> ChannelRegistryEntry:
+        """Project an ORM row into a ChannelRegistryEntry."""
         return ChannelRegistryEntry(
             youtube_channel_id=row.youtube_channel_id,
             channel_name=row.channel_name,
@@ -747,6 +749,7 @@ def _parse_tenant_uuid(tenant_id: UUID | str) -> UUID:
 
 
 def _parse_optional_uuid(value: str | None, field_name: str) -> UUID | None:
+    """Parse an optional UUID string, rejecting malformed input."""
     if value is None:
         return None
     try:
@@ -756,6 +759,7 @@ def _parse_optional_uuid(value: str | None, field_name: str) -> UUID | None:
 
 
 def _is_duplicate_channel_integrity_error(exc: IntegrityError) -> bool:
+    """Return True when the integrity error is a channel duplicate."""
     constraint_name = _constraint_name(exc)
     error_text = _integrity_error_text(exc)
     return (
@@ -769,6 +773,7 @@ def _is_duplicate_channel_integrity_error(exc: IntegrityError) -> bool:
 def _channel_registry_validation_error_from_integrity_error(
     exc: IntegrityError,
 ) -> ChannelRegistryValidationError:
+    """Translate a non-duplicate integrity error into a validation error."""
     constraint_name = _constraint_name(exc)
     error_text = _integrity_error_text(exc)
     if (
@@ -783,9 +788,11 @@ def _channel_registry_validation_error_from_integrity_error(
 
 
 def _constraint_name(exc: IntegrityError) -> str:
+    """Extract the failed constraint name from an integrity error, if present."""
     diag = getattr(getattr(exc, "orig", None), "diag", None)
     return str(getattr(diag, "constraint_name", "") or "").lower()
 
 
 def _integrity_error_text(exc: IntegrityError) -> str:
+    """Return the integrity error's printable diagnostic text."""
     return f"{exc.orig!s} {exc!s}".lower()

@@ -92,11 +92,7 @@ def test_audit_logs_model_declares_request_lifecycle_index():
     """
     table = SecurityBase.metadata.tables["audit_logs"]
     index = next(
-        (
-            index
-            for index in table.indexes
-            if index.name == "ix_audit_logs_tenant_event_request"
-        ),
+        (index for index in table.indexes if index.name == "ix_audit_logs_tenant_event_request"),
         None,
     )
     assert index is not None

@@ -642,9 +642,7 @@ def _require_authorization_digest(body: dict[str, object]) -> str:
     return digest
 
 
-def _require_seed_floor(
-    body: dict[str, object], tables: tuple[TableRecord, ...]
-) -> dict[str, int]:
+def _require_seed_floor(body: dict[str, object], tables: tuple[TableRecord, ...]) -> dict[str, int]:
     """Validate the dynamic seed floor against the snapshot table counts."""
     raw_floor = body["seed_floor"]
     if not isinstance(raw_floor, dict) or not raw_floor:

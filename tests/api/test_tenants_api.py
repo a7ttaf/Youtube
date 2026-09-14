@@ -211,9 +211,7 @@ def test_openapi_documents_primary_currency_on_both_hydration_responses(
     schema = client_db_mode.get("/openapi.json").json()
 
     tenant_properties = schema["components"]["schemas"]["TenantRead"]["properties"]
-    assert "primary_currency" in tenant_properties, (
-        "GET /tenants/me must document primary_currency"
-    )
+    assert "primary_currency" in tenant_properties, "GET /tenants/me must document primary_currency"
 
     session_properties = schema["components"]["schemas"]["SessionTenant"]["properties"]
     assert "primary_currency" in session_properties, (

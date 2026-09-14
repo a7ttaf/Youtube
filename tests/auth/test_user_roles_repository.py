@@ -124,15 +124,10 @@ def test_assign_role_adds_the_row_inside_its_savepoint(tmp_path):
         token = TENANT_CTX.set(_tenant())
         original_begin_nested = session.begin_nested
 
-        def _record_pending(
-            *args: object, **kwargs: object
-        ) -> SessionTransaction:
+        def _record_pending(*args: object, **kwargs: object) -> SessionTransaction:
             """Count pending assignment rows at the moment a savepoint opens."""
             pending_assignments_at_savepoint_open.append(
-                sum(
-                    isinstance(obj, UserRoleAssignmentORM)
-                    for obj in list(session.new)
-                )
+                sum(isinstance(obj, UserRoleAssignmentORM) for obj in list(session.new))
             )
             return original_begin_nested(*args, **kwargs)
 

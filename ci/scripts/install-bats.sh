@@ -20,14 +20,14 @@
 # Change BATS_VERSION deliberately, not incidentally.
 set -Eeuo pipefail
 
-BATS_VERSION="${BATS_VERSION:-v1.11.1}"
+BATS_VERSION="${BATS_VERSION:-v1.13.0}"
 BATS_REPO="${BATS_REPO:-https://github.com/bats-core/bats-core.git}"
-# Immutable commit the v1.11.1 tag dereferences to. The tag is mutable -- a moved
+# Immutable commit the v1.13.0 tag dereferences to. The tag is mutable -- a moved
 # or compromised upstream tag would otherwise be cloned and its install.sh
 # executed with this machine's privileges. BATS_COMMIT is what is actually
 # fetched and verified; BATS_VERSION remains the human-facing pin and the
 # already-provisioned comparison. Keep the two in sync when bumping.
-BATS_COMMIT="${BATS_COMMIT:-b640ec3cf2c7c9cfc9e6351479261186f76eeec8}"
+BATS_COMMIT="${BATS_COMMIT:-3bca150ec86275d6d9d5a4fd7d48ab8b6c6f3d87}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"

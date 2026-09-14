@@ -63,12 +63,8 @@ def _is_active_assignment_unique_violation(exc: IntegrityError) -> bool:
     # a NOT NULL/CHECK failure names the same columns without meaning a
     # duplicate.
     error_text = f"{exc.orig!s} {exc!s}"
-    return (
-        _ACTIVE_ASSIGNMENT_UNIQUE_INDEX in error_text
-        or (
-            "UNIQUE constraint failed" in error_text
-            and "user_role_assignments.role_key" in error_text
-        )
+    return _ACTIVE_ASSIGNMENT_UNIQUE_INDEX in error_text or (
+        "UNIQUE constraint failed" in error_text and "user_role_assignments.role_key" in error_text
     )
 
 

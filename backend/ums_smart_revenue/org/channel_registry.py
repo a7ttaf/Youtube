@@ -28,6 +28,8 @@ from ums_smart_revenue.org.bootstrap_registry import BOOTSTRAP_CHANNELS
 
 @dataclass(frozen=True)
 class ChannelRegistryEntry:
+    """Immutable view of one channel registry row."""
+
     youtube_channel_id: str
     channel_name: str
     primary_company_id: str | None
@@ -38,6 +40,7 @@ class ChannelRegistryEntry:
     active: bool = True
 
     def to_api(self) -> dict[str, object]:
+        """Return the API serialization of the channel entry."""
         return {
             "youtube_channel_id": self.youtube_channel_id,
             "channel_name": self.channel_name,
@@ -51,18 +54,20 @@ class ChannelRegistryEntry:
 
 
 class ChannelRegistryError(ValueError):
-    pass
+    """Base error for channel registry failures."""
 
 
 class ChannelRegistryConflictError(ChannelRegistryError):
-    pass
+    """Raised when a channel write conflicts with existing state."""
 
 
 class ChannelRegistryValidationError(ChannelRegistryError):
-    pass
+    """Raised when a channel write fails validation."""
 
 
 class ChannelMappingLockedMonthError(ChannelRegistryError):
+    """Raised when a mapping change is blocked by a locked month."""
+
     # ========================================================================
     # Purpose: Signal that a channel mapping change is blocked because the
     #   channel carries revenue facts in a LOCKED finance month, so re-parenting
@@ -77,10 +82,11 @@ class ChannelMappingLockedMonthError(ChannelRegistryError):
     #       raised by SqlAlchemyChannelRegistry.update_mapping.
     #   - File: backend/ums_smart_revenue/api/channels.py -> translated to 409.
     # ========================================================================
-    pass
 
 
 class ChannelRevenueRequirementLockedMonthError(ChannelRegistryError):
+    """Raised when a revenue-requirement change is blocked by a locked month."""
+
     # ========================================================================
     # Purpose: Signal that flipping a channel's revenue_required flag ON is
     #   blocked because a LOCKED finance month has no revenue fact for it.
@@ -100,10 +106,11 @@ class ChannelRevenueRequirementLockedMonthError(ChannelRegistryError):
     #   - File: backend/ums_smart_revenue/finance/month_close_readiness.py ->
     #       the readiness query this guard keeps stable for LOCKED months.
     # ========================================================================
-    pass
 
 
 class ChannelRegistryStore(Protocol):
+    """Persistence contract every channel registry backend must satisfy."""
+
     # The store's transactional backing, REQUIRED by the protocol: the
     # session object for SQL adapters, None for self-contained in-memory
     # ones (their journal is their own unit of work). A wrapper must
@@ -115,15 +122,15 @@ class ChannelRegistryStore(Protocol):
     sql_unit_of_work: object | None
 
     def list_channels(self) -> list[ChannelRegistryEntry]:
-        pass
+        """Return every active channel summary."""
 
     def list_channels_by_ids(
         self, youtube_channel_ids: set[str], *, include_inactive: bool = False
     ) -> list[ChannelRegistryEntry]:
-        pass
+        """Return channel summaries for the given ids."""
 
     def get_channel(self, youtube_channel_id: str) -> ChannelRegistryEntry | None:
-        pass
+        """Return the channel by id, or None."""
 
     def create_channel(
         self,
@@ -135,17 +142,17 @@ class ChannelRegistryStore(Protocol):
         revenue_required: bool,
         content_owner_id: str | None = None,
     ) -> ChannelRegistryEntry:
-        pass
+        """Create a channel mapping and return the stored entry."""
 
     def update_mapping(
         self, *, youtube_channel_id: str, primary_company_id: str | None
     ) -> ChannelRegistryEntry:
-        pass
+        """Update a channel's org mapping."""
 
     def update_content_owner(
         self, *, youtube_channel_id: str, content_owner_id: str | None
     ) -> ChannelRegistryEntry:
-        pass
+        """Update a channel's content owner."""
 
     # ========================================================================
     # Purpose: The registry's inventory WRITE, declared as a compare-and-update:
@@ -259,6 +266,8 @@ class ChannelRegistryStore(Protocol):
 
 
 class ChannelRegistry:
+    """In-memory channel registry used on the no-database tier."""
+
     # No SQL backing: the per-thread journal is this store's own unit of
     # work, so the import's shared-session validation has nothing to check.
     sql_unit_of_work: object | None = None
@@ -391,9 +400,7 @@ class ChannelRegistry:
             self._txn, "undo", None
         )
         if undo is not None:
-            undo.append(
-                (youtube_channel_id, self._channels.get(youtube_channel_id), written)
-            )
+            undo.append((youtube_channel_id, self._channels.get(youtube_channel_id), written))
 
     # ========================================================================
     # Purpose: In-memory read — every ACTIVE channel, sorted by id.
@@ -444,8 +451,7 @@ class ChannelRegistry:
                 [
                     channel
                     for channel_id, channel in list(self._channels.items())
-                    if channel_id in youtube_channel_ids
-                    and (channel.active or include_inactive)
+                    if channel_id in youtube_channel_ids and (channel.active or include_inactive)
                 ],
                 key=lambda channel: channel.youtube_channel_id,
             )
@@ -487,12 +493,11 @@ class ChannelRegistry:
         revenue_required: bool,
         content_owner_id: str | None = None,
     ) -> ChannelRegistryEntry:
+        """Create a channel mapping and return the stored entry."""
         normalized_company_id = _parse_optional_uuid(primary_company_id, "primary_company_id")
         with self._lock:
             if youtube_channel_id in self._channels:
-                raise ChannelRegistryConflictError(
-                    f"Channel already exists: {youtube_channel_id}"
-                )
+                raise ChannelRegistryConflictError(f"Channel already exists: {youtube_channel_id}")
             initial_revenue_source_status = (
                 "MISSING_REVENUE_SOURCE" if revenue_required else "PERFORMANCE_ONLY"
             )
@@ -526,6 +531,7 @@ class ChannelRegistry:
     def update_mapping(
         self, *, youtube_channel_id: str, primary_company_id: str | None
     ) -> ChannelRegistryEntry:
+        """Update a channel's org mapping."""
         normalized_company_id = _parse_optional_uuid(primary_company_id, "primary_company_id")
         with self._lock:
             existing = self._channels.get(youtube_channel_id)
@@ -561,6 +567,7 @@ class ChannelRegistry:
     def update_content_owner(
         self, *, youtube_channel_id: str, content_owner_id: str | None
     ) -> ChannelRegistryEntry:
+        """Update a channel's content owner."""
         with self._lock:
             existing = self._channels.get(youtube_channel_id)
             if existing is None:
@@ -651,6 +658,7 @@ class ChannelRegistry:
 
 
 def bootstrap_channel_registry() -> ChannelRegistry:
+    """Return a registry seeded from bootstrap rows."""
     channels = [
         ChannelRegistryEntry(
             youtube_channel_id=channel.youtube_channel_id,
@@ -670,6 +678,7 @@ def bootstrap_channel_registry() -> ChannelRegistry:
 
 
 def _parse_optional_uuid(value: str | None, field_name: str) -> str | None:
+    """Parse an optional UUID string, rejecting malformed input."""
     if value is None:
         return None
     try:

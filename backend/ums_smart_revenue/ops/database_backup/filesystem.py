@@ -44,7 +44,8 @@ def _is_redirect(path: Path) -> bool:
     """Report whether the path is a symlink or Windows reparse point."""
     try:
         return path.is_symlink() or bool(
-            path.lstat().st_file_attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT
+            path.lstat().st_file_attributes  # type: ignore[attr-defined]
+            & stat.FILE_ATTRIBUTE_REPARSE_POINT  # type: ignore[attr-defined]
         )
     except (AttributeError, FileNotFoundError):
         return path.is_symlink()
@@ -387,9 +388,7 @@ def _require_only_database_run_children(children: list[Path]) -> None:
             + ", ".join(foreign[:8]),
             exit_code=2,
         )
-    partials = sorted(
-        child.name for child in children if PARTIAL_RUN_NAME_RE.fullmatch(child.name)
-    )
+    partials = sorted(child.name for child in children if PARTIAL_RUN_NAME_RE.fullmatch(child.name))
     if partials:
         raise BackupToolError(
             "backup output contains a prior partial run; inspect it before retrying",
@@ -480,11 +479,11 @@ def _durable_move(source: Path, destination: Path) -> None:
     if os.name == "nt":
         import ctypes
 
-        move_file = ctypes.WinDLL("kernel32", use_last_error=True).MoveFileExW
+        move_file = ctypes.WinDLL("kernel32", use_last_error=True).MoveFileExW  # type: ignore[attr-defined]
         move_file.argtypes = [ctypes.c_wchar_p, ctypes.c_wchar_p, ctypes.c_uint32]
         move_file.restype = ctypes.c_int
         if not move_file(str(source), str(destination), 0x8):
-            raise ctypes.WinError(ctypes.get_last_error())
+            raise ctypes.WinError(ctypes.get_last_error())  # type: ignore[attr-defined]
         return
     os.rename(source, destination)
     _sync_directory(destination.parent)

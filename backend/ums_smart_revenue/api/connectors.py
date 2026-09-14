@@ -1251,9 +1251,7 @@ def _attach_reservation_lifecycle_hooks(
                     job_id=reservation.job_id,
                 )
             except Exception:  # noqa: BLE001 — best-effort audit
-                logger.exception(
-                    "Failed to persist activation-failure audit for reservation"
-                )
+                logger.exception("Failed to persist activation-failure audit for reservation")
 
     event.listen(session, "after_commit", _after_commit)
     event.listen(session, "after_transaction_end", _after_transaction_end)

@@ -595,8 +595,7 @@ def _redact_structured_value(value: object) -> object:
             return redact_exception_summary(value)
         if isinstance(value, dict):
             return {
-                _safe_dict_key(key): _redacted_for_key(key, nested)
-                for key, nested in value.items()
+                _safe_dict_key(key): _redacted_for_key(key, nested) for key, nested in value.items()
             }
         if isinstance(value, list):
             return [_redact_structured_value(nested) for nested in value]

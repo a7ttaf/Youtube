@@ -447,9 +447,13 @@ if [ "${#_GS_PATHS[@]}" -gt 0 ]; then
       # _gs_ncommits and the n-th group is the n-th path. batch-check prints
       # exactly one line per input line, which is what makes that hold; the
       # count check below refuses to trust the mapping if it ever stops holding.
+      # FIX: awk -v cannot carry a newline-separated list under BSD awk
+      # (macOS): object IDs never contain spaces, so pass them space-joined
+      # and split on that instead of embedding raw newlines in the -v value.
+      _gs_commits_joined="$(printf '%s\n' "$GATE_COMMITS" | tr '\n' ' ')"
       _gs_sizes_out="$(printf '%s\n' "${_GS_PATHS[@]}" \
-        | awk -v commits="$GATE_COMMITS" '
-            BEGIN { n = split(commits, c, "\n") }
+        | awk -v commits="$_gs_commits_joined" '
+            BEGIN { n = split(commits, c, " ") }
             { for (i = 1; i <= n; i++) if (c[i] != "") print c[i] ":" $0 }' \
         | git cat-file --batch-check 2>/dev/null \
         | awk -v n="$_gs_ncommits" '

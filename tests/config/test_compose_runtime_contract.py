@@ -56,10 +56,7 @@ def test_app_stop_grace_period_covers_connector_close_budgets() -> None:
     )
 
     dockerfile = _DOCKERFILE_PATH.read_text(encoding="utf-8")
-    graceful_flag = (
-        '"--timeout-graceful-shutdown", "'
-        f'{int(_SERVER_GRACEFUL_TIMEOUT_SECONDS)}"'
-    )
+    graceful_flag = f'"--timeout-graceful-shutdown", "{int(_SERVER_GRACEFUL_TIMEOUT_SECONDS)}"'
     assert graceful_flag in dockerfile
     app_dev_command = services["app-dev"]["command"]
     timeout_flag_index = app_dev_command.index("--timeout-graceful-shutdown")

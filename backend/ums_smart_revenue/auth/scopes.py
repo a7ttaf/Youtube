@@ -148,9 +148,7 @@ class OrgAccessIndex:
             return True
         return (target_scope.type, target_scope.id) in self.resolved_targets
 
-    def _contains_same_type(
-        self, granted_scope: AccessScope, target_scope: AccessScope
-    ) -> bool:
+    def _contains_same_type(self, granted_scope: AccessScope, target_scope: AccessScope) -> bool:
         """Decide same-type containment with resolution-aware id equality."""
         if granted_scope.id is None or target_scope.id is None:
             return granted_scope.id is None and target_scope.id is None
@@ -177,9 +175,7 @@ class OrgAccessIndex:
     #   - File: backend/ums_smart_revenue/org/access_index.py -> builds the
     #     edge maps this helper reads.
     # ========================================================================
-    def _contains_cross_type(
-        self, granted_scope: AccessScope, target_scope: AccessScope
-    ) -> bool:
+    def _contains_cross_type(self, granted_scope: AccessScope, target_scope: AccessScope) -> bool:
         """Decide cross-type containment through the ancestry edge maps."""
         # Cross-type containment requires real ids on both sides; a malformed
         # grant or target with id=None would otherwise compare equal to a

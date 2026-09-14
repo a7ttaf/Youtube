@@ -164,9 +164,7 @@ def _purge_test_rows(engine: sa.Engine) -> None:
             sa.text("DELETE FROM bank_reconciliation_entries WHERE month = :m"), {"m": MONTH}
         )
         conn.execute(
-            sa.text(
-                "DELETE FROM monthly_channel_revenue_facts WHERE youtube_channel_id = :c"
-            ),
+            sa.text("DELETE FROM monthly_channel_revenue_facts WHERE youtube_channel_id = :c"),
             {"c": CHANNEL_ID},
         )
         conn.execute(sa.text("DELETE FROM export_jobs WHERE id = :e"), {"e": str(EXPORT_ID)})
@@ -180,9 +178,7 @@ def _purge_test_rows(engine: sa.Engine) -> None:
             {"c": CHANNEL_ID, "late": LATE_CHANNEL_ID},
         )
         conn.execute(
-            sa.text(
-                "DELETE FROM org_units WHERE id IN (:company, :company_b, :sector, :sector_b)"
-            ),
+            sa.text("DELETE FROM org_units WHERE id IN (:company, :company_b, :sector, :sector_b)"),
             {
                 "company": str(COMPANY_ID),
                 "company_b": str(COMPANY_B_ID),

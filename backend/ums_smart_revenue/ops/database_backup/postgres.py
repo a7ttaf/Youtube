@@ -100,9 +100,19 @@ def _safe_detail(stderr: str) -> str:
 _LIBPQ_CLEAR_ARGS: tuple[str, ...] = tuple(
     arg
     for value in (
-        "PGHOST", "PGHOSTADDR", "PGPORT", "PGUSER", "PGDATABASE",
-        "PGSERVICE", "PGSERVICEFILE", "PGPASSWORD", "PGPASSFILE",
-        "PGSSLMODE", "PGOPTIONS", "PGAPPNAME", "PGCONNECT_TIMEOUT",
+        "PGHOST",
+        "PGHOSTADDR",
+        "PGPORT",
+        "PGUSER",
+        "PGDATABASE",
+        "PGSERVICE",
+        "PGSERVICEFILE",
+        "PGPASSWORD",
+        "PGPASSFILE",
+        "PGSSLMODE",
+        "PGOPTIONS",
+        "PGAPPNAME",
+        "PGCONNECT_TIMEOUT",
     )
     for arg in ("-e", f"{value}=")
 )
@@ -759,6 +769,7 @@ def _connect(
 #   - File: Docs/22_BACKUP_RESTORE_AND_REHEARSAL.md -> endpoint contract.
 # ============================================================================
 
+
 def require_password_authentication(source: ContainerConnection) -> None:
     """Prove the loopback target rejects a fresh deliberately wrong password.
 
@@ -869,6 +880,7 @@ def _table_names(connection: Connection[tuple[object, ...]]) -> list[tuple[str, 
 #   - File: Docs/22_BACKUP_RESTORE_AND_REHEARSAL.md -> supported source scope.
 # ============================================================================
 
+
 def require_no_foreign_tables(connection: Connection[tuple[object, ...]]) -> None:
     """Refuse foreign tables because pg_dump cannot capture their external rows.
 
@@ -915,6 +927,7 @@ def require_no_foreign_tables(connection: Connection[tuple[object, ...]]) -> Non
 #   - File: backend/ums_smart_revenue/ops/database_backup/backup.py -> post-dump.
 # ============================================================================
 
+
 def require_source_quiescent(connection: Connection[tuple[object, ...]]) -> None:
     """Refuse a source with another database session during the writer-stop window.
 
@@ -959,6 +972,7 @@ def require_source_quiescent(connection: Connection[tuple[object, ...]]) -> None
 #   - File: Docs/22_BACKUP_RESTORE_AND_REHEARSAL.md -> capture contract.
 # ============================================================================
 
+
 def _lock_export_relations(connection: Connection[tuple[object, ...]]) -> None:
     """Fence catalog rewrites/TRUNCATE before the repeatable-read snapshot exists."""
     # SHARE on pg_class conflicts with the catalog RowExclusive work needed by
@@ -990,6 +1004,7 @@ def _lock_export_relations(connection: Connection[tuple[object, ...]]) -> None:
 #   - File: backend/ums_smart_revenue/ops/database_backup/backup.py -> pre/post.
 #   - File: backend/ums_smart_revenue/ops/database_backup/contracts.py -> record.
 # ============================================================================
+
 
 def snapshot_sequences(
     connection: Connection[tuple[object, ...]],
@@ -1147,8 +1162,7 @@ def _permission_rows_well_formed(permission_rows: Sequence[tuple[object, ...]]) 
 def _assignment_rows_well_formed(assignment_rows: Sequence[tuple[object, ...]]) -> bool:
     """Return whether every assignment row is a pair of strings."""
     return not any(
-        len(row) != 2 or not all(isinstance(value, str) for value in row)
-        for row in assignment_rows
+        len(row) != 2 or not all(isinstance(value, str) for value in row) for row in assignment_rows
     )
 
 
@@ -1562,6 +1576,7 @@ def require_clean_target(source: ContainerConnection) -> None:
 #   - File: scripts/compose_restore_roles.sql -> later creates two NOLOGIN roles.
 # ============================================================================
 
+
 def require_dedicated_cluster(source: ContainerConnection) -> None:
     """Refuse anything except the exact fresh PostgreSQL 18 cluster shape.
 
@@ -1952,19 +1967,32 @@ def dump_snapshot(
         [
             "docker",
             "exec",
-            "-e", "PGHOST=",
-            "-e", "PGHOSTADDR=",
-            "-e", "PGPORT=",
-            "-e", "PGUSER=",
-            "-e", "PGDATABASE=",
-            "-e", "PGSERVICE=",
-            "-e", "PGSERVICEFILE=",
-            "-e", "PGPASSWORD=",
-            "-e", "PGPASSFILE=",
-            "-e", "PGSSLMODE=",
-            "-e", "PGOPTIONS=",
-            "-e", "PGAPPNAME=",
-            "-e", "PGCONNECT_TIMEOUT=",
+            "-e",
+            "PGHOST=",
+            "-e",
+            "PGHOSTADDR=",
+            "-e",
+            "PGPORT=",
+            "-e",
+            "PGUSER=",
+            "-e",
+            "PGDATABASE=",
+            "-e",
+            "PGSERVICE=",
+            "-e",
+            "PGSERVICEFILE=",
+            "-e",
+            "PGPASSWORD=",
+            "-e",
+            "PGPASSFILE=",
+            "-e",
+            "PGSSLMODE=",
+            "-e",
+            "PGOPTIONS=",
+            "-e",
+            "PGAPPNAME=",
+            "-e",
+            "PGCONNECT_TIMEOUT=",
             source.container,
             "pg_dump",
             "--format=custom",
@@ -1998,19 +2026,32 @@ def dump_toc_entries(runner: CommandRunner, container: str, dump_source: Path | 
         "docker",
         "exec",
         "-i",
-        "-e", "PGHOST=",
-        "-e", "PGHOSTADDR=",
-        "-e", "PGPORT=",
-        "-e", "PGUSER=",
-        "-e", "PGDATABASE=",
-        "-e", "PGSERVICE=",
-        "-e", "PGSERVICEFILE=",
-        "-e", "PGPASSWORD=",
-        "-e", "PGPASSFILE=",
-        "-e", "PGSSLMODE=",
-        "-e", "PGOPTIONS=",
-        "-e", "PGAPPNAME=",
-        "-e", "PGCONNECT_TIMEOUT=",
+        "-e",
+        "PGHOST=",
+        "-e",
+        "PGHOSTADDR=",
+        "-e",
+        "PGPORT=",
+        "-e",
+        "PGUSER=",
+        "-e",
+        "PGDATABASE=",
+        "-e",
+        "PGSERVICE=",
+        "-e",
+        "PGSERVICEFILE=",
+        "-e",
+        "PGPASSWORD=",
+        "-e",
+        "PGPASSFILE=",
+        "-e",
+        "PGSSLMODE=",
+        "-e",
+        "PGOPTIONS=",
+        "-e",
+        "PGAPPNAME=",
+        "-e",
+        "PGCONNECT_TIMEOUT=",
         container,
         "pg_restore",
         "--list",
@@ -2061,9 +2102,7 @@ def wait_for_postgres(
                 timeout_seconds=_remaining_budget(deadline, runner.timeout_seconds),
                 exit_code=4,
             )
-            connection = _connect(
-                source, connect_timeout=_remaining_budget(deadline, 10)
-            )
+            connection = _connect(source, connect_timeout=_remaining_budget(deadline, 10))
             connection.close()
             # The probe SUCCEEDED: a connection closed cleanly inside the
             # budget proves readiness even at the boundary instant — only a
@@ -2192,9 +2231,7 @@ def _run_fenced_mutation(
                 runner, argv, stream, container=container, user=user, database=database
             )
     else:
-        _run_fenced_stream(
-            runner, argv, feed, container=container, user=user, database=database
-        )
+        _run_fenced_stream(runner, argv, feed, container=container, user=user, database=database)
 
 
 def _run_fenced_stream(
@@ -2252,19 +2289,32 @@ def apply_sql_file(
         "docker",
         "exec",
         "-i",
-        "-e", "PGHOST=",
-        "-e", "PGHOSTADDR=",
-        "-e", "PGPORT=",
-        "-e", "PGUSER=",
-        "-e", "PGDATABASE=",
-        "-e", "PGSERVICE=",
-        "-e", "PGSERVICEFILE=",
-        "-e", "PGPASSWORD=",
-        "-e", "PGPASSFILE=",
-        "-e", "PGSSLMODE=",
-        "-e", "PGOPTIONS=",
-        "-e", f"PGAPPNAME={_mutation_tag()}",
-        "-e", "PGCONNECT_TIMEOUT=",
+        "-e",
+        "PGHOST=",
+        "-e",
+        "PGHOSTADDR=",
+        "-e",
+        "PGPORT=",
+        "-e",
+        "PGUSER=",
+        "-e",
+        "PGDATABASE=",
+        "-e",
+        "PGSERVICE=",
+        "-e",
+        "PGSERVICEFILE=",
+        "-e",
+        "PGPASSWORD=",
+        "-e",
+        "PGPASSFILE=",
+        "-e",
+        "PGSSLMODE=",
+        "-e",
+        "PGOPTIONS=",
+        "-e",
+        f"PGAPPNAME={_mutation_tag()}",
+        "-e",
+        "PGCONNECT_TIMEOUT=",
         container,
         "psql",
         "--no-psqlrc",
@@ -2309,19 +2359,32 @@ def restore_dump(
         "docker",
         "exec",
         "-i",
-        "-e", "PGHOST=",
-        "-e", "PGHOSTADDR=",
-        "-e", "PGPORT=",
-        "-e", "PGUSER=",
-        "-e", "PGDATABASE=",
-        "-e", "PGSERVICE=",
-        "-e", "PGSERVICEFILE=",
-        "-e", "PGPASSWORD=",
-        "-e", "PGPASSFILE=",
-        "-e", "PGSSLMODE=",
-        "-e", "PGOPTIONS=",
-        "-e", f"PGAPPNAME={_mutation_tag()}",
-        "-e", "PGCONNECT_TIMEOUT=",
+        "-e",
+        "PGHOST=",
+        "-e",
+        "PGHOSTADDR=",
+        "-e",
+        "PGPORT=",
+        "-e",
+        "PGUSER=",
+        "-e",
+        "PGDATABASE=",
+        "-e",
+        "PGSERVICE=",
+        "-e",
+        "PGSERVICEFILE=",
+        "-e",
+        "PGPASSWORD=",
+        "-e",
+        "PGPASSFILE=",
+        "-e",
+        "PGSSLMODE=",
+        "-e",
+        "PGOPTIONS=",
+        "-e",
+        f"PGAPPNAME={_mutation_tag()}",
+        "-e",
+        "PGCONNECT_TIMEOUT=",
         container,
         "pg_restore",
         "--exit-on-error",

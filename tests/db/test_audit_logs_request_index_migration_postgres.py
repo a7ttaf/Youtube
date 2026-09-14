@@ -61,8 +61,7 @@ def _index_columns(engine: object) -> list[str] | None:
     with engine.connect() as connection:  # type: ignore[union-attr]
         row = connection.execute(
             text(
-                "SELECT indexdef FROM pg_indexes "
-                "WHERE schemaname = 'public' AND indexname = :name"
+                "SELECT indexdef FROM pg_indexes WHERE schemaname = 'public' AND indexname = :name"
             ),
             {"name": INDEX_NAME},
         ).scalar_one_or_none()
@@ -90,7 +89,5 @@ def test_downgrade_drops_lifecycle_request_index(
     assert _index_columns(fresh_engine) is None
     # The table itself survives: the downgrade is schema-only, not data loss.
     with fresh_engine.connect() as connection:  # type: ignore[union-attr]
-        present = connection.execute(
-            text("SELECT to_regclass('public.audit_logs')")
-        ).scalar_one()
+        present = connection.execute(text("SELECT to_regclass('public.audit_logs')")).scalar_one()
     assert present == "audit_logs"

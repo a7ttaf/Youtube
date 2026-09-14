@@ -199,9 +199,7 @@ def _seed_org_db(
                 tenant_id=TENANT,
                 youtube_channel_id=channel_id,
                 channel_name=channel_id,
-                primary_org_unit_id=(
-                    id_map[primary_unit_id] if primary_unit_id else None
-                ),
+                primary_org_unit_id=(id_map[primary_unit_id] if primary_unit_id else None),
                 active=True,
             )
         )
@@ -278,9 +276,10 @@ def test_scoped_index_contains_matches_canonical_index() -> None:
         for target in targets:
             scoped = load_org_access_index_for_scope(session, target)
             for granted in grants:
-                assert scoped.contains(granted, target) == canonical.contains(
-                    granted, target
-                ), (granted, target)
+                assert scoped.contains(granted, target) == canonical.contains(granted, target), (
+                    granted,
+                    target,
+                )
     finally:
         TENANT_CTX.reset(token)
 
@@ -328,9 +327,7 @@ def test_scoped_index_omits_company_edge_for_orphan_company() -> None:
     )
     token = TENANT_CTX.set(_tenant())
     try:
-        scoped = load_org_access_index_for_scope(
-            session, AccessScope.channel("channel-orphan")
-        )
+        scoped = load_org_access_index_for_scope(session, AccessScope.channel("channel-orphan"))
     finally:
         TENANT_CTX.reset(token)
 

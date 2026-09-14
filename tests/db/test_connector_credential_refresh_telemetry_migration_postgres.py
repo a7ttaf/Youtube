@@ -24,11 +24,13 @@ _NEW_COLUMNS = {
 
 @pytest.fixture
 def postgres_url() -> str:
+    """Postgres url."""
     return require_postgres_url()
 
 
 @pytest.fixture
 def alembic_config(postgres_url: str) -> Config:
+    """Alembic config."""
     cfg = Config()
     cfg.set_main_option("sqlalchemy.url", postgres_url)
     cfg.set_main_option(
@@ -40,6 +42,7 @@ def alembic_config(postgres_url: str) -> Config:
 
 @pytest.fixture
 def fresh_engine(postgres_url: str) -> object:
+    """Fresh engine."""
     reset_public_schema(postgres_url)
     engine = create_engine(postgres_url)
     try:
@@ -49,6 +52,7 @@ def fresh_engine(postgres_url: str) -> object:
 
 
 def _insert_tenant(conn, tenant_id, slug: str) -> None:
+    """Return the insert tenant fixture helper."""
     conn.execute(
         text(
             "INSERT INTO tenants (id, slug, display_name, primary_currency, status) "
@@ -59,6 +63,7 @@ def _insert_tenant(conn, tenant_id, slug: str) -> None:
 
 
 def _insert_credential(conn, tenant_id, credential_id) -> None:
+    """Return the insert credential fixture helper."""
     conn.execute(
         text(
             "INSERT INTO api_connector_credentials "
@@ -71,6 +76,7 @@ def _insert_credential(conn, tenant_id, credential_id) -> None:
 
 
 def test_upgrade_adds_telemetry_columns(alembic_config: Config, fresh_engine: object) -> None:
+    """Verify upgrade adds telemetry columns."""
     command.upgrade(alembic_config, TELEMETRY_HEAD)
     inspector = inspect(fresh_engine)
     columns = {c["name"] for c in inspector.get_columns("api_connector_credentials")}
@@ -78,6 +84,7 @@ def test_upgrade_adds_telemetry_columns(alembic_config: Config, fresh_engine: ob
 
 
 def test_downgrade_then_upgrade_round_trip(alembic_config: Config, fresh_engine: object) -> None:
+    """Verify downgrade then upgrade round trip."""
     command.upgrade(alembic_config, TELEMETRY_HEAD)
     command.downgrade(alembic_config, PRIOR_HEAD)
     inspector = inspect(fresh_engine)
@@ -93,6 +100,7 @@ def test_downgrade_then_upgrade_round_trip(alembic_config: Config, fresh_engine:
 def test_last_refresh_status_check_positive_and_negative(
     alembic_config: Config, fresh_engine: object
 ) -> None:
+    """Verify last refresh status check positive and negative."""
     command.upgrade(alembic_config, TELEMETRY_HEAD)
     tenant_id = uuid4()
     credential_id = uuid4()
@@ -113,8 +121,7 @@ def test_last_refresh_status_check_positive_and_negative(
     with pytest.raises(DatabaseError), fresh_engine.begin() as conn:
         conn.execute(
             text(
-                "UPDATE api_connector_credentials "
-                "SET last_refresh_status = 'bogus' WHERE id = :id"
+                "UPDATE api_connector_credentials SET last_refresh_status = 'bogus' WHERE id = :id"
             ),
             {"id": credential_id},
         )
