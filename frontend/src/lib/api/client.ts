@@ -3,6 +3,8 @@ import { useMemo } from "react";
 
 import { useTenant } from "@/contexts/TenantContext";
 
+import { assertTrustedApiRoute } from "./trustedRoutes";
+
 // The JSON media type this client both requests and detects. Named once so the
 // Accept header, the Content-Type it sets on JSON bodies, and the response
 // content-type sniff in parseBody can never drift apart.
@@ -31,18 +33,51 @@ export class ApiError extends Error {
 /**
  * Resolve a request path against the configured API origin.
  *
- * An already-absolute http(s) URL is returned untouched. Otherwise the path is
+ * An absolute http(s) URL is accepted only when its origin matches either the
+ * configured API base or the browser's own origin. Otherwise the path is
  * prefixed with VITE_API_BASE_URL (trailing slashes stripped); when no base is
  * configured this returns the original relative path unchanged, so same-origin
  * deployments keep byte-identical relative URLs. Exported so non-JSON callers
- * (e.g. binary download flows) can target the same API origin as JSON requests
- * instead of hard-coding a frontend-relative URL. This is URL normalization
- * only: a cross-origin value does not establish CORS or trusted-gateway auth.
+ * (e.g. binary download flows) can target the same audited API origin as the
+ * JSON client instead of hard-coding a frontend-relative URL. This is URL
+ * normalization only: a cross-origin value does not establish CORS or
+ * trusted-gateway auth.
  */
+/** Collect the configured API origin plus the browser's own origin. */
+const trustedApiOrigins = (base: string): Set<string> => {
+  const origins = new Set<string>();
+  if (/^https?:\/\//i.test(base)) {
+    origins.add(new URL(base).origin);
+  }
+  const browserOrigin = globalThis.location?.origin;
+  if (browserOrigin) {
+    origins.add(browserOrigin);
+  }
+  return origins;
+};
+
+/** Fail closed unless an absolute request URL shares a trusted origin. */
+const assertTrustedAbsoluteUrl = (path: string, base: string): void => {
+  const requestUrl = new URL(path);
+  if (
+    requestUrl.username ||
+    requestUrl.password ||
+    !trustedApiOrigins(base).has(requestUrl.origin)
+  ) {
+    throw new Error("API request URL origin is outside the configured API origin");
+  }
+};
+
 export const resolveUrl = (path: string): string => {
-  if (/^https?:\/\//i.test(path)) return path;
+  // FIX: The canonical browser client and trusted dev proxy now consume the
+  // same route-root contract; a new request cannot outrun proxy coverage.
+  assertTrustedApiRoute(path);
   const raw = import.meta.env.VITE_API_BASE_URL ?? "";
   const base = raw.replace(/\/+$/, "");
+  if (/^https?:\/\//i.test(path)) {
+    assertTrustedAbsoluteUrl(path, base);
+    return path;
+  }
   const normalisedPath = path.startsWith("/") ? path : `/${path}`;
   return `${base}${normalisedPath}`;
 };
