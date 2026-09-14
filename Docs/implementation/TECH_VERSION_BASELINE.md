@@ -50,7 +50,7 @@ For this project:
 | React DOM | `19.2.6` |
 | TypeScript | `6.0.3` |
 | ESLint | `10.3.0` |
-| Vitest | `4.1.5` |
+| Vitest | `4.1.11` |
 | Playwright | `1.59.1` |
 
 ## Checked Sources

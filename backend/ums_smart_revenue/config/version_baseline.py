@@ -39,7 +39,7 @@ STACK_VERSION_BASELINE: dict[str, dict[str, str]] = {
         "react_dom": "19.2.6",
         "typescript": "6.0.3",
         "eslint": "10.3.0",
-        "vitest": "4.1.5",
+        "vitest": "4.1.11",
         "playwright": "1.59.1",
     },
 }
