@@ -295,6 +295,7 @@ _EXPECTED_CURRENT_ROLE_PERMISSIONS: dict[str, set[str]] = {
     "tv_sector_manager": {"analytics.view", "exports.analytics", "analytics.view_confidence"},
 }
 
+
 def _parse_value_tuples(body: str) -> list[tuple[str, ...]]:
     """Split a VALUES body into top-level tuples of literal values.
 
@@ -1087,9 +1088,7 @@ def test_security_seed_sql_matches_the_python_registries() -> None:
     permission_block = _values_block(
         sql, "INSERT INTO permissions (key, label, sensitive, audit_on_use)"
     )
-    raw_sql_permissions = [
-        row for row in _parse_value_tuples(permission_block) if len(row) == 4
-    ]
+    raw_sql_permissions = [row for row in _parse_value_tuples(permission_block) if len(row) == 4]
     assert len(raw_sql_permissions) == _REPAIR_COUNTS[1]
     sql_permissions = {
         key: (label, sensitive == "true", audit_on_use == "true")

@@ -109,6 +109,7 @@ def engine() -> Iterator[Engine]:
 
 def _session_context_factory(db_engine: Engine) -> type:
     """Helper for the session context factory scenario."""
+
     class _SessionCtx:
         """Connection-context stub whose cursor answers one canned row."""
 
@@ -128,6 +129,7 @@ def _patch_settings_and_session(
     module: ModuleType, monkeypatch: pytest.MonkeyPatch, db_engine: Engine
 ) -> None:
     """Helper for the patch settings and session scenario."""
+
     class _StubSettings:
         """Settings double carrying only the fields the CLI reads."""
 

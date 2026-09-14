@@ -33,9 +33,7 @@ CURRENCY_RE = re.compile(r"^[A-Z]{3}$")
 # uppercase letters). Membership in the frozen ISO 4217 catalog is enforced at
 # domain conversion, so a database-mode tenant row can never surface a triplet
 # the headers-mode settings path would reject (e.g. "ZZZ") as a valid currency.
-_ISO_4217_CURRENCY_CODES = frozenset(
-    str(entry["code"]) for entry in ISO_4217_CURRENCIES_2026_05
-)
+_ISO_4217_CURRENCY_CODES = frozenset(str(entry["code"]) for entry in ISO_4217_CURRENCIES_2026_05)
 MAX_TENANT_SLUG_LENGTH = 255
 
 

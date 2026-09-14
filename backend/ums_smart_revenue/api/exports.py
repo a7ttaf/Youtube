@@ -649,9 +649,7 @@ def download_analytics_summary_csv(
                 include_download_event=False,
             ),
         )
-        return _prepared_artifact_response(
-            repository=repository, filename=artifact.filename
-        )
+        return _prepared_artifact_response(repository=repository, filename=artifact.filename)
 
     # FIX: Ordering here is the audit's truth. The filename is validated
     # FIRST (an unsafe persisted name must fail closed as a 500 without ever
@@ -1293,9 +1291,7 @@ def _commit_export_artifact_audit_before_response(
 #   - File: backend/ums_smart_revenue/api/dependencies.py -> the yield
 #       session dependency whose teardown commit this front-runs.
 # ============================================================================
-def _commit_tenant_session_before_response(
-    *, repository: SqlAlchemyExportJobRepository
-) -> None:
+def _commit_tenant_session_before_response(*, repository: SqlAlchemyExportJobRepository) -> None:
     """Commit tenant export metadata through the repository before responding."""
     try:
         repository.commit_unit_of_work()

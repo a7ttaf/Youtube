@@ -48,6 +48,7 @@ class _BoomError(Exception):
 
 
 def _seeded_channel(name: str = "Old Name") -> ChannelRegistryEntry:
+    """Return the seeded channel fixture helper."""
     return ChannelRegistryEntry(
         youtube_channel_id=CHANNEL_ID,
         channel_name=name,
@@ -111,9 +112,7 @@ def test_registry_boundary_leaves_a_foreign_write_standing() -> None:
         # The foreign writer lands AFTER our journaled write, on OUR key; its
         # value is what the store holds when the boundary unwinds.
         current = registry._channels[CHANNEL_ID]
-        registry._channels[CHANNEL_ID] = dataclasses.replace(
-            current, content_owner_id=None
-        )
+        registry._channels[CHANNEL_ID] = dataclasses.replace(current, content_owner_id=None)
         raise _BoomError()
 
     stored = registry.get_channel(CHANNEL_ID)
@@ -260,6 +259,7 @@ def test_registry_boundary_is_thread_local_and_serializes_writers() -> None:
     worker_errors: list[BaseException] = []
 
     def worker() -> None:
+        """Worker."""
         try:
             with registry.transaction():
                 registry.create_channel(
@@ -311,6 +311,7 @@ def test_registry_readers_never_observe_uncommitted_boundary_state() -> None:
     reader_errors: list[BaseException] = []
 
     def reader() -> None:
+        """Reader."""
         try:
             observed["get"] = registry.get_channel(CHANNEL_ID)
             observed["listed"] = registry.list_channels()
@@ -348,6 +349,7 @@ def test_groups_readers_never_observe_uncommitted_boundary_state() -> None:
     reader_errors: list[BaseException] = []
 
     def reader() -> None:
+        """Reader."""
         try:
             observed["by_cms"] = groups.get_group_by_cms_id("cms-minted")
             observed["listed"] = groups.list_groups()

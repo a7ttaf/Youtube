@@ -1007,6 +1007,4 @@ def test_empty_install_gate_ignores_session_state_rows():
     # A real application row alongside the session state passes the gate.
     with_real_row = dict(with_tenant_state)
     with_real_row["public.channels"] = 1
-    assert backup._content_floor(with_real_row) == {
-        name: 1 for name in sorted(backup.SEED_TABLES)
-    }
+    assert backup._content_floor(with_real_row) == {name: 1 for name in sorted(backup.SEED_TABLES)}

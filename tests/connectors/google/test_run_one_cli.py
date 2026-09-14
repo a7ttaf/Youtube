@@ -240,6 +240,7 @@ class _SessionCtx:
 
 def _patch_cli_runtime(module, monkeypatch: pytest.MonkeyPatch, db_session: Session) -> None:
     """Install every double the CLI main path touches."""
+
     class _StubSettings:
         """Settings double carrying only the fields the CLI reads."""
 

@@ -202,9 +202,7 @@ def _parent_sector_id(
 #   - File: backend/ums_smart_revenue/auth/scopes.py -> contains() lookups.
 #   - File: backend/ums_smart_revenue/api/users.py -> mutation routes.
 # ============================================================================
-def load_org_access_index_for_scope(
-    session: Session, target_scope: AccessScope
-) -> OrgAccessIndex:
+def load_org_access_index_for_scope(session: Session, target_scope: AccessScope) -> OrgAccessIndex:
     """Build the minimal index covering only the target scope's ancestry.
 
     Raises:
@@ -380,8 +378,6 @@ def _company_target_index(
     return OrgAccessIndex(
         channel_company={},
         channel_sector={},
-        company_sector=(
-            {company_id_raw: sector_id} if sector_id is not None else {}
-        ),
+        company_sector=({company_id_raw: sector_id} if sector_id is not None else {}),
         resolved_targets=frozenset({(target_scope.type, company_id_raw)}),
     )

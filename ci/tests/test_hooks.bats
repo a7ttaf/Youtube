@@ -60,7 +60,10 @@ echo "DEST=${CI_GATE_PUSH_REMOTE_REFS-<unset>}"
 echo "TIPS=${CI_GATE_PUSH_BRANCH_TIPS-<unset>}"
 echo "TAGS=${CI_GATE_PUSH_TAG_TIPS-<unset>}"
 echo "OTHER=${CI_GATE_PUSH_OTHER_TIPS-<unset>}"
+echo "NOTES=${CI_GATE_PUSH_NOTES_TIPS-<unset>}"
+echo "OUTREFS=${CI_GATE_PUSH_OUTGOING_REFS-<unset>}"
 echo "DELONLY=${CI_GATE_PUSH_DELETIONS_ONLY-<unset>}"
+echo "OBJECT_ONLY=${CI_GATE_SECURITY_OBJECT_ONLY-<unset>}"
 exit 0
 SH
   chmod +x "$HD_SB/ci/preflight.sh"
@@ -649,12 +652,10 @@ refs/heads/old %s refs/publish/prod %s
   rm -rf "$HD_SB"
 }
 
-@test "hook: a notes push is not a tree this gate stands behind" {
-  # `git push origin refs/notes/commits` publishes a commit whose tree is note
-  # blobs. It became CI_GATE_PUSH_NEW_SHA, worktree_covers_push found it was
-  # neither the checkout nor on the destination -- `git branch -r --contains`
-  # never lists a notes commit -- and the push was refused with "check out the
-  # commit being pushed", which cannot be done to a notes commit.
+@test "hook: a notes push is application content with a dedicated object tip" {
+  # refs/notes/* is only a naming convention: Git accepts an arbitrary app
+  # commit there. It stays out of the single branch range, but counts as content
+  # and is retained separately for both worktree coverage and object scanning.
   _hd_sandbox
   local zero=0000000000000000000000000000000000000000
   run bash -c "cd '$HD_SB' && printf 'refs/notes/commits %s refs/notes/commits %s
@@ -666,6 +667,9 @@ refs/heads/old %s refs/publish/prod %s
   [[ "$output" != *"OTHER=$HD_ROOT"* ]]
   [[ "$output" == *"TAGS="* ]]
   [[ "$output" != *"TAGS=$HD_ROOT"* ]]
+  [[ "$output" == *"NOTES=$HD_ROOT"* ]]
+  [[ "$output" == *"OUTREFS=refs/notes/commits"* ]]
+  [[ "$output" == *"DELONLY=<unset>"* ]]
   rm -rf "$HD_SB"
 }
 
@@ -679,11 +683,15 @@ refs/heads/old %s refs/publish/prod %s
   # test-layout, the node lane, the build and the shell suites all skipped.
   _hd_sandbox
   run bash -c "cd '$HD_SB' && printf 'refs/heads/main %s refs/heads/main %s
-' '$HD_TIP' '$HD_BASE' | CI_GATE_PUSH_DELETIONS_ONLY=1 CI_GATE_PUSH_TAG_TIPS=stale CI_GATE_PUSH_NEW_SHA=stale bash ci/hook-dispatch.sh pre-push origin file:///x 2>&1"
+' '$HD_TIP' '$HD_BASE' | CI_GATE_PUSH_DELETIONS_ONLY=1 CI_GATE_PUSH_TAG_TIPS=stale \
+CI_GATE_PUSH_NOTES_TIPS=stale CI_GATE_PUSH_OUTGOING_REFS=stale \
+CI_GATE_SECURITY_OBJECT_ONLY=1 CI_GATE_PUSH_NEW_SHA=stale \
+bash ci/hook-dispatch.sh pre-push origin file:///x 2>&1"
   [ "$status" -eq 0 ]
   [[ "$output" == *"DELONLY=<unset>"* ]]
   [[ "$output" == *"NEW=$HD_TIP"* ]]
   [[ "$output" != *"=stale"* ]]
+  [[ "$output" == *"OBJECT_ONLY=<unset>"* ]]
 
   # The control: a push this hook itself finds to be deletions-only still says
   # so, so the reset is a reset and not a removal.
@@ -692,22 +700,22 @@ refs/heads/old %s refs/publish/prod %s
 ' '$zero' '$HD_BASE' | bash ci/hook-dispatch.sh pre-push origin file:///x 2>&1"
   [ "$status" -eq 0 ]
   [[ "$output" == *"DELONLY=1"* ]]
+  [[ "$output" == *"NOTES="* ]]
+  [[ "$output" != *"NOTES=$HD_ROOT"* ]]
   rm -rf "$HD_SB"
 }
 
-@test "hook: a notes-only push carries nothing a content lane reads" {
-  # `_push_any_content=1` was raised before the record's namespace was known, so
-  # the arm that treats refs/notes/* as annotations -- which it is -- came too
-  # late: the push counted as content, exported no tip and no deletions-only
-  # flag, and ship preflight fell back to the checked-out HEAD. An ordinary
-  # `git notes` update then ran the node lane, the build and the shell suites
-  # over unrelated project content, where any pre-existing failure blocked it.
+@test "hook: a notes-only push cannot select the content-free plan" {
+  # An ordinary notes commit usually contains only annotations, but the ref name
+  # cannot prove that. Treating it as content is the safe rule for an arbitrary
+  # commit pushed into refs/notes/*.
   _hd_sandbox
   local zero=0000000000000000000000000000000000000000
   run bash -c "cd '$HD_SB' && printf 'refs/notes/commits %s refs/notes/commits %s
 ' '$HD_ROOT' '$zero' | bash ci/hook-dispatch.sh pre-push origin file:///x 2>&1"
   [ "$status" -eq 0 ]
-  [[ "$output" == *"DELONLY=1"* ]]
+  [[ "$output" == *"DELONLY=<unset>"* ]]
+  [[ "$output" == *"NOTES=$HD_ROOT"* ]]
 
   # The control: a branch record beside the notes one raises the flag for
   # itself, and that push is gated in full.

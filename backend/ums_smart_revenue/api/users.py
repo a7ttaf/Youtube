@@ -600,9 +600,7 @@ def revoke_user_role(
         ) from exc
 
     existing_role = _parse_role_for_policy(existing.role_key)
-    existing_scope = _parse_scope_for_policy(
-        existing.scope_type, existing.scope_id, stored=True
-    )
+    existing_scope = _parse_scope_for_policy(existing.scope_type, existing.scope_id, stored=True)
     org_index = load_org_access_index_for_scope(session, existing_scope)
     _require_role_assignment_policy(user, existing_role, existing_scope, org_index)
 
@@ -741,9 +739,7 @@ def revoke_user_permission(
         ) from exc
 
     permission = _parse_permission_for_policy(existing.permission_key)
-    existing_scope = _parse_scope_for_policy(
-        existing.scope_type, existing.scope_id, stored=True
-    )
+    existing_scope = _parse_scope_for_policy(existing.scope_type, existing.scope_id, stored=True)
     org_index = load_org_access_index_for_scope(session, existing_scope)
     _require_permission_grant_policy(user, permission, existing_scope, org_index)
 
@@ -973,9 +969,7 @@ def _has_any_role(
     org_index: OrgAccessIndex,
 ) -> bool:
     """Return whether the caller has any active assignment in a role set."""
-    return any(
-        _has_scoped_role(user, role, target_scope, org_index) for role in roles
-    )
+    return any(_has_scoped_role(user, role, target_scope, org_index) for role in roles)
 
 
 # ============================================================================
@@ -992,9 +986,7 @@ def _has_any_role(
 #   - File: backend/ums_smart_revenue/auth/scopes.py -> target_resolved.
 #   - File: backend/ums_smart_revenue/org/access_index.py -> loader proof.
 # ============================================================================
-def _require_resolved_org_scope(
-    target_scope: AccessScope, org_index: OrgAccessIndex
-) -> None:
+def _require_resolved_org_scope(target_scope: AccessScope, org_index: OrgAccessIndex) -> None:
     """Raise 404 when a create-path mutation targets an unresolved org scope."""
     if not org_index.target_resolved(target_scope):
         raise HTTPException(

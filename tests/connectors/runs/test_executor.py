@@ -923,8 +923,7 @@ def test_close_logs_worker_exception_from_done_futures(tmp_path, caplog) -> None
     # legitimately strips exc_info after folding the redacted summary into
     # the message, so accept either the raw exc_info or the redacted marker.
     assert any(
-        record.exc_info is not None or "[exception=" in record.getMessage()
-        for record in matching
+        record.exc_info is not None or "[exception=" in record.getMessage() for record in matching
     )
 
 
@@ -1185,13 +1184,16 @@ def test_group_sync_failure_edge_prevents_false_shutdown_recovery(tmp_path) -> N
     assert executor.cancel_reservation(reservation) is True
 
     # The pre-dispatch failure edge the worker's catch writes for the intent.
-    assert executor._audit_group_sync_failure(
-        tenant_id=TENANT,
-        content_owner_id="content-owner-recovery",
-        error_class="ConnectorServicePrincipalUnavailableError",
-        actor_identity=ACTOR,
-        job_id=reservation.job_id,
-    ) is True
+    assert (
+        executor._audit_group_sync_failure(
+            tenant_id=TENANT,
+            content_owner_id="content-owner-recovery",
+            error_class="ConnectorServicePrincipalUnavailableError",
+            actor_identity=ACTOR,
+            job_id=reservation.job_id,
+        )
+        is True
+    )
 
     assert executor.recover_abandoned_submission_intents() == 0
     executor.close()

@@ -334,9 +334,7 @@ def _apply_tenant_isolation(session, _transaction, connection):
     # all of this. Independent of the role marker on purpose.
     bounds = session.info.get(_STATEMENT_BOUNDS_KEY)
     if bounds is not None:
-        apply_statement_bounds(
-            connection, lock_timeout=bounds[0], statement_timeout=bounds[1]
-        )
+        apply_statement_bounds(connection, lock_timeout=bounds[0], statement_timeout=bounds[1])
     role = session.info.get(_SESSION_ROLE_KEY)
     if role is None:
         return

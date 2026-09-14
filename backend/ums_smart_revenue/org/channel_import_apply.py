@@ -108,6 +108,7 @@ class _BufferedAuditSink:
         self._pending: list[AuditRecord] = []
 
     def append(self, record: AuditRecord) -> None:
+        """Buffer one audit record for the next transaction boundary."""
         self._pending.append(record)
 
     # ========================================================================
@@ -159,6 +160,8 @@ class _BufferedAuditSink:
         for record in self._pending:
             sink.append(record)
         self._pending.clear()
+
+
 # The `action` value _attach_group_memberships reports for a group it minted,
 # as opposed to a membership it added to an existing one. Recorded on the
 # GROUP_UPDATED audit event, where an auditor uses it to tell a new

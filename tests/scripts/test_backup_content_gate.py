@@ -326,6 +326,7 @@ def _has_unresolved_insert_literal(node: ast.AST) -> bool:
 #   - File: backend/ums_smart_revenue/ops/database_backup/contracts.py -> gate.
 # ============================================================================
 
+
 def _reachable_upgrade_functions(
     tree: ast.Module, functions: dict[str, ast.FunctionDef]
 ) -> set[str]:
@@ -349,7 +350,6 @@ def _reachable_upgrade_functions(
                     reachable.add(target)
                     pending.append(target)
     return reachable
-
 
 
 def _bulk_insert_targets(
@@ -396,14 +396,10 @@ def _execute_seed_targets(
     if nested_insert_targets:
         for nested_target in nested_insert_targets:
             collected.update(
-                _single_insert_target(
-                    nested_target, label, tables=tables, strings=strings
-                )
+                _single_insert_target(nested_target, label, tables=tables, strings=strings)
             )
         return collected
-    return collected | _sql_literal_seed_targets(
-        statement, label, tables=tables, strings=strings
-    )
+    return collected | _sql_literal_seed_targets(statement, label, tables=tables, strings=strings)
 
 
 def _single_insert_target(
@@ -414,9 +410,7 @@ def _single_insert_target(
     strings: dict[str, set[str]],
 ) -> set[str]:
     """Resolve one SQLAlchemy insert's table or fail the scan."""
-    targets = (
-        _qualified_table_name(target, tables, strings) if target is not None else set()
-    )
+    targets = _qualified_table_name(target, tables, strings) if target is not None else set()
     if len(targets) != 1:
         raise AssertionError(f"{label}: unresolved SQLAlchemy insert table")
     return targets

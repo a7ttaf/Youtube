@@ -857,9 +857,7 @@ class ConnectorJobExecutor:
             AuditLogORM.tenant_id == tenant_id,
             AuditLogORM.event_type == AuditEventType.CONNECTOR_JOB_RUN.value,
             AuditLogORM.request_id == str(job_id),
-            action.in_(
-                {_JOB_ACTION_SUBMITTED, *_JOB_RECOVERY_TERMINAL_ACTIONS}
-            ),
+            action.in_({_JOB_ACTION_SUBMITTED, *_JOB_RECOVERY_TERMINAL_ACTIONS}),
         )
         if session.get_bind().dialect.name == "postgresql":
             statement = statement.with_for_update(of=AuditLogORM)
@@ -937,16 +935,12 @@ class ConnectorJobExecutor:
         details = dict(intent_row.details or {})
         actor_user_id = intent_row.user_id or details.get("actor_user_id")
         if actor_user_id is None:
-            raise RuntimeError(
-                "connector job intent is missing its durable actor identity"
-            )
+            raise RuntimeError("connector job intent is missing its durable actor identity")
         connector_key = str(details.get("connector_key") or intent_row.scope_id or "")
         account_id = str(details.get("account_id") or "")
         report_month = str(details.get("report_month") or "")
         if not connector_key or not account_id or not report_month:
-            raise RuntimeError(
-                "connector job intent is missing recovery scope metadata"
-            )
+            raise RuntimeError("connector job intent is missing recovery scope metadata")
         actor = self._build_audit_actor(
             tenant_id=tenant_id,
             actor_identity=ConnectorJobActor(
@@ -1507,9 +1501,7 @@ class ConnectorJobExecutor:
                 # see _audit_failed_before_start for the full rationale.
                 session.info[_STATEMENT_BOUNDS_KEY] = _AUDIT_STATEMENT_BOUNDS
                 with platform_lane(session):
-                    apply_statement_bounds(
-                        session, lock_timeout="10s", statement_timeout="10s"
-                    )
+                    apply_statement_bounds(session, lock_timeout="10s", statement_timeout="10s")
                     sink = SqlAlchemyAuditSink(session, tenant_id=tenant_id)
                     record_audit_event(
                         sink=sink,
@@ -1680,9 +1672,7 @@ class ConnectorJobExecutor:
                 # this standalone audit (run_one does its own elevation; this
                 # audit runs OUTSIDE run_one). No-op off Postgres.
                 with platform_lane(session):
-                    apply_statement_bounds(
-                        session, lock_timeout="10s", statement_timeout="10s"
-                    )
+                    apply_statement_bounds(session, lock_timeout="10s", statement_timeout="10s")
                     sink = SqlAlchemyAuditSink(session, tenant_id=tenant_id)
                     record_audit_event(
                         sink=sink,

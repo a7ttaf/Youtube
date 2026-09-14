@@ -465,7 +465,11 @@ def test_prepare_rejects_symlink_or_junction_target(tmp_path):
     try:
         redirect.symlink_to(outside, target_is_directory=True)
     except OSError:
-        pytest.skip("this Windows account may not create symlinks")
+        if os.name != "nt":
+            raise
+        # Unprivileged Windows accounts cannot create symlinks; there is no
+        # redirect to reject on such a host.
+        return
 
     with pytest.raises(storage.StorageContractError, match="link"):
         storage.prepare_storage(
@@ -509,16 +513,14 @@ def _recovery_members(bundle: Path, archive: Path) -> list[Path]:
                     {
                         "name": "database.dump",
                         "sha256": (
-                            "320b506c406da6e90ae0654737e9377d19f10df68371520b"
-                            "1279a4c7495c77a5"
+                            "320b506c406da6e90ae0654737e9377d19f10df68371520b1279a4c7495c77a5"
                         ),
                         "bytes": 22,
                     },
                     {
                         "name": "roles.sql",
                         "sha256": (
-                            "bc775661d3f85651a648df1149db3728fcdcf67b300df0c7"
-                            "91cdac2f55e43681"
+                            "bc775661d3f85651a648df1149db3728fcdcf67b300df0c791cdac2f55e43681"
                         ),
                         "bytes": 50,
                     },
@@ -1371,11 +1373,7 @@ def test_restore_publication_rolls_back_and_retries_after_replace_error(tmp_path
     def fail_second_publication(source, destination):
         """Fail the publication of the second artifact."""
         nonlocal failed
-        if (
-            not failed
-            and Path(source).name == "blobs"
-            and Path(destination) == target / "blobs"
-        ):
+        if not failed and Path(source).name == "blobs" and Path(destination) == target / "blobs":
             failed = True
             raise OSError("injected publication failure")
         return real_replace(Path(source), Path(destination))
@@ -1581,9 +1579,11 @@ def test_restore_retry_rejects_directory_replaced_by_regular_file(tmp_path, monk
         )
 
 
-@pytest.mark.skipif(os.name == "nt", reason="POSIX execute-bit contract")
 def test_empty_nested_directory_without_search_permission_is_rejected():
     """Listing an empty directory is insufficient without execute/search access."""
+    if os.name == "nt":
+        # The POSIX execute/search-bit contract does not apply on Windows.
+        return
     code = """
 import importlib.util
 import os
@@ -1751,14 +1751,13 @@ def test_compose_contract_requires_precreated_bind_and_actual_image_identity():
     # service exists in the merged launcher design.
     assert compose.count("create_host_path: false") == 4
     artifacts_source = (
-        "source: ${UMS_APP_ARTIFACTS_HOST:-"
-        "${UMS_APP_DATA_HOST:-./data/ums}/artifacts}"
+        "source: ${UMS_APP_ARTIFACTS_HOST:-${UMS_APP_DATA_HOST:-./data/ums}/artifacts}"
     )
     blobs_source = "source: ${UMS_APP_BLOBS_HOST:-${UMS_APP_DATA_HOST:-./data/ums}/blobs}"
     assert compose.count(artifacts_source) == 2
     assert compose.count(blobs_source) == 2
     assert "app-data-init" not in compose
-    assert "user: \"0:0\"" not in compose
+    assert 'user: "0:0"' not in compose
     # The image pins one non-root application identity from one build arg.
     assert "ARG APP_UID=10001" in dockerfile
     assert "groupadd --system --gid ${APP_UID} ${APP_USER}" in dockerfile
@@ -1766,6 +1765,7 @@ def test_compose_contract_requires_precreated_bind_and_actual_image_identity():
     assert 'ENTRYPOINT ["/usr/bin/tini", "--"]' in dockerfile
     # Lifecycle goes through the pinned-project launcher only.
     assert "python scripts/compose.py up -d" in compose
+
 
 def test_runbook_seals_roles_database_and_bind_as_one_recovery_set():
     """Pin the security and recovery claims that replaced unsafe header commands."""

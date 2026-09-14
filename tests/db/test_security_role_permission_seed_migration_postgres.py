@@ -255,9 +255,7 @@ def _insert_beta_assignment(engine: sa.Engine, *, active: bool) -> None:
     scope_id = uuid4()
     with Session(engine) as session:
         session.add(UserORM(id=user_id, email="beta@example.com", display_name="Beta"))
-        session.add(
-            AccessScopeORM(id=scope_id, scope_type="global", scope_id=None, label="Global")
-        )
+        session.add(AccessScopeORM(id=scope_id, scope_type="global", scope_id=None, label="Global"))
         session.add(
             UserRoleAssignmentORM(
                 id=uuid4(),
@@ -291,12 +289,15 @@ def test_gate_refuses_postgres_downgrade_while_beta_assignment_is_live(
         assert connection.scalar(sa.text("SELECT version_num FROM alembic_version")) == (
             _current_head(_alembic_config(admin_url))
         )
-        assert connection.scalar(
-            sa.text(
-                "SELECT count(*) FROM user_role_assignments "
-                "WHERE role_key = 'beta_operator' AND active"
+        assert (
+            connection.scalar(
+                sa.text(
+                    "SELECT count(*) FROM user_role_assignments "
+                    "WHERE role_key = 'beta_operator' AND active"
+                )
             )
-        ) == 1
+            == 1
+        )
 
     # Once revoked, the gate's guard passes and the next refusal is the 0002
     # irreversible-repair floor — proving the gate itself did not block.
@@ -332,9 +333,7 @@ def test_gate_lock_contention_surfaces_verification_error(
     engine = gated_database
     admin_url = require_postgres_url()
     with engine.connect() as blocker:
-        blocker.execute(
-            sa.text("LOCK TABLE user_role_assignments IN ACCESS EXCLUSIVE MODE")
-        )
+        blocker.execute(sa.text("LOCK TABLE user_role_assignments IN ACCESS EXCLUSIVE MODE"))
         # The gate's LOCK TABLE ... SHARE ROW EXCLUSIVE now waits on this
         # blocker; its own lock_timeout=10s converts the wait into a
         # LockNotAvailable the classifier reports as a verification error.
@@ -362,11 +361,9 @@ def gated_restricted_owner_database() -> Iterator[tuple[str, sa.Engine]]:
     admin_engine = sa.create_engine(admin_url)
     owner_engine: sa.Engine | None = None
     try:
-        with admin_engine.connect().execution_options(
-            isolation_level="AUTOCOMMIT"
-        ) as connection:
+        with admin_engine.connect().execution_options(isolation_level="AUTOCOMMIT") as connection:
             connection.exec_driver_sql(
-                f'CREATE ROLE "{role_name}" LOGIN PASSWORD \'{password}\' '
+                f"CREATE ROLE \"{role_name}\" LOGIN PASSWORD '{password}' "
                 "NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS INHERIT"
             )
             connection.exec_driver_sql(f'ALTER SCHEMA public OWNER TO "{role_name}"')
@@ -380,9 +377,7 @@ def gated_restricted_owner_database() -> Iterator[tuple[str, sa.Engine]]:
         if owner_engine is not None:
             owner_engine.dispose()
         reset_public_schema(admin_url)
-        with admin_engine.connect().execution_options(
-            isolation_level="AUTOCOMMIT"
-        ) as connection:
+        with admin_engine.connect().execution_options(isolation_level="AUTOCOMMIT") as connection:
             _drop_generated_owner(connection, role_name)
         command.upgrade(admin_config, "head")
         admin_engine.dispose()

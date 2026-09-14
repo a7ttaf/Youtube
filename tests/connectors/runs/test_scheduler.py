@@ -445,9 +445,7 @@ def test_in_flight_debug_log_fingerprints_the_owner(tmp_path: Path, caplog) -> N
     fake = _RecordingExecutor(in_flight=frozenset({(TENANT_A, OWNER_A_ACTIVE)}))
     scheduler = _scheduler(factory, fake)
 
-    with caplog.at_level(
-        logging.DEBUG, logger="ums_smart_revenue.connectors.runs.scheduler"
-    ):
+    with caplog.at_level(logging.DEBUG, logger="ums_smart_revenue.connectors.runs.scheduler"):
         scheduler.tick()
 
     log_text = "\n".join(rec.getMessage() for rec in caplog.records)

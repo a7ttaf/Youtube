@@ -146,6 +146,8 @@ def test_build_service_principal_defers_unrelated_currency_validation(
 
     assert principal.user_id == configured_service_actor
     assert principal.tenant_id == str(_TENANT_ID)
+
+
 def test_build_service_principal_rejects_template_placeholder(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

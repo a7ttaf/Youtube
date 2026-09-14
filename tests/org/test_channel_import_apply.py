@@ -61,12 +61,14 @@ ACTOR = UserPrincipal(user_id="user-1", email="user@example.com")
 
 
 def _plan(entry: ChannelImportPlanEntry) -> ChannelImportPlan:
+    """Return the plan fixture helper."""
     counts = {outcome.value: 0 for outcome in ChannelImportOutcome}
     counts[entry.outcome.value] = 1
     return ChannelImportPlan(entries=(entry,), counts=counts)
 
 
 def _apply(plan: ChannelImportPlan, registry, groups, sink) -> None:
+    """Return the apply fixture helper."""
     apply_channel_import(
         plan,
         registry=registry,
@@ -360,6 +362,7 @@ class _ArchivedAtApplyGroups(ChannelGroupRegistry):
     def get_group_by_cms_id(
         self, cms_group_id: str, *, for_update: bool = False
     ) -> ChannelGroupEntry | None:
+        """Get group by cms id."""
         group = super().get_group_by_cms_id(cms_group_id, for_update=for_update)
         if group is not None and for_update:
             return replace(group, active=False)
@@ -471,6 +474,7 @@ class _FailsMidFlushSink(InMemoryAuditSink):
     """Real in-memory sink that accepts two records, then refuses the third."""
 
     def append(self, record: AuditRecord) -> None:
+        """Append."""
         if len(self.records) >= 2:
             raise RuntimeError("sink full")
         super().append(record)
@@ -619,6 +623,7 @@ class _UnstampedAtApplyGroups(ChannelGroupRegistry):
     def get_group_by_cms_id(
         self, cms_group_id: str, *, for_update: bool = False
     ) -> ChannelGroupEntry | None:
+        """Get group by cms id."""
         group = super().get_group_by_cms_id(cms_group_id, for_update=for_update)
         if group is not None and for_update:
             return replace(group, content_owner_id=None)
@@ -967,13 +972,12 @@ def test_no_plan_promises_a_group_effect_the_write_pass_will_not_perform() -> No
     # the legal cms-radio association would satisfy the assertion above while
     # losing the roster's actual intent.
     assert plan.counts[ChannelImportOutcome.ERROR.value] == 2
-    surviving = [
-        entry for entry in plan.entries if entry.outcome is not ChannelImportOutcome.ERROR
-    ]
+    surviving = [entry for entry in plan.entries if entry.outcome is not ChannelImportOutcome.ERROR]
     assert [entry.group_id for entry in surviving] == ["cms-radio"]
 
 
 def _empty_plan() -> ChannelImportPlan:
+    """Return the empty plan fixture helper."""
     return ChannelImportPlan(
         entries=(), counts={outcome.value: 0 for outcome in ChannelImportOutcome}
     )

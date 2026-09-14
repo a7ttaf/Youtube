@@ -437,9 +437,7 @@ def _component_confidence(
     return _CONFIDENCE_MEDIUM
 
 
-def _residual_confidence(
-    *, residual: Decimal | None, tolerance_usd: Decimal
-) -> tuple[str, str]:
+def _residual_confidence(*, residual: Decimal | None, tolerance_usd: Decimal) -> tuple[str, str]:
     """Confidence for a residual: HIGH when it is explained away, LOW when not."""
     if residual is None:
         return _CONFIDENCE_LOW
@@ -516,10 +514,7 @@ def _signed_money(value: Decimal) -> str:
 def _payment_leg_narrative(leg: GapExplanationLeg) -> str:
     """Deterministic prose for the payment leg. No LLM."""
     if leg.status == "INCOMPLETE":
-        return (
-            "The payment leg cannot be reconciled: "
-            f"{_incomplete_reason(leg.source_status)}"
-        )
+        return f"The payment leg cannot be reconciled: {_incomplete_reason(leg.source_status)}"
     operands = dict(leg.operands)
     youtube_total = operands["youtube_revenue_total_usd"]
     paid = operands["adsense_paid_amount_usd"]
@@ -530,9 +525,7 @@ def _payment_leg_narrative(leg: GapExplanationLeg) -> str:
         )
     gap = leg.gap_usd if leg.gap_usd is not None else Decimal("0")
     direction = "exceeds" if gap >= 0 else "trails"
-    in_flight = next(
-        (c for c in leg.components if c.key == "non_paid_adsense_payments"), None
-    )
+    in_flight = next((c for c in leg.components if c.key == "non_paid_adsense_payments"), None)
     in_flight_clause = ""
     if in_flight is not None and in_flight.amount_usd != 0:
         payment_word = "payment" if in_flight.evidence_count == 1 else "payments"
@@ -552,10 +545,7 @@ def _payment_leg_narrative(leg: GapExplanationLeg) -> str:
 def _bank_leg_narrative(leg: GapExplanationLeg) -> str:
     """Deterministic prose for the bank leg. No LLM."""
     if leg.status == "INCOMPLETE":
-        return (
-            "The bank leg cannot be reconciled: "
-            f"{_incomplete_reason(leg.source_status)}"
-        )
+        return f"The bank leg cannot be reconciled: {_incomplete_reason(leg.source_status)}"
     operands = dict(leg.operands)
     paid = operands["adsense_paid_amount_usd"]
     received = operands["bank_received_amount_usd"]
@@ -598,9 +588,7 @@ def _month_narrative(
     *, month: str, payment_leg: GapExplanationLeg, bank_leg: GapExplanationLeg
 ) -> str:
     """One deterministic summary line for the whole month."""
-    return (
-        f"{month}: payment leg {payment_leg.status}, bank leg {bank_leg.status}."
-    )
+    return f"{month}: payment leg {payment_leg.status}, bank leg {bank_leg.status}."
 
 
 # ============================================================================
@@ -659,9 +647,7 @@ def _leg_provenance(
                 else "bank_reconciliation_entries"
             ),
             formula=_COMPONENT_FORMULAS[component.key],
-            confidence=(
-                "SOURCE_BACKED" if component.evidence_count > 0 else "MISSING_SOURCE"
-            ),
+            confidence=("SOURCE_BACKED" if component.evidence_count > 0 else "MISSING_SOURCE"),
             export_value=component.amount_usd,
         )
     residual_label, _ = _residual_confidence(
@@ -742,8 +728,7 @@ def _build_money_provenance(
                 ),
             },
             gap_formula=(
-                "youtube_revenue_total_usd - adsense_paid_amount_usd when both "
-                "sides exist"
+                "youtube_revenue_total_usd - adsense_paid_amount_usd when both sides exist"
             ),
             tolerance_usd=tolerance_usd,
         )

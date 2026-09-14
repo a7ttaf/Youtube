@@ -865,11 +865,7 @@ def create_mounted_artifact_archive(
 def _require_member_shape(member: tarfile.TarInfo, seen: set[str]) -> PurePosixPath:
     """Validate one archive member and return its canonical posix path."""
     path = PurePosixPath(member.name)
-    if (
-        path.is_absolute()
-        or not path.parts
-        or any(part in {"", ".", ".."} for part in path.parts)
-    ):
+    if path.is_absolute() or not path.parts or any(part in {"", ".", ".."} for part in path.parts):
         raise StorageContractError(f"unsafe archive path: {member.name}")
     if "\\" in member.name or path.parts[0] not in STORAGE_DIRECTORIES:
         raise StorageContractError(f"archive member is outside storage roots: {member.name}")
@@ -1134,9 +1130,7 @@ def _require_gcs_snapshot_when_needed(
     )
 
 
-def _require_parseable_database_manifest(
-    files: list[Path], bundle_root: Path
-) -> None:
+def _require_parseable_database_manifest(files: list[Path], bundle_root: Path) -> None:
     """Parse the database package manifest before the bundle is sealed.
 
     A structurally complete filename set says nothing about content: the
@@ -1173,9 +1167,7 @@ def _decoded_database_manifest(member: Path) -> dict[str, object]:
     return payload
 
 
-def _require_manifested_artifacts_present(
-    payload: dict[str, object], *, run_dir: Path
-) -> None:
+def _require_manifested_artifacts_present(payload: dict[str, object], *, run_dir: Path) -> None:
     """Require every artifact the manifest describes to sit beside it, byte-exact.
 
     The seal gate enforces the same strictness the restore path consumes:
@@ -1403,9 +1395,7 @@ def _verified_member(
             candidate_stat.st_ino,
         ):
             raise StorageContractError(f"backup member changed during verification: {name}")
-    actual_size, actual_digest, snapshot_payload = _member_digest(
-        name, candidate, pinned=pinned
-    )
+    actual_size, actual_digest, snapshot_payload = _member_digest(name, candidate, pinned=pinned)
     if actual_size != size or actual_digest != digest:
         raise StorageContractError(f"backup checksum mismatch: {name}")
     return name, candidate, actual_size, actual_digest, snapshot_payload
@@ -1852,9 +1842,7 @@ def _unlink_and_sync(path: Path) -> None:
     _sync_directory(path.parent)
 
 
-def _staged_restore_locations(
-    storage: Path, stage: Path
-) -> tuple[dict[str, Path], set[str]]:
+def _staged_restore_locations(storage: Path, stage: Path) -> tuple[dict[str, Path], set[str]]:
     """Locate exactly one copy of each storage root and list its members."""
     locations: dict[str, Path] = {}
     actual_names: set[str] = set()

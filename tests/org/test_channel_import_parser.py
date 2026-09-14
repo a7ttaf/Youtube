@@ -11,6 +11,7 @@ CHANNEL_ID = "UCB6sc84dcg6VQGB_d89sx2g"
 
 
 def test_parses_required_columns() -> None:
+    """Verify parses required columns."""
     csv_text = f"youtube_channel_id,channel_name\n{CHANNEL_ID},CBC Egypt\n"
     parsed = parse_channel_import_csv(csv_text)
     assert parsed.errors == ()
@@ -24,6 +25,7 @@ def test_parses_required_columns() -> None:
 
 
 def test_parses_optional_columns_in_any_order_and_case() -> None:
+    """Verify parses optional columns in any order and case."""
     csv_text = (
         f"View_Revenue,Group_ID,CHANNEL_NAME,youtube_channel_id\nYes,cms-tv,CBC,{CHANNEL_ID}\n"
     )
@@ -34,6 +36,7 @@ def test_parses_optional_columns_in_any_order_and_case() -> None:
 
 
 def test_tolerates_utf8_bom_and_arabic_names() -> None:
+    """Verify tolerates utf8 bom and arabic names."""
     csv_text = f"﻿youtube_channel_id,channel_name\n{CHANNEL_ID},هاشتاج\n"
     parsed = parse_channel_import_csv(csv_text)
     assert parsed.errors == ()
@@ -41,18 +44,21 @@ def test_tolerates_utf8_bom_and_arabic_names() -> None:
 
 
 def test_rejects_unknown_header() -> None:
+    """Verify rejects unknown header."""
     csv_text = f"youtube_channel_id,channel_name,revenue_usd\n{CHANNEL_ID},CBC,100\n"
     with pytest.raises(ChannelImportFormatError, match="unknown column"):
         parse_channel_import_csv(csv_text)
 
 
 def test_rejects_missing_required_header() -> None:
+    """Verify rejects missing required header."""
     csv_text = "channel_name\nCBC\n"
     with pytest.raises(ChannelImportFormatError, match="missing required column"):
         parse_channel_import_csv(csv_text)
 
 
 def test_rejects_empty_file() -> None:
+    """Verify rejects empty file."""
     with pytest.raises(ChannelImportFormatError, match="empty"):
         parse_channel_import_csv("")
 
@@ -98,9 +104,7 @@ def test_flags_every_copy_of_a_repeated_channel_group_pair() -> None:
 def test_flags_a_repeated_channel_carrying_no_group() -> None:
     """With no group there is no many-to-many justification for the repeat."""
     csv_text = (
-        "youtube_channel_id,channel_name\n"
-        f"{CHANNEL_ID},Alpha News\n"
-        f"{CHANNEL_ID},Alpha News\n"
+        f"youtube_channel_id,channel_name\n{CHANNEL_ID},Alpha News\n{CHANNEL_ID},Alpha News\n"
     )
     parsed = parse_channel_import_csv(csv_text)
     assert parsed.rows == ()
@@ -125,6 +129,7 @@ def test_reports_the_conflict_when_a_repeat_also_disagrees() -> None:
 
 
 def test_flags_malformed_channel_id() -> None:
+    """Verify flags malformed channel id."""
     csv_text = "youtube_channel_id,channel_name\nهاشتاج,CBC\n"
     parsed = parse_channel_import_csv(csv_text)
     assert parsed.rows == ()
@@ -132,6 +137,7 @@ def test_flags_malformed_channel_id() -> None:
 
 
 def test_flags_empty_channel_name() -> None:
+    """Verify flags empty channel name."""
     csv_text = f"youtube_channel_id,channel_name\n{CHANNEL_ID},   \n"
     parsed = parse_channel_import_csv(csv_text)
     assert parsed.rows == ()
@@ -139,6 +145,7 @@ def test_flags_empty_channel_name() -> None:
 
 
 def test_flags_blank_view_revenue_when_column_present() -> None:
+    """Verify flags blank view revenue when column present."""
     csv_text = f"youtube_channel_id,channel_name,view_revenue\n{CHANNEL_ID},CBC,\n"
     parsed = parse_channel_import_csv(csv_text)
     assert parsed.rows == ()
@@ -146,6 +153,7 @@ def test_flags_blank_view_revenue_when_column_present() -> None:
 
 
 def test_flags_unrecognised_view_revenue_token() -> None:
+    """Verify flags unrecognised view revenue token."""
     csv_text = f"youtube_channel_id,channel_name,view_revenue\n{CHANNEL_ID},CBC,maybe\n"
     parsed = parse_channel_import_csv(csv_text)
     assert parsed.rows == ()
@@ -153,6 +161,7 @@ def test_flags_unrecognised_view_revenue_token() -> None:
 
 
 def test_accepts_all_view_revenue_token_forms() -> None:
+    """Verify accepts all view revenue token forms."""
     for token, expected in (
         ("yes", True),
         ("TRUE", True),
@@ -243,7 +252,8 @@ def test_rejects_nul_in_group_id() -> None:
 
 def test_rejects_oversized_group_id() -> None:
     """A multi-KB group key fails the row: it would exceed the unique B-tree
-    index's per-entry limit at apply and 500 after a clean dry run."""
+    index's per-entry limit at apply and 500 after a clean dry run.
+    """
     long_key = "g" * 256
     csv_text = f"youtube_channel_id,channel_name,group_id\n{CHANNEL_ID},Alpha News,{long_key}\n"
     parsed = parse_channel_import_csv(csv_text)
@@ -280,6 +290,7 @@ def test_raw_view_revenue_is_none_when_column_absent() -> None:
 
 
 def test_skips_fully_blank_lines() -> None:
+    """Verify skips fully blank lines."""
     csv_text = f"youtube_channel_id,channel_name\n{CHANNEL_ID},CBC\n\n"
     parsed = parse_channel_import_csv(csv_text)
     assert len(parsed.rows) == 1
@@ -287,6 +298,7 @@ def test_skips_fully_blank_lines() -> None:
 
 
 def test_row_numbers_are_one_based_and_exclude_the_header() -> None:
+    """Verify row numbers are one based and exclude the header."""
     second = "UC3Dci3BzZXDo4jw4dU8KqWg"
     csv_text = f"youtube_channel_id,channel_name\n{CHANNEL_ID},CBC\n{second},CBC Drama\n"
     parsed = parse_channel_import_csv(csv_text)

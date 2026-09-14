@@ -99,6 +99,8 @@ class ChannelGroupConflictError(ValueError):
 
 @dataclass(frozen=True)
 class ChannelGroupEntry:
+    """Immutable view of one channel group row."""
+
     id: str
     name: str
     group_type: str
@@ -108,6 +110,7 @@ class ChannelGroupEntry:
     content_owner_id: str | None = None
 
     def to_api(self) -> dict[str, object]:
+        """Return the API serialization of the group entry."""
         return {
             "id": self.id,
             "name": self.name,
@@ -137,16 +140,18 @@ class ClearedContentOwner:
 
 
 class ChannelGroupRegistryStore(Protocol):
+    """Persistence contract every group registry backend must satisfy."""
+
     # The store's transactional backing, REQUIRED by the protocol — see
     # ChannelRegistryStore.sql_unit_of_work for the full contract
     # (PR #196 rounds 6+8, codex).
     sql_unit_of_work: object | None
 
     def list_groups(self) -> list[ChannelGroupEntry]:
-        pass
+        """Return every group summary."""
 
     def list_groups_full(self) -> list[ChannelGroupEntry]:
-        pass
+        """Return every group with full membership."""
 
     def list_synced_groups(self, *, content_owner_id: str | None = None) -> list[ChannelGroupEntry]:
         """Return every CMS-keyed group, optionally scoped to one owner.
@@ -158,7 +163,6 @@ class ChannelGroupRegistryStore(Protocol):
         owner's groups too, and any group missing from the CURRENT owner's
         upstream snapshot looks "vanished" and gets deactivated.
         """
-        pass
 
     def get_group(self, group_id: str, *, for_update: bool = False) -> ChannelGroupEntry | None:
         """Return the group by id, or None.
@@ -246,7 +250,7 @@ class ChannelGroupRegistryStore(Protocol):
         """
 
     def get_active_member_channels(self, group_id: str) -> tuple[str, ...] | None:
-        pass
+        """Return the group's active member channel ids, or None when the group is unknown."""
 
     def create_group(
         self,
@@ -257,7 +261,7 @@ class ChannelGroupRegistryStore(Protocol):
         cms_group_id: str | None = None,
         content_owner_id: str | None = None,
     ) -> ChannelGroupEntry:
-        pass
+        """Create a group and return the stored entry."""
 
     def update_group(
         self,
@@ -286,10 +290,10 @@ class ChannelGroupRegistryStore(Protocol):
         """
 
     def add_members(self, *, group_id: str, channel_ids: list[str]) -> ChannelGroupEntry:
-        pass
+        """Attach channels to a group and return the updated entry."""
 
     def remove_member(self, *, group_id: str, channel_id: str) -> ChannelGroupEntry:
-        pass
+        """Detach one channel from a group and return the updated entry."""
 
     # ========================================================================
     # Purpose: The group half of the import's atomicity boundary — same
@@ -329,6 +333,8 @@ class ChannelGroupRegistryStore(Protocol):
 
 
 class ChannelGroupRegistry:
+    """In-memory group registry used on the no-database tier."""
+
     # No SQL backing — see ChannelRegistry.sql_unit_of_work.
     sql_unit_of_work: object | None = None
 
@@ -699,6 +705,7 @@ class ChannelGroupRegistry:
         cms_group_id: str | None = None,
         content_owner_id: str | None = None,
     ) -> ChannelGroupEntry:
+        """Create a group and return the stored entry."""
         with self._lock:
             # Parity with the SQL store's per-tenant unique key: a duplicate
             # CMS key must fail typed here too, not silently create a second
@@ -741,13 +748,12 @@ class ChannelGroupRegistry:
         active: bool | None,
         content_owner_id: str | None = None,
     ) -> ChannelGroupEntry:
+        """Update a group's name, active state, and/or content owner."""
         with self._lock:
             group = self._require_group(group_id)
             # Parity with the SQL store: adopt-only, reassignment raises.
             if content_owner_id is not None:
-                require_adoptable_owner(
-                    group.content_owner_id, content_owner_id, group_id=group_id
-                )
+                require_adoptable_owner(group.content_owner_id, content_owner_id, group_id=group_id)
             updated = replace(
                 group,
                 name=name if name is not None else group.name,
@@ -807,6 +813,7 @@ class ChannelGroupRegistry:
     #     SQL implementation this must answer identically to.
     # ========================================================================
     def add_members(self, *, group_id: str, channel_ids: list[str]) -> ChannelGroupEntry:
+        """Attach channels to a group and return the updated entry."""
         with self._lock:
             group = self._require_group(group_id)
             updated = replace(
@@ -828,6 +835,7 @@ class ChannelGroupRegistry:
     #     SQL implementation this must answer identically to.
     # ========================================================================
     def remove_member(self, *, group_id: str, channel_id: str) -> ChannelGroupEntry:
+        """Detach one channel from a group and return the updated entry."""
         with self._lock:
             group = self._require_group(group_id)
             updated = replace(
@@ -841,6 +849,7 @@ class ChannelGroupRegistry:
             return updated
 
     def _require_group(self, group_id: str) -> ChannelGroupEntry:
+        """Return the group by id or raise the store's not-found error."""
         group = self.get_group(group_id)
         if group is None:
             raise KeyError(f"Group not found: {group_id}")

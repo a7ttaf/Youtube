@@ -19,6 +19,7 @@ D = Decimal
 
 
 def _line():
+    """Return the line fixture helper."""
     return ChannelReconciliation(
         youtube_channel_id="c1",
         gross_usd=D("100.000000"),
@@ -63,6 +64,7 @@ def test_generic_builder_rejects_reconciliation_metric():
 
 
 def test_explanation_shape():
+    """Verify explanation shape."""
     entry = build_reconciliation_explanation(month="2026-03", line=_line(), warnings=[])
     assert entry.entity_type == "channel"
     assert entry.entity_id == "c1"
@@ -82,18 +84,15 @@ def test_explanation_shape():
 
 
 def test_narrative_is_deterministic_prose():
+    """Verify narrative is deterministic prose."""
     entry = build_reconciliation_explanation(month="2026-03", line=_line(), warnings=[])
-    narrative_component = next(
-        (c for c in entry.components if c["key"] == "narrative"), None
-    )
+    narrative_component = next((c for c in entry.components if c["key"] == "narrative"), None)
     assert narrative_component is not None, "narrative component missing"
     narrative = narrative_component["text"]
     assert "100" in narrative and "75" in narrative
     # Deterministic: same inputs => identical text.
     again = build_reconciliation_explanation(month="2026-03", line=_line(), warnings=[])
-    again_component = next(
-        (c for c in again.components if c["key"] == "narrative"), None
-    )
+    again_component = next((c for c in again.components if c["key"] == "narrative"), None)
     assert again_component is not None, "rebuilt narrative component missing"
     again_text = again_component["text"]
     assert narrative == again_text

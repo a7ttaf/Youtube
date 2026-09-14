@@ -65,6 +65,7 @@ OTHER_TENANT_CHANNEL_ID = "channel-shared-across-tenants"
 
 
 def _tenant(tenant_id: UUID, *, slug: str) -> Tenant:
+    """Return the tenant fixture helper."""
     now = datetime.now(UTC)
     return Tenant(
         id=tenant_id,
@@ -90,10 +91,12 @@ def _naive(value: datetime) -> datetime:
 
 
 def build_session() -> Session:
+    """Build session."""
     engine = create_engine("sqlite+pysqlite:///:memory:")
 
     @event.listens_for(engine, "connect")
     def _enable_foreign_keys(dbapi_connection, _connection_record):
+        """Return the enable foreign keys fixture helper."""
         dbapi_connection.execute("PRAGMA foreign_keys=ON")
 
     OrgBase.metadata.create_all(engine)
@@ -110,6 +113,7 @@ def build_finance_session() -> Session:
 
     @event.listens_for(engine, "connect")
     def _enable_foreign_keys(dbapi_connection, _connection_record):
+        """Return the enable foreign keys fixture helper."""
         dbapi_connection.execute("PRAGMA foreign_keys=ON")
 
     OrgBase.metadata.create_all(engine)
@@ -118,6 +122,7 @@ def build_finance_session() -> Session:
 
 
 def seed_org(session: Session) -> None:
+    """Seed org."""
     session.add_all(
         [
             OrgUnitORM(id=SECTOR_TV_ID, parent_id=None, type="SECTOR", name="TV", active=True),
@@ -192,6 +197,7 @@ def seed_org(session: Session) -> None:
 
 
 def test_sql_channel_registry_reads_and_writes_channel_rows():
+    """Verify sql channel registry reads and writes channel rows."""
     session = build_finance_session()
     seed_org(session)
     registry = SqlAlchemyChannelRegistry(session)
@@ -224,6 +230,7 @@ def test_sql_channel_registry_reads_and_writes_channel_rows():
 
 
 def test_sql_channel_registry_preserves_outside_cms_revenue_metadata():
+    """Verify sql channel registry preserves outside cms revenue metadata."""
     session = build_session()
     seed_org(session)
     session.add(
@@ -252,6 +259,7 @@ def test_sql_channel_registry_preserves_outside_cms_revenue_metadata():
 
 
 def test_sql_channel_registry_create_persists_content_owner_id():
+    """Verify sql channel registry create persists content owner id."""
     session = build_session()
     seed_org(session)
     registry = SqlAlchemyChannelRegistry(session)
@@ -276,6 +284,7 @@ def test_sql_channel_registry_create_persists_content_owner_id():
 
 
 def test_sql_channel_registry_update_content_owner_sets_and_clears():
+    """Verify sql channel registry update content owner sets and clears."""
     session = build_session()
     seed_org(session)
     registry = SqlAlchemyChannelRegistry(session)
@@ -299,6 +308,7 @@ def test_sql_channel_registry_update_content_owner_sets_and_clears():
 
 
 def test_sql_channel_registry_update_content_owner_missing_channel_raises():
+    """Verify sql channel registry update content owner missing channel raises."""
     session = build_session()
     seed_org(session)
     registry = SqlAlchemyChannelRegistry(session)
@@ -310,6 +320,7 @@ def test_sql_channel_registry_update_content_owner_missing_channel_raises():
 
 
 def test_sql_channel_registry_update_inventory_persists_all_four_fields():
+    """Verify sql channel registry update inventory persists all four fields."""
     session = build_session()
     seed_org(session)
     registry = SqlAlchemyChannelRegistry(session)
@@ -339,6 +350,7 @@ def test_sql_channel_registry_update_inventory_persists_all_four_fields():
 
 
 def test_sql_channel_registry_update_inventory_flips_revenue_source_status():
+    """Verify sql channel registry update inventory flips revenue source status."""
     session = build_session()
     seed_org(session)
     registry = SqlAlchemyChannelRegistry(session)
@@ -555,6 +567,7 @@ def test_update_inventory_takes_guard_before_the_row_lock(monkeypatch):
     original_refresh = session.refresh
 
     def recording_refresh(instance, *args, **kwargs):
+        """Recording refresh."""
         if kwargs.get("with_for_update"):
             call_order.append("row-lock")
         return original_refresh(instance, *args, **kwargs)
@@ -840,6 +853,7 @@ def test_update_inventory_allows_unchanged_flag_despite_locked_month():
 
 
 def test_sql_channel_registry_update_inventory_missing_channel_raises():
+    """Verify sql channel registry update inventory missing channel raises."""
     session = build_session()
     seed_org(session)
     registry = SqlAlchemyChannelRegistry(session)
@@ -859,7 +873,8 @@ def test_setting_content_owner_makes_channel_targetable_for_ingestion():
     Analytics ingestion target only once its content_owner_id matches the CMS
     account id. Before the write path every channel kept content_owner_id=None,
     so list_target_channels returned nothing and a run reported SUCCEEDED while
-    ingesting zero rows."""
+    ingesting zero rows.
+    """
     session = build_session()
     seed_org(session)
     registry = SqlAlchemyChannelRegistry(session)
@@ -876,6 +891,7 @@ def test_setting_content_owner_makes_channel_targetable_for_ingestion():
 
 
 def test_sql_channel_registry_rejects_malformed_primary_company_id():
+    """Verify sql channel registry rejects malformed primary company id."""
     session = build_session()
     seed_org(session)
     registry = SqlAlchemyChannelRegistry(session)
@@ -891,6 +907,7 @@ def test_sql_channel_registry_rejects_malformed_primary_company_id():
 
 
 def test_org_sql_repositories_validate_tenant_id_constructor_input():
+    """Verify org sql repositories validate tenant id constructor input."""
     with pytest.raises(ChannelRegistryValidationError, match="tenant_id"):
         SqlAlchemyChannelRegistry(object(), tenant_id="not-a-uuid")
     with pytest.raises(ValueError, match="tenant_id must be a valid UUID"):
@@ -898,6 +915,7 @@ def test_org_sql_repositories_validate_tenant_id_constructor_input():
 
 
 def test_sql_channel_registry_rejects_missing_company_id_on_create():
+    """Verify sql channel registry rejects missing company id on create."""
     session = build_session()
     seed_org(session)
     registry = SqlAlchemyChannelRegistry(session)
@@ -918,17 +936,20 @@ def test_sql_channel_registry_rejects_missing_company_id_on_create():
 def test_sql_channel_registry_does_not_mask_non_duplicate_integrity_error(
     monkeypatch: pytest.MonkeyPatch,
 ):
+    """Verify sql channel registry does not mask non duplicate integrity error."""
     session = build_session()
     seed_org(session)
     registry = SqlAlchemyChannelRegistry(session)
     lookups = 0
 
     def _get_row(channel_id: str):
+        """Return the get row fixture helper."""
         nonlocal lookups
         assert channel_id == "channel-racing-failure"
         lookups += 1
 
     def _raise_foreign_key_failure():
+        """Return the raise foreign key failure fixture helper."""
         raise IntegrityError(
             "insert youtube channel",
             {},
@@ -956,18 +977,21 @@ def test_sql_channel_registry_does_not_mask_non_duplicate_integrity_error(
 def test_sql_channel_registry_detects_duplicate_race_after_integrity_error(
     monkeypatch: pytest.MonkeyPatch,
 ):
+    """Verify sql channel registry detects duplicate race after integrity error."""
     session = build_session()
     seed_org(session)
     registry = SqlAlchemyChannelRegistry(session)
     lookups = 0
 
     def _get_row(channel_id: str):
+        """Return the get row fixture helper."""
         nonlocal lookups
         assert channel_id == "channel-racing-duplicate"
         lookups += 1
         return None if lookups == 1 else object()
 
     def _raise_late_duplicate():
+        """Return the raise late duplicate fixture helper."""
         raise IntegrityError("insert youtube channel", {}, Exception("late insert"))
 
     monkeypatch.setattr(registry, "_get_row", _get_row)
@@ -986,6 +1010,7 @@ def test_sql_channel_registry_detects_duplicate_race_after_integrity_error(
 
 
 def test_sql_channel_registry_rejects_missing_company_id_on_update_and_rolls_back():
+    """Verify sql channel registry rejects missing company id on update and rolls back."""
     session = build_session()
     seed_org(session)
     registry = SqlAlchemyChannelRegistry(session)
@@ -1009,6 +1034,7 @@ def test_sql_channel_registry_rejects_missing_company_id_on_update_and_rolls_bac
 
 
 def test_sql_channel_registry_filters_every_read_to_default_tenant():
+    """Verify sql channel registry filters every read to default tenant."""
     session = build_session()
     seed_org(session)
     registry = SqlAlchemyChannelRegistry(session)
@@ -1021,6 +1047,7 @@ def test_sql_channel_registry_filters_every_read_to_default_tenant():
 
 
 def test_sql_channel_registry_allows_same_external_channel_id_in_another_tenant():
+    """Verify sql channel registry allows same external channel id in another tenant."""
     session = build_session()
     seed_org(session)
     registry = SqlAlchemyChannelRegistry(session)
@@ -1038,6 +1065,7 @@ def test_sql_channel_registry_allows_same_external_channel_id_in_another_tenant(
 
 
 def test_sql_channel_registry_explicit_tenant_writes_are_isolated():
+    """Verify sql channel registry explicit tenant writes are isolated."""
     session = build_session()
     seed_org(session)
     default_registry = SqlAlchemyChannelRegistry(session)
@@ -1063,6 +1091,7 @@ def test_sql_channel_registry_explicit_tenant_writes_are_isolated():
 
 
 def test_sql_channel_registry_rejects_cross_tenant_company_id():
+    """Verify sql channel registry rejects cross tenant company id."""
     session = build_session()
     seed_org(session)
     registry = SqlAlchemyChannelRegistry(session)
@@ -1081,6 +1110,7 @@ def test_sql_channel_registry_rejects_cross_tenant_company_id():
 
 
 def test_load_org_access_index_from_session_uses_active_sql_rows():
+    """Verify load org access index from session uses active sql rows."""
     session = build_session()
     seed_org(session)
     token = TENANT_CTX.set(_tenant(DEFAULT_TENANT_ID, slug="ums"))
@@ -1102,6 +1132,7 @@ def test_load_org_access_index_from_session_uses_active_sql_rows():
 
 
 def test_load_org_access_index_from_session_requires_tenant_context():
+    """Verify load org access index from session requires tenant context."""
     session = build_session()
     seed_org(session)
 
@@ -1124,6 +1155,7 @@ def _seed_channel_fact(session: Session, *, month: str) -> None:
 
 
 def test_update_mapping_rejected_when_channel_has_locked_month_fact():
+    """Verify update mapping rejected when channel has locked month fact."""
     session = build_finance_session()
     seed_org(session)
     session.add(FinanceMonthCloseORM(month="2026-09", status="LOCKED"))
@@ -1146,6 +1178,7 @@ def test_update_mapping_rejected_when_channel_has_locked_month_fact():
 
 
 def test_update_mapping_allowed_when_channel_only_has_open_month_fact():
+    """Verify update mapping allowed when channel only has open month fact."""
     session = build_finance_session()
     seed_org(session)
     session.add(FinanceMonthCloseORM(month="2026-09", status="OPEN"))
@@ -1354,14 +1387,8 @@ def test_sql_adapters_declare_their_session_as_the_unit_of_work():
     session = build_session()
     assert SqlAlchemyChannelRegistry(session).sql_unit_of_work is session
     assert SqlAlchemyChannelGroupRegistry(session).sql_unit_of_work is session
-    assert (
-        SqlAlchemyAuditSink(session, tenant_id=DEFAULT_TENANT_ID).sql_unit_of_work
-        is session
-    )
-    assert (
-        PlatformLaneAuditSink(session, tenant_id=DEFAULT_TENANT_ID).sql_unit_of_work
-        is session
-    )
+    assert SqlAlchemyAuditSink(session, tenant_id=DEFAULT_TENANT_ID).sql_unit_of_work is session
+    assert PlatformLaneAuditSink(session, tenant_id=DEFAULT_TENANT_ID).sql_unit_of_work is session
 
 
 def test_boundary_covered_create_conflict_still_recovers_via_the_boundary():
@@ -1416,6 +1443,7 @@ def test_boundary_writes_do_not_open_per_row_savepoints():
     statements: list[str] = []
 
     def _capture(_conn, _cursor, statement, *_args):
+        """Return the capture fixture helper."""
         statements.append(statement)
 
     event.listen(session.bind, "before_cursor_execute", _capture)
