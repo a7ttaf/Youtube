@@ -14,6 +14,7 @@ def test_allowlist_is_nonempty_and_excludes_platform_tables():
     assert "currencies" not in TENANT_SCOPED_TABLES
     # No duplicates.
     assert len(TENANT_SCOPED_TABLES) == len(set(TENANT_SCOPED_TABLES))
+    assert TENANT_SCOPED_TABLES == tuple(sorted(TENANT_SCOPED_TABLES))
 
 
 def test_policy_name_is_table_scoped():

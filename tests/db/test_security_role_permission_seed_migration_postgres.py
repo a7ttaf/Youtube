@@ -349,7 +349,13 @@ def test_gate_lock_contention_surfaces_verification_error(
 
 @pytest.fixture
 def gated_restricted_owner_database() -> Iterator[tuple[str, sa.Engine]]:
-    """Provide head schema owned by a NOBYPASSRLS login for gate 42501 coverage."""
+    """Provide the gate-adjacent schema owned by a NOBYPASSRLS login.
+
+    Stages at 20260913_0001 — one step above the rollback gate — so the
+    restricted downgrade reaches the gate's row-security check. From head it
+    would first have to tear down 20260828_0001's tables and users foreign
+    key, which require object ownership this login deliberately lacks.
+    """
     admin_url = require_postgres_url()
     admin_config = _alembic_config(admin_url)
     role_name = f"authz_gate_owner_{uuid4().hex[:16]}"
@@ -357,7 +363,7 @@ def gated_restricted_owner_database() -> Iterator[tuple[str, sa.Engine]]:
     owner_url = _owner_url(admin_url, role_name=role_name, password=password)
 
     reset_public_schema(admin_url)
-    command.upgrade(admin_config, "head")
+    command.upgrade(admin_config, "20260913_0001")
     admin_engine = sa.create_engine(admin_url)
     owner_engine: sa.Engine | None = None
     try:
@@ -407,6 +413,6 @@ def test_gate_privilege_denial_maps_to_assignment_error(
     assert type(exc_info.value).__name__ == "LiveBetaOperatorAssignmentError"
     assert "row-security" in str(exc_info.value)
     with admin_engine.connect() as connection:
-        assert connection.scalar(
-            sa.text("SELECT version_num FROM alembic_version")
-        ) == _current_head(_alembic_config(require_postgres_url()))
+        assert (
+            connection.scalar(sa.text("SELECT version_num FROM alembic_version")) == "20260913_0001"
+        )

@@ -506,6 +506,12 @@ gate). None of the three is optional for that step, and the beta needs none of t
 
 ---
 
+*Relationship to Docs/21 (frozen costing snapshot; Docs/25 + live GitHub own execution status): this program is additive
+and currency-neutral; it does not touch the P0/P1 bands or the EGP phases. A1/A5 assume
+**P0-c merged**. A1 adds session-capability/scoped-read backend surface; A4 adds the
+read-only status endpoint; A6 changes authorization gates, containment, repositories,
+and isolation proofs across all eight scope types; A7 adds identity persistence,
+audited enrollment, and OIDC gateway enforcement. Independent of
 ## 7 — Migration and blast-radius statement
 
 - **Confirmed migration required (A1):** add/seed `users.read_scoped` if that new
