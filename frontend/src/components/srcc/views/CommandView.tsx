@@ -29,12 +29,13 @@ import { useOutsideCmsChannels } from "@/lib/api/useOutsideCmsChannels";
 import { useRankings } from "@/lib/api/useRankings";
 import { useRevenueScopes } from "@/lib/api/useRevenueScopes";
 import { useSmartAlerts } from "@/lib/api/useSmartAlerts";
-import type { Severity } from "@/lib/mock/data";
+import type { Severity } from "@/types/domain";
 import { confidenceDisplay } from "@/lib/confidence";
 import { LockIcon } from "../icons";
 import {
   Badge,
   DEFAULT_MONTH,
+  Dot,
   financeDisplay,
   ItemRow,
   MONTH_OPTIONS,
@@ -82,12 +83,8 @@ const scopeOptionKey = (scopeType: string, scopeId: string | null): string => {
   return scopeId ? `${scopeType}:${scopeId}` : scopeType;
 };
 
-// The guaranteed fallback when the authorized-scope fetch is loading, errors, or
-// returns nothing: a single GLOBAL option. A scoped viewer with no global grant
-// never sees this injected on top of a successful response — it is ONLY the
-// fail-open default so the screen renders while the real, fail-closed option set
-// (which the backend returns with global present ONLY when authorized) loads. The
-// panels themselves fail-closed on the actual scoped reads.
+// Inert query-shape placeholder used only while requests are disabled. It is
+// never rendered as an authorized option and never enables a global request.
 const GLOBAL_SCOPE_FALLBACK: ScopeOption = {
   label: "Global",
   scopeType: "global",
@@ -100,9 +97,10 @@ const GLOBAL_SCOPE_FALLBACK: ScopeOption = {
 //   authorized scopes verbatim (the backend already includes global only when
 //   authorized, so a scoped viewer correctly gets no global option — the
 //   anti-scope-leak guarantee). While loading, on a 403/error, or on an empty
-//   list, fall back to global-only so the screen never blocks.
+//   list, return no options so every scope-bound finance read remains withheld.
 // Standards: Pure mapping; no client-side authorization invented — the fetched
-//   set is the fail-closed source of truth. No money handling here.
+//   set is the fail-closed source of truth. A failed or empty read returns NO
+//   options; it must never invent global authority.
 // Blast Radius: Authorization (the selector's option source). No mutation.
 // Connections:
 //   - File: frontend/src/lib/api/useRevenueScopes.ts -> the option source.
@@ -110,7 +108,7 @@ const GLOBAL_SCOPE_FALLBACK: ScopeOption = {
 // ============================================================================
 const resolveScopeOptions = (scopes: RevenueScopeOption[] | null): ScopeOption[] => {
   if (!scopes || scopes.length === 0) {
-    return [GLOBAL_SCOPE_FALLBACK];
+    return [];
   }
   return scopes.map((scope) => ({
     label: scope.label,
@@ -234,9 +232,17 @@ const channelAvatar = (channel: ChannelNetRevenue): string => {
 };
 
 // ============================================================================
-// Purpose: Map an ApiError/Error to friendly UI copy. 403 -> no-permission
-//   message (matches the finance fail-closed model); other ApiError -> the
-//   typed status + message; non-ApiError -> generic network failure.
+// Purpose: Map an ApiError/Error to friendly UI copy. A caller may provide
+//   domain-specific 403 detail instead of inheriting the net-revenue default.
+// Database/ORM: None (frontend error presentation only).
+// Standards: The 403 branch uses fixed caller-owned copy and never reflects a
+//   backend authorization detail; other typed/network failures preserve the
+//   existing shared error contract.
+// Blast Radius: Operator-facing failure copy only; no request or authorization
+//   behavior changes.
+// Connections:
+//   - File: frontend/src/components/srcc/views/CloseView.tsx -> close copy.
+//   - File: frontend/src/components/srcc/views/ExportsView.tsx -> export copy.
 // ============================================================================
 const extractApiErrorDetail = (error: ApiError): string => {
   const body = error.body as { detail?: unknown } | null;
@@ -312,6 +318,36 @@ const emptyAlertSubText = (data: SmartAlertsSummary | null): string =>
     ? `Status ${data.status} — nothing needs attention for ${data.month}.`
     : "No smart-alert data returned.";
 
+// ============================================================================
+// Purpose: Translate Smart Alerts failures without reusing net-revenue copy or
+//   exposing an arbitrary backend error body in this cross-domain panel.
+// Database/ORM: None (frontend error presentation only).
+// Standards: 403 names Smart Alerts and the selected-month permission domain;
+//   all other failures use fixed retry-safe copy.
+// Blast Radius: Error copy only; no fetch or authorization behavior.
+// Connections:
+//   - File: backend/ums_smart_revenue/api/revenue.py -> smart-alerts gates.
+// ============================================================================
+const smartAlertsErrorCopy = (
+  error: ApiError | Error,
+): { title: string; detail: string } => {
+  if (error instanceof ApiError) {
+    if (error.status === 403) {
+      // FIX: Keep this cross-domain panel from inheriting net-revenue denial
+      // copy while retaining its fixed, non-reflective failure messages.
+      return describeError(error, "Your role cannot view smart alerts for this month.");
+    }
+    return {
+      title: `Request failed (${error.status})`,
+      detail: "Could not load Smart Alerts for this finance month.",
+    };
+  }
+  return {
+    title: "Network error",
+    detail: "Could not reach the Smart Alerts service.",
+  };
+};
+
 /** Body of the smart-alerts panel: error, loading, empty, and alert-row states. */
 const SmartAlertsBody = ({
   data,
@@ -323,10 +359,7 @@ const SmartAlertsBody = ({
   error: ApiError | Error | null;
 }) => {
   if (error) {
-    const { title, detail } = describeError(
-      error,
-      "Your role cannot view smart alerts for this month.",
-    );
+    const { title, detail } = smartAlertsErrorCopy(error);
     return (
       <div className="issue-list" role="alert">
         <ItemRow
@@ -396,7 +429,8 @@ const SmartAlertsBody = ({
 //   four finance-month permissions the net-revenue read does not all require) or
 //   any other error renders inside this card only — the channel table, status
 //   strip, and explain panel keep rendering. Loading / error / 403 / empty
-//   states mirror the rest of CommandView and reuse describeError.
+//   states are domain-specific. The hook is disabled unless all four
+//   backend-derived grants cover the selected month.
 // Database/ORM: None (frontend) — consumes GET /revenue/months/{month}/smart-alerts.
 // Standards: No money is rendered here (alerts carry messages, not gated finance
 //   cells), so no canViewFinance gating is needed; severity drives the badge
@@ -408,8 +442,29 @@ const SmartAlertsBody = ({
 //   - File: frontend/src/lib/api/types.ts -> SmartAlertsSummary contract.
 //   - File: backend/ums_smart_revenue/api/revenue.py -> get_month_smart_alerts.
 // ============================================================================
-const SmartAlertsPanel = ({ month }: { month: string }) => {
-  const { data, loading, error, reload } = useSmartAlerts({ month });
+const SmartAlertsPanel = ({ month, enabled }: { month: string; enabled: boolean }) => {
+  const { data, loading, error, reload } = useSmartAlerts({ month, enabled });
+
+  if (!enabled) {
+    return (
+      <section className="panel" aria-labelledby="smartAlertsTitle" style={{ marginBottom: 16 }}>
+        <div className="panel-header">
+          <div className="panel-title">
+            <strong id="smartAlertsTitle">Smart Alerts / Problem Panel</strong>
+            <span>Cross-domain finance health signals for {month}</span>
+          </div>
+          <Badge tone="red">Restricted</Badge>
+        </div>
+        <div className="permission-band">
+          <Dot tone="red" />
+          <span>
+            <strong>Smart Alerts withheld</strong>
+            <span>Requires global revenue and confidence plus payment and bank access for this month.</span>
+          </span>
+        </div>
+      </section>
+    );
+  }
 
   return (
     <section className="panel" aria-labelledby="smartAlertsTitle" style={{ marginBottom: 16 }}>
@@ -636,11 +691,11 @@ const adsensePaymentBadge = (
   return { text: "Missing", tone: "amber" };
 };
 
-/** Build the primary AdSense payment count note. */
+/** Primary note for the AdSense payment card: the paid-USD payment count. */
 const adsensePaymentPrimaryNote = (data: MonthBankReconciliationSummary): string =>
   countLabel(data.paid_payment_count, "paid USD payment");
 
-/** Build the secondary AdSense payment note for unsupported or unpaid rows. */
+/** Secondary note: unsupported-currency or unpaid counts, else the source name. */
 const adsensePaymentSecondaryNote = (data: MonthBankReconciliationSummary): string => {
   if (data.unsupported_payment_currency_count > 0) {
     return countLabel(data.unsupported_payment_currency_count, "unsupported currency payment");
@@ -1754,9 +1809,10 @@ const CommandWorkspace = ({
           selectedChannelId={selectedChannelId}
           onSelect={onSelect}
         />
+
       </div>
 
-      {/* explain card — REAL data, derived from the selected net-revenue row */}
+      {/* The explanation card is API-backed; no fabricated readiness panel. */}
       <aside className="side-stack" aria-label="Explanation">
         <ExplainCard
           selectedChannel={selectedChannel}
@@ -2387,7 +2443,365 @@ const financeMonthHintSatisfies = (
   month: string,
 ): boolean => hint.globalScope || hint.financeMonths.includes(month);
 
-/** Render the Command Center's scoped finance, alert, monitor, and ranking panels. */
+// ============================================================================
+// Purpose: Explain why scope-bound finance queries are currently withheld.
+// Database/ORM: None (frontend read-state presentation).
+// Standards: Fixed copy; an error or empty authorized-scope response never
+//   degrades into an invented global request.
+// Blast Radius: Authorization UX only; the query gate is computed separately.
+// Connections:
+//   - File: frontend/src/lib/api/useRevenueScopes.ts -> supplies this state.
+// ============================================================================
+type ScopeNoticeCopy = { title: string; detail: string; tone: Severity };
+
+const SCOPE_NOTICE_COPY: Record<"denied" | "loading" | "failed" | "empty", ScopeNoticeCopy> = {
+  denied: {
+    title: "Revenue access unavailable",
+    detail: "This session has no revenue-read capability.",
+    tone: "red",
+  },
+  loading: {
+    title: "Loading authorized scopes",
+    detail: "Finance queries stay withheld until the scope list is trustworthy.",
+    tone: "blue",
+  },
+  failed: {
+    title: "Authorized scopes unavailable",
+    detail: "The scope read failed, so no global or scoped finance query was sent.",
+    tone: "red",
+  },
+  empty: {
+    title: "No authorized scopes returned",
+    detail: "The empty scope response cannot authorize a global finance query.",
+    tone: "red",
+  },
+};
+
+/** Pick which notice copy applies; anything finance-capable but untrusted
+ * degrades to the red "withheld" band rather than authorizing a query. */
+const scopeNoticeState = ({
+  canViewFinance,
+  loading,
+  error,
+  empty,
+}: {
+  canViewFinance: boolean;
+  loading: boolean;
+  error: ApiError | Error | null;
+  empty: boolean;
+}): keyof typeof SCOPE_NOTICE_COPY =>
+  !canViewFinance
+    ? "denied"
+    : loading
+      ? "loading"
+      : error
+        ? "failed"
+        : empty
+          ? "empty"
+          : "denied";
+
+/** The withheld/not-ready band rendered instead of any finance query surface
+ * when the authorized scope list cannot prove a scope to query. */
+const ScopeAccessNotice = ({
+  canViewFinance,
+  loading,
+  error,
+  empty,
+}: {
+  canViewFinance: boolean;
+  loading: boolean;
+  error: ApiError | Error | null;
+  empty: boolean;
+}) => {
+  const { title, detail, tone } = SCOPE_NOTICE_COPY[
+    scopeNoticeState({ canViewFinance, loading, error, empty })
+  ];
+  return (
+    <div className="permission-band" role={error ? "alert" : undefined}>
+      <Dot tone={tone} />
+      <span>
+        <strong>{title}</strong>
+        <span>{detail}</span>
+      </span>
+      <Badge tone={tone}>{loading && canViewFinance ? "Loading" : "Withheld"}</Badge>
+    </div>
+  );
+};
+
+// ============================================================================
+// Purpose: Fetch and resolve the viewer's authorized revenue scopes and the
+//   active {scopeType, scopeId} selection. Fail-closed: a missing capability,
+//   a failed discovery, or an empty authorized list yields scopesTrusted=false
+//   and every scope-bound finance request stays disabled — a failed or empty
+//   response is never authority for a global fallback.
+// Database/ORM: None (frontend) — reads GET /revenue/scopes via useRevenueScopes.
+// Standards: The active scope resolves only against the server-authorized set
+//   using the stable option key; the inert GLOBAL fallback shapes disabled
+//   hooks but never dispatches a request.
+// Blast Radius: Authorization (the anti-scope-leak option source). Read-only.
+// Connections:
+//   - File: frontend/src/lib/api/useRevenueScopes.ts -> authorized scope fetch.
+//   - File: backend/ums_smart_revenue/api/revenue.py -> GET /revenue/scopes.
+// ============================================================================
+/** Fail-closed: only a granted, successful, non-empty discovery authorizes. */
+const scopesResponseIsTrusted = (
+  canViewFinance: boolean,
+  scopesData: RevenueScopeOption[] | null,
+  scopesError: ApiError | Error | null,
+): boolean =>
+  canViewFinance &&
+  scopesError === null &&
+  Array.isArray(scopesData) &&
+  scopesData.length > 0;
+
+/** Resolve the selection against the server-authorized set (first option wins). */
+const resolveActiveScope = (
+  options: ScopeOption[],
+  selectedScopeKey: string,
+): ScopeOption | null =>
+  options.find(
+    (option) => scopeOptionKey(option.scopeType, option.scopeId) === selectedScopeKey,
+  ) ??
+  options[0] ??
+  null;
+
+const useAuthorizedScope = ({
+  canViewFinance,
+  selectedScopeKey,
+}: {
+  canViewFinance: boolean;
+  selectedScopeKey: string;
+}) => {
+  // FIX: No VIEW_REVENUE capability means no scope discovery request. More
+  // importantly, a failed or empty discovery response is not authority for a
+  // global fallback: every scope-bound finance request stays disabled.
+  const {
+    data: scopesData,
+    loading: scopesLoading,
+    error: scopesError,
+  } = useRevenueScopes(canViewFinance);
+  const scopesTrusted = scopesResponseIsTrusted(canViewFinance, scopesData, scopesError);
+  const scopeOptions = useMemo(
+    () => resolveScopeOptions(scopesData),
+    [scopesData],
+  );
+  // Resolve only against the server-authorized set. The inert placeholder
+  // shapes disabled hooks but is never rendered or allowed to dispatch.
+  const scope = resolveActiveScope(scopeOptions, selectedScopeKey);
+  return { scope, scopeOptions, scopesData, scopesError, scopesLoading, scopesTrusted };
+};
+
+// ============================================================================
+// Purpose: Mirror the composed gap-explanation endpoint's gate set client-side
+//   (VIEW_REVENUE + VIEW_CONFIDENCE @ global scope; payments + bank @ the
+//   selected finance month) so a session that cannot possibly pass renders the
+//   restricted band and fires nothing. The backend re-checks every gate — these
+//   hints never broaden access.
+// Database/ORM: None.
+// Standards: Read-only capability composition; fails closed on missing hints.
+// Blast Radius: Analytics/alerts panel mounting; no finance math.
+// ============================================================================
+/** The bank-summary panel mounts only when both endpoint gates and both
+ * month-resolution hints cover the selected month — otherwise it would fire a
+ * guaranteed-403 fetch. */
+const bankSummaryGate = ({
+  canViewPayments,
+  canViewBankReconciliation,
+  paymentsCoverMonth,
+  bankCoversMonth,
+}: {
+  canViewPayments: boolean;
+  canViewBankReconciliation: boolean;
+  paymentsCoverMonth: boolean;
+  bankCoversMonth: boolean;
+}): boolean =>
+  canViewPayments && canViewBankReconciliation && paymentsCoverMonth && bankCoversMonth;
+
+/** Month/scope selector row. The scope option shown is the RESOLVED active
+ * scope (not the raw stored key) so a scopes-list reload cannot desync the
+ * displayed option from the scope actually being read. */
+const NetRevenueFilterRow = ({
+  month,
+  onMonthChange,
+  scope,
+  scopeOptions,
+  scopesTrusted,
+  onScopeChange,
+  onRefresh,
+}: {
+  month: string;
+  onMonthChange: (month: string) => void;
+  scope: ScopeOption | null;
+  scopeOptions: ScopeOption[];
+  scopesTrusted: boolean;
+  onScopeChange: (key: string) => void;
+  onRefresh: () => void;
+}) => (
+  <section className="control-row" aria-label="Net revenue filters" style={{ marginBottom: 16 }}>
+    <select
+      className="control"
+      aria-label="Month"
+      value={month}
+      onChange={(e) => onMonthChange(e.target.value)}
+    >
+      {MONTH_OPTIONS.map((m) => (
+        <option key={m} value={m}>
+          {m}
+        </option>
+      ))}
+    </select>
+    <select
+      className="control"
+      aria-label="Scope"
+      // Drive the shown option from the RESOLVED active scope, not the raw
+      // selectedScopeKey: after a /revenue/scopes reload returns a different
+      // authorized set, the stored key may name an option no longer present.
+      // `scope` already falls back to the first option (global while
+      // loading), so the displayed option always matches the scope being read
+      // — no desynced selection that reads one scope but shows another.
+      value={scope ? scopeOptionKey(scope.scopeType, scope.scopeId) : ""}
+      disabled={!scopesTrusted}
+      onChange={(e) => onScopeChange(e.target.value)}
+    >
+      {!scope ? <option value="">Authorized scopes unavailable</option> : null}
+      {scopeOptions.map((s) => (
+        <option
+          key={scopeOptionKey(s.scopeType, s.scopeId)}
+          value={scopeOptionKey(s.scopeType, s.scopeId)}
+        >
+          {s.label}
+        </option>
+      ))}
+    </select>
+    <button
+      type="button"
+      className="icon-button"
+      aria-label="Refresh net revenue"
+      title="Refresh net revenue"
+      disabled={!scopesTrusted}
+      onClick={onRefresh}
+    >
+      ↻
+    </button>
+  </section>
+);
+
+/** All four gap-narrative gates must hold before the panel may fetch. */
+const gapNarrativeGate = ({
+  scopesTrusted,
+  canViewRevenueGlobal,
+  canViewConfidence,
+  paymentsCoverMonth,
+  bankCoversMonth,
+}: {
+  scopesTrusted: boolean;
+  canViewRevenueGlobal: boolean;
+  canViewConfidence: boolean;
+  paymentsCoverMonth: boolean;
+  bankCoversMonth: boolean;
+}): boolean =>
+  scopesTrusted &&
+  canViewRevenueGlobal &&
+  canViewConfidence &&
+  paymentsCoverMonth &&
+  bankCoversMonth;
+
+/** Resolves the selected channel row and its id for the explain workspace. */
+const useSelectedChannel = (
+  channels: ChannelNetRevenue[],
+  selectedChannelId: string | null,
+) => {
+  const selectedChannel = useMemo(
+    () =>
+      channels.find((c) => c.youtube_channel_id === selectedChannelId) ??
+      channels[0] ??
+      null,
+    [channels, selectedChannelId],
+  );
+  const activeChannelId = useMemo(
+    () => selectedChannel?.youtube_channel_id ?? null,
+    [selectedChannel],
+  );
+  return { selectedChannel, activeChannelId };
+};
+
+/** Restricted-scope notice band rendered while the scope read cannot be trusted. */
+const ScopeReadNotice = ({
+  canViewFinance,
+  scopesLoading,
+  scopesError,
+  scopesData,
+}: {
+  canViewFinance: boolean;
+  scopesLoading: boolean;
+  scopesError: ApiError | Error | null;
+  scopesData: RevenueScopeOption[] | null;
+}) => (
+  <ScopeAccessNotice
+    canViewFinance={canViewFinance}
+    loading={canViewFinance && scopesLoading && scopesError === null}
+    error={scopesError}
+    empty={Array.isArray(scopesData) && scopesData.length === 0}
+  />
+);
+
+/** Finance sections that mount only once the authorized scope read is trusted. */
+const TrustedRevenueSections = ({
+  data,
+  loading,
+  error,
+  canViewFinance,
+  currency,
+  month,
+  queryScope,
+  channels,
+  selectedChannel,
+  activeChannelId,
+  onSelectChannel,
+}: {
+  data: NetRevenueResponse | null;
+  loading: boolean;
+  error: ApiError | Error | null;
+  canViewFinance: boolean;
+  currency: string;
+  month: string;
+  queryScope: ScopeOption;
+  channels: ChannelNetRevenue[];
+  selectedChannel: ChannelNetRevenue | null;
+  activeChannelId: string | null;
+  onSelectChannel: (channelId: string | null) => void;
+}) => (
+  <>
+    <NetRevenueStatusStrip
+      data={data}
+      loading={loading}
+      error={error}
+      canViewFinance={canViewFinance}
+      currency={currency}
+    />
+    <RankingsPanel
+      month={month}
+      canViewFinance={canViewFinance}
+      scopeType={queryScope.scopeType}
+      scopeId={queryScope.scopeId}
+      scopesReady
+    />
+    <CommandWorkspace
+      data={data}
+      loading={loading}
+      error={error}
+      canViewFinance={canViewFinance}
+      currency={currency}
+      channelCount={channels.length}
+      selectedChannel={selectedChannel}
+      selectedChannelId={activeChannelId}
+      month={month}
+      onSelect={onSelectChannel}
+    />
+  </>
+);
+
+/** The Command Center view: revenue, alerts, and monitor panels gated by session grants. */
 const CommandView = ({
   canViewFinance,
   canViewAnalytics = false,
@@ -2426,66 +2840,36 @@ const CommandView = ({
   const [month, setMonth] = useState<string>(DEFAULT_MONTH);
   // Stable {scopeType, scopeId} identity instead of a positional index: the
   // option list arrives asynchronously, so an index would point at the wrong
-  // (or a vanished) scope once the fetched set replaces the global-only fallback.
+  // (or a vanished) scope once the fetched set resolves.
   const [selectedScopeKey, setSelectedScopeKey] = useState<string>(
     scopeOptionKey(GLOBAL_SCOPE_FALLBACK.scopeType, GLOBAL_SCOPE_FALLBACK.scopeId),
   );
   const [selectedChannelId, setSelectedChannelId] = useState<string | null>(null);
 
-  // Fetch the viewer's VIEW_REVENUE-authorized scopes ONCE at the view root. The
-  // selector is populated ONLY from these (fail-closed against an org-structure
-  // leak); while loading or on a 403/error it degrades to global-only so the
-  // screen never blocks (the panels fail-closed on the actual scoped reads).
-  const { data: scopesData, error: scopesError } = useRevenueScopes();
-  // FIX (review #102 Qodo #3): Hold the net-revenue + rankings reads until the
-  // authorized-scope fetch has a verdict (data OR error). While it is still
-  // loading, scopesData is null and `scope` resolves to the global fallback —
-  // firing it immediately would trigger an unauthorized global read (likely a
-  // noisy 403) for a scoped viewer before their real options arrive. Once the
-  // scopes fetch resolves (success -> real options, or error -> global fallback),
-  // the gated reads fire with the correct scope.
-  const scopesReady = useMemo(
-    () => scopesData !== null || scopesError !== null,
-    [scopesData, scopesError],
-  );
-  const scopeOptions = useMemo(
-    () => resolveScopeOptions(scopesData),
-    [scopesData],
-  );
-  // Resolve the active scope from the stable key, falling back to the first
-  // option (always present — resolveScopeOptions guarantees >=1) when the key is
-  // not in the current list (e.g. before the fetch resolves). The fallback is
-  // global while loading, never an out-of-scope unit.
-  const scope = useMemo(
-    () =>
-      scopeOptions.find(
-        (option) => scopeOptionKey(option.scopeType, option.scopeId) === selectedScopeKey,
-      ) ??
-      scopeOptions[0] ??
-      GLOBAL_SCOPE_FALLBACK,
-    [scopeOptions, selectedScopeKey],
-  );
+  const { scope, scopeOptions, scopesData, scopesError, scopesLoading, scopesTrusted } =
+    useAuthorizedScope({ canViewFinance, selectedScopeKey });
+  const queryScope = scope ?? GLOBAL_SCOPE_FALLBACK;
   const { data, loading, error, reload } = useNetRevenue({
     month,
-    scopeType: scope.scopeType,
-    scopeId: scope.scopeId,
-    enabled: scopesReady,
+    scopeType: queryScope.scopeType,
+    scopeId: queryScope.scopeId,
+    enabled: scopesTrusted,
   });
 
   const currency = useMemo(() => data?.currency ?? "USD", [data]);
   const channels = useMemo(() => data?.channels ?? [], [data]);
-  const selectedChannel = useMemo(
-    () =>
-      channels.find((c) => c.youtube_channel_id === selectedChannelId) ??
-      channels[0] ??
-      null,
-    [channels, selectedChannelId],
+  const { selectedChannel, activeChannelId } = useSelectedChannel(
+    channels,
+    selectedChannelId,
   );
-  const activeChannelId = useMemo(
-    () => selectedChannel?.youtube_channel_id ?? null,
-    [selectedChannel],
-  );
-  const canViewBankReconciliationSummary = canViewPayments && canViewBankReconciliation;
+  const paymentsCoverMonth = financeMonthHintSatisfies(paymentsViewScopes, month);
+  const bankCoversMonth = financeMonthHintSatisfies(bankReconciliationViewScopes, month);
+  const canViewBankReconciliationSummary = bankSummaryGate({
+    canViewPayments,
+    canViewBankReconciliation,
+    paymentsCoverMonth,
+    bankCoversMonth,
+  });
   // The composed gap-explanation endpoint enforces the smart-alerts gate set
   // (VIEW_REVENUE + VIEW_CONFIDENCE @ global, payments + bank @ the
   // requested finance month) — mirror it client-side so a session that
@@ -2495,78 +2879,46 @@ const CommandView = ({
   // terms are MONTH-RESOLUTION hints checked against the SELECTED month: a
   // grant scoped only to another month restricts here instead of fetching.
   // The backend still re-checks every gate — these hints never broaden.
-  const canViewGapNarrative =
-    canViewRevenueGlobal &&
-    canViewConfidence &&
-    financeMonthHintSatisfies(paymentsViewScopes, month) &&
-    financeMonthHintSatisfies(bankReconciliationViewScopes, month);
+  const canViewGapNarrative = gapNarrativeGate({
+    scopesTrusted,
+    canViewRevenueGlobal,
+    canViewConfidence,
+    paymentsCoverMonth,
+    bankCoversMonth,
+  });
+  const canViewSmartAlerts = canViewGapNarrative;
 
   return (
     <>
       {/* month + scope selector */}
-      <section className="control-row" aria-label="Net revenue filters" style={{ marginBottom: 16 }}>
-        <select
-          className="control"
-          aria-label="Month"
-          value={month}
-          onChange={(e) => {
-            setMonth(e.target.value);
-            setSelectedChannelId(null);
-          }}
-        >
-          {MONTH_OPTIONS.map((m) => (
-            <option key={m} value={m}>
-              {m}
-            </option>
-          ))}
-        </select>
-        <select
-          className="control"
-          aria-label="Scope"
-          // Drive the shown option from the RESOLVED active scope, not the raw
-          // selectedScopeKey: after a /revenue/scopes reload returns a different
-          // authorized set, the stored key may name an option no longer present.
-          // `scope` already falls back to the first option (global while
-          // loading), so the displayed option always matches the scope being read
-          // — no desynced selection that reads one scope but shows another.
-          value={scopeOptionKey(scope.scopeType, scope.scopeId)}
-          onChange={(e) => {
-            // Store the stable scope key; the active {scopeType, scopeId} is
-            // resolved from it against the current option list. Reset the
-            // selected channel so the explain card never shows a channel from
-            // the prior scope.
-            setSelectedScopeKey(e.target.value);
-            setSelectedChannelId(null);
-          }}
-        >
-          {scopeOptions.map((s) => (
-            <option
-              key={scopeOptionKey(s.scopeType, s.scopeId)}
-              value={scopeOptionKey(s.scopeType, s.scopeId)}
-            >
-              {s.label}
-            </option>
-          ))}
-        </select>
-        <button
-          type="button"
-          className="icon-button"
-          aria-label="Refresh net revenue"
-          title="Refresh net revenue"
-          onClick={reload}
-        >
-          ↻
-        </button>
-      </section>
-
-      {/* status strip — REAL net-revenue summary */}
-      <NetRevenueStatusStrip
-        data={data}
-        loading={loading}
-        error={error}
-        canViewFinance={canViewFinance}
-        currency={currency}
+      <NetRevenueFilterRow
+        month={month}
+        onMonthChange={(value) => {
+          setMonth(value);
+          setSelectedChannelId(null);
+        }}
+        scope={scope}
+        scopeOptions={scopeOptions}
+        scopesTrusted={scopesTrusted}
+        onScopeChange={(key) => {
+          // Store the stable scope key; the active {scopeType, scopeId} is
+          // resolved from it against the current option list. Reset the
+          // selected channel so the explain card never shows a channel from
+          // the prior scope.
+          setSelectedScopeKey(key);
+          setSelectedChannelId(null);
+        }}
+        onRefresh={reload}
       />
+
+      {!scopesTrusted ? (
+        <ScopeReadNotice
+          canViewFinance={canViewFinance}
+          scopesLoading={scopesLoading}
+          scopesError={scopesError}
+          scopesData={scopesData}
+        />
+      ) : null}
 
       {/* payment/bank reconciliation — REAL data, sourced from the backend summary */}
       <BankReconciliationStatusStrip
@@ -2580,34 +2932,29 @@ const CommandView = ({
       <GapNarrativePanel month={month} canViewGapNarrative={canViewGapNarrative} />
 
       {/* smart-alerts / problem panel — REAL data, fails independently */}
-      <SmartAlertsPanel month={month} />
+      <SmartAlertsPanel month={month} enabled={canViewSmartAlerts} />
 
       {/* outside-CMS + channel-issues monitor — REAL data, fails independently,
           no-fetch-when-restricted (mounts only when canViewAnalytics) */}
       <OutsideCmsMonitorPanel canViewAnalytics={canViewAnalytics} />
 
-      {/* company/sector/channel rankings — REAL data, fails independently,
-           finance-gated (shows money; mounts only when canViewFinance) */}
-      <RankingsPanel
-        month={month}
-        canViewFinance={canViewFinance}
-        scopeType={scope.scopeType}
-        scopeId={scope.scopeId}
-        scopesReady={scopesReady}
-      />
-
-      <CommandWorkspace
-        data={data}
-        loading={loading}
-        error={error}
-        canViewFinance={canViewFinance}
-        currency={currency}
-        channelCount={channels.length}
-        selectedChannel={selectedChannel}
-        selectedChannelId={activeChannelId}
-        month={month}
-        onSelect={setSelectedChannelId}
-      />
+      {/* status strip + rankings + workspace — REAL data, finance-gated,
+          mounted only once the authorized scope read is trusted */}
+      {scopesTrusted ? (
+        <TrustedRevenueSections
+          data={data}
+          loading={loading}
+          error={error}
+          canViewFinance={canViewFinance}
+          currency={currency}
+          month={month}
+          queryScope={queryScope}
+          channels={channels}
+          selectedChannel={selectedChannel}
+          activeChannelId={activeChannelId}
+          onSelectChannel={setSelectedChannelId}
+        />
+      ) : null}
     </>
   );
 };

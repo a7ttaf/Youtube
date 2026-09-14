@@ -6,7 +6,7 @@ import { useChannelMappingAction } from "@/lib/api/useChannelMapping";
 import { useChannels } from "@/lib/api/useChannels";
 import { useProposeAccountLinkAction } from "@/lib/api/useChannelAccountLinks";
 import { useOrgUnits } from "@/lib/api/useOrgUnits";
-import type { Severity } from "@/lib/mock/data";
+import type { Severity } from "@/types/domain";
 import { currentMonthKey } from "@/lib/months";
 import {
   Badge,
@@ -57,7 +57,8 @@ import { useUnsettledImport } from "@/contexts/UnsettledImportContext";
 // ---- Client-side derivation helpers ----------------------------------------
 
 /** Compute up to 2-char initials from a channel display name. */
-const avatarFromName = (name: string): string =>  name
+const avatarFromName = (name: string): string =>
+  name
     .split(/\s+/)
     .filter(Boolean)
     .slice(0, 2)
@@ -89,10 +90,11 @@ const sourceLabel = (revenue_source_status: string): string =>
   SOURCE_LABELS[revenue_source_status] ?? revenue_source_status;
 
 /**
- * Option A state derivation — purely from existing fields, no new DB column.
+ * Factual state derivation — purely from existing fields, no approval claim.
  * Export block: no revenue source + revenue required (held from export).
  * Evidence due: outside CMS without a verified content-owner link.
- * Approved: everything else (source resolved + CMS status resolved).
+ * Registered: every other row is known only to exist in the registry. The API
+ * exposes no approval status, so the UI must not fabricate "Approved".
  */
 const deriveState = (ch: ChannelRegistryEntry): { text: string; tone: Severity } => {
   if (ch.revenue_required && ch.revenue_source_status === "MISSING_REVENUE_SOURCE") {
@@ -101,7 +103,9 @@ const deriveState = (ch: ChannelRegistryEntry): { text: string; tone: Severity }
   if (ch.cms_status === "OUTSIDE_CMS" && !ch.content_owner_id) {
     return { text: "Evidence due", tone: "amber" };
   }
-  return { text: "Approved", tone: "green" };
+  // FIX: A resolved source/CMS shape is not evidence of approval. "Registered"
+  // is the neutral fact this GET proves without inventing workflow state.
+  return { text: "Registered", tone: "blue" };
 };
 
 /**
@@ -169,24 +173,26 @@ const describeMutationError = (err: unknown): string => {
 
 // ---- Summary tile counts (derived from fetched channels) -------------------
 
+// ============================================================================
+// Purpose: Derive exactly two registry summary counts from the same live rows
+//   the table renders, so the header cannot disagree with the body. Sourceless
+//   finance/change tiles were removed; no finance tile is fabricated here.
+// Database/ORM: None (frontend pure derivation over GET /channels output).
+// Standards: Null data renders neutral placeholders; successful empty data
+//   renders real zeros. Only API-backed channel counts are rendered and
+//   outside-CMS counts use the backend enum.
+// Blast Radius: Registry summary display only; no mutation or finance math.
+//   Outside-CMS count includes ONLY channels with cms_status === "OUTSIDE_CMS".
+// Connections:
+//   - File: frontend/src/lib/api/useChannels.ts -> supplies the channel rows.
+// ============================================================================
 type RegistrySummaryTile = {
   label: string;
   value: string;
   note: string;
 };
 
-// ============================================================================
-// Purpose: Derive the registry summary tiles from the live channel response.
-//   Both tiles are counts of the SAME fetched rows the table renders, so the
-//   header can never disagree with the body. Returns neutral values
-//   (loading: "…", error/no data: "—") with no note when channels is null.
-// Standards: No fabricated values. The tile set was cut from four to two in
-//   P1.4: "Unmapped revenue" and "Scoped changes" had no live source and stood
-//   permanently at "—", so they were deleted rather than left as empty
-//   furniture. Neither remaining tile shows money, so no finance gating applies.
-//   Outside-CMS count includes ONLY channels with cms_status === "OUTSIDE_CMS".
-// Blast Radius: Registry header display only. No mutation, no money.
-// ============================================================================
+/** Build the registry header's summary tiles from the loaded channel list. */
 const buildSummaryTiles = (
   channels: ChannelRegistryEntry[] | null,
   loading: boolean,
@@ -1137,7 +1143,7 @@ const AccountLinkProposalPanel = ({
   );
 };
 
-/** Registry side panels: the live mapping-change form and the account-link proposal form. */
+/** Registry side panels: the live mapping-change and account-link proposal forms. */
 const RegistrySidePanels = ({
   canManageRegistry,
   channels,

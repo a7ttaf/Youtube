@@ -810,4 +810,28 @@ describe("ExportsView wired to the exports endpoint", () => {
     const currency = screen.getByLabelText("Currency") as HTMLSelectElement;
     expect(Array.from(currency.options).map((o) => o.value)).toEqual(["USD"]);
   });
+
+  it("maps a 403 from export creation to create-specific no-permission copy", async () => {
+    fetchMock().mockImplementation((input: unknown, init?: unknown) => {
+      if (urlOf(input) === "/exports" && methodOf(init) === "POST") {
+        return Promise.resolve(
+          jsonResponse({ detail: "Missing permission: exports.finance" }, 403),
+        );
+      }
+      return Promise.resolve(jsonResponse(EMPTY_LIST));
+    });
+    renderExportsView();
+
+    await screen.findByText(/No export jobs yet/i);
+    fireEvent.change(screen.getByLabelText("Reason"), {
+      target: { value: "Permission regression" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /^generate$/i }));
+
+    expect(
+      await screen.findByText(/Your role cannot create this export\./i),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/cannot view net revenue/i)).not.toBeInTheDocument();
+    expect(screen.getByRole("alert")).toBeInTheDocument();
+  });
 });

@@ -288,9 +288,9 @@ run_check() {
 # In ship mode: HEAD's, for the reason the lane plan is read from HEAD one
 # function down. These toggles decide which lanes run at all, and reading them
 # from the worktree let an *unstaged* edit switch lanes off for a push that does
-# not carry the edit. Setting `tests-shell`, `tests-js` and `typecheck-js` to
-# false is enough on its own -- `lint-js` and `format-js` are already disabled,
-# so `_all_related_checks_disabled` then drops the whole `node` lane too, and
+# not carry the edit. Setting every related check (`tests-shell`, `tests-js`,
+# `typecheck-js`, `lint-js`, and `format-js`) to false is enough on its own, so
+# `_all_related_checks_disabled` then drops the whole `node` lane too, and
 # `tests-shell` is the lane that would have reported the config file as drift.
 # A pushed frontend commit with failing tests passes on toggles that exist in
 # nobody's tree but the pusher's.

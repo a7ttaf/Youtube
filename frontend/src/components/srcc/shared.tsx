@@ -1,13 +1,13 @@
 import type { ReactNode } from "react";
 
-import type { Severity } from "@/lib/mock/data";
+import type { Severity } from "@/types/domain";
 import { rollingMonthWindow } from "@/lib/months";
 
 // ============================================================================
-// Purpose: Shared presentational helpers for the SRCC shell views. Extracted
-//   from AppShell so the wired CommandView (and future wired views) reuse the
-//   exact same design-system primitives (Badge/Dot/ItemRow/SummaryTile) and the
-//   single RESTRICTED_FINANCE_VALUE / finance-formatting contract.
+// Purpose: Shared presentational helpers for the SRCC shell views. Kept in one
+//   module so the wired CommandView (and future wired views) reuse the exact
+//   same design-system primitives (Badge/Dot/ItemRow/SummaryTile) and the single
+//   RESTRICTED_FINANCE_VALUE / finance-formatting contract.
 // Database/ORM: None (presentation only).
 // Standards: No business logic; money formatting takes API strings (never float
 //   math) and renders RESTRICTED_FINANCE_VALUE when the viewer lacks finance
@@ -20,8 +20,8 @@ import { rollingMonthWindow } from "@/lib/months";
 export const RESTRICTED_FINANCE_VALUE = "Restricted";
 
 // ============================================================================
-// Purpose: Publish the rolling month window every wired view shares. Previously
-//   two frozen literals ("2026-03" and a four-entry
+// Purpose: Publish the month window shared by the five wired, controlled view
+//   selectors. Previously two frozen literals ("2026-03" and a four-entry
 //   list ending at "2025-12") that silently aged into a default month with no
 //   data; now a ROLLING window derived from the current calendar month.
 // Database/ORM: None — a selection default, not a stored value.
@@ -34,10 +34,9 @@ export const RESTRICTED_FINANCE_VALUE = "Restricted";
 //   currency, no write path.
 // Connections:
 //   - File: frontend/src/lib/months.ts -> rollingMonthWindow computes these.
-//   - File: frontend/src/components/srcc/AppShell.tsx -> keeps the shell chrome
-//     free of an unowned month selector; view-owned selectors consume this API.
-//   - Files: views/{Command,Close,Trace,Exports,Connectors}View.tsx -> each
-//     seeds its month state from DEFAULT_MONTH and lists MONTH_OPTIONS.
+//   - Files: views/{Command,Close,Trace,Exports,Connectors}View.tsx -> all list
+//     MONTH_OPTIONS; the four read views use DEFAULT_MONTH while Connectors
+//     uses WRITE_DEFAULT_MONTH for its write-oriented controls.
 // ============================================================================
 
 /**
@@ -48,9 +47,9 @@ export const RESTRICTED_FINANCE_VALUE = "Restricted";
 export const MONTH_OPTIONS = rollingMonthWindow();
 
 /**
- * The month each wired view (Command/Close/Trace/Exports/Connectors) defaults
- * to: the current calendar month, and by construction the first MONTH_OPTIONS
- * entry. Shared from here so the five views stay in lockstep.
+ * The month each wired read view (Command/Close/Trace/Exports) defaults to: the
+ * current calendar month, and by construction the first MONTH_OPTIONS entry.
+ * Connectors deliberately uses WRITE_DEFAULT_MONTH below.
  */
 export const DEFAULT_MONTH = MONTH_OPTIONS[0];
 

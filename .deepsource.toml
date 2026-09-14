@@ -11,6 +11,12 @@ test_patterns = [
   "**/*.test.tsx",
 ]
 
+# The flat ESLint config is a tool config, not application source; keep the
+# analyzer from flagging its require/module.exports shape.
+exclude_patterns = [
+  "frontend/eslint.config.cjs",
+]
+
 [[analyzers]]
 name = "python"
 enabled = true

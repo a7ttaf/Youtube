@@ -58,6 +58,8 @@ type ErrorBoundaryProps = {
   children: ReactNode;
   /** Changes clear a stale fallback without remounting the guarded subtree. */
   resetKey?: string;
+  /** True while a non-abortable write below the boundary has not settled. */
+  recoveryDisabled?: boolean;
   /** Performs a full document reload so all server-backed state is reconciled. */
   onReload?: () => void;
   /** Optional approved sink; it receives only ErrorBoundaryReport. */
@@ -194,6 +196,9 @@ export const reloadDocumentForRecovery = (): void => {
   window.location.reload();
 };
 
+const WRITE_RECOVERY_NOTE =
+  "Wait for the active write to finish before reloading or leaving this section.";
+
 /**
  * Catch render-time errors from the guarded subtree and show a safe fallback.
  * Navigation clears a stale fallback through resetKey; the action itself always
@@ -279,6 +284,11 @@ class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundaryState> {
 
   /** Reload/re-fetch instead of retrying a possibly committed child write. */
   private readonly handleReload = (): void => {
+    // FIX: A disabled button protects pointer/keyboard input; this handler guard
+    // also prevents programmatic invocation while an unabortable write is live.
+    if (this.props.recoveryDisabled) {
+      return;
+    }
     (this.props.onReload ?? reloadDocumentForRecovery)();
   };
 
@@ -310,7 +320,14 @@ class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundaryState> {
           <Badge tone="red">{errorCategory}</Badge>
         </div>
         <div className="action-row">
-          <button className="ghost-button" type="button" onClick={this.handleReload}>
+          {this.props.recoveryDisabled ? <span>{WRITE_RECOVERY_NOTE}</span> : null}
+          <button
+            className="ghost-button"
+            type="button"
+            disabled={this.props.recoveryDisabled}
+            title={this.props.recoveryDisabled ? WRITE_RECOVERY_NOTE : undefined}
+            onClick={this.handleReload}
+          >
             Reload and reconcile
           </button>
         </div>

@@ -4,6 +4,32 @@ import { useApiClient } from "@/lib/api/client";
 import type { RevenueScopeOption, RevenueScopesResponse } from "@/lib/api/types";
 import { useAsync, type AsyncState } from "@/lib/api/useAsync";
 
+const REVENUE_SCOPE_TYPES = new Set(["global", "sector", "company", "group"]);
+
+// FIX: TypeScript response types do not validate JSON at runtime. Reject every
+// malformed scope row here so an object with missing/falsey scope fields cannot
+// reach useNetRevenue and silently omit its query parameters, which the backend
+// would otherwise interpret as its global-scope defaults.
+/** Global scopes carry a null scope_id; every other scope needs a non-blank id. */
+const hasValidScopeId = (candidate: Record<string, unknown>): boolean =>
+  candidate.scope_type === "global"
+    ? candidate.scope_id === null
+    : typeof candidate.scope_id === "string" && candidate.scope_id.trim().length > 0;
+
+/** The scope row must name a known scope_type and carry a non-blank label. */
+const hasValidScopeFields = (candidate: Record<string, unknown>): boolean =>
+  typeof candidate.scope_type === "string" &&
+  REVENUE_SCOPE_TYPES.has(candidate.scope_type) &&
+  typeof candidate.label === "string" &&
+  candidate.label.trim().length > 0;
+
+/** Runtime guard for one authorized-scope row in the GET /revenue/scopes body. */
+const isRevenueScopeOption = (value: unknown): value is RevenueScopeOption => {
+  if (typeof value !== "object" || value === null) return false;
+  const candidate = value as Record<string, unknown>;
+  return hasValidScopeFields(candidate) && hasValidScopeId(candidate);
+};
+
 // ============================================================================
 // Purpose: Typed auto-fetch hook for the viewer's authorized rollup scope
 //   options. Fetches GET /revenue/scopes on mount via the production
@@ -17,8 +43,8 @@ import { useAsync, type AsyncState } from "@/lib/api/useAsync";
 // Standards: The request closure is memoized on `client` (stable ref) so
 //   useAsync does NOT refetch on every render. The backend requires an active
 //   VIEW_REVENUE grant; a 403 surfaces as a typed ApiError for the view to
-//   translate (it degrades to a guaranteed global-only fallback, never an
-//   invented scope). No client-side authorization is invented here.
+//   translate. A failed, malformed, or empty response authorizes nothing; the
+//   caller withholds finance queries instead of inventing a global fallback.
 // Blast Radius: Authorization (the selector's anti-scope-leak option source).
 //   Read-only — no finance number, no source-of-truth mutation.
 // Connections:
@@ -26,14 +52,22 @@ import { useAsync, type AsyncState } from "@/lib/api/useAsync";
 //   - File: frontend/src/lib/api/types.ts -> RevenueScopeOption/RevenueScopesResponse.
 //   - File: backend/ums_smart_revenue/api/revenue.py -> GET /revenue/scopes.
 // ============================================================================
-export const useRevenueScopes = (): AsyncState<RevenueScopeOption[]> => {
+export const useRevenueScopes = (enabled = true): AsyncState<RevenueScopeOption[]> => {
   const client = useApiClient();
   const run = useCallback(
     async () => {
       const response = await client.get<RevenueScopesResponse>("/revenue/scopes");
+      if (
+        !Array.isArray(response.scopes) ||
+        !response.scopes.every(isRevenueScopeOption)
+      ) {
+        // FIX: A malformed 200 envelope or entry is not a permission grant and
+        // must not reach CommandView as trusted scope data.
+        throw new Error("Authorized revenue scopes response was malformed.");
+      }
       return response.scopes;
     },
     [client],
   );
-  return useAsync(run);
+  return useAsync(run, enabled);
 };

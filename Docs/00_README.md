@@ -53,6 +53,7 @@ Migration `20260513_0002_retire_graph_permissions` dropped the retired `graph-re
 | `17_MULTI_TENANT_ARCHITECTURE.md` | Postgres RLS, tenant isolation, role grants |
 | `18_MULTI_CURRENCY_ENGINE.md` | Multi-currency rate store and conversion path |
 | `19_GOOGLE_CREDENTIAL_SETUP_SMOKE.md` | Owner-approved Google credential setup and smoke runbook |
+| `pulls/2026-08-31-pr-tbd-frontend-p1-integration-handoff.md` | Frontend P1 integration scope, validation, risk, and rollback handoff |
 | `20_COMPOSE_STORAGE_RUNBOOK.md` | Compose bind safety, coordinated backup, verification, and recovery |
 | `22_BACKUP_RESTORE_AND_REHEARSAL.md` | Atomic database backup, clean restore, and throwaway rehearsal |
 | `security/ROLE_PERMISSION_MODEL.md` | Role catalog, permission list, gate registry |

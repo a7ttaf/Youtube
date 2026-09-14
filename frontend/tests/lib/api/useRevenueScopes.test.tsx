@@ -47,6 +47,13 @@ const requireFetchArgs = () => {
 };
 
 describe("useRevenueScopes", () => {
+  it("does not fetch when revenue visibility is absent", () => {
+    const { result } = renderHook(() => useRevenueScopes(false), { wrapper });
+
+    expect(globalThis.fetch).not.toHaveBeenCalled();
+    expect(result.current).toMatchObject({ data: null, loading: true, error: null });
+  });
+
   it("auto-fetches GET /revenue/scopes on mount and returns the .scopes array", async () => {
     fetchMock().mockResolvedValue(jsonResponse({ scopes: SCOPES }));
     const { result } = renderHook(() => useRevenueScopes(), { wrapper });
@@ -81,6 +88,17 @@ describe("useRevenueScopes", () => {
     await waitFor(() => expect(result.current.loading).toBe(false));
     expect(result.current.data).toBeNull();
     expect(result.current.error).toMatchObject({ name: "ApiError", status: 403 });
+  });
+
+  it("rejects a malformed scope entry instead of permitting a global-default query", async () => {
+    fetchMock().mockResolvedValue(jsonResponse({ scopes: [{}] }));
+    const { result } = renderHook(() => useRevenueScopes(), { wrapper });
+
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    expect(result.current.data).toBeNull();
+    expect(result.current.error).toEqual(
+      new Error("Authorized revenue scopes response was malformed."),
+    );
   });
 
   it("reload() re-runs the fetch", async () => {

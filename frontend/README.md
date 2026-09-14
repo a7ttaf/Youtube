@@ -382,6 +382,10 @@ permanent access-denied screen — **no preview role is needed**.
   `disabled` principal renders `AccessDenied` — the dashboard is never shown
   before the principal is known, and a transient error never leaves a stale
   principal's capabilities live.
+- **Tenant/auth boundaries rehydrate fail closed**: when the resolved tenant
+  changes inside the mounted application, the prior principal is hidden
+  immediately while a tenant-keyed `/session/me` request resolves. A failed or
+  disabled replacement cannot inherit the prior principal's capabilities.
 - **Connector controls require `canRunConnectorJobs`**: the job-sync and
   AdSense-sync write actions stay disabled unless the principal's capability is
   true.
@@ -432,7 +436,7 @@ gateway/bearer secrets in a query string.
 | Exports             | `GET /exports` (job list) + `POST /exports` (request); QUEUED jobs show **Generate** and COMPLETED jobs show **Download** for XLSX, PDF, PPTX, and analytics CSV artifacts. The action authenticates `GET <artifact-route>?prepare=true`, then starts a same-origin native GET of the persisted artifact. |
 | Connectors          | `GET /connectors/credentials` + `GET /adsense/payments`; `POST /connectors/jobs` and `POST /adsense/sync-payments`. The job-sync and AdSense-sync controls render **disabled for every preview role** (hint: "Requires a connector-operations role.") and use an inline reason field — no browser prompts |
 | Audit               | `GET /audit/events` (cursor-paginated timeline; server-driven sensitive-payload redaction; fail-closed — a non-audit viewer sees a restricted placeholder and fires no fetch). **First page only** (no Load More via `next_cursor` yet). Summary tiles, coverage panel, and the severity-filter / Download controls stay static/disabled placeholders |
-| Registry            | Mock data only (not wired to the API yet — clearly labelled in-app) |
+| Registry            | `GET /channels` (channel table + summary tiles) + `GET /org-units` (company/sector display names with raw-id fallback); `PATCH` channel mapping and account-link proposals via the inline actions |
 
 Money values are backend decimal **strings** and are formatted for display only
 (no float math); finance cells are permission-gated to a `Restricted` sentinel

@@ -1,4 +1,5 @@
 import { type ReactNode, useCallback, useEffect, useRef, useState } from "react";
+import { useBlocker, useLocation, useNavigate } from "react-router-dom";
 
 import { ApiError, useApiClient } from "@/lib/api/client";
 import type {
@@ -16,8 +17,8 @@ import {
   WriteInFlightProvider,
   useWriteInFlightLatch,
 } from "@/contexts/WriteInFlightContext";
-import type { Role, ViewKey } from "@/lib/mock/data";
-import ErrorBoundary, { reloadDocumentForRecovery } from "./ErrorBoundary";
+import { isViewKey, NAV_GROUPS, VIEW_COPY } from "@/config/navigation";
+import type { Role, ViewKey } from "@/types/domain";
 import { BrandIcon, NAV_ICONS } from "./icons";
 import AuditView from "./views/AuditView";
 import CloseView from "./views/CloseView";
@@ -29,93 +30,7 @@ import RegistryView from "./views/RegistryView";
 import { importScopeFor } from "@/contexts/UnsettledImportContext";
 import TraceView from "./views/TraceView";
 import { Badge, Dot } from "./shared";
-
-/* ------------------------------------------------------------------ chrome config */
-
-// ============================================================================
-// Purpose: The shell's OWN chrome configuration: the page copy for every routed
-//   view, and the sidebar navigation map. Replaces the VIEW_COPY / NAV_GROUPS
-//   imports from lib/mock/data, which drove the chrome from a frozen
-//   "March 2026 close" demo snapshot — nav items carried invented badge counts
-//   ("318" channels, "12" exports, "2" connectors, "AA") and the Command copy
-//   named a month, a scope and a reporting currency none of which the shell
-//   reads from anywhere.
-// Database/ORM: None (frontend) — static route metadata. No fetch, no store.
-// Standards: Every entry names a view this shell actually routes to; both maps
-//   are keyed by ViewKey, so the Record is exhaustive by type and adding a view
-//   without copy is a compile error. Copy describes the SURFACE and never a
-//   VALUE — no month, no scope, no currency, no count — because the shell holds
-//   no data to back one and a frozen number rendered in the chrome reads as a
-//   live figure. Nav items carry no count for the same reason: the counts they
-//   used to show were mock constants, and the real ones belong to the views
-//   that fetch them.
-// Blast Radius: Presentation only — the page <h1>, its subtitle, and the nav
-//   labels. No authorization, no money, no request.
-// Connections:
-//   - File: frontend/src/components/srcc/AppShell.tsx -> Topbar reads VIEW_COPY;
-//     Sidebar/NavSection read NAV_GROUPS.
-//   - File: frontend/src/lib/mock/data.ts -> ViewKey, the key set both maps use.
-//   - File: frontend/src/components/srcc/icons.tsx -> NAV_ICONS, keyed by `icon`.
-// ============================================================================
-
-const VIEW_COPY: Record<ViewKey, { title: string; subtitle: string }> = {
-  command: {
-    title: "Revenue Command Center",
-    subtitle: "Net revenue, payment reconciliation, and open issues for the selected month",
-  },
-  registry: {
-    title: "Channel Registry",
-    subtitle: "Channel ownership, CMS status, company scope, and roster import",
-  },
-  groups: {
-    title: "CMS Groups",
-    subtitle: "Content-owner group mirror, ownership stamps, and sync",
-  },
-  close: {
-    title: "Month Close Workbench",
-    subtitle: "Close readiness, lock and unlock controls, and the audited reason trail",
-  },
-  trace: {
-    title: "SQL Trace Explorer",
-    subtitle: "Per-channel number explanation, filtered by your read permissions",
-  },
-  exports: {
-    title: "Export Center",
-    subtitle: "Permission-gated export requests and the artifacts they generate",
-  },
-  connectors: {
-    title: "Connector Operations",
-    subtitle: "Credentials, run history, and permission-gated job controls",
-  },
-  audit: {
-    title: "Audit Log",
-    subtitle:
-      "Sensitive action trace for revenue, exports, overrides, connectors, and lineage reads",
-  },
-};
-
-type NavItem = { key: ViewKey; label: string; icon: string };
-
-const NAV_GROUPS: ReadonlyArray<{ label: string; items: readonly NavItem[] }> = [
-  {
-    label: "Workspace",
-    items: [
-      { key: "command", label: "Command Center", icon: "command" },
-      { key: "registry", label: "Channel Registry", icon: "registry" },
-      { key: "groups", label: "CMS Groups", icon: "groups" },
-      { key: "close", label: "Month Close", icon: "close" },
-      { key: "trace", label: "Trace Explorer", icon: "trace" },
-    ],
-  },
-  {
-    label: "Operations",
-    items: [
-      { key: "exports", label: "Exports", icon: "exports" },
-      { key: "connectors", label: "Connectors", icon: "connectors" },
-      { key: "audit", label: "Audit Log", icon: "audit" },
-    ],
-  },
-];
+import ErrorBoundary from "./ErrorBoundary";
 
 /* ------------------------------------------------------------------ shared */
 
@@ -651,7 +566,24 @@ const Sidebar = ({
 
 /* ------------------------------------------------------------------ topbar */
 
-/** Page header: the routed view's title and subtitle only. */
+// ============================================================================
+// Purpose: Render the routed page title; month and scope controls belong to the
+//          API-backed view that owns the corresponding request.
+// Database/ORM: None (frontend route metadata only).
+// Standards: Keep shell chrome free of inert filters whose values do not feed a
+//            request; each view owns its selected month and query lifecycle.
+//            The month list stays on the shared rolling-window source from
+//            PR #211 in the owning view, never in shell chrome.
+// Blast Radius: Presentation-only header; no request or finance calculation.
+// Connections:
+//   - File: frontend/src/config/navigation.ts -> title and subtitle copy.
+//   - File: frontend/src/components/srcc/views/* -> owning month controls and
+//       API requests.
+//   - File: frontend/src/components/srcc/views/ExportsView.tsx -> export action.
+// ============================================================================
+// FIX: Removed the shell-level Month selector because its value never reached
+// any request; the API-backed view selector is now the only visible authority,
+// and the real export form remains in ExportsView.
 const Topbar = ({ title, subtitle }: { title: string; subtitle: string }) => {
   return (
     <header className="topbar">
@@ -681,7 +613,7 @@ type ViewRouterProps = {
 };
 
 /**
- * Route the active view key to its wired or mock view with the right props. A
+ * Route the active view key to its API-backed view with the right props. A
  * ViewKey-keyed render map replaces the per-view conditional chain: the Record
  * is exhaustive by type (adding a ViewKey without a renderer is a type error),
  * and only the active key's renderer is invoked — one mounted view, exactly as
@@ -775,12 +707,9 @@ const ViewRouter = ({
 // RegistryView is the wired Channel Registry screen; it lives in
 // ./views/RegistryView.tsx and reads GET /channels via useChannels. Client-side
 // derivation maps the API fields to avatar initials, CMS badge tone, source
-// label, state (Option A: from existing fields), trace key, and action label.
-// Company/sector columns show primary_company_id and "—" until GET /org-units
-// is added. Summary tiles derive active-channel + outside-CMS counts from the
-// response; finance tiles stay static placeholders.
-
-
+// label, factual state, trace key, and action label. GET /org-units resolves
+// company/sector names. The only summary tiles are live-derived active-channel
+// and outside-CMS counts; no finance or approval placeholder is rendered.
 
 /* ------------------------------------------------------------------ close */
 
@@ -814,7 +743,8 @@ const ViewRouter = ({
 // AuditView is the wired Audit Log screen; it lives in ./views/AuditView.tsx and
 // reads GET /audit/events via useAuditEvents (cursor-paginated, server-driven
 // redaction). The timeline gate is canViewAudit (restricted -> no fetch); the
-// summary tiles + coverage panel stay static context (no aggregate-count route).
+// summary tiles are live GET /audit/summary counts and the coverage panel is
+// policy context rather than a fabricated aggregate.
 
 /* ------------------------------------------------------------------ shell */
 
@@ -983,12 +913,17 @@ export const isImportScopeSettled = (session: SessionMe, tenantSettled: boolean)
 //   - File: frontend/src/contexts/SessionContext.tsx -> useSessionBootstrap.
 //   - File: backend/ums_smart_revenue/api/session.py -> GET /session/me.
 // ============================================================================
-const AppShell = () => {
-  const [view, setView] = useState<ViewKey>("command");
+const AppShell = ({ initialView = "command" }: { initialView?: ViewKey }) => {
+  const navigate = useNavigate();
+  const location = useLocation();
+  const routeCandidate = location.pathname.replace(/^\//, "");
+  const routeView = isViewKey(routeCandidate) ? routeCandidate : initialView;
+  const [view, setView] = useState<ViewKey>(routeView);
   const [previewRole, setPreviewRole] = useState<Role>(DEFAULT_PREVIEW_ROLE);
   // Registry "Review" navigation target: seeds TraceView's initial channel
   // selection. Navigation-only state — carries no authorization meaning.
   const [traceChannelId, setTraceChannelId] = useState<string | null>(null);
+  const pendingTraceChannelIdRef = useRef<string | null>(null);
 
   const sessionBootstrap = useSessionBootstrap();
   // The RESOLVED tenant, for the import scope below. SessionMe.tenant is
@@ -1016,13 +951,57 @@ const AppShell = () => {
   const writeInFlight = useWriteInFlightLatch();
   const navBlockedReason = writeInFlight.reason;
 
+  // ============================================================================
+  // Purpose: Block router transitions, including browser Back/Forward, while an
+  //          unabortable write is committing so its flow cannot unmount first.
+  // Database/ORM: None (frontend navigation state only).
+  // Standards: React Router owns the transition and restores the current
+  //            location when the blocker is reset; sidebar and programmatic
+  //            handlers use the same latch before dispatching navigation.
+  // Blast Radius: Prevents a pending write result from being hidden; no data,
+  //                authorization, or server-side state changes.
+  // Connections:
+  //   - File: frontend/src/contexts/WriteInFlightContext.tsx -> supplies the
+  //       reason that arms this blocker.
+  //   - File: frontend/src/components/srcc/views/RegistryImportFlow.tsx ->
+  //       arms the latch before the apply request and releases it on settle.
+  // ============================================================================
+  const navigationBlocker = useBlocker(navBlockedReason !== null);
+
+  useEffect(() => {
+    if (navigationBlocker.state === "blocked") {
+      navigationBlocker.reset();
+    }
+  }, [navigationBlocker.reset, navigationBlocker.state]);
+
+  // FIX: Route-driven transitions clear the Registry -> Trace seed only when
+  // the view actually changes; a blocked or no-op route event cannot unmount a
+  // write flow, mutate the local view, or clear the active trace seed.
+  const reconcileTraceSeed = useCallback(
+    (enteringTrace: boolean) => {
+      const pendingTraceChannelId = pendingTraceChannelIdRef.current;
+      pendingTraceChannelIdRef.current = null;
+      setTraceChannelId(enteringTrace ? pendingTraceChannelId : null);
+    },
+    [setTraceChannelId],
+  );
+
+  useEffect(() => {
+    if (routeView === view || navBlockedReason !== null) return;
+    setView(routeView);
+    reconcileTraceSeed(routeView === "trace");
+  }, [navBlockedReason, reconcileTraceSeed, routeView, view]);
+
   const handleViewChange = useCallback(
     (next: ViewKey) => {
       if (navBlockedReason !== null) return;
-      if (next !== "trace") setTraceChannelId(null);
-      setView(next);
+      if (next !== "trace") {
+        pendingTraceChannelIdRef.current = null;
+        setTraceChannelId(null);
+      }
+      navigate(`/${next}`);
     },
-    [navBlockedReason, setView, setTraceChannelId],
+    [navBlockedReason, navigate, setTraceChannelId],
   );
 
   if (sessionBootstrap.status === "loading") {
@@ -1074,36 +1053,44 @@ const AppShell = () => {
 
   return (
     <WriteInFlightProvider value={writeInFlight}>
-      <div className="app">
-        {import.meta.env.DEV && <TenantProofTag label={proofLabel} />}
-        <Sidebar
-          view={view}
-          onSelectView={handleViewChange}
-          previewRole={previewRole}
-          onSelectPreviewRole={setPreviewRole}
-          displayedRole={displayedRole}
-          canViewFinance={canViewFinance}
-          blockedReason={navBlockedReason}
-        />
-        <main className="main">
-          <Topbar title={copy.title} subtitle={copy.subtitle} />
-          <ErrorBoundary resetKey={view} onReload={reloadDocumentForRecovery}>
-            <ViewRouter
-              view={view}
-              permissions={permissions}
-              canViewFinance={canViewFinance}
-              displayedRole={displayedRole}
-              traceChannelId={traceChannelId}
-              importScope={importScope}
-              importScopeSettled={importScopeSettled}
-              onOpenTrace={(channelId) => {
-                setTraceChannelId(channelId);
-                setView("trace");
-              }}
-            />
-          </ErrorBoundary>
-        </main>
-      </div>
+    <div className="app">
+      {import.meta.env.DEV && <TenantProofTag label={proofLabel} />}
+      <Sidebar
+        view={view}
+        onSelectView={handleViewChange}
+        previewRole={previewRole}
+        onSelectPreviewRole={setPreviewRole}
+        displayedRole={displayedRole}
+        canViewFinance={canViewFinance}
+        blockedReason={navBlockedReason}
+      />
+      <main className="main">
+        <Topbar title={copy.title} subtitle={copy.subtitle} />
+        {/* FIX: A render crash may unmount an import flow while its apply POST
+            keeps running. Keep navigation and the full-document reconciliation
+            reload unavailable until the promise-owned write latch settles, so
+            recovery cannot hide or duplicate an unabortable audited write. */}
+        <ErrorBoundary
+          resetKey={view}
+          recoveryDisabled={navBlockedReason !== null}
+        >
+          <ViewRouter
+            view={view}
+            permissions={permissions}
+            canViewFinance={canViewFinance}
+            displayedRole={displayedRole}
+            traceChannelId={traceChannelId}
+            importScope={importScope}
+            importScopeSettled={importScopeSettled}
+            onOpenTrace={(channelId) => {
+              if (navBlockedReason !== null) return;
+              pendingTraceChannelIdRef.current = channelId;
+              navigate("/trace");
+            }}
+          />
+        </ErrorBoundary>
+      </main>
+    </div>
     </WriteInFlightProvider>
   );
 };
