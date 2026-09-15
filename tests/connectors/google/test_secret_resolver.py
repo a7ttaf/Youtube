@@ -185,9 +185,7 @@ def test_file_backed_local_secret_rereads_file_on_each_resolve(monkeypatch, tmp_
 
 def test_file_backed_local_secret_fails_closed_on_missing_file(monkeypatch, tmp_path) -> None:
     _stub_gcp_resolver(monkeypatch)
-    monkeypatch.setenv(
-        "UMS_CONNECTOR_LOCAL_SECRETS_FILE", str(tmp_path / "does-not-exist.json")
-    )
+    monkeypatch.setenv("UMS_CONNECTOR_LOCAL_SECRETS_FILE", str(tmp_path / "does-not-exist.json"))
     ensure_default_resolvers()
 
     with pytest.raises(LocalSecretsFileError) as ctx:
