@@ -25,10 +25,10 @@ STACK_VERSION_BASELINE: dict[str, dict[str, str]] = {
         "reportlab": "5.0.1",
         "python_pptx": "1.0.2",
         "google_cloud_secret_manager": "2.30.0",
-        "google_cloud_storage": "3.13.1",
+        "google_cloud_storage": "3.14.1",
         "pytest": "9.1.1",
         "httpx2": "2.12.0",
-        "pypdf": "6.16.1",
+        "pypdf": "6.18.1",
     },
     "datastores": {
         "postgresql": "18.3",
