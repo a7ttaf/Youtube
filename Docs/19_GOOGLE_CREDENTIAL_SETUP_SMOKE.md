@@ -76,7 +76,11 @@ Current production resolver support:
   registered production resolvers in this slice. A connector run using one of
   them fails closed with an unsupported resolver error.
 - `local-secret://` is for tests and local mocks only. Do not use it for owner
-  credential smoke.
+  credential smoke. Exception: a demo/self-host deployment that explicitly
+  configures `UMS_CONNECTOR_LOCAL_SECRETS_FILE` opts into a file-backed
+  `local-secret://<name>` resolver (the file is re-read on every resolve and
+  fails closed on unreadable/malformed content). Production owner-credential
+  smoke still requires the GCP Secret Manager schemes above.
 
 ## Setup sequence
 

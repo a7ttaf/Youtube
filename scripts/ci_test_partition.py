@@ -43,9 +43,20 @@ DATABASE_ACCESS_TOKENS: Final = (
 # two new fast-lane modules plus expanded normalizer suites 3121 -> 3204.
 # Updated deliberately after merging main with #228 (identity/withholding):
 # its new fast-lane suites grew the collected manifest 3204 -> 3265.
-EXPECTED_FAST_ITEM_COUNT: Final = 3265
+# Updated deliberately after merging main with #238 (env-gated local secrets
+# file): its new fast-lane gating tests grew the collected manifest 3265 -> 3279.
+# Updated deliberately after #238 review fixes (blank-env normalization +
+# invalid-UTF-8 fail-closed tests): 3279 -> 3283.
+# Updated deliberately after #238 bounded-read hardening (oversized-file
+# fail-closed test): 3283 -> 3284.
+# Updated deliberately after #238 deferred-currency-validation fix
+# (malformed-currency regression test): 3284 -> 3285.
+# Updated deliberately after #238 moved the new gating tests into dedicated
+# modules (test_local_secrets_file_resolver.py, test_local_secret_ref_gate.py)
+# to keep pre-existing test files untouched: count unchanged, sha only.
+EXPECTED_FAST_ITEM_COUNT: Final = 3285
 EXPECTED_FAST_NODEID_SHA256: Final = (
-    "8b2156688a1e2e97513ed7ff6e377263f9eec0ff854bf5e9e8c60500f58d9dc4"
+    "29d21f366b3300e309a3c21d5a02f1199227a8672bb0930a907e4363bf1f46a3"
 )
 EXPECTED_DATABASE_ITEM_COUNT: Final = 461
 EXPECTED_DATABASE_NODEID_SHA256: Final = (

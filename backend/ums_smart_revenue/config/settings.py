@@ -93,6 +93,14 @@ CONNECTOR_JOB_MAX_WORKERS_ENV = "UMS_CONNECTOR_JOB_MAX_WORKERS"
 CONNECTOR_JOB_STALE_RUNNING_HOURS_ENV = "UMS_CONNECTOR_JOB_STALE_RUNNING_HOURS"
 GROUP_SYNC_SCHEDULE_ENABLED_ENV = "UMS_GROUP_SYNC_SCHEDULE_ENABLED"
 GROUP_SYNC_INTERVAL_HOURS_ENV = "UMS_GROUP_SYNC_INTERVAL_HOURS"
+# Demo/self-host opt-in for connector credential secrets. When set to a JSON
+# file path, secret-resolver boot registers a file-backed ``local-secret://``
+# resolver and the credential API accepts ``local-secret://`` refs. Unset
+# (the default and the production contract): ``local-secret://`` stays
+# rejected at the API boundary and unregistered at the resolver boundary;
+# production credentials must reference a real secret manager
+# (``gcp-secret-manager://`` today).
+CONNECTOR_LOCAL_SECRETS_FILE_ENV = "UMS_CONNECTOR_LOCAL_SECRETS_FILE"
 LOG_LEVEL_ENV = "UMS_LOG_LEVEL"
 TENANT_PRIMARY_CURRENCY_ENV = "UMS_TENANT_PRIMARY_CURRENCY"
 YOUTUBE_ANALYTICS_COUNTRY_EVIDENCE_ENABLED_ENV = "UMS_YOUTUBE_ANALYTICS_COUNTRY_EVIDENCE_ENABLED"
@@ -158,6 +166,14 @@ class AppSettings:
     # same contract as max_workers.
     group_sync_schedule_enabled: bool = False
     group_sync_interval_hours: int = 24
+    # Demo/self-host opt-in: filesystem path to a JSON object mapping
+    # ``local-secret://`` names to OAuth payload strings. ``None`` (default)
+    # keeps the production contract — ``local-secret://`` credential refs are
+    # rejected at the API boundary and unregistered at the resolver boundary.
+    # When set, the file is re-read on every secret resolve so operators can
+    # rotate credentials without an app restart; unreadable or malformed
+    # files fail closed at first use (see connectors/google/secret_resolver).
+    connector_local_secrets_file: str | None = None
     # APPLICATION logging level applied once at ASGI startup by
     # config/logging_config.py::configure_logging. Stored as the canonical
     # upper-case level NAME (not the int) so the value stays readable in
@@ -227,11 +243,16 @@ def load_app_settings(*, validate_tenant_currency: bool = True) -> AppSettings:
     if authz_source not in ALLOWED_AUTHZ_SOURCES:
         allowed = ", ".join(sorted(ALLOWED_AUTHZ_SOURCES))
         raise ValueError(f"{AUTHZ_SOURCE_ENV} must be one of: {allowed}")
+    raw_connector_local_secrets_file = environ.get(CONNECTOR_LOCAL_SECRETS_FILE_ENV)
     settings = AppSettings(
         database_url=database_url or None,
         trusted_gateway_token=trusted_gateway_token or None,
         authz_source=authz_source,
         google_connector_service_actor_id=_load_google_connector_service_actor_id(),
+        # Blank/whitespace-only values normalize to None so the documented
+        # "unset disables the local-secret lane" contract holds for every
+        # falsy spelling, not just a missing variable.
+        connector_local_secrets_file=(raw_connector_local_secrets_file or "").strip() or None,
         connector_job_executor_enabled=_load_bool(
             CONNECTOR_JOB_EXECUTOR_ENABLED_ENV, default=False
         ),

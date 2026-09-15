@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Demo/self-host connector credential lane: `UMS_CONNECTOR_LOCAL_SECRETS_FILE`
+  (path to a JSON `{name: payload}` mapping) opts a deployment into
+  `local-secret://<name>` credential refs. The resolver re-reads the file on
+  every resolve and fails closed (typed `LocalSecretsFileError`) on missing
+  files, invalid UTF-8, malformed JSON, and non-string mappings; the
+  credential API accepts the `local-secret://` prefix only while the variable
+  is set, and blank/whitespace values normalize to unset. Production default
+  (unset) keeps the GCP-Secret-Manager-only contract unchanged.
+
 ### Security
 - Connector-execution ingestion surfaces are service-principal only:
   `POST /reports/raw-files` and the connector-source path of
