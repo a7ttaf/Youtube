@@ -150,7 +150,13 @@ def ensure_default_resolvers() -> None:
         # only when UMS_CONNECTOR_LOCAL_SECRETS_FILE is configured. Unset (the
         # production default) leaves the scheme unregistered so resolve_secret
         # fails closed with UnsupportedSecretSchemeError exactly as before.
-        local_secrets_file = load_app_settings().connector_local_secrets_file
+        # FIX: defer strict tenant-currency validation (contract shared with
+        # app.py / connectors/google/audit.py): resolver boot is authz-mode
+        # independent and must not crash on a malformed currency env in
+        # database-authz deployments.
+        local_secrets_file = load_app_settings(
+            validate_tenant_currency=False
+        ).connector_local_secrets_file
         if local_secrets_file and "local-secret" not in _REGISTRY:
             _REGISTRY["local-secret"] = _FileBackedLocalSecretResolver(path=local_secrets_file)
 

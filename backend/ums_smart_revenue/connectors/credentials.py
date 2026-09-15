@@ -407,7 +407,11 @@ LOCAL_SECRET_REF_PREFIX = "local-secret://"
 
 def allowed_secret_ref_prefixes() -> tuple[str, ...]:
     """Return the accepted secret-ref prefixes (demo prefix only when enabled)."""
-    if load_app_settings().connector_local_secrets_file:
+    # FIX: mode-independent consumers must defer strict tenant-currency
+    # validation (contract shared with app.py / connectors/google/audit.py):
+    # database-authz deployments do not consume UMS_TENANT_PRIMARY_CURRENCY, so
+    # a malformed value there must not crash credential-ref validation.
+    if load_app_settings(validate_tenant_currency=False).connector_local_secrets_file:
         return (*SECRET_REF_PREFIXES, LOCAL_SECRET_REF_PREFIX)
     return SECRET_REF_PREFIXES
 

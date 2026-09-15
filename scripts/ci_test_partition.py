@@ -49,9 +49,11 @@ DATABASE_ACCESS_TOKENS: Final = (
 # invalid-UTF-8 fail-closed tests): 3279 -> 3283.
 # Updated deliberately after #238 bounded-read hardening (oversized-file
 # fail-closed test): 3283 -> 3284.
-EXPECTED_FAST_ITEM_COUNT: Final = 3284
+# Updated deliberately after #238 deferred-currency-validation fix
+# (malformed-currency regression test): 3284 -> 3285.
+EXPECTED_FAST_ITEM_COUNT: Final = 3285
 EXPECTED_FAST_NODEID_SHA256: Final = (
-    "ded176637ed847a5995ac6327b874a89821e10aae492c73d5322fa8e21e9c543"
+    "1bdf89075604cdba52b2512c7183e3bec07961c0e1097ccbe69da4c42f03f9a7"
 )
 EXPECTED_DATABASE_ITEM_COUNT: Final = 461
 EXPECTED_DATABASE_NODEID_SHA256: Final = (

@@ -214,6 +214,22 @@ def test_local_secret_ref_still_rejected_after_setting_removed(monkeypatch, tmp_
     assert is_external_secret_ref("local-secret://yt-owner") is False
 
 
+def test_local_secret_gate_survives_malformed_currency_in_database_mode(monkeypatch, tmp_path):
+    """The gate must not crash when UMS_TENANT_PRIMARY_CURRENCY is malformed.
+
+    Database-authz deployments never consume the currency setting; strict
+    validation is deferred for mode-independent consumers (contract shared
+    with app.py / connectors/google/audit.py), so credential-ref validation
+    must keep working instead of raising ValueError.
+    """
+    secrets_file = tmp_path / "connector-secrets.json"
+    secrets_file.write_text('{"yt-owner": "{}"}', encoding="utf-8")
+    monkeypatch.setenv("UMS_CONNECTOR_LOCAL_SECRETS_FILE", str(secrets_file))
+    monkeypatch.setenv("UMS_TENANT_PRIMARY_CURRENCY", "not-a-code")
+
+    assert is_external_secret_ref("local-secret://yt-owner") is True
+
+
 # -----------------------------------------------------------------------------
 # ConnectorCredentialEntry.to_api
 # -----------------------------------------------------------------------------
