@@ -113,5 +113,14 @@ Patch-refresh addendum checked on: `2026-09-14` (UTC)
   checked-baseline test and `STACK_VERSION_BASELINE` were updated in the
   same change.
 
+Minor-refresh addendum checked on: `2026-09-14` (UTC)
+
+- PyPI release metadata for the minor-updates group bumped by PR #237:
+  google-cloud-storage `3.14.1` (refreshes `3.13.1`, runtime dependency
+  for the backup/blob storage path) and pypdf `6.18.1` (refreshes
+  `6.16.1`, test and dev extras only). Pins live in `pyproject.toml` /
+  `uv.lock`; the checked-baseline test and `STACK_VERSION_BASELINE` were
+  updated in the same change.
+
 ## Local Environment Note
 The current workstation Python is `3.12`, so tests are still run against the available local interpreter. The production runtime target is `3.14.5`, and the project metadata now expresses `>=3.14,<3.15`.
