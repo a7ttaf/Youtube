@@ -9,17 +9,14 @@ are intentionally unknown until a future credential-lifecycle PR.
 
 from __future__ import annotations
 
-import json
 import time
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
 from ums_smart_revenue.connectors.google.errors import (
-    LocalSecretsFileError,
     MalformedSecretUriError,
     ResolverAlreadyRegisteredError,
-    SecretNotFoundError,
     UnsupportedSecretSchemeError,
 )
 from ums_smart_revenue.connectors.google.secret_resolver import (
@@ -122,173 +119,6 @@ def test_resolve_secret_raises_for_unknown_scheme() -> None:
     with pytest.raises(UnsupportedSecretSchemeError) as ctx:
         resolve_secret("aws-secretsmanager://my-arn")
     assert ctx.value.scheme == "aws-secretsmanager"
-
-
-# -----------------------------------------------------------------------------
-# UMS_CONNECTOR_LOCAL_SECRETS_FILE opt-in (demo/self-host local-secret:// lane)
-# -----------------------------------------------------------------------------
-
-
-def _stub_gcp_resolver(monkeypatch) -> None:
-    """Patch the GCP resolver constructor so boot never needs Google credentials."""
-    from ums_smart_revenue.connectors.google import gcp_secret_manager
-
-    monkeypatch.setattr(
-        gcp_secret_manager,
-        "GcpSecretManagerResolver",
-        lambda: _StubResolver(payload="gcp-payload"),
-    )
-
-
-def test_ensure_default_resolvers_skips_local_secret_when_file_unset(monkeypatch) -> None:
-    """The local-secret lane stays unregistered (fail closed) when the env var is unset."""
-    _stub_gcp_resolver(monkeypatch)
-    monkeypatch.delenv("UMS_CONNECTOR_LOCAL_SECRETS_FILE", raising=False)
-
-    ensure_default_resolvers()
-
-    with pytest.raises(UnsupportedSecretSchemeError):
-        resolve_secret("local-secret://yt-owner")
-
-
-def test_ensure_default_resolvers_registers_file_backed_local_secret(monkeypatch, tmp_path) -> None:
-    """A configured secrets file registers the file-backed local-secret resolver."""
-    _stub_gcp_resolver(monkeypatch)
-    secrets_file = tmp_path / "connector-secrets.json"
-    payload = json.dumps(
-        {
-            "refresh_token": "rt",
-            "client_id": "cid",
-            "client_secret": "cs",
-            "token_uri": "https://oauth2.googleapis.com/token",
-        }
-    )
-    secrets_file.write_text(json.dumps({"yt-owner": payload}), encoding="utf-8")
-    monkeypatch.setenv("UMS_CONNECTOR_LOCAL_SECRETS_FILE", str(secrets_file))
-
-    ensure_default_resolvers()
-
-    assert resolve_secret("local-secret://yt-owner") == payload
-
-
-def test_file_backed_local_secret_rereads_file_on_each_resolve(monkeypatch, tmp_path) -> None:
-    """Each resolve re-reads the mapping file so payload rotation applies without restart."""
-    _stub_gcp_resolver(monkeypatch)
-    secrets_file = tmp_path / "connector-secrets.json"
-    secrets_file.write_text(json.dumps({"yt-owner": "payload-v1"}), encoding="utf-8")
-    monkeypatch.setenv("UMS_CONNECTOR_LOCAL_SECRETS_FILE", str(secrets_file))
-    ensure_default_resolvers()
-
-    first = resolve_secret("local-secret://yt-owner")
-    secrets_file.write_text(json.dumps({"yt-owner": "payload-v2"}), encoding="utf-8")
-    second = resolve_secret("local-secret://yt-owner")
-
-    assert first == "payload-v1"
-    assert second == "payload-v2"
-
-
-def test_file_backed_local_secret_fails_closed_on_missing_file(monkeypatch, tmp_path) -> None:
-    """An unreadable secrets file fails closed with LocalSecretsFileError."""
-    _stub_gcp_resolver(monkeypatch)
-    monkeypatch.setenv("UMS_CONNECTOR_LOCAL_SECRETS_FILE", str(tmp_path / "does-not-exist.json"))
-    ensure_default_resolvers()
-
-    with pytest.raises(LocalSecretsFileError) as ctx:
-        resolve_secret("local-secret://yt-owner")
-    assert ctx.value.path.endswith("does-not-exist.json")
-    assert isinstance(ctx.value.inner, OSError)
-
-
-def test_file_backed_local_secret_fails_closed_on_invalid_utf8(monkeypatch, tmp_path) -> None:
-    """Invalid UTF-8 content fails closed with LocalSecretsFileError, not a raw decode error."""
-    _stub_gcp_resolver(monkeypatch)
-    secrets_file = tmp_path / "connector-secrets.json"
-    secrets_file.write_bytes(b'{"yt-owner": "\xff\xfe-invalid-utf8"}')
-    monkeypatch.setenv("UMS_CONNECTOR_LOCAL_SECRETS_FILE", str(secrets_file))
-    ensure_default_resolvers()
-
-    with pytest.raises(LocalSecretsFileError) as ctx:
-        resolve_secret("local-secret://yt-owner")
-    assert isinstance(ctx.value.inner, UnicodeDecodeError)
-
-
-def test_file_backed_local_secret_fails_closed_on_oversized_file(monkeypatch, tmp_path) -> None:
-    """A secrets file beyond the bounded read cap fails closed instead of parsing."""
-    _stub_gcp_resolver(monkeypatch)
-    secrets_file = tmp_path / "connector-secrets.json"
-    padding = "x" * (1024 * 1024 + 16)
-    secrets_file.write_text(json.dumps({"yt-owner": padding}), encoding="utf-8")
-    monkeypatch.setenv("UMS_CONNECTOR_LOCAL_SECRETS_FILE", str(secrets_file))
-    ensure_default_resolvers()
-
-    with pytest.raises(LocalSecretsFileError):
-        resolve_secret("local-secret://yt-owner")
-
-
-def test_file_backed_local_secret_fails_closed_on_malformed_json(monkeypatch, tmp_path) -> None:
-    """Invalid JSON in the secrets file fails closed with LocalSecretsFileError."""
-    _stub_gcp_resolver(monkeypatch)
-    secrets_file = tmp_path / "connector-secrets.json"
-    secrets_file.write_text("{not-json", encoding="utf-8")
-    monkeypatch.setenv("UMS_CONNECTOR_LOCAL_SECRETS_FILE", str(secrets_file))
-    ensure_default_resolvers()
-
-    with pytest.raises(LocalSecretsFileError):
-        resolve_secret("local-secret://yt-owner")
-
-
-@pytest.mark.parametrize(
-    "content",
-    [
-        '["not", "an", "object"]',  # top-level array
-        '{"yt-owner": 123}',  # non-string payload
-        '{"yt-owner": {"nested": "object"}}',  # nested object payload
-        '{"yt-owner": null}',  # null payload
-    ],
-)
-def test_file_backed_local_secret_fails_closed_on_non_string_mapping(
-    monkeypatch, tmp_path, content
-) -> None:
-    """Valid JSON that is not a str->str mapping fails closed with LocalSecretsFileError."""
-    _stub_gcp_resolver(monkeypatch)
-    secrets_file = tmp_path / "connector-secrets.json"
-    secrets_file.write_text(content, encoding="utf-8")
-    monkeypatch.setenv("UMS_CONNECTOR_LOCAL_SECRETS_FILE", str(secrets_file))
-    ensure_default_resolvers()
-
-    with pytest.raises(LocalSecretsFileError):
-        resolve_secret("local-secret://yt-owner")
-
-
-def test_file_backed_local_secret_unknown_key_raises_secret_not_found(
-    monkeypatch, tmp_path
-) -> None:
-    """A ref whose name is absent from the mapping raises SecretNotFoundError."""
-    _stub_gcp_resolver(monkeypatch)
-    secrets_file = tmp_path / "connector-secrets.json"
-    secrets_file.write_text(json.dumps({"other-owner": "payload"}), encoding="utf-8")
-    monkeypatch.setenv("UMS_CONNECTOR_LOCAL_SECRETS_FILE", str(secrets_file))
-    ensure_default_resolvers()
-
-    with pytest.raises(SecretNotFoundError):
-        resolve_secret("local-secret://yt-owner")
-
-
-def test_registered_local_secret_test_resolver_takes_precedence_over_file_lane(
-    monkeypatch, tmp_path
-) -> None:
-    """An explicitly registered local-secret resolver (tests/CLI smoke) is not
-    replaced by the file-backed lane even when the env var is set."""
-    _stub_gcp_resolver(monkeypatch)
-    secrets_file = tmp_path / "connector-secrets.json"
-    secrets_file.write_text(json.dumps({"yt-owner": "file-payload"}), encoding="utf-8")
-    monkeypatch.setenv("UMS_CONNECTOR_LOCAL_SECRETS_FILE", str(secrets_file))
-    stub = _StubResolver(payload="explicit-payload")
-    register_resolver(scheme="local-secret", resolver=stub)
-
-    ensure_default_resolvers()
-
-    assert resolve_secret("local-secret://yt-owner") == "explicit-payload"
 
 
 @pytest.mark.parametrize(

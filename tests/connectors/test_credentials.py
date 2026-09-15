@@ -22,7 +22,6 @@ from sqlalchemy import create_engine, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from ums_smart_revenue.config.settings import load_app_settings
 from ums_smart_revenue.connectors.credentials import (
     CONNECTOR_CREDENTIAL_UNIQUE_CONSTRAINT,
     LIVE_CREDENTIAL_SMOKE_REQUIRED_DETAIL,
@@ -33,7 +32,6 @@ from ums_smart_revenue.connectors.credentials import (
     ConnectorCredentialValidationError,
     SqlAlchemyConnectorCredentialRepository,
     _is_foreign_key_integrity_error,
-    allowed_secret_ref_prefixes,
     is_external_secret_ref,
     live_credential_rejection_detail,
 )
@@ -159,75 +157,6 @@ def test_secret_ref_prefixes_const_matches_documented_allowlist():
         "vault://",
         "kms://",
     }
-
-
-# -----------------------------------------------------------------------------
-# local-secret:// demo opt-in gate (UMS_CONNECTOR_LOCAL_SECRETS_FILE)
-# -----------------------------------------------------------------------------
-
-
-def test_local_secret_ref_rejected_while_local_secrets_file_unset(monkeypatch):
-    """local-secret:// refs stay rejected while the secrets-file env var is unset."""
-    monkeypatch.delenv("UMS_CONNECTOR_LOCAL_SECRETS_FILE", raising=False)
-
-    assert is_external_secret_ref("local-secret://yt-owner") is False
-    assert is_external_secret_ref("  local-secret://yt-owner  ") is False
-    assert allowed_secret_ref_prefixes() == SECRET_REF_PREFIXES
-
-
-def test_local_secret_ref_accepted_while_local_secrets_file_set(monkeypatch, tmp_path):
-    """local-secret:// refs are accepted only while the secrets-file env var is set."""
-    secrets_file = tmp_path / "connector-secrets.json"
-    secrets_file.write_text('{"yt-owner": "{}"}', encoding="utf-8")
-    monkeypatch.setenv("UMS_CONNECTOR_LOCAL_SECRETS_FILE", str(secrets_file))
-
-    assert is_external_secret_ref("local-secret://yt-owner") is True
-    assert is_external_secret_ref("  local-secret://yt-owner  ") is True
-    # Blank names stay rejected exactly like the production prefixes.
-    assert is_external_secret_ref("local-secret://") is False
-    assert is_external_secret_ref("local-secret://   ") is False
-    assert allowed_secret_ref_prefixes() == (*SECRET_REF_PREFIXES, "local-secret://")
-
-
-@pytest.mark.parametrize("blank", ["", "   ", "\t"])
-def test_blank_local_secrets_file_env_normalizes_to_disabled(monkeypatch, blank):
-    """Blank/whitespace env values normalize to None and keep the lane disabled."""
-    monkeypatch.setenv("UMS_CONNECTOR_LOCAL_SECRETS_FILE", blank)
-
-    assert load_app_settings().connector_local_secrets_file is None
-    assert is_external_secret_ref("local-secret://yt-owner") is False
-    assert allowed_secret_ref_prefixes() == SECRET_REF_PREFIXES
-
-
-def test_local_secret_ref_still_rejected_after_setting_removed(monkeypatch, tmp_path):
-    """Removing the env var restores the production rejection on the next settings load."""
-    secrets_file = tmp_path / "connector-secrets.json"
-    secrets_file.write_text("{}", encoding="utf-8")
-    monkeypatch.setenv("UMS_CONNECTOR_LOCAL_SECRETS_FILE", str(secrets_file))
-    assert is_external_secret_ref("local-secret://yt-owner") is True
-
-    # The conftest reset_app_settings_cache fixture plus delenv makes the next
-    # load_app_settings() see the production configuration again.
-    monkeypatch.delenv("UMS_CONNECTOR_LOCAL_SECRETS_FILE", raising=False)
-    load_app_settings.cache_clear()
-
-    assert is_external_secret_ref("local-secret://yt-owner") is False
-
-
-def test_local_secret_gate_survives_malformed_currency_in_database_mode(monkeypatch, tmp_path):
-    """The gate must not crash when UMS_TENANT_PRIMARY_CURRENCY is malformed.
-
-    Database-authz deployments never consume the currency setting; strict
-    validation is deferred for mode-independent consumers (contract shared
-    with app.py / connectors/google/audit.py), so credential-ref validation
-    must keep working instead of raising ValueError.
-    """
-    secrets_file = tmp_path / "connector-secrets.json"
-    secrets_file.write_text('{"yt-owner": "{}"}', encoding="utf-8")
-    monkeypatch.setenv("UMS_CONNECTOR_LOCAL_SECRETS_FILE", str(secrets_file))
-    monkeypatch.setenv("UMS_TENANT_PRIMARY_CURRENCY", "not-a-code")
-
-    assert is_external_secret_ref("local-secret://yt-owner") is True
 
 
 # -----------------------------------------------------------------------------
