@@ -194,6 +194,18 @@ def test_file_backed_local_secret_fails_closed_on_missing_file(monkeypatch, tmp_
     assert isinstance(ctx.value.inner, OSError)
 
 
+def test_file_backed_local_secret_fails_closed_on_invalid_utf8(monkeypatch, tmp_path) -> None:
+    _stub_gcp_resolver(monkeypatch)
+    secrets_file = tmp_path / "connector-secrets.json"
+    secrets_file.write_bytes(b'{"yt-owner": "\xff\xfe-invalid-utf8"}')
+    monkeypatch.setenv("UMS_CONNECTOR_LOCAL_SECRETS_FILE", str(secrets_file))
+    ensure_default_resolvers()
+
+    with pytest.raises(LocalSecretsFileError) as ctx:
+        resolve_secret("local-secret://yt-owner")
+    assert isinstance(ctx.value.inner, UnicodeDecodeError)
+
+
 def test_file_backed_local_secret_fails_closed_on_malformed_json(monkeypatch, tmp_path) -> None:
     _stub_gcp_resolver(monkeypatch)
     secrets_file = tmp_path / "connector-secrets.json"

@@ -413,6 +413,7 @@ def allowed_secret_ref_prefixes() -> tuple[str, ...]:
 
 
 def is_external_secret_ref(value: str) -> bool:
+    """Return whether ``value`` is an accepted external secret-manager reference."""
     normalized = value.strip()
     if not normalized:
         return False

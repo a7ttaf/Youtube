@@ -187,6 +187,15 @@ def test_local_secret_ref_accepted_while_local_secrets_file_set(monkeypatch, tmp
     assert allowed_secret_ref_prefixes() == (*SECRET_REF_PREFIXES, "local-secret://")
 
 
+@pytest.mark.parametrize("blank", ["", "   ", "\t"])
+def test_blank_local_secrets_file_env_normalizes_to_disabled(monkeypatch, blank):
+    monkeypatch.setenv("UMS_CONNECTOR_LOCAL_SECRETS_FILE", blank)
+
+    assert load_app_settings().connector_local_secrets_file is None
+    assert is_external_secret_ref("local-secret://yt-owner") is False
+    assert allowed_secret_ref_prefixes() == SECRET_REF_PREFIXES
+
+
 def test_local_secret_ref_still_rejected_after_setting_removed(monkeypatch, tmp_path):
     secrets_file = tmp_path / "connector-secrets.json"
     secrets_file.write_text("{}", encoding="utf-8")

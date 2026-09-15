@@ -33,6 +33,8 @@ from ums_smart_revenue.connectors.google.local_secret_resolver import (
 
 
 class SecretResolver(Protocol):
+    """Contract every concrete secret resolver must satisfy."""
+
     def resolve(self, ref: str) -> str:
         """Return the secret payload as a string. Raise SecretNotFoundError /
         SecretFetchError on backend failure."""
@@ -104,10 +106,14 @@ class _FileBackedLocalSecretResolver:
         self._path = path
 
     def resolve(self, ref: str) -> str:
+        """Re-read the mapping file and resolve ``ref`` against it, failing closed."""
         try:
             with open(self._path, encoding="utf-8") as handle:
                 mapping = json.load(handle)
-        except OSError as exc:
+        except (OSError, UnicodeDecodeError) as exc:
+            # UnicodeDecodeError is a ValueError sibling, not a JSONDecodeError:
+            # invalid UTF-8 in the secrets file must map to the same typed
+            # fail-closed error as an unreadable file, not escape as a 500.
             raise LocalSecretsFileError(path=self._path, inner=exc) from exc
         except json.JSONDecodeError as exc:
             raise LocalSecretsFileError(path=self._path, inner=exc) from exc

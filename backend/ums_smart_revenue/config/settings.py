@@ -249,9 +249,10 @@ def load_app_settings(*, validate_tenant_currency: bool = True) -> AppSettings:
         trusted_gateway_token=trusted_gateway_token or None,
         authz_source=authz_source,
         google_connector_service_actor_id=_load_google_connector_service_actor_id(),
-        connector_local_secrets_file=raw_connector_local_secrets_file.strip()
-        if raw_connector_local_secrets_file
-        else None,
+        # Blank/whitespace-only values normalize to None so the documented
+        # "unset disables the local-secret lane" contract holds for every
+        # falsy spelling, not just a missing variable.
+        connector_local_secrets_file=(raw_connector_local_secrets_file or "").strip() or None,
         connector_job_executor_enabled=_load_bool(
             CONNECTOR_JOB_EXECUTOR_ENABLED_ENV, default=False
         ),

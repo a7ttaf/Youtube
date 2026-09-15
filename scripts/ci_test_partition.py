@@ -45,9 +45,11 @@ DATABASE_ACCESS_TOKENS: Final = (
 # its new fast-lane suites grew the collected manifest 3204 -> 3265.
 # Updated deliberately after merging main with #238 (env-gated local secrets
 # file): its new fast-lane gating tests grew the collected manifest 3265 -> 3279.
-EXPECTED_FAST_ITEM_COUNT: Final = 3279
+# Updated deliberately after #238 review fixes (blank-env normalization +
+# invalid-UTF-8 fail-closed tests): 3279 -> 3283.
+EXPECTED_FAST_ITEM_COUNT: Final = 3283
 EXPECTED_FAST_NODEID_SHA256: Final = (
-    "97b2222800bd48e58aeb7ca302ef3dec0fd7c4ffa2239cf5a7bbdbf105281e6d"
+    "da213c1b6ff005332e991a1c8032176448c55202996a69b8391ca677573c8c96"
 )
 EXPECTED_DATABASE_ITEM_COUNT: Final = 461
 EXPECTED_DATABASE_NODEID_SHA256: Final = (
