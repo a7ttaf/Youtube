@@ -47,9 +47,11 @@ DATABASE_ACCESS_TOKENS: Final = (
 # file): its new fast-lane gating tests grew the collected manifest 3265 -> 3279.
 # Updated deliberately after #238 review fixes (blank-env normalization +
 # invalid-UTF-8 fail-closed tests): 3279 -> 3283.
-EXPECTED_FAST_ITEM_COUNT: Final = 3283
+# Updated deliberately after #238 bounded-read hardening (oversized-file
+# fail-closed test): 3283 -> 3284.
+EXPECTED_FAST_ITEM_COUNT: Final = 3284
 EXPECTED_FAST_NODEID_SHA256: Final = (
-    "da213c1b6ff005332e991a1c8032176448c55202996a69b8391ca677573c8c96"
+    "ded176637ed847a5995ac6327b874a89821e10aae492c73d5322fa8e21e9c543"
 )
 EXPECTED_DATABASE_ITEM_COUNT: Final = 461
 EXPECTED_DATABASE_NODEID_SHA256: Final = (

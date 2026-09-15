@@ -102,6 +102,11 @@ def register_resolver(*, scheme: str, resolver: SecretResolver) -> None:
 class _FileBackedLocalSecretResolver:
     """Resolve ``local-secret://{name}`` from the opt-in JSON secrets file."""
 
+    # Bounded read so a misconfigured oversized file cannot allocate unbounded
+    # memory per credential resolve. A credential mapping of a few OAuth
+    # payloads is a few KiB; 1 MiB is generous headroom.
+    _MAX_FILE_BYTES = 1024 * 1024
+
     def __init__(self, *, path: str) -> None:
         self._path = path
 
@@ -109,7 +114,10 @@ class _FileBackedLocalSecretResolver:
         """Re-read the mapping file and resolve ``ref`` against it, failing closed."""
         try:
             with open(self._path, encoding="utf-8") as handle:
-                mapping = json.load(handle)
+                content = handle.read(self._MAX_FILE_BYTES + 1)
+            if len(content.encode("utf-8")) > self._MAX_FILE_BYTES:
+                raise LocalSecretsFileError(path=self._path)
+            mapping = json.loads(content)
         except (OSError, UnicodeDecodeError) as exc:
             # UnicodeDecodeError is a ValueError sibling, not a JSONDecodeError:
             # invalid UTF-8 in the secrets file must map to the same typed

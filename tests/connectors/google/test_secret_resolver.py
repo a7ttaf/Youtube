@@ -212,6 +212,19 @@ def test_file_backed_local_secret_fails_closed_on_invalid_utf8(monkeypatch, tmp_
     assert isinstance(ctx.value.inner, UnicodeDecodeError)
 
 
+def test_file_backed_local_secret_fails_closed_on_oversized_file(monkeypatch, tmp_path) -> None:
+    """A secrets file beyond the bounded read cap fails closed instead of parsing."""
+    _stub_gcp_resolver(monkeypatch)
+    secrets_file = tmp_path / "connector-secrets.json"
+    padding = "x" * (1024 * 1024 + 16)
+    secrets_file.write_text(json.dumps({"yt-owner": padding}), encoding="utf-8")
+    monkeypatch.setenv("UMS_CONNECTOR_LOCAL_SECRETS_FILE", str(secrets_file))
+    ensure_default_resolvers()
+
+    with pytest.raises(LocalSecretsFileError):
+        resolve_secret("local-secret://yt-owner")
+
+
 def test_file_backed_local_secret_fails_closed_on_malformed_json(monkeypatch, tmp_path) -> None:
     """Invalid JSON in the secrets file fails closed with LocalSecretsFileError."""
     _stub_gcp_resolver(monkeypatch)
