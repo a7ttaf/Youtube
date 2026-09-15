@@ -67,6 +67,7 @@ class _FailingAuditCommitUnitOfWork:
     """SQL-like audit unit of work that fails at the durability boundary."""
 
     def __init__(self) -> None:
+        """Start with no commit, rollback, or expunge attempted."""
         self.commit_attempted = False
         self.rollback_attempted = False
         self.expunge_attempted = False
@@ -89,6 +90,7 @@ class _FailingAuditCommitSink(InMemoryAuditSink):
     """Capture requested audit rows, then fail when the route commits them."""
 
     def __init__(self) -> None:
+        """Initialize the sink and attach the failing unit of work."""
         super().__init__()
         self.unit_of_work = _FailingAuditCommitUnitOfWork()
         self.sql_unit_of_work = self.unit_of_work
@@ -832,6 +834,7 @@ class _ValueErrorAuditSink(InMemoryAuditSink):
     """
 
     def __init__(self) -> None:
+        """Initialize the sink and attach the failing unit of work."""
         super().__init__()
         self.unit_of_work = _FailingAuditCommitUnitOfWork()
         self.sql_unit_of_work = self.unit_of_work

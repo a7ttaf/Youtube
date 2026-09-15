@@ -17,7 +17,7 @@ STACK_VERSION_BASELINE: dict[str, dict[str, str]] = {
         "pydantic": "2.13.5",
         "uvicorn": "0.52.4",
         "sqlalchemy": "2.0.52",
-        "alembic": "1.19.1",
+        "alembic": "1.19.2",
         "psycopg": "3.3.5",
         "celery": "5.6.3",
         "redis": "8.1.0",
