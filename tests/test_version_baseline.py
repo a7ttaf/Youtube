@@ -25,7 +25,7 @@ def test_backend_dependencies_are_pinned_to_checked_latest_stable_versions():
         "pydantic==2.13.5",
         "uvicorn[standard]==0.52.4",
         "sqlalchemy==2.0.52",
-        "alembic==1.19.1",
+        "alembic==1.19.2",
         "psycopg[binary]==3.3.5",
         # httpx2 is the successor of httpx (starlette 1.3+ deprecates the old
         # package for its testclient); migrated 2026-08-21 (backlog item 2/3).
@@ -60,7 +60,7 @@ def test_stack_version_baseline_records_runtime_and_frontend_targets():
     assert STACK_VERSION_BASELINE["backend"]["fastapi"] == "0.141.1"
     assert STACK_VERSION_BASELINE["backend"]["pydantic"] == "2.13.5"
     assert STACK_VERSION_BASELINE["backend"]["sqlalchemy"] == "2.0.52"
-    assert STACK_VERSION_BASELINE["backend"]["alembic"] == "1.19.1"
+    assert STACK_VERSION_BASELINE["backend"]["alembic"] == "1.19.2"
     assert STACK_VERSION_BASELINE["backend"]["psycopg"] == "3.3.5"
     assert STACK_VERSION_BASELINE["backend"]["openpyxl"] == "3.1.5"
     assert STACK_VERSION_BASELINE["backend"]["reportlab"] == "5.0.1"

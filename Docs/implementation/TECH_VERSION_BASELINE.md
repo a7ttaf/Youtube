@@ -102,5 +102,16 @@ Patch-refresh addendum checked on: `2026-09-07` (UTC)
   `pyproject.toml` / `uv.lock`; the checked-baseline test and
   `STACK_VERSION_BASELINE` were updated in the same change.
 
+Patch-refresh addendum checked on: `2026-09-14` (UTC)
+
+- PyPI release metadata for the patch-updates group bumped by PR #236:
+  alembic `1.19.2` (refreshes `1.19.1`, runtime dependency and baseline
+  record) and ruff `0.16.7` (refreshes `0.16.6`, lint extra and dev
+  extra only; its formatter now collapses several already-short
+  multi-line calls, so `ruff format` was applied repo-wide in the same
+  change). Pins live in `pyproject.toml` / `uv.lock`; the
+  checked-baseline test and `STACK_VERSION_BASELINE` were updated in the
+  same change.
+
 ## Local Environment Note
 The current workstation Python is `3.12`, so tests are still run against the available local interpreter. The production runtime target is `3.14.5`, and the project metadata now expresses `>=3.14,<3.15`.
