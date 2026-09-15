@@ -167,6 +167,7 @@ def test_secret_ref_prefixes_const_matches_documented_allowlist():
 
 
 def test_local_secret_ref_rejected_while_local_secrets_file_unset(monkeypatch):
+    """local-secret:// refs stay rejected while the secrets-file env var is unset."""
     monkeypatch.delenv("UMS_CONNECTOR_LOCAL_SECRETS_FILE", raising=False)
 
     assert is_external_secret_ref("local-secret://yt-owner") is False
@@ -175,6 +176,7 @@ def test_local_secret_ref_rejected_while_local_secrets_file_unset(monkeypatch):
 
 
 def test_local_secret_ref_accepted_while_local_secrets_file_set(monkeypatch, tmp_path):
+    """local-secret:// refs are accepted only while the secrets-file env var is set."""
     secrets_file = tmp_path / "connector-secrets.json"
     secrets_file.write_text('{"yt-owner": "{}"}', encoding="utf-8")
     monkeypatch.setenv("UMS_CONNECTOR_LOCAL_SECRETS_FILE", str(secrets_file))
@@ -189,6 +191,7 @@ def test_local_secret_ref_accepted_while_local_secrets_file_set(monkeypatch, tmp
 
 @pytest.mark.parametrize("blank", ["", "   ", "\t"])
 def test_blank_local_secrets_file_env_normalizes_to_disabled(monkeypatch, blank):
+    """Blank/whitespace env values normalize to None and keep the lane disabled."""
     monkeypatch.setenv("UMS_CONNECTOR_LOCAL_SECRETS_FILE", blank)
 
     assert load_app_settings().connector_local_secrets_file is None
@@ -197,6 +200,7 @@ def test_blank_local_secrets_file_env_normalizes_to_disabled(monkeypatch, blank)
 
 
 def test_local_secret_ref_still_rejected_after_setting_removed(monkeypatch, tmp_path):
+    """Removing the env var restores the production rejection on the next settings load."""
     secrets_file = tmp_path / "connector-secrets.json"
     secrets_file.write_text("{}", encoding="utf-8")
     monkeypatch.setenv("UMS_CONNECTOR_LOCAL_SECRETS_FILE", str(secrets_file))

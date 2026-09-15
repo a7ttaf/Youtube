@@ -130,6 +130,7 @@ def test_resolve_secret_raises_for_unknown_scheme() -> None:
 
 
 def _stub_gcp_resolver(monkeypatch) -> None:
+    """Patch the GCP resolver constructor so boot never needs Google credentials."""
     from ums_smart_revenue.connectors.google import gcp_secret_manager
 
     monkeypatch.setattr(
@@ -140,6 +141,7 @@ def _stub_gcp_resolver(monkeypatch) -> None:
 
 
 def test_ensure_default_resolvers_skips_local_secret_when_file_unset(monkeypatch) -> None:
+    """The local-secret lane stays unregistered (fail closed) when the env var is unset."""
     _stub_gcp_resolver(monkeypatch)
     monkeypatch.delenv("UMS_CONNECTOR_LOCAL_SECRETS_FILE", raising=False)
 
@@ -150,6 +152,7 @@ def test_ensure_default_resolvers_skips_local_secret_when_file_unset(monkeypatch
 
 
 def test_ensure_default_resolvers_registers_file_backed_local_secret(monkeypatch, tmp_path) -> None:
+    """A configured secrets file registers the file-backed local-secret resolver."""
     _stub_gcp_resolver(monkeypatch)
     secrets_file = tmp_path / "connector-secrets.json"
     payload = json.dumps(
@@ -169,6 +172,7 @@ def test_ensure_default_resolvers_registers_file_backed_local_secret(monkeypatch
 
 
 def test_file_backed_local_secret_rereads_file_on_each_resolve(monkeypatch, tmp_path) -> None:
+    """Each resolve re-reads the mapping file so payload rotation applies without restart."""
     _stub_gcp_resolver(monkeypatch)
     secrets_file = tmp_path / "connector-secrets.json"
     secrets_file.write_text(json.dumps({"yt-owner": "payload-v1"}), encoding="utf-8")
@@ -184,6 +188,7 @@ def test_file_backed_local_secret_rereads_file_on_each_resolve(monkeypatch, tmp_
 
 
 def test_file_backed_local_secret_fails_closed_on_missing_file(monkeypatch, tmp_path) -> None:
+    """An unreadable secrets file fails closed with LocalSecretsFileError."""
     _stub_gcp_resolver(monkeypatch)
     monkeypatch.setenv("UMS_CONNECTOR_LOCAL_SECRETS_FILE", str(tmp_path / "does-not-exist.json"))
     ensure_default_resolvers()
@@ -195,6 +200,7 @@ def test_file_backed_local_secret_fails_closed_on_missing_file(monkeypatch, tmp_
 
 
 def test_file_backed_local_secret_fails_closed_on_invalid_utf8(monkeypatch, tmp_path) -> None:
+    """Invalid UTF-8 content fails closed with LocalSecretsFileError, not a raw decode error."""
     _stub_gcp_resolver(monkeypatch)
     secrets_file = tmp_path / "connector-secrets.json"
     secrets_file.write_bytes(b'{"yt-owner": "\xff\xfe-invalid-utf8"}')
@@ -207,6 +213,7 @@ def test_file_backed_local_secret_fails_closed_on_invalid_utf8(monkeypatch, tmp_
 
 
 def test_file_backed_local_secret_fails_closed_on_malformed_json(monkeypatch, tmp_path) -> None:
+    """Invalid JSON in the secrets file fails closed with LocalSecretsFileError."""
     _stub_gcp_resolver(monkeypatch)
     secrets_file = tmp_path / "connector-secrets.json"
     secrets_file.write_text("{not-json", encoding="utf-8")
@@ -229,6 +236,7 @@ def test_file_backed_local_secret_fails_closed_on_malformed_json(monkeypatch, tm
 def test_file_backed_local_secret_fails_closed_on_non_string_mapping(
     monkeypatch, tmp_path, content
 ) -> None:
+    """Valid JSON that is not a str->str mapping fails closed with LocalSecretsFileError."""
     _stub_gcp_resolver(monkeypatch)
     secrets_file = tmp_path / "connector-secrets.json"
     secrets_file.write_text(content, encoding="utf-8")
@@ -242,6 +250,7 @@ def test_file_backed_local_secret_fails_closed_on_non_string_mapping(
 def test_file_backed_local_secret_unknown_key_raises_secret_not_found(
     monkeypatch, tmp_path
 ) -> None:
+    """A ref whose name is absent from the mapping raises SecretNotFoundError."""
     _stub_gcp_resolver(monkeypatch)
     secrets_file = tmp_path / "connector-secrets.json"
     secrets_file.write_text(json.dumps({"other-owner": "payload"}), encoding="utf-8")
