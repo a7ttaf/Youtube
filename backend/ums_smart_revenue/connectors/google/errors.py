@@ -134,6 +134,25 @@ class SecretFetchError(GoogleConnectorError):
         self.inner = inner
 
 
+class LocalSecretsFileError(GoogleConnectorError):
+    """Raised when the opt-in local connector-secrets file cannot be used.
+
+    Covers unreadable files (missing path, permissions), invalid JSON, and
+    non-``{"name": "payload string"}`` shapes. The configured path is config,
+    not secret material, so it is safe to carry verbatim; payload contents are
+    never included.
+    """
+
+    def __init__(self, *, path: str, inner: Exception | None = None) -> None:
+        """Carry the configured file ``path`` and the original ``inner`` error, if any."""
+        message = f"local connector secrets file unusable: {path}"
+        if inner is not None:
+            message = f"{message}: {type(inner).__name__}"
+        super().__init__(message)
+        self.path = path
+        self.inner = inner
+
+
 class MalformedSecretPayloadError(GoogleConnectorError):
     """Raised when a fetched secret cannot be parsed into the expected schema."""
 

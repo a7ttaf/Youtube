@@ -998,7 +998,11 @@ machine-readable status is `ok`, then run an ingestion CLI `--dry-run` smoke
 before any `dry_run: false` connector job. Current production resolver support
 is GCP Secret Manager via `secret-manager://` or `gcp-secret-manager://`; other
 admin-accepted secret-reference prefixes fail closed until their resolvers are
-implemented.
+implemented. Demo/self-host deployments may additionally configure
+`UMS_CONNECTOR_LOCAL_SECRETS_FILE` (JSON name-to-payload mapping file), which
+opts that deployment into `local-secret://<name>` credential refs resolved from
+the file; unset (the default) keeps `local-secret://` rejected at the API
+boundary and unregistered at the resolver boundary.
 
 `POST /connectors/jobs` submits a real Google ingest pull to the module-owned,
 bounded, in-process `ConnectorJobExecutor` and returns **202** immediately with

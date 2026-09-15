@@ -4,7 +4,9 @@ resolve_secret(ref) parses the URI scheme and dispatches to a registered
 SecretResolver. Implemented schemes (registered at app/test boot):
 - gcp-secret-manager:// -> GcpSecretManagerResolver (B2.1)
 - secret-manager://     -> GcpSecretManagerResolver alias for admin API refs
-- local-secret://       -> LocalSecretResolver (B2.1, test only)
+- local-secret://       -> LocalSecretResolver (B2.1, test only), plus an
+  opt-in file-backed variant for demo/self-host deployments enabled by
+  UMS_CONNECTOR_LOCAL_SECRETS_FILE (see ensure_default_resolvers)
 
 Other ORM-accepted prefixes (aws-secretsmanager://, vault://, kms://,
 azure-keyvault://) are intentionally unregistered until a future
@@ -14,13 +16,19 @@ closed instead of silently dropping the secret.
 
 from __future__ import annotations
 
+import json
 from threading import RLock
 from typing import Protocol
 
+from ums_smart_revenue.config.settings import load_app_settings
 from ums_smart_revenue.connectors.google.errors import (
+    LocalSecretsFileError,
     MalformedSecretUriError,
     ResolverAlreadyRegisteredError,
     UnsupportedSecretSchemeError,
+)
+from ums_smart_revenue.connectors.google.local_secret_resolver import (
+    LocalSecretResolver,
 )
 
 
@@ -67,21 +75,70 @@ def register_resolver(*, scheme: str, resolver: SecretResolver) -> None:
 #   - File: backend/ums_smart_revenue/connectors/runs/orchestrator.py ->
 #     Calls before resolving the credential secret reference.
 # ============================================================================
+# ============================================================================
+# Purpose: Opt-in demo/self-host resolver for ``local-secret://{name}`` refs,
+#   backed by the JSON mapping file named by UMS_CONNECTOR_LOCAL_SECRETS_FILE.
+#   The file is re-read on every resolve so operators rotate credential
+#   payloads without an app restart; unreadable files, invalid JSON, and
+#   non-string values fail closed with LocalSecretsFileError before any
+#   payload material is handed to the OAuth layer. Registered ONLY when that
+#   setting is present (ensure_default_resolvers); production deployments that
+#   leave it unset keep local-secret:// unregistered and unsupported.
+# Database/ORM: None.
+# Standards: Reuses LocalSecretResolver's URI parsing and SecretNotFoundError
+#            contract; secret payloads are never included in error messages.
+# Blast Radius: Connector credential secret resolution in demo deployments
+#               only. No finance, authorization, audit, or export impact.
+# Connections:
+#   - File: backend/ums_smart_revenue/connectors/google/local_secret_resolver.py
+#     -> LocalSecretResolver performs the ref parse + mapping lookup.
+#   - File: backend/ums_smart_revenue/config/settings.py ->
+#     connector_local_secrets_file gates registration.
+#   - File: backend/ums_smart_revenue/connectors/google/errors.py ->
+#     LocalSecretsFileError carries the path and inner error type only.
+# ============================================================================
+class _FileBackedLocalSecretResolver:
+    """Resolve ``local-secret://{name}`` from the opt-in JSON secrets file."""
+
+    def __init__(self, *, path: str) -> None:
+        self._path = path
+
+    def resolve(self, ref: str) -> str:
+        try:
+            with open(self._path, encoding="utf-8") as handle:
+                mapping = json.load(handle)
+        except OSError as exc:
+            raise LocalSecretsFileError(path=self._path, inner=exc) from exc
+        except json.JSONDecodeError as exc:
+            raise LocalSecretsFileError(path=self._path, inner=exc) from exc
+        if not isinstance(mapping, dict) or not all(
+            isinstance(key, str) and isinstance(value, str) for key, value in mapping.items()
+        ):
+            raise LocalSecretsFileError(path=self._path)
+        return LocalSecretResolver(mapping=mapping).resolve(ref)
+
+
 def ensure_default_resolvers() -> None:
-    """Register production secret resolvers exactly once at runtime boot."""
+    """Register production secret resolver schemes exactly once at runtime boot."""
     with _REGISTRY_LOCK:
         missing = [scheme for scheme in _GCP_SECRET_MANAGER_SCHEMES if scheme not in _REGISTRY]
-        if not missing:
-            return
-        from ums_smart_revenue.connectors.google.gcp_secret_manager import (
-            GcpSecretManagerResolver,
-        )
+        if missing:
+            from ums_smart_revenue.connectors.google.gcp_secret_manager import (
+                GcpSecretManagerResolver,
+            )
 
-        resolver = _REGISTRY.get("gcp-secret-manager") or _REGISTRY.get("secret-manager")
-        if resolver is None:
-            resolver = GcpSecretManagerResolver()
-        for scheme in missing:
-            _REGISTRY[scheme] = resolver
+            resolver = _REGISTRY.get("gcp-secret-manager") or _REGISTRY.get("secret-manager")
+            if resolver is None:
+                resolver = GcpSecretManagerResolver()
+            for scheme in missing:
+                _REGISTRY[scheme] = resolver
+        # Demo/self-host opt-in: register the file-backed local-secret resolver
+        # only when UMS_CONNECTOR_LOCAL_SECRETS_FILE is configured. Unset (the
+        # production default) leaves the scheme unregistered so resolve_secret
+        # fails closed with UnsupportedSecretSchemeError exactly as before.
+        local_secrets_file = load_app_settings().connector_local_secrets_file
+        if local_secrets_file and "local-secret" not in _REGISTRY:
+            _REGISTRY["local-secret"] = _FileBackedLocalSecretResolver(path=local_secrets_file)
 
 
 def _parse_scheme(ref: str) -> str:

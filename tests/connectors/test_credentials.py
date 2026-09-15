@@ -22,6 +22,7 @@ from sqlalchemy import create_engine, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from ums_smart_revenue.config.settings import load_app_settings
 from ums_smart_revenue.connectors.credentials import (
     CONNECTOR_CREDENTIAL_UNIQUE_CONSTRAINT,
     LIVE_CREDENTIAL_SMOKE_REQUIRED_DETAIL,
@@ -32,6 +33,7 @@ from ums_smart_revenue.connectors.credentials import (
     ConnectorCredentialValidationError,
     SqlAlchemyConnectorCredentialRepository,
     _is_foreign_key_integrity_error,
+    allowed_secret_ref_prefixes,
     is_external_secret_ref,
     live_credential_rejection_detail,
 )
@@ -157,6 +159,46 @@ def test_secret_ref_prefixes_const_matches_documented_allowlist():
         "vault://",
         "kms://",
     }
+
+
+# -----------------------------------------------------------------------------
+# local-secret:// demo opt-in gate (UMS_CONNECTOR_LOCAL_SECRETS_FILE)
+# -----------------------------------------------------------------------------
+
+
+def test_local_secret_ref_rejected_while_local_secrets_file_unset(monkeypatch):
+    monkeypatch.delenv("UMS_CONNECTOR_LOCAL_SECRETS_FILE", raising=False)
+
+    assert is_external_secret_ref("local-secret://yt-owner") is False
+    assert is_external_secret_ref("  local-secret://yt-owner  ") is False
+    assert allowed_secret_ref_prefixes() == SECRET_REF_PREFIXES
+
+
+def test_local_secret_ref_accepted_while_local_secrets_file_set(monkeypatch, tmp_path):
+    secrets_file = tmp_path / "connector-secrets.json"
+    secrets_file.write_text('{"yt-owner": "{}"}', encoding="utf-8")
+    monkeypatch.setenv("UMS_CONNECTOR_LOCAL_SECRETS_FILE", str(secrets_file))
+
+    assert is_external_secret_ref("local-secret://yt-owner") is True
+    assert is_external_secret_ref("  local-secret://yt-owner  ") is True
+    # Blank names stay rejected exactly like the production prefixes.
+    assert is_external_secret_ref("local-secret://") is False
+    assert is_external_secret_ref("local-secret://   ") is False
+    assert allowed_secret_ref_prefixes() == (*SECRET_REF_PREFIXES, "local-secret://")
+
+
+def test_local_secret_ref_still_rejected_after_setting_removed(monkeypatch, tmp_path):
+    secrets_file = tmp_path / "connector-secrets.json"
+    secrets_file.write_text("{}", encoding="utf-8")
+    monkeypatch.setenv("UMS_CONNECTOR_LOCAL_SECRETS_FILE", str(secrets_file))
+    assert is_external_secret_ref("local-secret://yt-owner") is True
+
+    # The conftest reset_app_settings_cache fixture plus delenv makes the next
+    # load_app_settings() see the production configuration again.
+    monkeypatch.delenv("UMS_CONNECTOR_LOCAL_SECRETS_FILE", raising=False)
+    load_app_settings.cache_clear()
+
+    assert is_external_secret_ref("local-secret://yt-owner") is False
 
 
 # -----------------------------------------------------------------------------

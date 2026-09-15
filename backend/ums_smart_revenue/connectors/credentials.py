@@ -23,6 +23,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from ums_smart_revenue.config.settings import load_app_settings
 from ums_smart_revenue.db.security_models import ApiConnectorCredentialORM, UserORM
 from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
 from ums_smart_revenue.tenancy.context import get_current_tenant
@@ -383,13 +384,41 @@ class SqlAlchemyConnectorCredentialRepository:
         )
 
 
+# ============================================================================
+# Purpose: Compose the accepted secret-ref prefix set. The production set is
+#   the frozen SECRET_REF_PREFIXES tuple; the demo/self-host
+#   ``local-secret://`` prefix is appended ONLY while
+#   UMS_CONNECTOR_LOCAL_SECRETS_FILE is configured, mirroring the resolver
+#   registration gate in connectors/google/secret_resolver so the API boundary
+#   and the runtime boundary accept exactly the same schemes.
+# Database/ORM: None.
+# Standards: Single composition point consumed by is_external_secret_ref;
+#            SECRET_REF_PREFIXES itself stays frozen for production callers.
+# Blast Radius: Connector credential creation validation only. No finance,
+#               authorization, audit, or export impact.
+# Connections:
+#   - File: backend/ums_smart_revenue/api/connectors.py ->
+#     create_connector_credential validates payloads through this gate.
+#   - File: backend/ums_smart_revenue/connectors/google/secret_resolver.py ->
+#     ensure_default_resolvers registers the matching runtime resolver.
+# ============================================================================
+LOCAL_SECRET_REF_PREFIX = "local-secret://"
+
+
+def allowed_secret_ref_prefixes() -> tuple[str, ...]:
+    """Return the accepted secret-ref prefixes (demo prefix only when enabled)."""
+    if load_app_settings().connector_local_secrets_file:
+        return (*SECRET_REF_PREFIXES, LOCAL_SECRET_REF_PREFIX)
+    return SECRET_REF_PREFIXES
+
+
 def is_external_secret_ref(value: str) -> bool:
     normalized = value.strip()
     if not normalized:
         return False
     return any(
         normalized.startswith(prefix) and bool(normalized[len(prefix) :].strip())
-        for prefix in SECRET_REF_PREFIXES
+        for prefix in allowed_secret_ref_prefixes()
     )
 
 
