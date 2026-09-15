@@ -43,6 +43,8 @@ _DEFAULT_TENANT_UUID = UUID(UMS_TENANT_ID)
 
 @dataclass(frozen=True)
 class ConnectorCredentialEntry:
+    """API-facing view of one connector credential row (never the secret payload)."""
+
     id: str
     connector_key: str
     account_id: str
@@ -54,6 +56,7 @@ class ConnectorCredentialEntry:
     last_refresh_error_class: str | None = None
 
     def to_api(self) -> dict[str, object]:
+        """Serialize the entry into the public API response shape."""
         return {
             "id": self.id,
             "connector_key": self.connector_key,
@@ -144,6 +147,7 @@ def live_credential_rejection_detail(
     *,
     as_of: datetime,
 ) -> str | None:
+    """Return the live-run admission rejection detail, or None when admissible."""
     if entry.status != "active":
         return "Connector credential is not active"
     if not entry.has_secret_ref:
@@ -172,6 +176,8 @@ def _as_aware_utc(value: datetime) -> datetime:
 
 @dataclass(frozen=True)
 class ConnectorCredentialPage:
+    """One bounded page of credential entries plus pagination metadata."""
+
     items: list[ConnectorCredentialEntry]
     limit: int
     offset: int
@@ -179,18 +185,20 @@ class ConnectorCredentialPage:
 
 
 class ConnectorCredentialError(ValueError):
-    pass
+    """Base typed error for connector credential repository failures."""
 
 
 class ConnectorCredentialConflictError(ConnectorCredentialError):
-    pass
+    """Raised when a credential already exists for the same connector and account."""
 
 
 class ConnectorCredentialValidationError(ConnectorCredentialError):
-    pass
+    """Raised when credential input values fail repository-level validation."""
 
 
 class SqlAlchemyConnectorCredentialRepository:
+    """Tenant-scoped SQLAlchemy repository for api_connector_credentials rows."""
+
     def __init__(self, session: Session, *, tenant_id: UUID | str | None = None):
         """Bind connector credential reads and writes to one tenant."""
         self._session = session
@@ -221,6 +229,7 @@ class SqlAlchemyConnectorCredentialRepository:
         offset: int = 0,
         connector_keys: frozenset[str] | None = None,
     ) -> ConnectorCredentialPage:
+        """Return one validated page of tenant-scoped credentials, key/account ordered."""
         if limit < 1 or limit > MAX_CREDENTIAL_PAGE_SIZE:
             raise ConnectorCredentialValidationError(
                 f"limit must be between 1 and {MAX_CREDENTIAL_PAGE_SIZE}"
@@ -289,6 +298,7 @@ class SqlAlchemyConnectorCredentialRepository:
         encrypted_secret_ref: str,
         actor_user_id: str,
     ) -> ConnectorCredentialEntry:
+        """Insert one credential row after tenant-validating the acting user."""
         actor_uuid = _parse_uuid(actor_user_id)
         actor_exists = self._session.scalar(
             select(UserORM.id).where(
@@ -371,6 +381,7 @@ class SqlAlchemyConnectorCredentialRepository:
 
     @staticmethod
     def _to_entry(row: ApiConnectorCredentialORM) -> ConnectorCredentialEntry:
+        """Map one ORM row onto the API-facing entry dataclass."""
         return ConnectorCredentialEntry(
             id=str(row.id),
             connector_key=row.connector_key,
@@ -428,6 +439,7 @@ def is_external_secret_ref(value: str) -> bool:
 
 
 def _parse_uuid(value: str) -> UUID:
+    """Parse a UUID or raise the typed credential validation error."""
     try:
         return UUID(value)
     except ValueError as exc:
@@ -455,6 +467,7 @@ def _parse_tenant_uuid(tenant_id: UUID | str) -> UUID:
 
 
 def _is_duplicate_credential_integrity_error(exc: IntegrityError) -> bool:
+    """Return whether the integrity error is the credential unique-constraint duplicate."""
     diag = getattr(getattr(exc, "orig", None), "diag", None)
     constraint_name = getattr(diag, "constraint_name", None)
     if constraint_name == CONNECTOR_CREDENTIAL_UNIQUE_CONSTRAINT:
@@ -490,6 +503,7 @@ _ACTOR_FK_CONSTRAINTS = frozenset(
 
 
 def _is_foreign_key_integrity_error(exc: IntegrityError) -> bool:
+    """Return whether the integrity error is an actor foreign-key violation."""
     diag = getattr(getattr(exc, "orig", None), "diag", None)
     constraint_name = getattr(diag, "constraint_name", None)
     if constraint_name in _ACTOR_FK_CONSTRAINTS:

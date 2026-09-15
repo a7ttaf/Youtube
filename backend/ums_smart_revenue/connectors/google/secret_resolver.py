@@ -37,7 +37,8 @@ class SecretResolver(Protocol):
 
     def resolve(self, ref: str) -> str:
         """Return the secret payload as a string. Raise SecretNotFoundError /
-        SecretFetchError on backend failure."""
+        SecretFetchError on backend failure.
+        """
 
 
 _GCP_SECRET_MANAGER_SCHEMES = ("gcp-secret-manager", "secret-manager")
@@ -58,6 +59,7 @@ _REGISTRY_LOCK = RLock()
 #     -> Test/dev resolver.
 # ============================================================================
 def register_resolver(*, scheme: str, resolver: SecretResolver) -> None:
+    """Register a concrete resolver for a secret URI scheme (duplicates fail fast)."""
     with _REGISTRY_LOCK:
         if scheme in _REGISTRY:
             raise ResolverAlreadyRegisteredError(scheme=scheme)
@@ -108,6 +110,7 @@ class _FileBackedLocalSecretResolver:
     _MAX_FILE_BYTES = 1024 * 1024
 
     def __init__(self, *, path: str) -> None:
+        """Bind the resolver to the configured secrets-file path."""
         self._path = path
 
     def resolve(self, ref: str) -> str:
@@ -162,6 +165,7 @@ def ensure_default_resolvers() -> None:
 
 
 def _parse_scheme(ref: str) -> str:
+    """Return the URI scheme of ``ref`` or raise MalformedSecretUriError."""
     if not ref or "://" not in ref:
         raise MalformedSecretUriError(ref=ref)
     scheme, _, rest = ref.partition("://")
@@ -171,6 +175,7 @@ def _parse_scheme(ref: str) -> str:
 
 
 def resolve_secret(ref: str) -> str:
+    """Dispatch ``ref`` to its registered scheme resolver, failing closed when unsupported."""
     scheme = _parse_scheme(ref)
     with _REGISTRY_LOCK:
         resolver = _REGISTRY.get(scheme)
