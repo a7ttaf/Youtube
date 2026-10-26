@@ -4,39 +4,39 @@ version = "0.1.0"
 description = "UMS Smart Revenue Control Center backend foundation"
 requires-python = ">=3.14,<3.15"
 dependencies = [
-    "fastapi==0.141.1",
-    "pydantic==2.13.5",
-    "uvicorn[standard]==0.52.4",
-    "sqlalchemy==2.0.52",
-    "alembic==1.19.2",
+    "fastapi==0.161.1",
+    "pydantic==2.14.1",
+    "uvicorn[standard]==0.54.0",
+    "sqlalchemy==2.1.6",
+    "alembic==1.20.1",
     "psycopg[binary]==3.3.5",
-    "httpx2==2.12.0",
+    "httpx2==2.16.0",
     "celery==5.6.3",
     "redis==8.1.0",
     "openpyxl==3.1.5",
-    "reportlab==5.0.1",
+    "reportlab==5.1.0",
     "python-pptx==1.0.2",
-    "google-cloud-secret-manager==2.30.0",
-    "google-cloud-storage==3.14.1",
+    "google-cloud-secret-manager==2.31.0",
+    "google-cloud-storage==3.17.1",
     "python-multipart==0.0.32",
 ]
 
 [project.optional-dependencies]
 test = [
     "pytest==9.1.1",
-    "httpx2==2.12.0",
-    "pypdf==6.18.1",
+    "httpx2==2.16.0",
+    "pypdf==6.21.2",
 ]
 lint = [
-    "mypy==2.3.1",
-    "ruff==0.16.7",
+    "mypy==2.4.0",
+    "ruff==0.17.2",
 ]
 dev = [
-    "httpx2==2.12.0",
-    "mypy==2.3.1",
-    "pypdf==6.18.1",
+    "httpx2==2.16.0",
+    "mypy==2.4.0",
+    "pypdf==6.21.2",
     "pytest==9.1.1",
-    "ruff==0.16.7",
+    "ruff==0.17.2",
 ]
 
 [tool.pytest.ini_options]
